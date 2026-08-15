@@ -1,0 +1,12 @@
+# Only the settings this example actually needs. `sdkconfig` itself is
+# generated and gitignored.
+
+# TP1 over the software bit-bang backend, so this example and the TPUART one
+# together give both TP1 backend families build coverage.
+CONFIG_KNX_MEDIUM_TP1=y
+CONFIG_KNX_TP1_BITBANG=y
+
+# Board wiring. Replace with your own board's pin map; see
+# docs/reference/board_bringup_guide.md before connecting to a live bus.
+CONFIG_KNX_TP1_BITBANG_TX_PIN=4
+CONFIG_KNX_TP1_BITBANG_RX_PIN=5

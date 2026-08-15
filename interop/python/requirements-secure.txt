@@ -1,0 +1,4 @@
+# Optional dependencies for KNX Secure interop tests (xknx-based)
+# Install with: pip install -r interop/python/requirements-secure.txt
+
+xknx

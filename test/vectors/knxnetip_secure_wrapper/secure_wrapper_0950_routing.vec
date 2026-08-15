@@ -1,0 +1,14 @@
+# KNXnet/IP Secure Wrapper (0x0950) routing vector generated from KNXUltimate primitives.
+# sessionId == 0; tag is explicit; CTR suffix is tag||ff00.
+
+name=secure_wrapper_0950_routing
+key=6da809eed8dbdbd0a0680fb88afe2bb2
+sid=0000
+seq=000000ca0279
+serial=00a207164012
+tag=6f8c
+hdr=06100950003f
+inner=061004200018041122002900bce0110a230100800100000000
+mac_cbc=6f7904d2fb41d7ff9c6b95beca4a0558
+mac_enc=4e290360b7bf03c3daf64ab0141f7f7b
+frame=06100950003f0000000000ca027900a2071640126f8c8c344a4db1eef549882f5a85c5a8018cae205ffeee748ad4324e290360b7bf03c3daf64ab0141f7f7b

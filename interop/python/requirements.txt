@@ -1,0 +1,7 @@
+pytest>=7.0
+pytest-asyncio>=0.21
+pytest-timeout>=2.3
+
+# Used by optional KNX Data Secure interop tests.
+# Tests will still be skipped unless XKNX_KNXKEYS_FILE and XKNX_KNXKEYS_PASSWORD are set.
+xknx

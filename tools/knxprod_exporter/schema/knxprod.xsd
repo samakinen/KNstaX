@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           targetNamespace="http://example.org/knxprod"
+           xmlns="http://example.org/knxprod"
+           elementFormDefault="qualified">
+
+  <xs:element name="KNXProductFile">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element name="Vendor" type="VendorType"/>
+        <xs:element name="Product" type="ProductType"/>
+        <xs:element name="Metadata" type="MetadataType" minOccurs="0"/>
+      </xs:sequence>
+      <xs:attribute name="Version" type="xs:string" use="required"/>
+    </xs:complexType>
+  </xs:element>
+
+  <xs:complexType name="VendorType">
+    <xs:sequence>
+      <xs:element name="ManufacturerId" type="xs:string"/>
+      <xs:element name="ManufacturerName" type="xs:string"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="ProductType">
+    <xs:sequence>
+      <xs:element name="ProductName" type="xs:string"/>
+      <xs:element name="ProfileKey" type="xs:string"/>
+      <xs:element name="ApplicationProgram" type="AppProgramType"/>
+      <xs:element name="Device" type="DeviceType"/>
+      <xs:element name="GroupObjectTable" type="GroupObjectTableType" minOccurs="0"/>
+      <xs:element name="Parameters" type="ParametersType" minOccurs="0"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="AppProgramType">
+    <xs:sequence>
+      <xs:element name="ApplicationNumber" type="xs:integer"/>
+      <xs:element name="ApplicationVersion" type="xs:integer"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="DeviceType">
+    <xs:sequence>
+      <xs:element name="Medium" type="xs:string"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="GroupObjectTableType">
+    <xs:sequence>
+      <xs:element name="GroupObject" type="GroupObjectType" maxOccurs="unbounded"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="GroupObjectType">
+    <xs:sequence>
+      <xs:element name="Id" type="xs:integer"/>
+      <xs:element name="Name" type="xs:string"/>
+      <xs:element name="Key" type="xs:string"/>
+      <xs:element name="GroupAddress" type="xs:string"/>
+      <xs:element name="DPT" type="xs:string" minOccurs="0"/>
+      <xs:element name="Read" type="xs:boolean"/>
+      <xs:element name="Write" type="xs:boolean"/>
+      <xs:element name="Transmit" type="xs:boolean"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="ParametersType">
+    <xs:sequence>
+      <xs:element name="ParameterCount" type="xs:integer"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="MetadataType">
+    <xs:sequence>
+      <xs:element name="Persistence" type="xs:boolean" minOccurs="0"/>
+      <xs:element name="SecurityCapable" type="xs:boolean" minOccurs="0"/>
+    </xs:sequence>
+  </xs:complexType>
+
+</xs:schema>

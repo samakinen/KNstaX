@@ -1,0 +1,510 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2025-2026 Sami Mäkinen
+
+menu "KNX Stack Configuration"
+
+    config KNX_PRODUCTION_BUILD
+        bool "Production build mode"
+        default n
+        help
+            Enable production build mode.
+
+            This repository does not ship stub platform drivers in src/.
+            Use this flag as a project-level indicator for stricter build
+            settings (e.g., disabling debug features, tightening checks).
+
+    choice KNX_MEDIUM
+        prompt "KNX Medium"
+        default KNX_MEDIUM_TP1
+        help
+            Select the KNX communication medium
+        
+        config KNX_MEDIUM_TP1
+            bool "TP1 (Twisted Pair)"
+            help
+                KNX TP1 (Twisted Pair) medium at 9600 baud
+        
+        config KNX_MEDIUM_IP
+            bool "IP (KNXnet/IP)"
+            help
+                KNXnet/IP over Ethernet/WiFi
+        
+        config KNX_MEDIUM_RF
+            bool "RF (Radio Frequency)"
+            help
+                KNX RF medium (868 MHz)
+    endchoice
+
+    menu "TP1 Configuration"
+        depends on KNX_MEDIUM_TP1
+        
+        choice KNX_TP1_PHYSICAL
+            prompt "TP1 Physical Layer"
+            default KNX_TP1_TPUART
+            
+            config KNX_TP1_TPUART
+                bool "TPUART (NCN5120/NCN5121)"
+                help
+                    Use hardware TPUART chip (NCN5120, NCN5121, etc.)
+            
+            config KNX_TP1_BITBANG
+                bool "Bit-Bang (Software)"
+                help
+                    Use software bit-bang implementation
+        endchoice
+        
+        config KNX_TP1_UART_NUM
+            int "UART Number"
+            depends on KNX_TP1_TPUART
+            default 1
+            range 0 2
+            help
+                UART port number for TPUART communication
+        
+        config KNX_TP1_UART_TX_PIN
+            int "UART TX Pin"
+            depends on KNX_TP1_TPUART
+            default 17
+            help
+                GPIO pin for UART TX
+        
+        config KNX_TP1_UART_RX_PIN
+            int "UART RX Pin"
+            depends on KNX_TP1_TPUART
+            default 16
+            help
+                GPIO pin for UART RX
+
+        config KNX_TP1_UART_RTS_PIN
+            int "UART RTS Pin"
+            depends on KNX_TP1_TPUART
+            default -1
+            help
+                GPIO pin for UART RTS hardware flow control.
+                Set to -1 to leave RTS unassigned.
+
+        config KNX_TP1_UART_CTS_PIN
+            int "UART CTS Pin"
+            depends on KNX_TP1_TPUART
+            default -1
+            help
+                GPIO pin for UART CTS hardware flow control.
+                Set to -1 to leave CTS unassigned.
+        
+        config KNX_TP1_BITBANG_TX_PIN
+            int "Bit-Bang TX Pin"
+            depends on KNX_TP1_BITBANG
+            default 17
+            help
+                GPIO pin for bit-bang TX
+        
+        config KNX_TP1_BITBANG_RX_PIN
+            int "Bit-Bang RX Pin"
+            depends on KNX_TP1_BITBANG
+            default 16
+            help
+                GPIO pin for bit-bang RX
+
+        config KNX_TP1_BITBANG_RX_PULLUP
+            bool "Enable RX pull-up"
+            depends on KNX_TP1_BITBANG
+            default y
+            help
+                Enable internal pull-up on the bit-bang RX pin.
+
+        config KNX_TP1_BITBANG_TX_DOMINANT_HIGH
+            bool "TX dominant level is GPIO high"
+            depends on KNX_TP1_BITBANG
+            default y
+            help
+                Set to n if the connected TP1 transceiver expects a GPIO low level for dominant transmit drive.
+
+        config KNX_TP1_BITBANG_RX_DOMINANT_HIGH
+            bool "RX dominant level is GPIO high"
+            depends on KNX_TP1_BITBANG
+            default y
+            help
+                Set to n if the connected TP1 transceiver reports dominant bus level as GPIO low.
+
+        config KNX_TP1_BITBANG_SERIAL_BIT_TIME_US
+            int "Bit-bang serial bit time (µs)"
+            depends on KNX_TP1_BITBANG
+            default 104
+            range 90 130
+            help
+                UART-style bit time used by the TP1 timer ISR state machine.
+
+        config KNX_TP1_BITBANG_ZERO_ACTIVE_US
+            int "Bit-bang dominant pulse width (µs)"
+            depends on KNX_TP1_BITBANG
+            default 35
+            range 1 129
+            help
+                Dominant pulse width used when transmitting a logical zero.
+
+        config KNX_TP1_BITBANG_ZERO_EQUALIZATION_US
+            int "Bit-bang equalization width (µs)"
+            depends on KNX_TP1_BITBANG
+            default 69
+            range 1 129
+            help
+                Recessive equalization time after the dominant zero pulse.
+
+        config KNX_TP1_BITBANG_SAMPLE_OFFSET_US
+            int "Bit-bang RX sample offset (µs)"
+            depends on KNX_TP1_BITBANG
+            default 52
+            range 1 129
+            help
+                Sampling point after the detected RX edge for the bit-bang receiver.
+
+                A received bit is decoded from a sticky flag set by the RX edge
+                interrupt, not from the bus level, so the sample point does NOT
+                have to fall inside the 35 µs dominant pulse — it only has to
+                fall after this bit cell's edge and before the next one. The
+                tolerance for a late sampling alarm is therefore
+                (serial bit time − this offset), and the tolerance for an early
+                one is this offset. Mid-cell (52 µs of a 104 µs cell) splits
+                them evenly; the previous 78 µs default left only 26 µs of late
+                margin, which measured interrupt latency on a busy ESP32-C6 can
+                exceed, silently shifting bits into the wrong position.
+
+        config KNX_TP1_BITBANG_START_BIT_VALIDATION_US
+            int "Start bit validation pulse duration (µs)"
+            depends on KNX_TP1_BITBANG
+            default 15
+            range 5 30
+            help
+                Minimum time the bus must remain dominant after a falling edge
+                before the start bit is confirmed. The validation timer fires at
+                this offset from the edge and reads the bus level. If the bus has
+                already returned recessive, the edge is treated as a glitch and
+                discarded. Values of 15-20 µs are recommended. Must be less than
+                the zero-active time and the RX sample offset.
+
+        config KNX_TP1_BITBANG_LINK_PIN
+            int "Bit-Bang link-health (KNX_OK) pin"
+            depends on KNX_TP1_BITBANG
+            default 255
+            help
+                GPIO connected to the transceiver's bus-health output (STKNX
+                KNX_OK, TPUART SAVE and equivalents). 255 disables the feature,
+                in which case the driver reports LinkState::Unknown and behaves
+                exactly as it did before the signal existed.
+
+                With the signal wired, the stack can tell a dead bus from a
+                quiet one: it stops burning retransmission budget into an
+                unpowered line and can notify the application about bus power
+                loss and return.
+
+        config KNX_TP1_BITBANG_LINK_ACTIVE_HIGH
+            bool "Link-health signal is active high"
+            depends on KNX_TP1_BITBANG
+            default y
+            help
+                Set to n when the transceiver pulls the pin low to indicate a
+                healthy bus, or when the output is open-drain with an inverting
+                buffer. Check the transceiver datasheet and the board schematic.
+
+        config KNX_TP1_BITBANG_LINK_PULLUP
+            bool "Enable pull-up on the link-health pin"
+            depends on KNX_TP1_BITBANG
+            default n
+            help
+                Enable the internal pull-up. Required for open-drain
+                transceiver outputs without an external pull-up.
+
+        config KNX_TP1_BITBANG_LINK_DOWN_DEBOUNCE_US
+            int "Link-down debounce (µs)"
+            depends on KNX_TP1_BITBANG
+            default 20000
+            range 100 5000000
+            help
+                How long the signal must stay deasserted before the link is
+                reported Down. Bus voltage sags under heavy traffic, so a short
+                window causes spurious transitions.
+
+                This bounds how late the stack learns about a real outage, so it
+                must stay comfortably inside the board's hold-up time — the time
+                the local 3V3 rail survives on bulk capacitance after the bus
+                dies. Boards whose hold-up is shorter than this window should
+                additionally enable the pre-debounce power-fail notification
+                below rather than shortening the debounce.
+
+        config KNX_TP1_BITBANG_LINK_UP_DEBOUNCE_US
+            int "Link-up debounce (µs)"
+            depends on KNX_TP1_BITBANG
+            default 200000
+            range 100 10000000
+            help
+                How long the signal must stay asserted before the link is
+                reported Up. Longer than the down window on purpose: bus power
+                return is bouncy, and declaring Up too early resumes
+                transmission into a supply that is still settling.
+
+        config KNX_TP1_BITBANG_LINK_POWERFAIL_ISR
+            bool "Notify power-fail from the signal's edge ISR"
+            depends on KNX_TP1_BITBANG
+            default n
+            help
+                Deliver a LinkEventKind::PowerFailImminent notification directly
+                from the edge interrupt, ahead of the debounce, to whichever
+                handler the application registered with
+                setPowerFailIsrHandler().
+
+                Only useful on boards whose hold-up time is too short to wait
+                out the debounce window — it trades false positives (the signal
+                also dips on a marginal bus) for the earliest possible warning.
+                The handler runs in interrupt context.
+
+        config KNX_TP1_BITBANG_ISR_SERVICE_FLAGS
+            int "Extra GPIO ISR service flags"
+            depends on KNX_TP1_BITBANG
+            default 8
+            help
+                Extra flags ORed into the gpio_install_isr_service() call that attaches
+                the TP1 RX edge interrupt. The default is 8 (ESP_INTR_FLAG_LEVEL3), which
+                matches the gptimer interrupt priority so the two driver ISRs cannot
+                preempt each other.
+
+                ESP_INTR_FLAG_IRAM (1024) is always added by the driver and does not need
+                to be set here — it is mandatory, because without it the GPIO interrupt is
+                disabled for the entire time the flash cache is off (NVS commits during
+                ETS commissioning, OTA writes) and TP1 bit timing is lost.
+
+                KNstaX always calls gpio_install_isr_service() and tolerates the service
+                already existing, so no separate "install" switch is needed. Note that the
+                service is global: the IRAM requirement applies to every GPIO ISR handler
+                the application attaches, not just KNstaX's.
+
+        config KNX_TP1_BITBANG_TIMING_STATS
+            bool "Enable ISR timing statistics (development only)"
+            depends on KNX_TP1_BITBANG
+            default n
+            help
+                Collect rolling min/max/average statistics inside the bitbang ISR driver:
+                  - Timer alarm jitter: how many µs late each timer ISR fires vs the
+                    scheduled alarm time. Large values (> ~20 µs) correlate with framing
+                    errors and are the primary diagnostic for tuning timing parameters.
+                  - onTimerAlarm() total execution time in CPU cycles.
+                  - onRxEdge() total execution time in CPU cycles.
+                  - processStartBit() execution time in CPU cycles.
+                  - processReceiveBit() execution time in CPU cycles.
+
+                When disabled (the default) every instrumentation macro expands to nothing
+                — the compiler emits zero extra code and there is no runtime overhead.
+
+                When enabled, each timer ISR adds two esp_cpu_get_cycle_count() reads
+                (single-cycle CSR reads on RISC-V) plus one knx_timer_gpio_hal_timer_now_us()
+                call. Each GPIO edge ISR adds two cycle reads. These costs are measurable
+                in the statistics themselves.
+
+                Do NOT leave this enabled in production builds.
+    endmenu
+
+    menu "IP Configuration"
+        depends on KNX_MEDIUM_IP
+        
+        config KNX_ENABLE_ROUTING
+            bool "Enable Routing"
+            default n
+            help
+                Enable KNXnet/IP Routing (multicast).
+                Note: routing support is not currently shipped as part of the standalone/host build.
+        
+        config KNX_ENABLE_TUNNELING
+            bool "Enable Tunneling"
+            default y
+            help
+                Enable KNXnet/IP Tunneling (unicast)
+        
+        config KNX_IP_MULTICAST_ADDR
+            string "Multicast Address"
+            depends on KNX_ENABLE_ROUTING
+            default "224.0.23.12"
+            help
+                KNXnet/IP multicast address
+        
+        config KNX_IP_PORT
+            int "KNXnet/IP Port"
+            default 3671
+            help
+                UDP port for KNXnet/IP communication
+
+        config KNX_NETIP_UDP_BUFFER_SIZE
+            int "KNXnet/IP UDP scratch buffer size"
+            default 1500
+            range 512 4096
+            help
+                Fixed-capacity UDP scratch buffer for KNXnet/IP datagrams.
+                Keep this near the expected MTU for embedded builds.
+
+        config KNX_NETIP_DEVICE_MANAGEMENT_BUFFER_SIZE
+            int "KNXnet/IP device-management buffer size"
+            default 2048
+            range 512 4096
+            help
+                Fixed-capacity request/response buffer for device-management payload exchanges.
+
+        config KNX_NETIP_TCP_BUFFER_SIZE
+            int "KNXnet/IP TCP frame buffer size"
+            default 4096
+            range 512 8192
+            help
+                Fixed-capacity framed TCP scratch buffer for secure tunneling and session bootstrap.
+
+        config KNX_NETIP_TUNNELING_KEEPALIVE_INTERVAL_MS
+            int "KNXnet/IP tunneling keepalive interval (ms)"
+            default 60000
+            range 1000 120000
+            help
+                Default tunneling connection-state request interval.
+    endmenu
+
+    menu "Security Configuration"
+        
+        config KNX_ENABLE_SECURITY
+            bool "Enable KNX Secure"
+            default n
+            help
+                Enable KNX Data Security and/or System-B Secure
+        
+        config KNX_SECURITY_KEY_SIZE
+            int
+            default 16
+            depends on KNX_ENABLE_SECURITY
+    endmenu
+
+    menu "Object Limits"
+
+        config KNX_MAX_GROUP_OBJECT_PAYLOAD_BYTES
+            int "Group object payload capacity (octets)"
+            default 16
+            range 14 254
+            help
+                Payload octets reserved per group object.  Each object holds two
+                buffers of this size (current value plus last-transmitted value
+                for send-on-change), so the cost is paid twice per object.
+
+                The default of 16 covers every datapoint type in the catalog
+                (the widest is DPT 16 at 14 octets) and keeps a group object at
+                ~288 bytes instead of ~768.  Raise it only for a product that
+                uses group objects as opaque transport for larger blobs.
+                Oversized payloads are rejected, never truncated.
+    endmenu
+
+    menu "Task Configuration"
+        
+        config KNX_TASK_STACK_SIZE
+            int "Main Task Stack Size (bytes)"
+            default 4096
+            range 2048 16384
+            help
+                Stack size for main KNX processing task
+        
+        config KNX_TASK_PRIORITY
+            int "Main Task Priority"
+            default 5
+            range 1 24
+            help
+                Priority for main KNX processing task
+        
+        config KNX_RX_TASK_STACK_SIZE
+            int "RX Task Stack Size (bytes)"
+            default 3072
+            range 2048 8192
+            help
+                Stack size for frame reception task
+        
+        config KNX_RX_TASK_PRIORITY
+            int "RX Task Priority"
+            default 10
+            range 1 24
+            help
+                Priority for frame reception task (should be high)
+    endmenu
+
+    menu "Buffer Configuration"
+        
+        config KNX_RX_QUEUE_SIZE
+            int "RX Queue Size"
+            default 10
+            range 1 50
+            help
+                Number of frames that can be queued for reception
+        
+        config KNX_TX_QUEUE_SIZE
+            int "TX Queue Size"
+            default 5
+            range 1 20
+            help
+                Number of frames that can be queued for transmission
+    endmenu
+
+    menu "Memory Configuration"
+        
+        config KNX_FLASH_SIZE
+            int "Flash Size (bytes)"
+            default 4096
+            help
+                Size of non-volatile memory for KNX configuration
+        
+        config KNX_FLASH_PAGE_SIZE
+            int "Flash Page Size (bytes)"
+            default 256
+            help
+                Flash page/sector size
+        
+        config KNX_USE_NVS
+            bool "Use ESP32 NVS"
+            default y
+            help
+                Use ESP32 Non-Volatile Storage instead of raw flash
+    endmenu
+
+    menu "Feature Flags"
+        
+        config KNX_ENABLE_GROUP_ADDRESS_FILTER
+            bool "Enable Group Address Filtering"
+            default y
+            help
+                Filter incoming group telegrams based on address table
+        
+        config KNX_ENABLE_DEVICE_DESCRIPTOR
+            bool "Enable Device Descriptor"
+            default y
+            help
+                Support device descriptor read
+        
+        config KNX_ENABLE_PROPERTY_SERVICES
+            bool "Enable Property Services"
+            default y
+            help
+                Support property read/write services
+    endmenu
+
+    menu "Debug Configuration"
+        
+        config KNX_DEBUG_ENABLED
+            bool "Enable Debug Output"
+            default n
+            help
+                Enable debug logging
+        
+        config KNX_VERBOSE_LOGGING
+            bool "Verbose Logging"
+            depends on KNX_DEBUG_ENABLED
+            default n
+            help
+                Enable verbose frame-level logging
+        
+        config KNX_LOG_LEVEL
+            int "Log Level"
+            depends on KNX_DEBUG_ENABLED
+            default 3
+            range 0 5
+            help
+                0=None, 1=Error, 2=Warning, 3=Info, 4=Debug, 5=Verbose
+    endmenu
+
+endmenu

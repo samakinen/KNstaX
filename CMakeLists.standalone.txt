@@ -1,0 +1,208 @@
+cmake_minimum_required(VERSION 3.21)
+project(KNstaX VERSION 1.0.0 LANGUAGES C CXX)
+
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 13)
+        message(FATAL_ERROR "KNstaX now requires C++23. GCC 13+ is required, found ${CMAKE_CXX_COMPILER_VERSION}.")
+    endif()
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 17)
+        message(FATAL_ERROR "KNstaX now requires C++23. Clang 17+ is required, found ${CMAKE_CXX_COMPILER_VERSION}.")
+    endif()
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
+    if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 16.0)
+        message(FATAL_ERROR "KNstaX now requires C++23. AppleClang 16.0+ is required, found ${CMAKE_CXX_COMPILER_VERSION}.")
+    endif()
+elseif(MSVC)
+    if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 19.38)
+        message(FATAL_ERROR "KNstaX now requires C++23. MSVC 19.38+ is required, found ${CMAKE_CXX_COMPILER_VERSION}.")
+    endif()
+else()
+    message(FATAL_ERROR "Unsupported C++ compiler '${CMAKE_CXX_COMPILER_ID}'. KNstaX currently requires a C++23-capable toolchain.")
+endif()
+
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# ============================================================================
+# Platform Selection
+# ============================================================================
+
+# Detect platform if not specified
+if(NOT DEFINED KNX_PLATFORM)
+    if(WIN32 OR CYGWIN)
+        set(KNX_PLATFORM "windows")
+    elseif(APPLE)
+        set(KNX_PLATFORM "macos")
+    elseif(UNIX AND NOT APPLE)
+        set(KNX_PLATFORM "linux")
+    else()
+        message(FATAL_ERROR "Unknown platform. Please specify -DKNX_PLATFORM=linux|macos|windows")
+    endif()
+endif()
+
+message(STATUS "Building KNX Stack for platform: ${KNX_PLATFORM}")
+
+# ============================================================================
+# Source Files - Common
+# ============================================================================
+
+set(COMMON_SOURCES
+    # Data Link Layer
+    "src/datalink/tp1_data_link_layer.cpp"
+    "src/datalink/frame_codec.cpp"
+    
+    # Physical Layer
+    "src/physical/bitbang_physical_platform.cpp"
+    "src/physical/manchester_codec.cpp"
+    "src/physical/tp1_frame_codec.cpp"
+    
+    # Network Layer
+    "src/network/network_layer.cpp"
+    
+    # Transport Layer
+    "src/transport/transport_layer.cpp"
+    
+    # Application Layer
+    "src/application/dpt.cpp"
+    "src/application/group_object.cpp"
+)
+
+# ============================================================================
+# Platform-Specific Sources
+# ============================================================================
+
+if(KNX_PLATFORM STREQUAL "linux" OR KNX_PLATFORM STREQUAL "macos")
+    list(APPEND PLATFORM_SOURCES
+        "src/platform/linux_platform.cpp"
+    )
+    set(PLATFORM_LIBS pthread)
+elseif(KNX_PLATFORM STREQUAL "windows")
+    list(APPEND PLATFORM_SOURCES
+        "src/platform/linux_platform.cpp"  # Windows uses same POSIX-like interface
+    )
+    set(PLATFORM_LIBS)
+elseif(KNX_PLATFORM STREQUAL "esp32")
+    list(APPEND PLATFORM_SOURCES
+        "src/platform/freertos_platform.cpp"
+        "src/platform/esp32_platform.cpp"
+        "src/platform/esp32_memory.cpp"
+        "src/platform/esp32_network.cpp"
+        "src/platform/esp32_uart.cpp"
+        "src/platform/esp32_spi.cpp"
+    )
+else()
+    message(FATAL_ERROR "Unknown platform: ${KNX_PLATFORM}")
+endif()
+
+# ============================================================================
+# Create Library
+# ============================================================================
+
+add_library(knx_core STATIC
+    ${COMMON_SOURCES}
+    ${PLATFORM_SOURCES}
+)
+
+target_include_directories(knx_core PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(knx_core PUBLIC
+    ${PLATFORM_LIBS}
+)
+
+target_compile_definitions(knx_core PUBLIC
+    KNX_PLATFORM_${UPPER_KNX_PLATFORM}
+)
+
+# Enable all warnings
+target_compile_options(knx_core PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+enable_testing()
+
+# Find or create Unity test framework
+find_package(unity CONFIG QUIET)
+if(NOT unity_FOUND)
+    # Create a minimal Unity implementation from source
+    message(STATUS "Unity not found, creating minimal test support")
+    add_library(unity INTERFACE)
+    target_include_directories(unity INTERFACE 
+        ${CMAKE_CURRENT_SOURCE_DIR}/test/unity_mock
+    )
+endif()
+
+# Test executable: test_types
+add_executable(test_types
+    test/unit/test_types.cpp
+)
+target_link_libraries(test_types PRIVATE
+    knx_core
+    unity
+)
+add_test(NAME test_types COMMAND test_types)
+
+# Test executable: test_dpt
+add_executable(test_dpt
+    test/unit/test_dpt.cpp
+)
+target_link_libraries(test_dpt PRIVATE
+    knx_core
+    unity
+)
+add_test(NAME test_dpt COMMAND test_dpt)
+
+# Test executable: test_frame_encoding
+add_executable(test_frame_encoding
+    test/unit/test_frame_encoding.cpp
+)
+target_link_libraries(test_frame_encoding PRIVATE
+    knx_core
+    unity
+)
+add_test(NAME test_frame_encoding COMMAND test_frame_encoding)
+
+# Test executable: test_tp1_integration
+add_executable(test_tp1_integration
+    test/integration/test_tp1_integration.cpp
+)
+target_link_libraries(test_tp1_integration PRIVATE
+    knx_core
+    unity
+)
+add_test(NAME test_tp1_integration COMMAND test_tp1_integration)
+
+# ============================================================================
+# Examples
+# ============================================================================
+
+if(NOT DEFINED KNX_BUILD_EXAMPLES OR KNX_BUILD_EXAMPLES)
+    message(STATUS "Building examples")
+    add_subdirectory(examples/tp1_device)
+endif()
+
+# ============================================================================
+# Summary
+# ============================================================================
+
+message(STATUS "")
+message(STATUS "KNX Stack Configuration:")
+message(STATUS "  Platform:          ${KNX_PLATFORM}")
+message(STATUS "  Build Type:        ${CMAKE_BUILD_TYPE}")
+message(STATUS "  C++ Standard:      ${CMAKE_CXX_STANDARD}")
+message(STATUS "")
+message(STATUS "Build Targets:")
+message(STATUS "  Library:           knx_core")
+message(STATUS "  Tests:             test_types, test_dpt, test_frame_encoding, test_tp1_integration")
+message(STATUS "")
+message(STATUS "To build: cmake --build .")
+message(STATUS "To test:  ctest --output-on-failure")
+message(STATUS "")

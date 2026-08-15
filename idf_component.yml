@@ -1,0 +1,21 @@
+name: KNstaX
+version: 0.2.0-alpha
+description: "ESP-IDF component manifest for KNstaX: a modern C++ KNX System-7 stack for ESP32/FreeRTOS with TP1, KNXnet/IP (tunneling + routing) and KNX Secure support."
+url: https://git.pilosa.fi/smak/KNstaX
+repository: ssh://git@git.pilosa.fi:2222/smak/KNstaX.git
+issues: https://git.pilosa.fi/smak/KNstaX/-/issues
+maintainers:
+  - "Sami Mäkinen <sami.makinen@flou.io>"
+tags:
+  - knx
+  - stack
+  - rtos
+  - freertos
+  - esp32
+  - knx-secure
+  - knxnet-ip
+  - tp1
+  - kaenx
+dependencies:
+  idf: ">=5.3"
+  # Note: mbedtls is provided by ESP-IDF itself, no need to declare it

@@ -1,0 +1,23 @@
+# KNXnet/IP Secure Group Sync (0x0955 TimerNotify) vector extracted from
+# external/KNXUltimate/documents/WiresharkMulticastNotWorking.pcapng (frame 26).
+
+name=timernotify_0955_capture_frame_26
+
+# Backbone key decrypted from external/KNXUltimate/documents/Secure Test.knxkeys
+# (loaded with password "passwordprogetto" via KNXUltimate's Keyring implementation)
+key=6da809eed8dbdbd0a0680fb88afe2bb2
+
+# KNXnet/IP header for 0x0955 with total length 0x0024
+header=061009550024
+
+# Body fields
+# timer (6) || serial (6) || tag (2) || mac_enc (16)
+timer=000000ca0279
+serial=00a207164012
+tag=6f8c
+
+# Encrypted MAC (MAC-TR) as present on wire
+mac_enc=fdfa2ced10578e5aff68dddea810e17d
+
+# Full UDP payload
+frame=061009550024000000ca027900a2071640126f8cfdfa2ced10578e5aff68dddea810e17d

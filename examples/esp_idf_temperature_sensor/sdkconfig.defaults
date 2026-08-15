@@ -1,0 +1,12 @@
+# Only the settings this example actually needs. `sdkconfig` itself is
+# generated and gitignored: committing 3800 lines of generated config pins a
+# target, conflicts on every IDF bump, and buries the handful of lines that
+# matter.
+
+# TP1 over a TPUART transceiver (NCN5120/NCN5121). This is the IDF default for
+# KNX_TP1_PHYSICAL, stated explicitly so the intent survives a Kconfig change.
+CONFIG_KNX_MEDIUM_TP1=y
+CONFIG_KNX_TP1_TPUART=y
+CONFIG_KNX_TP1_UART_NUM=1
+CONFIG_KNX_TP1_UART_TX_PIN=17
+CONFIG_KNX_TP1_UART_RX_PIN=16

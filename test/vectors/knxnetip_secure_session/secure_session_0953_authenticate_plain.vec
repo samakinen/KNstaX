@@ -1,0 +1,9 @@
+# KNX/IP Secure session authenticate (0x0953) plaintext vector (deterministic).
+
+name=secure_session_0953_authenticate_plain
+user_id=11
+password_latin1=70617373776f7264
+user_password_key=14ddf711084a0d1e6e2cf97e8fbf70f9
+client_pub=d81072e6181d4c9a1cfae5dd30fda1d7dd4aebf7878fed279e87eab08e97ea51
+server_pub=a7de4151a357cd5efc9cfac4cd47e35884908a07514689dac2ea52b53f66f016
+frame=061009530018001139e52da021300bd5eded319fbdb313cb

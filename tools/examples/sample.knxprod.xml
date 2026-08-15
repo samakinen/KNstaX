@@ -1,0 +1,35 @@
+<?xml version="1.0" ?>
+<KNX xmlns="http://knx.org/xml/project/23" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://knx.org/xml/project/23 schema/knx_schema_version23.xsd">
+  <MasterData Version="1" Signature="AA==" Id="master1">
+    <DatapointTypes>
+      <DatapointType Id="DPT_BOOL" Number="1" Name="Boolean" SizeInBit="1">
+        <DatapointSubtypes>
+          <DatapointSubtype Id="DPT_SWITCH" Number="1" Name="Switch" Text="Switch" Default="true"/>
+        </DatapointSubtypes>
+      </DatapointType>
+    </DatapointTypes>
+    <MediumTypes>
+      <MediumType Id="MT0" Number="0" Name="MT-0" DomainAddressLength="16"/>
+    </MediumTypes>
+    <MaskVersions>
+      <MaskVersion Id="mask1" Name="Default" MaskVersion="1" ManagementModel="None" MediumTypeRefId="MT0"/>
+    </MaskVersions>
+    <Manufacturers>
+      <Manufacturer Id="M1" Name="pilot_a_tp1_actuator" KnxManufacturerId="250"/>
+    </Manufacturers>
+  </MasterData>
+  <ManufacturerData>
+    <Manufacturer RefId="M1">
+      <ApplicationPrograms>
+        <ApplicationProgram Id="pilot_a_tp1_actuator" ApplicationNumber="0" ApplicationVersion="0" ProgramType="ApplicationProgram" MaskVersion="mask1" Name="pilot_a_tp1_actuator" LoadProcedureStyle="DefaultProcedure" PeiType="0" DefaultLanguage="en" DynamicTableManagement="false" Linkable="false">
+          <Static>
+            <ComObjectTable>
+              <ComObject Id="CO1" Name="Command" Text="Command" Number="1" FunctionText="Command" ObjectSize="1 Byte" ReadFlag="Enabled" WriteFlag="Enabled" CommunicationFlag="Enabled" TransmitFlag="Disabled" UpdateFlag="Disabled" ReadOnInitFlag="Disabled" DatapointType="DPT_SWITCH"/>
+              <ComObject Id="CO2" Name="Status" Text="Status" Number="2" FunctionText="Status" ObjectSize="1 Byte" ReadFlag="Enabled" WriteFlag="Enabled" CommunicationFlag="Enabled" TransmitFlag="Enabled" UpdateFlag="Disabled" ReadOnInitFlag="Disabled" DatapointType="DPT_SWITCH"/>
+            </ComObjectTable>
+          </Static>
+        </ApplicationProgram>
+      </ApplicationPrograms>
+    </Manufacturer>
+  </ManufacturerData>
+</KNX>

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Keyring xmlns="http://knx.org/xml/keyring/1" Project="KNstaX-Interop" CreatedBy="KNstaX" Created="2026-01-07T08:38:30Z" Signature="EjWqe6wjF/lnHmR7dxNa4w==">
+  <Interface Type="Tunneling" IndividualAddress="1.1.2">
+    <Group Address="0/0/1" Senders="1.1.2"/>
+  </Interface>
+  <GroupAddresses>
+    <Group Address="0/0/1" Key="aX2fqimmVs86aJihUyUe/w=="/>
+  </GroupAddresses>
+</Keyring>

@@ -1,0 +1,6 @@
+# KNX/IP Secure session request (0x0951) vector (deterministic).
+
+name=secure_session_0951_request
+client_priv=4f3b1b2a3c4d5e6f708192a3b4c5d6e7f80112233445566778899aabbccddeef
+client_pub=d81072e6181d4c9a1cfae5dd30fda1d7dd4aebf7878fed279e87eab08e97ea51
+frame=06100951002e0802000000000000d81072e6181d4c9a1cfae5dd30fda1d7dd4aebf7878fed279e87eab08e97ea51

@@ -1,0 +1,74 @@
+# CMake / build outputs
+build/
+build_*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+Makefile
+compile_commands.json
+
+# IDE
+.vscode/
+
+# Artifacts
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.exe
+*.out
+*.elf
+*.map
+*.bin
+*.hex
+*.log
+
+# OS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+
+# Virtualenvs
+.venv/
+venv/
+env/
+ENV/
+
+# Runtime process files from the interop harness
+*.pid
+
+# Editor / merge leftovers
+*.backup
+*.orig
+*.rej
+
+# Pytest / tooling caches
+.pytest_cache/
+.mypy_cache/
+.cache/
+.coverage
+
+# Packaging / build artifacts
+dist/
+*.egg-info/
+pip-wheel-metadata/
+build/
+
+external/
+# IDEs
+.idea/
+_tmp_knxkeys
+
+# ESP-IDF generated per-project artefacts. sdkconfig and dependencies.lock are
+# both regenerated per target, so committing them pins one SoC and produces a
+# spurious diff for anyone building for another. Commit sdkconfig.defaults —
+# the handful of settings that actually matter — instead.
+sdkconfig
+sdkconfig.old
+dependencies.lock

@@ -1,0 +1,10 @@
+
+# KNX/IP Secure session response (0x0952) vector (spec-compliant, with MAC).
+
+name=secure_session_0952_response
+sid=1234
+server_priv=9f1e2d3c4b5a69788796a5b4c3d2e1f0ffeeddccbbaa99887766554433221100
+server_pub=a7de4151a357cd5efc9cfac4cd47e35884908a07514689dac2ea52b53f66f016
+# The following MAC is a placeholder and must be replaced with a valid value for a real test
+mac=00000000000000000000000000000000
+frame=0610095200381234a7de4151a357cd5efc9cfac4cd47e35884908a07514689dac2ea52b53f66f01600000000000000000000000000000000

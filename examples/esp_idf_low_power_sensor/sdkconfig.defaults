@@ -1,0 +1,12 @@
+# Only the settings this example actually needs. `sdkconfig` itself is
+# generated and gitignored.
+
+CONFIG_KNX_MEDIUM_TP1=y
+CONFIG_KNX_TP1_BITBANG=y
+CONFIG_KNX_TP1_BITBANG_TX_PIN=4
+CONFIG_KNX_TP1_BITBANG_RX_PIN=5
+
+# The point of this example: automatic light sleep between telegrams. Without
+# power management enabled the sleep-hint API still works but nothing sleeps.
+CONFIG_PM_ENABLE=y
+CONFIG_FREERTOS_USE_TICKLESS_IDLE=y

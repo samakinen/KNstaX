@@ -1,0 +1,6 @@
+@PACKAGE_INIT@
+
+# KNstaXConfig.cmake
+# Minimal config to locate KNstaX targets
+
+include("${CMAKE_CURRENT_LIST_DIR}/KNstaXTargets.cmake")
