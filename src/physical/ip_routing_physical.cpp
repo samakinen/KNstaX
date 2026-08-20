@@ -12,9 +12,12 @@
 #include "knx/netip/detail/polling.hpp"
 #include "knx/netip/netip_config.hpp"
 #include "knx/netip/routing_endpoint.hpp"
+#include "knx/netip/system_broadcast.hpp"
 #include "knx/util/result.hpp"
 
+#include <algorithm>
 #include <cstring>
+#include <tuple>
 
 #if KNX_SECURE_ENABLED
 #include "knx/netip/ip_secure/secure_routing_security.hpp"
@@ -46,28 +49,18 @@ IpRoutingPhysical::~IpRoutingPhysical() {
     close();
 }
 
-void IpRoutingPhysical::drainInboundOnce(uint32_t timeoutMs)
+void IpRoutingPhysical::enqueueFrame(std::span<const uint8_t> cemi)
 {
-    if (!initialized_.load() || !endpoint_ || !endpoint_->isOpen()) {
-        return;
-    }
-
-    std::array<uint8_t, netip::kMaxCemiLDataSize> cemi{};
-    auto recvRes = endpoint_->receiveRoutingIndication(cemi, timeoutMs);
-    if (!recvRes.isOk()) {
-        return;
-    }
-
     datalink::LDataFrame frame;
     uint8_t cemiMessageCode = 0;
-    if (netip::decodeCemiLData(std::span<const uint8_t>(cemi).first(recvRes.value()),
-                               frame,
-                               cemiMessageCode)
-            .isError()) {
+    if (netip::decodeCemiLData(cemi, frame, cemiMessageCode).isError()) {
         return;
     }
 
-    std::array<uint8_t, 64> buf{};
+    // A TP1 standard frame tops out at 23 octets, but an L_Data_Extended one
+    // carries up to 263 — and every ETS download that moves a key table or a
+    // parameter block is extended. A 64-octet buffer silently dropped those.
+    std::array<uint8_t, datalink::LDataFrame::MAX_FRAME_SIZE + 8> buf{};
     auto encodeResult = datalink::FrameCodec::encodeFrame(frame, buf);
     if (!encodeResult.isOk()) {
         return;
@@ -87,6 +80,29 @@ void IpRoutingPhysical::drainInboundOnce(uint32_t timeoutMs)
     if (rxCb_) {
         rxCb_(rxCtx_);
     }
+}
+
+void IpRoutingPhysical::drainInboundOnce(uint32_t timeoutMs)
+{
+    if (!initialized_.load() || !endpoint_ || !endpoint_->isOpen()) {
+        return;
+    }
+
+    std::array<uint8_t, netip::kMaxCemiLDataSize> cemi{};
+    auto recvRes = endpoint_->receive(cemi, timeoutMs);
+    if (!recvRes.isOk()) {
+        return;
+    }
+
+    const auto inbound = recvRes.value();
+    // Both domains carry an ordinary cEMI L_Data frame; which service type
+    // brought it only decides how it must be sent back out, and the layers
+    // above address that from the APDU rather than from the transport.
+    if (inbound.kind == netip::RoutingEndpoint::InboundKind::None) {
+        return;
+    }
+
+    enqueueFrame(std::span<const uint8_t>(cemi).first(inbound.cemiLength));
 }
 
 void IpRoutingPhysical::setMulticast(IpAddress multicastGroup,
@@ -128,6 +144,80 @@ void IpRoutingPhysical::setSecureRouting(const std::array<uint8_t, 16>& groupKey
 }
 #endif
 
+void IpRoutingPhysical::setCoreDiscovery(netip::CoreServerResponder::DescriptionProvider provider,
+                                         std::span<const netip::ServiceFamilySupport> serviceFamilies) {
+    if (initialized_.load()) return;
+    coreResponder_.setDescriptionProvider(std::move(provider));
+    if (coreResponder_.setServiceFamilies(serviceFamilies).isError()) {
+        return;
+    }
+    coreDiscoveryEnabled_ = true;
+}
+
+void IpRoutingPhysical::setRandomSource(netip::RandomUnitSource source) {
+    randomSource_ = std::move(source);
+}
+
+#if KNX_SECURE_ENABLED
+util::Result<void> IpRoutingPhysical::applySecureRouting(std::span<const uint8_t> groupKey,
+                                                         uint64_t initialSeq) {
+    using netip::ip_secure::SecureWrapper;
+    // SecureWrapper names its key by type rather than by length; AES-128 makes
+    // that 16 octets, and the compiler holds us to it.
+    constexpr size_t kGroupKeyLen = std::tuple_size_v<SecureWrapper::Key>;
+
+    // ETS clears the backbone key by writing zeros; treat an absent or all-zero
+    // key as "plain multicast" rather than as a key that happens to be zero.
+    const bool clearing = groupKey.empty() ||
+        std::all_of(groupKey.begin(), groupKey.end(), [](uint8_t b) { return b == 0; });
+
+    if (!clearing && groupKey.size() != kGroupKeyLen) {
+        return util::ErrorCode::InvalidParameter;
+    }
+
+    std::lock_guard<std::mutex> lock(secureRoutingMutex_);
+
+    if (clearing) {
+        secureRoutingEnabled_ = false;
+        secureRoutingGroupKey_.fill(0);
+        if (endpoint_) {
+            endpoint_->setSecurity(nullptr);
+        }
+        if (routingSecurity_) {
+            retiredRoutingSecurity_.push_back(std::move(routingSecurity_));
+        }
+        return util::Result<void>::ok();
+    }
+
+    SecureWrapper::Key key{};
+    std::copy(groupKey.begin(), groupKey.end(), key.begin());
+
+    secureRoutingEnabled_ = true;
+    secureRoutingGroupKey_ = key;
+    secureRoutingInitialSeq_ = initialSeq;
+
+    // Before init() there is no endpoint to inform; the stored settings are
+    // picked up when it opens.
+    if (!endpoint_) {
+        return util::Result<void>::ok();
+    }
+
+    auto security = std::make_unique<netip::ip_secure::SecureRoutingSecurity>(
+        key, secureRoutingSerial_, secureRoutingTag_, initialSeq);
+    endpoint_->setSecurity(security.get());
+    if (routingSecurity_) {
+        retiredRoutingSecurity_.push_back(std::move(routingSecurity_));
+    }
+    routingSecurity_ = std::move(security);
+    return util::Result<void>::ok();
+}
+
+bool IpRoutingPhysical::isSecureRoutingActive() const {
+    std::lock_guard<std::mutex> lock(secureRoutingMutex_);
+    return secureRoutingEnabled_;
+}
+#endif
+
 void IpRoutingPhysical::setMaxRxQueueDepth(size_t maxFrames) {
     if (maxFrames == 0) maxFrames = 1;
     maxRxQueueDepth_.store(maxFrames);
@@ -163,6 +253,20 @@ util::Result<void> IpRoutingPhysical::init() {
         return openRes.error();
     }
 
+    if (coreDiscoveryEnabled_) {
+        // The control endpoint a search response advertises is this socket:
+        // the device answers on the address it was found at, which is also the
+        // only one it knows to be reachable.
+        coreResponder_.setControlEndpoint(endpoint_->localAddress(), port_);
+        endpoint_->setControlDatagramHandler(
+            [this](std::span<const uint8_t> datagram, IpAddress source, uint16_t sourcePort) {
+                netip::CoreServerResponder::Reply reply;
+                if (!coreResponder_.handle(datagram, source, sourcePort, reply)) return;
+                if (reply.datagram.empty()) return;
+                (void)endpoint_->sendDatagram(reply.address, reply.port, reply.datagram);
+            });
+    }
+
     initialized_.store(true);
     state_.store(PhysicalLayerState::Idle);
 
@@ -182,6 +286,12 @@ void IpRoutingPhysical::close() {
         std::lock_guard<std::mutex> lock(rxMutex_);
         rxQueue_.clear();
     }
+#if KNX_SECURE_ENABLED
+    {
+        std::lock_guard<std::mutex> lock(secureRoutingMutex_);
+        retiredRoutingSecurity_.clear();
+    }
+#endif
     initialized_.store(false);
     state_.store(PhysicalLayerState::Idle);
 }
@@ -240,8 +350,10 @@ util::Result<uint32_t> IpRoutingPhysical::beginTransmit(std::span<const uint8_t>
         return util::ErrorCode::EncodeFailed;
     }
 
-    auto sendRes = endpoint_->sendRoutingIndication(
-        std::span<const uint8_t>(cemi).first(cemiResult.value()));
+    const auto encodedCemi = std::span<const uint8_t>(cemi).first(cemiResult.value());
+    auto sendRes = netip::isSystemBroadcast(decodedFrame)
+        ? endpoint_->sendRoutingSystemBroadcast(encodedCemi)
+        : endpoint_->sendRoutingIndication(encodedCemi);
     txState_ = sendRes.isOk() ? ProgressState::Success : util::progressStateFromError(sendRes.error());
     state_.store(sendRes.isOk() ? PhysicalLayerState::Idle : PhysicalLayerState::Error);
     if (sendRes.isError()) {

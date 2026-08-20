@@ -104,6 +104,10 @@ set(KNX_SOURCES_NETIP
     "src/netip/device_management_codec.cpp"
     "src/netip/routing.cpp"
     "src/netip/routing_endpoint.cpp"
+    "src/netip/routing_flow_control.cpp"
+    "src/netip/system_broadcast.cpp"
+    "src/netip/core_discovery_codec.cpp"
+    "src/netip/core_server_responder.cpp"
 )
 
 # Coupler/bridge code needs both media present.

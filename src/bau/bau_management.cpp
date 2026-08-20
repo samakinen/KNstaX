@@ -193,10 +193,18 @@ util::Result<FunctionPropertyResult> handleSecurityFunctionProperty(
 enum : uint8_t {
     kPidKnxNetIpProjectInstallationId = 51,
     kPidKnxNetIpIndividualAddress = 52,
+    kPidKnxNetIpCurrentIpAssignmentMethod = 54,
+    kPidKnxNetIpIpAssignmentMethod = 55,
     kPidKnxNetIpCurrentIpAddress = 57,
+    kPidKnxNetIpCurrentSubnetMask = 58,
+    kPidKnxNetIpCurrentDefaultGateway = 59,
     kPidKnxNetIpMacAddress = 64,
+    kPidKnxNetIpSystemSetupMulticastAddress = 65,
+    kPidKnxNetIpRoutingMulticastAddress = 66,
+    kPidKnxNetIpTtl = 67,
     kPidKnxNetIpDeviceCapabilities = 68,
     kPidKnxNetIpFriendlyName = 76,
+    kPidKnxNetIpBackboneKey = 91,
 
     kPidRouterLineStatus = 51,
     kPidRouterMainLcConfig = 52,
@@ -216,6 +224,18 @@ std::array<uint8_t, 2> beU16(uint16_t value)
 {
     return {static_cast<uint8_t>((value >> 8) & 0xFFu), static_cast<uint8_t>(value & 0xFFu)};
 }
+
+#if KNX_FEATURE_NETIP
+/// An IPv4 address as the four octets a KNX property carries, most significant
+/// first. IpAddress stores them already in that order, so this is a copy with
+/// the byte order named rather than assumed.
+std::array<uint8_t, 4> ipOctets(IpAddress address)
+{
+    std::array<uint8_t, 4> octets{};
+    address.toOctets(octets[0], octets[1], octets[2], octets[3]);
+    return octets;
+}
+#endif
 
 }  // namespace
 
@@ -296,7 +316,23 @@ void BusAccessUnit::publishMediumInterfaceObjects()
                                          static_cast<application::PropertyID>(
                                              kPidKnxNetIpDeviceCapabilities),
                                          capabilities);
-        (void)kPidKnxNetIpCurrentIpAddress;  // Filled by the IP transport once bound.
+        // The address-bearing properties stay untouched here. They are not
+        // knowable at this point — the interface may not even be up — and are
+        // filled by applyKnxNetIpConfiguration() once the firmware has them.
+
+        // PID_BACKBONE_KEY is the one property in this object that does
+        // something when written rather than merely recording it. ETS
+        // downloads the KNX/IP Secure Routing group key here, and it is meant
+        // to take effect without a restart.
+        if (auto* object = referenceInterfaceObject(InterfaceObjectType::knxNetIpParameter())) {
+            object->setWriteObserver([this](application::PropertyID propertyId,
+                                            std::span<const uint8_t> value) {
+                if (static_cast<uint8_t>(propertyId) != kPidKnxNetIpBackboneKey) return;
+                if (_backboneKeyCallback) {
+                    _backboneKeyCallback(value);
+                }
+            });
+        }
     }
 #endif
 
@@ -709,6 +745,66 @@ void BusAccessUnit::wireManagementServices()
                  serial.size(), application::kKnxSerialNumberBytes);
     }
 }
+
+#if KNX_FEATURE_NETIP
+void BusAccessUnit::setBackboneKeyCallback(BackboneKeyCallback callback)
+{
+    _backboneKeyCallback = std::move(callback);
+}
+
+util::Result<void> BusAccessUnit::applyKnxNetIpConfiguration(const netip::KnxNetIpConfiguration& config)
+{
+    const auto objectType = InterfaceObjectType::knxNetIpParameter();
+
+    const auto write = [&](uint8_t propertyId, std::span<const uint8_t> value) {
+        return setReferenceObjectProperty(objectType,
+                                          static_cast<application::PropertyID>(propertyId),
+                                          value);
+    };
+
+    // Failures here are reported rather than fatal: the object is registered by
+    // publishMediumInterfaceObjects() and a build that never published it
+    // simply has nowhere to put these, which is not a reason to refuse to run.
+    util::Result<void> firstError = util::Result<void>::ok();
+    const auto record = [&firstError](util::Result<void> result) {
+        if (result.isError() && firstError.isOk()) {
+            firstError = result;
+        }
+    };
+
+    record(write(kPidKnxNetIpCurrentIpAddress, ipOctets(config.currentIpAddress)));
+    record(write(kPidKnxNetIpCurrentSubnetMask, ipOctets(config.currentSubnetMask)));
+    record(write(kPidKnxNetIpCurrentDefaultGateway, ipOctets(config.currentDefaultGateway)));
+    record(write(kPidKnxNetIpRoutingMulticastAddress, ipOctets(config.routingMulticastAddress)));
+    record(write(kPidKnxNetIpSystemSetupMulticastAddress, ipOctets(config.systemSetupMulticastAddress)));
+
+    const std::array<uint8_t, 1> ttl{config.timeToLive};
+    record(write(kPidKnxNetIpTtl, ttl));
+
+    const std::array<uint8_t, 1> assignment{config.ipAssignmentMethod};
+    record(write(kPidKnxNetIpCurrentIpAssignmentMethod, assignment));
+    record(write(kPidKnxNetIpIpAssignmentMethod, assignment));
+
+    record(write(kPidKnxNetIpDeviceCapabilities, beU16(config.deviceCapabilities)));
+
+    // The MAC address is a distinct property from the KNX serial number even
+    // where a device derives one from the other; seeding it from the serial, as
+    // this used to, reports a plausible wrong answer to anything that asks.
+    record(write(kPidKnxNetIpMacAddress, config.macAddress));
+
+    if (!config.friendlyName.empty()) {
+        // 30 octets on the wire (03/08/02 §7.5.4.2); a longer name is trimmed
+        // rather than refused, because a name is not worth failing a boot over.
+        constexpr size_t kFriendlyNameLength = 30;
+        const size_t length = std::min(config.friendlyName.size(), kFriendlyNameLength);
+        record(write(kPidKnxNetIpFriendlyName,
+                     std::span<const uint8_t>(
+                         reinterpret_cast<const uint8_t*>(config.friendlyName.data()), length)));
+    }
+
+    return firstError;
+}
+#endif  // KNX_FEATURE_NETIP
 
 } // namespace bau
 } // namespace knx

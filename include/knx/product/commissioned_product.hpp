@@ -1362,6 +1362,21 @@ public:
     }
 #endif  // KNX_FEATURE_NETIP
 
+#if KNX_FEATURE_NETIP
+    /**
+     * @brief Publish this device's live IP identity to the KNXnet/IP Parameter Object.
+     *
+     * ETS reads a KNX IP device's address, multicast group, MAC and friendly
+     * name out of interface object 11. The stack registers the object; only the
+     * firmware knows the values, and not until the network interface is up.
+     * Call this once it is, and again on every address change.
+     */
+    util::Result<void> applyKnxNetIpConfiguration(const netip::KnxNetIpConfiguration& config)
+    {
+        return _runtime.applyKnxNetIpConfiguration(config);
+    }
+#endif
+
     /**
      * @brief The coupler, when the product was started with `CouplerOptions`.
      *

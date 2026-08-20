@@ -29,23 +29,39 @@ void tearDown(void) {}
 
 namespace {
 
+/// Stands in for real IP Secure while keeping the one property the endpoint
+/// depends on: a protected datagram is a KNXnet/IP frame whose service type is
+/// SECURE_WRAPPER. The endpoint classifies from the header before it decrypts —
+/// that is what lets discovery and system broadcasts stay readable on a secured
+/// group — so a stub that emitted arbitrary bytes would be testing a transport
+/// that cannot exist.
 class PrefixSecurity final : public NetIpSecurity {
 public:
+    static constexpr size_t kHeaderLen = KnxNetIpCodec::kHeaderLen;
+
     util::Result<size_t> protect(std::span<const uint8_t> in, std::span<uint8_t> out) override {
-        if (out.size() < 3 + in.size()) return util::ErrorCode::BufferTooSmall;
-        out[0] = 'S';
-        out[1] = 'E';
-        out[2] = 'C';
-        std::memcpy(out.data() + 3, in.data(), in.size());
-        return 3 + in.size();
+        if (out.size() < kHeaderLen + in.size()) return util::ErrorCode::BufferTooSmall;
+        auto headerResult = KnxNetIpCodec::encodeHeader(
+            ip_secure::SecureWrapper::kServiceTypeSecureWrapper,
+            in.size(),
+            std::span<uint8_t, kHeaderLen>(out.data(), kHeaderLen));
+        if (headerResult.isError()) return headerResult.error();
+        std::memcpy(out.data() + kHeaderLen, in.data(), in.size());
+        return kHeaderLen + in.size();
     }
 
     util::Result<size_t> unprotect(std::span<const uint8_t> in, std::span<uint8_t> out) override {
-        if (in.size() < 3) return util::ErrorCode::DecodeFailed;
-        if (in[0] != 'S' || in[1] != 'E' || in[2] != 'C') return util::ErrorCode::DecodeFailed;
-        if (out.size() < in.size() - 3) return util::ErrorCode::BufferTooSmall;
-        std::memcpy(out.data(), in.data() + 3, in.size() - 3);
-        return in.size() - 3;
+        KnxNetIpHeader header;
+        auto headerResult = KnxNetIpCodec::decodeHeader(in, header);
+        if (headerResult.isError()) return headerResult.error();
+        if (header.serviceType != ip_secure::SecureWrapper::kServiceTypeSecureWrapper) {
+            return util::ErrorCode::DecodeFailed;
+        }
+        if (header.totalLength > in.size()) return util::ErrorCode::InvalidFrameSize;
+        const size_t payload = header.totalLength - kHeaderLen;
+        if (out.size() < payload) return util::ErrorCode::BufferTooSmall;
+        std::memcpy(out.data(), in.data() + kHeaderLen, payload);
+        return payload;
     }
 };
 
@@ -173,7 +189,7 @@ void test_routing_endpoint_calls_security_wrapper_on_send_and_receive(void)
     TEST_ASSERT_TRUE(plainPktResult.isOk());
     plainPkt.resize(plainPktResult.value());
 
-    std::vector<uint8_t> securedPkt(plainPkt.size() + 3);
+    std::vector<uint8_t> securedPkt(plainPkt.size() + PrefixSecurity::kHeaderLen);
     auto securedLen = sec.protect(plainPkt, securedPkt);
     TEST_ASSERT_TRUE(securedLen.isOk());
     securedPkt.resize(securedLen.value());
@@ -190,9 +206,10 @@ void test_routing_endpoint_calls_security_wrapper_on_send_and_receive(void)
     net.sock->pushRx(securedPkt);
 
     std::array<uint8_t, kMaxCemiLDataSize> gotCemi{};
-    const auto recvRes = ep.receiveRoutingIndication(gotCemi, 10);
+    const auto recvRes = ep.receive(gotCemi, 10);
     TEST_ASSERT_TRUE(recvRes.isOk());
-    TEST_ASSERT_EQUAL_UINT32(cemiView.size(), recvRes.value());
+    TEST_ASSERT_TRUE(recvRes.value().kind == RoutingEndpoint::InboundKind::RoutingIndication);
+    TEST_ASSERT_EQUAL_UINT32(cemiView.size(), recvRes.value().cemiLength);
     for (size_t i = 0; i < cemiView.size(); ++i) {
         TEST_ASSERT_EQUAL_UINT8(cemiView[i], gotCemi[i]);
     }

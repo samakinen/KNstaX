@@ -257,21 +257,42 @@ util::Result<void> GenericInterfaceObject::writeGeneric(
         return res;
     }
 
-    std::lock_guard<std::mutex> lock(domain->_valuesMutex);
-    auto it = domain->_values.find(info->id);
-    if (it == domain->_values.end()) {
-        return util::Result<void>::err(util::ErrorCode::OperationNotSupported);
+    std::vector<uint8_t> observed;
+    {
+        std::lock_guard<std::mutex> lock(domain->_valuesMutex);
+        auto it = domain->_values.find(info->id);
+        if (it == domain->_values.end()) {
+            return util::Result<void>::err(util::ErrorCode::OperationNotSupported);
+        }
+
+        auto& updated = it->second;
+        if (offset > updated.size()) {
+            return util::Result<void>::err(util::ErrorCode::OutOfRange);
+        }
+        if (offset + count > updated.size()) {
+            updated.resize(offset + count, 0);
+        }
+        std::copy(chunk.begin(), chunk.end(), updated.begin() + offset);
+
+        if (domain->_writeObserver) {
+            observed = updated;
+        }
     }
 
-    auto& updated = it->second;
-    if (offset > updated.size()) {
-        return util::Result<void>::err(util::ErrorCode::OutOfRange);
+    // Outside the mutex, and on a copy: an observer that reaches back into the
+    // object — to read a sibling property, say — would otherwise deadlock on a
+    // lock this thread already holds.
+    if (domain->_writeObserver) {
+        domain->_writeObserver(info->id, observed);
     }
-    if (offset + count > updated.size()) {
-        updated.resize(offset + count, 0);
-    }
-    std::copy(chunk.begin(), chunk.end(), updated.begin() + offset);
+
     return util::Result<void>::ok();
+}
+
+void GenericInterfaceObject::setWriteObserver(WriteObserver observer)
+{
+    std::lock_guard<std::mutex> lock(_valuesMutex);
+    _writeObserver = std::move(observer);
 }
 
 KernelBinding GenericInterfaceObject::kernelBinding() const {

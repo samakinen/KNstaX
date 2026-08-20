@@ -1021,6 +1021,13 @@ util::Result<void> BusAccessUnit::setReferenceObjectProperty(InterfaceObjectType
     return object->setPropertyValue(propertyId, value);
 }
 
+objects::GenericInterfaceObject* BusAccessUnit::referenceInterfaceObject(InterfaceObjectType objectType) {
+    if (!_propertyAccessBridge) {
+        return nullptr;
+    }
+    return _propertyAccessBridge->referenceObject(objectType);
+}
+
 network::TwoPortCoupler* BusAccessUnit::stackPortCoupler() {
     return _stackPort ? _stackPort->coupler() : nullptr;
 }

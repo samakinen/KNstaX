@@ -66,7 +66,15 @@ public:
     std::unique_ptr<UdpSocket> createUdpSocket() override;
     
 private:
-    esp_netif_t* _netif;
+    /// Resolve the station interface on demand.
+    ///
+    /// A KNX IP device is brought up before Wi-Fi has associated as often as
+    /// after: the stack starts, the join completes seconds later, and a handle
+    /// latched at init() would stay null for the life of the process — the
+    /// device would report no address and never join the multicast group.
+    esp_netif_t* stationNetif() const;
+
+    mutable esp_netif_t* _netif;
     bool _initialized;
     
     static void wifiEventHandler(void* arg, esp_event_base_t event_base,

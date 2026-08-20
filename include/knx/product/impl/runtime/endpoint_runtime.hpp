@@ -451,6 +451,23 @@ public:
         return _bau->management().syncRouterRoutingConfig();
     }
 
+#if KNX_FEATURE_NETIP
+    /**
+     * @brief Publish the device's live IP identity to the KNXnet/IP Parameter Object.
+     *
+     * The addresses only exist once the interface is up, which is after the
+     * stack starts, so this cannot be part of start(). Call it when the lease
+     * lands and again whenever it changes.
+     */
+    util::Result<void> applyKnxNetIpConfiguration(const netip::KnxNetIpConfiguration& config)
+    {
+        if (!_bau) {
+            return util::ErrorCode::OperationNotReady;
+        }
+        return _bau->management().applyKnxNetIpConfiguration(config);
+    }
+#endif
+
     /// The coupler, or nullptr when this is an ordinary single-port device.
     network::TwoPortCoupler* coupler()
     {

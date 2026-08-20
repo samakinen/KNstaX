@@ -7,6 +7,7 @@
  */
 
 #include "knx/netip/cemi.hpp"
+#include "knx/netip/system_broadcast.hpp"
 #include "knx/util/log.hpp"
 #include "knx/util/bit_ops.hpp"
 #include "knx/util/result.hpp"
@@ -75,11 +76,12 @@ util::Result<size_t> encodeCemiLData(const datalink::LDataFrame& frame,
     uint8_t cf1 = 0;
     if (frame.standardFrame) cf1 |= CF1_FRAMEFMT_STD;
     if (!frame.repeated)     cf1 |= CF1_REPEAT;  // cEMI repeat bit: 1 = not repeated
-    // Broadcast-type flag: only the group destination 0/0/0 travels in the
-    // system-broadcast domain (bit = 0); everything else is normal broadcast.
-    const bool systemBroadcast = isGroupAddress(frame.destinationType)
-        && frame.destination.raw == 0x0000u;
-    if (!systemBroadcast)    cf1 |= CF1_BROADCAST;
+    // Broadcast-type flag. Destination 0/0/0 alone does not decide it: every
+    // broadcast uses that address, and the two domains are told apart by the
+    // service inside (see netip/system_broadcast.hpp). Treating them all as
+    // system broadcasts would put A_IndividualAddress_Write — plain
+    // commissioning — in the wrong domain.
+    if (!isSystemBroadcast(frame)) cf1 |= CF1_BROADCAST;
     cf1 |= (static_cast<uint8_t>(frame.priority) << 2) & CF1_PRIORITY_MASK;
     if (frame.ackRequested)  cf1 |= CF1_ACK_REQ;
     if (frame.confirmation)  cf1 |= CF1_CONFIRM;

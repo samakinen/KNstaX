@@ -232,6 +232,10 @@ private:
         return encodePacketHeader(writer.span(), serviceType);
     }
 
+public:
+    /// HPAI is the one structure every control service shares, so the discovery
+    /// and self-description responders build on these rather than repeating the
+    /// eight-octet layout each time.
     static inline util::Result<void> appendHpai(PacketWriter& writer, const HpaiEndpoint& endpoint)
     {
         uint8_t a = 0;
@@ -251,6 +255,35 @@ private:
             static_cast<uint8_t>(endpoint.port & 0xFF),
         };
         return writer.write(hpai);
+    }
+
+    /// Read an HPAI out of `data` at `position`, advancing it past the block.
+    ///
+    /// A TCP HPAI is decoded, not rejected: whether a TCP return address is
+    /// acceptable depends on the service that carries it (discovery must
+    /// discard it, connection management must not), so that judgement belongs
+    /// to the caller rather than here.
+    static inline util::Result<HpaiEndpoint> decodeHpai(std::span<const uint8_t> data, size_t& position)
+    {
+        if ((position + kHpaiLength) > data.size()) return util::ErrorCode::InvalidFrameSize;
+        if (data[position] != kHpaiLength) return util::ErrorCode::DecodeFailed;
+
+        const uint8_t protocol = data[position + 1];
+        if (protocol != static_cast<uint8_t>(HpaiProtocol::Udp) &&
+            protocol != static_cast<uint8_t>(HpaiProtocol::Tcp)) {
+            return util::ErrorCode::DecodeFailed;
+        }
+
+        HpaiEndpoint endpoint{};
+        endpoint.protocol = static_cast<HpaiProtocol>(protocol);
+        endpoint.address = IpAddress::fromOctets(data[position + 2],
+                                                 data[position + 3],
+                                                 data[position + 4],
+                                                 data[position + 5]);
+        endpoint.port = static_cast<uint16_t>((static_cast<uint16_t>(data[position + 6]) << 8) |
+                                              static_cast<uint16_t>(data[position + 7]));
+        position += kHpaiLength;
+        return endpoint;
     }
 
     static inline util::Result<void> encodePacketHeader(std::span<uint8_t> packet, NetIpServiceType serviceType)

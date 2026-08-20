@@ -15,10 +15,12 @@
 #include "knx/objects/address_table_object.hpp"
 #include "knx/objects/association_table_object.hpp"
 #include "knx/objects/application_program_object.hpp"
+#include "knx/objects/generic_interface_object.hpp"
 #include "knx/objects/group_object_table_object.hpp"
 #include "knx/objects/security_interface_object.hpp"
 #include "knx/config.hpp"
 #if KNX_FEATURE_NETIP
+#include "knx/netip/netip_parameter_object.hpp"
 #include "knx/physical/ip_routing_physical.hpp"
 #include "knx/physical/ip_secure_tunneling_physical.hpp"
 #include "knx/physical/ip_tunneling_physical.hpp"
@@ -584,9 +586,45 @@ private:
     /// Current value of a reference object property, empty if never written.
     std::vector<uint8_t> referenceObjectPropertyValue(
         InterfaceObjectType objectType, application::PropertyID propertyId) const;
+#if KNX_FEATURE_NETIP
+    /**
+     * Publish this device's live IP identity into the KNXnet/IP Parameter
+     * Object, where ETS reads it back.
+     *
+     * Separate from publishMediumInterfaceObjects(), which runs at start-up:
+     * none of these values exist yet at that point, and most of them change
+     * again when a lease is renewed. Call it once the interface is up, and
+     * again whenever the address changes.
+     */
+    util::Result<void> applyKnxNetIpConfiguration(const netip::KnxNetIpConfiguration& config);
+
+    /**
+     * Notified when ETS downloads PID_BACKBONE_KEY into the KNXnet/IP
+     * Parameter Object.
+     *
+     * That property is how a project turns on KNX/IP Secure Routing: the
+     * backbone key is written over a secured management connection and takes
+     * effect immediately, without a restart. A device that stores it and does
+     * nothing else keeps sending plain multicast into an installation whose
+     * project says it is encrypted — the failure is silent on the device and
+     * invisible in ETS, which is the worst combination.
+     *
+     * The key is 16 octets; an all-zero value means secure routing is off.
+     */
+    using BackboneKeyCallback = util::InplaceFunction<void(std::span<const uint8_t> key), 64>;
+    void setBackboneKeyCallback(BackboneKeyCallback callback);
+
+    BackboneKeyCallback _backboneKeyCallback{};
+#endif
+
     util::Result<void> setReferenceObjectProperty(InterfaceObjectType objectType,
                                                   application::PropertyID propertyId,
                                                   std::span<const uint8_t> value);
+
+    /// The live reference interface object of `objectType`, or nullptr when it
+    /// is not published in this build. Defined in bau.cpp, where the property
+    /// bridge is a complete type.
+    objects::GenericInterfaceObject* referenceInterfaceObject(InterfaceObjectType objectType);
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -686,6 +724,23 @@ public:
 
     /// Apply a downloaded coupler configuration to the live routing policy.
     util::Result<void> syncRouterRoutingConfig() { return _bau.syncRouterRoutingConfig(); }
+
+#if KNX_FEATURE_NETIP
+    /// Publish the device's live IP identity — address, multicast group, MAC,
+    /// friendly name — into the KNXnet/IP Parameter Object. Call it once the
+    /// interface is up and again whenever the address changes; see
+    /// netip::KnxNetIpConfiguration for why leaving it unset is worse than it
+    /// looks.
+    util::Result<void> applyKnxNetIpConfiguration(const netip::KnxNetIpConfiguration& config) {
+        return _bau.applyKnxNetIpConfiguration(config);
+    }
+
+    /// Observe ETS downloading the KNX/IP Secure Routing backbone key. See
+    /// BusAccessUnit::setBackboneKeyCallback for why storing it is not enough.
+    void setBackboneKeyCallback(BusAccessUnit::BackboneKeyCallback callback) {
+        _bau.setBackboneKeyCallback(std::move(callback));
+    }
+#endif
 
     /// Write a property of a reference interface object (Router, KNXnet/IP
     /// Parameter, ...). This is the same path ETS writes through, so it is also

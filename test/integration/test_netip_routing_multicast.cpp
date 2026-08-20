@@ -119,13 +119,13 @@ void test_routing_multicast_send_receive(void)
     bool ok = false;
     while (std::chrono::steady_clock::now() < deadline) {
         std::array<uint8_t, kMaxCemiLDataSize> tmp{};
-        const auto recvRes = b.receiveRoutingIndication(tmp, 50);
+        const auto recvRes = b.receive(tmp, 50);
         if (recvRes.isError()) {
             continue;
         }
-        if (recvRes.value() == cemiView.size()) {
+        if (recvRes.value().cemiLength == cemiView.size()) {
             ok = true;
-            got.assign(tmp.begin(), tmp.begin() + recvRes.value());
+            got.assign(tmp.begin(), tmp.begin() + recvRes.value().cemiLength);
             break;
         }
     }

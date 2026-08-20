@@ -1288,6 +1288,42 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/knx_product.cmake)
     )
     add_test(NAME test_netip_secure_session_bootstrap COMMAND test_netip_secure_session_bootstrap)
 
+    add_executable(test_netip_routing_flow_control
+        test/unit/test_netip_routing_flow_control.cpp
+    )
+    target_link_libraries(test_netip_routing_flow_control PRIVATE
+        knx_core
+        unity
+    )
+    add_test(NAME test_netip_routing_flow_control COMMAND test_netip_routing_flow_control)
+
+    add_executable(test_netip_backbone_key
+        test/unit/test_netip_backbone_key.cpp
+    )
+    target_link_libraries(test_netip_backbone_key PRIVATE
+        knx_core
+        unity
+    )
+    add_test(NAME test_netip_backbone_key COMMAND test_netip_backbone_key)
+
+    add_executable(test_netip_core_discovery
+        test/unit/test_netip_core_discovery.cpp
+    )
+    target_link_libraries(test_netip_core_discovery PRIVATE
+        knx_core
+        unity
+    )
+    add_test(NAME test_netip_core_discovery COMMAND test_netip_core_discovery)
+
+    add_executable(test_netip_system_broadcast
+        test/unit/test_netip_system_broadcast.cpp
+    )
+    target_link_libraries(test_netip_system_broadcast PRIVATE
+        knx_core
+        unity
+    )
+    add_test(NAME test_netip_system_broadcast COMMAND test_netip_system_broadcast)
+
     add_executable(test_netip_udp_datagram_channel
         test/unit/test_netip_udp_datagram_channel.cpp
     )
@@ -1566,6 +1602,10 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/knx_product.cmake)
             test_ip_physical_config
             test_netip_secure_timernotify_vector
             test_netip_secure_session_vectors
+            test_netip_routing_flow_control
+            test_netip_core_discovery
+            test_netip_backbone_key
+            test_netip_system_broadcast
             test_netip_secure_session_bootstrap
             test_netip_secure_tunneling_handshake
             test_transport_connection

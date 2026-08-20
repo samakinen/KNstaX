@@ -125,35 +125,42 @@ void test_routing_indication_uses_total_length_not_datagram_length(void)
 
 void test_routing_lost_message_decodes_counter(void)
 {
+    // Header plus the four-octet LostMessageInfo of 03/08/05 §5.3: structure
+    // length, DeviceState, then the counter.
     std::vector<uint8_t> pkt = {
         0x06, 0x10,
         0x05, 0x31,
-        0x00, 0x08,
+        0x00, 0x0A,
+        0x04, 0x21,
         0x00, 0x05,
     };
 
-    uint16_t lost = 0;
+    knx::netip::RoutingLostMessageInfo lost{};
     TEST_ASSERT_TRUE(RoutingCodec::decodeRoutingLostMessage(std::span<const uint8_t>(pkt), lost).isOk());
-    TEST_ASSERT_EQUAL_UINT16(5, lost);
+    TEST_ASSERT_EQUAL_UINT16(5, lost.lostMessages);
+    TEST_ASSERT_EQUAL_UINT8(0x21, lost.deviceState);
 }
 
 void test_routing_lost_message_encodes_expected_bytes(void)
 {
     std::array<uint8_t, RoutingCodec::ROUTING_LOST_MESSAGE_FRAME_LEN> pkt{};
-    TEST_ASSERT_TRUE(RoutingCodec::encodeRoutingLostMessage(5, pkt).isOk());
+    const knx::netip::RoutingLostMessageInfo info{.deviceState = 0x21, .lostMessages = 5};
+    TEST_ASSERT_TRUE(RoutingCodec::encodeRoutingLostMessage(info, pkt).isOk());
 
     const std::vector<uint8_t> expected = {
         0x06, 0x10,
         0x05, 0x31,
-        0x00, 0x08,
+        0x00, 0x0A,
+        0x04, 0x21,
         0x00, 0x05,
     };
     TEST_ASSERT_EQUAL_UINT32(expected.size(), pkt.size());
     assert_uint8_array_equal(expected, pkt);
 
-    uint16_t lost = 0;
+    knx::netip::RoutingLostMessageInfo lost{};
     TEST_ASSERT_TRUE(RoutingCodec::decodeRoutingLostMessage(std::span<const uint8_t>(pkt), lost).isOk());
-    TEST_ASSERT_EQUAL_UINT16(5, lost);
+    TEST_ASSERT_EQUAL_UINT16(5, lost.lostMessages);
+    TEST_ASSERT_EQUAL_UINT8(0x21, lost.deviceState);
 }
 
 void test_routing_lost_message_rejects_wrong_length(void)
@@ -161,13 +168,79 @@ void test_routing_lost_message_rejects_wrong_length(void)
     std::vector<uint8_t> pkt = {
         0x06, 0x10,
         0x05, 0x31,
-        0x00, 0x09, // wrong total length
+        0x00, 0x0B, // wrong total length
+        0x04, 0x00,
         0x00, 0x05,
         0x00,
     };
 
-    uint16_t lost = 0;
+    knx::netip::RoutingLostMessageInfo lost{};
     TEST_ASSERT_TRUE(RoutingCodec::decodeRoutingLostMessage(std::span<const uint8_t>(pkt), lost).isError());
+}
+
+void test_routing_lost_message_rejects_wrong_structure_length(void)
+{
+    // Right frame length, wrong self-declared structure length. A receiver that
+    // trusts the header alone would read the counter out of the wrong octets.
+    std::vector<uint8_t> pkt = {
+        0x06, 0x10,
+        0x05, 0x31,
+        0x00, 0x0A,
+        0x06, 0x00,
+        0x00, 0x05,
+    };
+
+    knx::netip::RoutingLostMessageInfo lost{};
+    TEST_ASSERT_TRUE(RoutingCodec::decodeRoutingLostMessage(std::span<const uint8_t>(pkt), lost).isError());
+}
+
+void test_routing_busy_round_trips(void)
+{
+    std::array<uint8_t, RoutingCodec::ROUTING_BUSY_FRAME_LEN> pkt{};
+    const knx::netip::RoutingBusyInfo info{
+        .deviceState = 0x00,
+        .waitTimeMs = 100,
+        .controlField = 0x0000,
+    };
+    TEST_ASSERT_TRUE(RoutingCodec::encodeRoutingBusy(info, pkt).isOk());
+
+    const std::vector<uint8_t> expected = {
+        0x06, 0x10,
+        0x05, 0x32,
+        0x00, 0x0C,
+        0x06, 0x00,
+        0x00, 0x64,
+        0x00, 0x00,
+    };
+    assert_uint8_array_equal(expected, pkt);
+
+    knx::netip::RoutingBusyInfo decoded{};
+    TEST_ASSERT_TRUE(RoutingCodec::decodeRoutingBusy(std::span<const uint8_t>(pkt), decoded).isOk());
+    TEST_ASSERT_EQUAL_UINT16(100, decoded.waitTimeMs);
+    TEST_ASSERT_EQUAL_UINT16(0x0000, decoded.controlField);
+}
+
+void test_routing_system_broadcast_round_trips(void)
+{
+    // Same body as a routing indication, carried under 0533h so the receiver
+    // knows which broadcast domain it belongs to (03/02/06 §4.1.3).
+    const std::vector<uint8_t> cemi = {0x29, 0x00, 0xB0, 0x60, 0x11, 0x02, 0x00, 0x00, 0x01, 0x00};
+
+    std::array<uint8_t, 64> pkt{};
+    auto encoded = RoutingCodec::encodeRoutingSystemBroadcast(std::span<const uint8_t>(cemi), pkt);
+    TEST_ASSERT_TRUE(encoded.isOk());
+    TEST_ASSERT_EQUAL_UINT32(6 + cemi.size(), encoded.value());
+    TEST_ASSERT_EQUAL_UINT8(0x05, pkt[2]);
+    TEST_ASSERT_EQUAL_UINT8(0x33, pkt[3]);
+
+    auto decoded = RoutingCodec::decodeRoutingSystemBroadcast(
+        std::span<const uint8_t>(pkt).first(encoded.value()));
+    TEST_ASSERT_TRUE(decoded.isOk());
+    TEST_ASSERT_EQUAL_UINT32(cemi.size(), decoded.value().size());
+
+    // A system broadcast must not be mistaken for an ordinary indication.
+    TEST_ASSERT_TRUE(RoutingCodec::decodeRoutingIndication(
+        std::span<const uint8_t>(pkt).first(encoded.value())).isError());
 }
 
 int main()
@@ -180,5 +253,8 @@ int main()
     RUN_TEST(test_routing_lost_message_decodes_counter);
     RUN_TEST(test_routing_lost_message_encodes_expected_bytes);
     RUN_TEST(test_routing_lost_message_rejects_wrong_length);
+    RUN_TEST(test_routing_lost_message_rejects_wrong_structure_length);
+    RUN_TEST(test_routing_busy_round_trips);
+    RUN_TEST(test_routing_system_broadcast_round_trips);
     return UNITY_END();
 }

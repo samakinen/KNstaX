@@ -11,6 +11,7 @@
 #include "knx/objects/interface_object.hpp"
 #include "knx/objects/property_kernel.hpp"
 #include "knx/util/fixed_vector.hpp"
+#include "knx/util/inplace_function.hpp"
 #include "knx/util/result.hpp"
 #include <map>
 #include <mutex>
@@ -54,6 +55,23 @@ public:
     /// The copy is taken under the value mutex, so the caller owns the result.
     std::vector<uint8_t> propertyValue(application::PropertyID propertyId) const;
 
+    /**
+     * @brief Called after a remote write lands in this object.
+     *
+     * Some properties are not inert storage. PID_BACKBONE_KEY is the reason
+     * this exists: ETS downloads the group key for KNX/IP Secure Routing as an
+     * ordinary property write, and a device that only files it away keeps
+     * multicasting in the clear while its project believes it is secured.
+     *
+     * The observer runs on the stack task that handled the write, after the
+     * value is stored and outside the value mutex, and is given a copy rather
+     * than a reference into storage. Keep it short — it sits inside the
+     * property service's response path.
+     */
+    using WriteObserver = util::InplaceFunction<void(application::PropertyID propertyId,
+                                                     std::span<const uint8_t> value), 64>;
+    void setWriteObserver(WriteObserver observer);
+
 private:
     static util::Result<void> readGeneric(
         const PropertyContext& context,
@@ -88,6 +106,7 @@ private:
     std::map<application::PropertyID, std::vector<uint8_t>> _values;
     util::FixedVector<GenericPropertyInfo, kMaxRegistrationCount> _handlerInfo;
     util::FixedVector<PropertyHandler, kMaxHandlerCount> _handlers;
+    WriteObserver _writeObserver{};
     ValidationPolicy _validationPolicy{ValidationPolicy::OnWrite};
     mutable bool _handlersValidated{false};
     mutable bool _handlersValid{true};

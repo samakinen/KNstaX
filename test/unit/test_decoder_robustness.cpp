@@ -205,7 +205,7 @@ void test_knxnetip_routing_codec_random_inputs_does_not_crash(void) {
     for (const auto& bytes : knxnetipRoutingCorpus()) {
         (void)RoutingCodec::decodeRoutingIndication(std::span<const uint8_t>(bytes));
 
-        uint16_t lost = 0;
+        knx::netip::RoutingLostMessageInfo lost{};
         (void)RoutingCodec::decodeRoutingLostMessage(std::span<const uint8_t>(bytes), lost);
     }
 
@@ -213,7 +213,7 @@ void test_knxnetip_routing_codec_random_inputs_does_not_crash(void) {
         const auto bytes = randomBytes(512);
         (void)RoutingCodec::decodeRoutingIndication(std::span<const uint8_t>(bytes));
 
-        uint16_t lost = 0;
+        knx::netip::RoutingLostMessageInfo lost{};
         (void)RoutingCodec::decodeRoutingLostMessage(std::span<const uint8_t>(bytes), lost);
     }
 }
@@ -231,10 +231,10 @@ void test_knxnetip_routing_codec_rejects_length_mismatches(void) {
         TEST_ASSERT_TRUE(RoutingCodec::decodeRoutingIndication(std::span<const uint8_t>(pkt)).isError());
     }
 
-    // LOST_MESSAGE must be exactly 8 bytes total
+    // LOST_MESSAGE is a header plus a four-octet LostMessageInfo, and nothing else
     {
-        const std::vector<uint8_t> pkt = {0x06, 0x10, 0x05, 0x31, 0x00, 0x09, 0x00, 0x01, 0x00};
-        uint16_t lost = 0;
+        const std::vector<uint8_t> pkt = {0x06, 0x10, 0x05, 0x31, 0x00, 0x09, 0x04, 0x00, 0x00};
+        knx::netip::RoutingLostMessageInfo lost{};
         TEST_ASSERT_TRUE(RoutingCodec::decodeRoutingLostMessage(std::span<const uint8_t>(pkt), lost).isError());
     }
 }

@@ -235,81 +235,101 @@ Esp32Network::~Esp32Network() {
     // Network cleanup handled by ESP-IDF
 }
 
+esp_netif_t* Esp32Network::stationNetif() const {
+    if (_netif == nullptr) {
+        _netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    }
+    return _netif;
+}
+
 knx::util::Result<void> Esp32Network::init() {
     if (_initialized) {
         return knx::util::Result<void>::ok();
     }
-    
-    // Initialize TCP/IP stack
-    ESP_ERROR_CHECK(esp_netif_init());
-    
-    // Get default WiFi station netif
-    _netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-    if (!_netif) {
-        KNX_LOGW(TAG, "WiFi station netif not found, will retry when WiFi is ready");
+
+    // Idempotent, and deliberately not conditional: the application may already
+    // have brought the TCP/IP stack up to run its own Wi-Fi, and calling this
+    // again after that is defined to succeed.
+    const esp_err_t netifResult = esp_netif_init();
+    if (netifResult != ESP_OK && netifResult != ESP_ERR_INVALID_STATE) {
+        KNX_LOGE(TAG, "esp_netif_init failed: %d", static_cast<int>(netifResult));
+        return knx::util::ErrorCode::OperationFailed;
     }
-    
+
+    // Not an error when it is missing: the interface appears when Wi-Fi is
+    // configured, which may be after this point. stationNetif() picks it up.
+    if (stationNetif() == nullptr) {
+        KNX_LOGW(TAG, "Wi-Fi station interface not up yet — will resolve it when it appears");
+    }
+
     _initialized = true;
     KNX_LOGI(TAG, "Network interface initialized");
-    
+
     return knx::util::Result<void>::ok();
 }
 
 bool Esp32Network::isConnected() const {
-    if (!_netif) {
+    esp_netif_t* netif = stationNetif();
+    if (!netif) {
         return false;
     }
-    
+
     esp_netif_ip_info_t ip_info;
-    if (esp_netif_get_ip_info(_netif, &ip_info) == ESP_OK) {
+    if (esp_netif_get_ip_info(netif, &ip_info) == ESP_OK) {
+        // An interface that exists but holds 0.0.0.0 is associated without a
+        // lease, which is not a network a KNX IP device can be reached on.
         return ip_info.ip.addr != 0;
     }
-    
+
     return false;
 }
 
 IpAddress Esp32Network::ipAddress() const {
-    if (!_netif) {
+    esp_netif_t* netif = stationNetif();
+    if (!netif) {
         return IpAddress(0);
     }
-    
+
     esp_netif_ip_info_t ip_info;
-    if (esp_netif_get_ip_info(_netif, &ip_info) == ESP_OK) {
+    if (esp_netif_get_ip_info(netif, &ip_info) == ESP_OK) {
         return IpAddress(ip_info.ip.addr);
     }
-    
+
     return IpAddress(0);
 }
 
 IpAddress Esp32Network::subnetMask() const {
-    if (!_netif) {
+    esp_netif_t* netif = stationNetif();
+    if (!netif) {
         return IpAddress(0);
     }
-    
+
     esp_netif_ip_info_t ip_info;
-    if (esp_netif_get_ip_info(_netif, &ip_info) == ESP_OK) {
+    if (esp_netif_get_ip_info(netif, &ip_info) == ESP_OK) {
         return IpAddress(ip_info.netmask.addr);
     }
-    
+
     return IpAddress(0);
 }
 
 IpAddress Esp32Network::gateway() const {
-    if (!_netif) {
+    esp_netif_t* netif = stationNetif();
+    if (!netif) {
         return IpAddress(0);
     }
-    
+
     esp_netif_ip_info_t ip_info;
-    if (esp_netif_get_ip_info(_netif, &ip_info) == ESP_OK) {
+    if (esp_netif_get_ip_info(netif, &ip_info) == ESP_OK) {
         return IpAddress(ip_info.gw.addr);
     }
-    
+
     return IpAddress(0);
 }
 
 void Esp32Network::macAddress(std::span<uint8_t> mac) const {
-    if (_netif && mac.size() >= 6) {
-        esp_netif_get_mac(_netif, mac.data());
+    esp_netif_t* netif = stationNetif();
+    if (netif && mac.size() >= 6) {
+        esp_netif_get_mac(netif, mac.data());
     }
 }
 
