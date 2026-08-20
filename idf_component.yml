@@ -1,9 +1,9 @@
 name: KNstaX
-version: 0.2.0-alpha
+version: 0.3.0-alpha
 description: "ESP-IDF component manifest for KNstaX: a modern C++ KNX System-7 stack for ESP32/FreeRTOS with TP1, KNXnet/IP (tunneling + routing) and KNX Secure support."
-url: https://git.pilosa.fi/smak/KNstaX
-repository: ssh://git@git.pilosa.fi:2222/smak/KNstaX.git
-issues: https://git.pilosa.fi/smak/KNstaX/-/issues
+url: https://github.com/samakinen/KNstaX
+repository: https://github.com/samakinen/KNstaX.git
+issues: https://github.com/samakinen/KNstaX/issues
 maintainers:
   - "Sami Mäkinen <sami.makinen@flou.io>"
 tags:
