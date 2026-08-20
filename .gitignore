@@ -7,6 +7,7 @@ cmake_install.cmake
 CTestTestfile.cmake
 Makefile
 compile_commands.json
+Testing/
 
 # IDE
 .vscode/
