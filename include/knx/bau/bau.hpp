@@ -548,6 +548,8 @@ private:
 
     /// Coupler role, if declared.  A null filterTable means "end device".
     RouterRoleConfig _routerRole{};
+    /// Remembered so a stack port attached after the declaration still gets it.
+    MediumType _deviceMedium{MediumType::TP1};
 
     /// Register and seed the Router Object; called from
     /// publishMediumInterfaceObjects() when a coupler role is declared.
@@ -586,6 +588,16 @@ private:
     /// Current value of a reference object property, empty if never written.
     std::vector<uint8_t> referenceObjectPropertyValue(
         InterfaceObjectType objectType, application::PropertyID propertyId) const;
+    /**
+     * Declare the medium this device sits on.
+     *
+     * Reaches the Device Descriptor Type 0 that ETS reads before every
+     * download; see BusAccessStackPort::setDeviceMedium. Call it before or
+     * just after start(), and only when the device is not on TP1 — that is the
+     * default, and re-declaring it changes nothing.
+     */
+    void setDeviceMedium(MediumType medium);
+
 #if KNX_FEATURE_NETIP
     /**
      * Publish this device's live IP identity into the KNXnet/IP Parameter
@@ -735,6 +747,10 @@ public:
         return _bau.applyKnxNetIpConfiguration(config);
     }
 
+    /// Declare which medium this device is on, so its Device Descriptor
+    /// reports the right mask version. See BusAccessUnit::setDeviceMedium.
+    void setDeviceMedium(MediumType medium) { _bau.setDeviceMedium(medium); }
+
     /// Observe ETS downloading the KNX/IP Secure Routing backbone key. See
     /// BusAccessUnit::setBackboneKeyCallback for why storing it is not enough.
     void setBackboneKeyCallback(BusAccessUnit::BackboneKeyCallback callback) {
@@ -883,6 +899,17 @@ public:
     /// Publish this device's 6-octet KNX serial number so it can be addressed
     /// by A_IndividualAddressSerialNumber_Read/_Write without programming mode.
     virtual void setCommissioningSerialNumber(const application::KnxSerialNumber& serialNumber) = 0;
+    /**
+     * Declare which medium this device is on.
+     *
+     * It reaches the Device Descriptor Type 0 that ETS reads before it will
+     * download anything: the mask version's high nibble is the medium
+     * (03/05/01 Table 7), so a System B device is 07B0h on TP1 and 57B0h on
+     * KNX IP. Defaulting to TP1 is right for most builds and wrong in a way
+     * that fails commissioning for the rest, since ETS compares the descriptor
+     * against the catalogue entry it is downloading.
+     */
+    virtual void setDeviceMedium(MediumType medium) = 0;
     virtual void setInboundCallback(InboundCallback callback) = 0;
     virtual void registerPropertyObject(InterfaceObjectType objectType,
                                         InterfaceObjectIndex objectIndex,

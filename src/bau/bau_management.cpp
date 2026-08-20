@@ -746,6 +746,14 @@ void BusAccessUnit::wireManagementServices()
     }
 }
 
+void BusAccessUnit::setDeviceMedium(MediumType medium)
+{
+    _deviceMedium = medium;
+    if (_stackPort) {
+        _stackPort->setDeviceMedium(medium);
+    }
+}
+
 #if KNX_FEATURE_NETIP
 void BusAccessUnit::setBackboneKeyCallback(BackboneKeyCallback callback)
 {

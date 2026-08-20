@@ -25,6 +25,9 @@ namespace knx::product {
 
 struct RuntimeProductIdentity {
     ManufacturerId manufacturerId{};
+    /// Not only an export detail: it decides the mask version in the Device
+    /// Descriptor that ETS reads before every download.
+    Medium medium{Medium::TP1};
     uint16_t applicationNumber{0};
     uint16_t applicationVersion{0};
     uint8_t firmwareRevision{0};
@@ -440,6 +443,7 @@ constexpr auto compileEndpointDefinition(const DefinitionT& definition)
     return CompiledEndpointDefinition<DefinitionT>{
         .identity = RuntimeProductIdentity{
             .manufacturerId = definition.identity.manufacturerId,
+            .medium = definition.identity.medium,
             .applicationNumber = definition.identity.applicationNumber,
             .applicationVersion = definition.identity.applicationVersion,
             .firmwareRevision = definition.identity.firmwareRevision,

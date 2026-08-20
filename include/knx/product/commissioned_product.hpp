@@ -769,6 +769,31 @@ struct IpRoutingOptions {
     NetIpPort port{NetIpPort(3671)};
     /// Egress/join interface address.  Use IpAddress(0) for the system default.
     IpAddress interfaceAddress{};
+    /// Multicast hop limit.  1 confines KNX traffic to the local subnet; the
+    /// default of 16 matches what KNXnet/IP routers ship with.
+    uint8_t timeToLive{16};
+
+    /**
+     * Answer KNXnet/IP discovery and self-description on the routing socket.
+     *
+     * On by default, because Core is mandatory for a KNXnet/IP device
+     * (03/08/01 Table 2) and a device that stays silent is one ETS cannot list
+     * even while it is sitting on the multicast group. Everything the response
+     * carries — individual address, serial number, programming mode, medium —
+     * is read from the running device when a request arrives, so the answer is
+     * never a snapshot from boot.
+     */
+    bool announceOnNetwork{true};
+
+    /**
+     * The name ETS shows for this device in a discovery list.
+     *
+     * Up to 30 octets of ISO 8859-1. Empty falls back to the product's order
+     * number, which identifies the model but not the unit — set this to
+     * whatever the installation calls this particular device.
+     */
+    std::string friendlyName{};
+
     /// Optional KNX/IP Secure Routing settings (network-level, not device-level).
     IpRoutingSecureOptions secureRouting{};
     /// Device-level KNX Data Secure options.  Default is behavior-safe.
@@ -1316,6 +1341,56 @@ public:
         return util::Result<void>::ok();
     }
 
+    /// Install the description a Core search response is built from.
+    ///
+    /// Every field is read when the request arrives rather than captured now:
+    /// the individual address changes at commissioning, programming mode
+    /// changes at the press of a button, and both decide whether ETS finds this
+    /// device at all.
+    void configureCoreDiscovery(physical::IpRoutingPhysical& physical,
+                                platform::NetworkInterface& network,
+                                const IpRoutingOptions& options)
+    {
+        static constexpr netip::ServiceFamilySupport kFamilies[] = {
+            {netip::service_family::kCore, 2},
+            {netip::service_family::kRouting, 2},
+        };
+
+        const IpAddress multicastGroup = options.multicastGroup;
+        std::string friendlyName = options.friendlyName;
+
+        physical.setCoreDiscovery(
+            [this, &network, multicastGroup, friendlyName]() {
+                netip::CoreDeviceDescription description{};
+                description.medium = static_cast<uint8_t>(MediumType::IP);
+                description.programmingMode = _runtime.isProgrammingModeActive();
+                description.individualAddress = _runtime.individualAddress();
+                description.routingMulticastAddress = multicastGroup;
+                description.maxLocalApduLength = _runtime.compiledDefinition().identity.maxApduLength;
+                // System B on KNX IP. Matches what setDeviceMedium() puts in
+                // the Device Descriptor, which is what ETS cross-checks.
+                description.deviceDescriptorType0 = 0x57B0;
+
+                network.macAddress(description.macAddress);
+
+                const auto serial = _runtime.deviceObject().getSerialNumber();
+                const size_t serialLength = std::min(serial.size(), description.serialNumber.size());
+                std::copy_n(serial.begin(), serialLength, description.serialNumber.begin());
+
+                // A name identifies the unit, the order number only the model.
+                // Falling back to the model still beats an empty field, which
+                // ETS shows as a blank row.
+                const std::string_view name =
+                    friendlyName.empty() ? std::string_view(_runtime.compiledDefinition().identity.orderNumber)
+                                         : std::string_view(friendlyName);
+                const size_t nameLength = std::min(name.size(), description.friendlyName.size());
+                std::copy_n(name.begin(), nameLength, description.friendlyName.begin());
+
+                return description;
+            },
+            std::span<const netip::ServiceFamilySupport>(kFamilies));
+    }
+
     auto start(platform::Platform& platform, IpRoutingOptions options) -> util::Result<void>
     {
         if (options.multicastGroup.raw == 0) {
@@ -1330,6 +1405,11 @@ public:
         auto physical = std::make_unique<physical::IpRoutingPhysical>();
         physical->setNetworkInterface(network);
         physical->setMulticast(options.multicastGroup, options.port, options.interfaceAddress);
+        physical->setMulticastSocketOptions(options.timeToLive, Toggle::Enable);
+
+        if (options.announceOnNetwork) {
+            configureCoreDiscovery(*physical, *network, options);
+        }
 
 #if KNX_SECURE_ENABLED
         if (options.secureRouting.enabled) {

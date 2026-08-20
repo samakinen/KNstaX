@@ -799,6 +799,10 @@ util::Result<void> BusAccessUnit::init(const IndividualAddress& ownAddress,
         return stackInit;
     }
 
+    // Applied here as well as in setDeviceMedium(): a product declares its
+    // medium before start(), when there is no stack port yet to tell.
+    _stackPort->setDeviceMedium(_deviceMedium);
+
     _stackPort->setProgrammingModeEnabled(_deviceObject.getProgMode());
     _deviceObject.registerProgModeCallback([this](Toggle mode) {
         if (_stackPort) {

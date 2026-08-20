@@ -755,8 +755,30 @@ public:
         return util::Result<void>::ok();
     }
 
+    /// The product's declared medium, as the Device Descriptor encodes it.
+    static MediumType descriptorMedium(Medium medium)
+    {
+        switch (medium) {
+            case Medium::IP_Tunneling:
+            case Medium::IP_Routing:
+#if KNX_SECURE_ENABLED
+            case Medium::IP_Secure_Tunneling:
+#endif
+                return MediumType::IP;
+            case Medium::TP1:
+                break;
+        }
+        return MediumType::TP1;
+    }
+
     void applyIdentity()
     {
+        // Declared before anything else touches the device object: ETS reads
+        // the Device Descriptor before it will download, and the mask version
+        // it expects depends on the medium (07B0h on TP1, 57B0h on KNX IP).
+        // The product already states which; nothing used to act on it.
+        _bau->management().setDeviceMedium(descriptorMedium(_compiled.identity.medium));
+
         auto& device = _bau->deviceObject();
         device.setManufacturerId(_compiled.identity.manufacturerId);
         device.setFirmwareRevision(_compiled.identity.firmwareRevision);
