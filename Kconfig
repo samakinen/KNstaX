@@ -314,9 +314,21 @@ menu "KNX Stack Configuration"
         
         config KNX_ENABLE_TUNNELING
             bool "Enable Tunneling"
+            depends on !(KNX_ENABLE_SECURITY && MBEDTLS_VER_4_X_SUPPORT)
             default y
             help
-                Enable KNXnet/IP Tunneling (unicast)
+                Enable KNXnet/IP Tunneling (unicast): the client role, this
+                device opening a connection to a KNXnet/IP gateway. A KNX IP
+                device (03/02/06) is not a tunnelling client, so an image that
+                only has to be commissioned by ETS does not need this.
+
+                Not available when KNX Secure is enabled against mbedTLS 4
+                (ESP-IDF 6.x): IP Secure session establishment needs X25519 and
+                PBKDF2 from the legacy mbedTLS API, which mbedTLS 4 no longer
+                exposes. Data Secure and Secure Routing are unaffected.
+
+        comment "Tunnelling withdrawn: IP Secure sessions need X25519/PBKDF2 from the legacy mbedTLS API, gone in mbedTLS 4"
+            depends on KNX_ENABLE_SECURITY && MBEDTLS_VER_4_X_SUPPORT
         
         config KNX_IP_MULTICAST_ADDR
             string "Multicast Address"
