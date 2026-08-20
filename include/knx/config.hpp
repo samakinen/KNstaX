@@ -256,9 +256,33 @@ constexpr uint32_t IP_ROUTING_INDICATION_INTERVAL_MS = 100;
 #  endif
 #endif
 
+// KNX_SECURE_IP_TUNNELING gates the IP Secure *session* machinery — ECDH key
+// agreement, PBKDF2, the SESSION_REQUEST handshake and the secure tunnelling
+// client — separately from the rest of KNX Secure.
+//
+// It has to be separable because the two IP Secure features need different
+// amounts of cryptography. Secure Routing is AES-CCM under a group key the
+// project downloads, and the AES already present for Data Secure covers it. A
+// secure tunnelling session additionally needs X25519 and PBKDF2, which on
+// ESP-IDF means legacy mbedTLS headers that mbedTLS 4 no longer ships. A KNX
+// IP device does not open tunnelling sessions — it is not a client — so
+// compiling that machinery in would cost a device a build failure for a
+// feature it cannot use.
+#ifndef KNX_SECURE_IP_TUNNELING
+#  if defined(CONFIG_KNX_ENABLE_TUNNELING)
+#    define KNX_SECURE_IP_TUNNELING (KNX_SECURE_ENABLED && KNX_FEATURE_NETIP)
+#  elif defined(CONFIG_KNX_MEDIUM_IP)
+#    define KNX_SECURE_IP_TUNNELING 0
+#  else
+#    define KNX_SECURE_IP_TUNNELING (KNX_SECURE_ENABLED && KNX_FEATURE_NETIP)
+#  endif
+#endif
+
 namespace feature {
 /// True when the KNXnet/IP medium is compiled into this build.
 constexpr bool NETIP = (KNX_FEATURE_NETIP != 0);
+/// True when IP Secure tunnelling sessions are compiled in.
+constexpr bool SECURE_IP_TUNNELING = (KNX_SECURE_IP_TUNNELING != 0);
 /// True when the TP1 medium is compiled into this build.
 constexpr bool TP1 = (KNX_FEATURE_TP1 != 0);
 } // namespace feature

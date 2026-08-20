@@ -139,14 +139,27 @@ set(KNX_SOURCES_SECURE
     ${KNX_SOURCES_SECURE_IP_CRYPTO}
 )
 
-# IP Secure additionally requires the KNXnet/IP group.
-set(KNX_SOURCES_SECURE_NETIP
-    "src/physical/ip_secure_tunneling_physical.cpp"
+# Secure Routing: AES-CCM under a group key ETS downloads. Needs nothing the
+# Data Secure set has not already brought in.
+set(KNX_SOURCES_SECURE_ROUTING
     "src/netip/secure_wrapper.cpp"
+    "src/netip/secure_routing_security.cpp"
+)
+
+# Secure Tunnelling: the session half of IP Secure — ECDH key agreement, the
+# SESSION_REQUEST handshake, the client that opens one. Split from routing
+# because it is what pulls in KNX_SOURCES_SECURE_IP_CRYPTO, and a KNX IP device
+# is not a tunnelling client and never opens a session.
+set(KNX_SOURCES_SECURE_TUNNELING
+    "src/physical/ip_secure_tunneling_physical.cpp"
     "src/netip/secure_session.cpp"
     "src/netip/secure_session_bootstrap.cpp"
-    "src/netip/secure_routing_security.cpp"
     "src/netip/secure_tunneling_client.cpp"
+)
+
+set(KNX_SOURCES_SECURE_NETIP
+    ${KNX_SOURCES_SECURE_ROUTING}
+    ${KNX_SOURCES_SECURE_TUNNELING}
 )
 
 # --- ETS import/migration tooling (host builds only) ---------------------

@@ -225,23 +225,30 @@ public:
         assignPhysical(std::move(physicalLayer));
     }
 
+#if KNX_FEATURE_TP1
     Tp1MediumBundle(platform::Platform& platform,
                     std::unique_ptr<physical::Tp1MediumBackend> mediumBackend)
         : _platform(platform)
         , _macPhysical(std::make_unique<physical::Tp1MacPhysical>(std::move(mediumBackend)))
     {
     }
+#endif
 
     util::Result<void> init(const IndividualAddress& ownAddress,
                             std::span<const GroupAddress> groupAddresses)
     {
         if (!_dataLink) {
-            if (_macPhysical) {
+            if (false) {
+                // Placeholder so the chain below reads the same whichever
+                // media this build contains.
+#if KNX_FEATURE_TP1
+            } else if (_macPhysical) {
                 _dataLink = std::make_unique<datalink::Tp1DataLinkLayer>(_platform, *_macPhysical);
+#endif
 #if KNX_FEATURE_NETIP
             } else if (_ipTunnelingPhysical) {
                 _dataLink = std::make_unique<datalink::Tp1DataLinkLayer>(_platform, *_ipTunnelingPhysical);
-#if KNX_SECURE_ENABLED
+#if KNX_SECURE_IP_TUNNELING
             } else if (_ipSecureTunnelingPhysical) {
                 _dataLink = std::make_unique<datalink::Tp1DataLinkLayer>(_platform, *_ipSecureTunnelingPhysical);
 #endif
@@ -308,12 +315,15 @@ private:
     {
         using ConcretePhysical = std::remove_cvref_t<PhysicalT>;
 
-        if constexpr (std::is_same_v<ConcretePhysical, physical::Tp1MacPhysical>) {
+        if constexpr (false) {
+#if KNX_FEATURE_TP1
+        } else if constexpr (std::is_same_v<ConcretePhysical, physical::Tp1MacPhysical>) {
             _macPhysical = std::move(physicalLayer);
+#endif
 #if KNX_FEATURE_NETIP
         } else if constexpr (std::is_same_v<ConcretePhysical, physical::IpTunnelingPhysical>) {
             _ipTunnelingPhysical = std::move(physicalLayer);
-#if KNX_SECURE_ENABLED
+#if KNX_SECURE_IP_TUNNELING
         } else if constexpr (std::is_same_v<ConcretePhysical, physical::IpSecureTunnelingPhysical>) {
             _ipSecureTunnelingPhysical = std::move(physicalLayer);
 #endif
@@ -328,10 +338,12 @@ private:
     }
 
     platform::Platform& _platform;
+#if KNX_FEATURE_TP1
     std::unique_ptr<physical::Tp1MacPhysical> _macPhysical;
+#endif
 #if KNX_FEATURE_NETIP
     std::unique_ptr<physical::IpTunnelingPhysical> _ipTunnelingPhysical;
-#if KNX_SECURE_ENABLED
+#if KNX_SECURE_IP_TUNNELING
     std::unique_ptr<physical::IpSecureTunnelingPhysical> _ipSecureTunnelingPhysical;
 #endif
     std::unique_ptr<physical::IpRoutingPhysical> _ipRoutingPhysical;
@@ -808,12 +820,14 @@ public:
     {
     }
 
+#if KNX_FEATURE_TP1
     Tp1LowerStackContext(platform::Platform& platformRef,
                          std::unique_ptr<physical::Tp1MediumBackend> mediumBackend)
         : platform(platformRef)
         , medium(platformRef, std::move(mediumBackend))
     {
     }
+#endif
 
     platform::Platform& platform;
     Tp1MediumBundle medium;
@@ -1252,6 +1266,7 @@ private:
 
 class Tp1StackPort final : public StackPort {
 public:
+#if KNX_FEATURE_TP1
     Tp1StackPort(platform::Platform& platform,
                  std::unique_ptr<physical::Tp1MacPhysical> physicalLayer)
         : _lowerStack(createTp1LowerStackRoles(platform, std::move(physicalLayer)))
@@ -1270,6 +1285,7 @@ public:
         _lowerStack.context->couplerState.secondaryMedium =
             std::make_unique<Tp1MediumBundle>(platform, std::move(secondaryPhysical));
     }
+#endif  // KNX_FEATURE_TP1
 
     network::TwoPortCoupler* coupler() override {
         return _lowerStack.context ? _lowerStack.context->couplerState.coupler.get() : nullptr;
@@ -1282,7 +1298,7 @@ public:
     {
     }
 
-#if KNX_SECURE_ENABLED
+#if KNX_SECURE_IP_TUNNELING
     Tp1StackPort(platform::Platform& platform,
                  std::unique_ptr<physical::IpSecureTunnelingPhysical> physicalLayer)
         : _lowerStack(createTp1LowerStackRoles(platform, std::move(physicalLayer)))
@@ -1303,11 +1319,13 @@ public:
     {
     }
 
+#if KNX_FEATURE_TP1
     Tp1StackPort(platform::Platform& platform,
                  std::unique_ptr<physical::Tp1MediumBackend> mediumBackend)
         : _lowerStack(createTp1LowerStackRoles(platform, std::move(mediumBackend)))
     {
     }
+#endif
 
     util::Result<void> init(const IndividualAddress& ownAddress) override {
         return _lowerStack.lifecycle->init(ownAddress);
@@ -1515,6 +1533,7 @@ private:
         return roles;
     }
 
+#if KNX_FEATURE_TP1
     static LowerStackRoles createTp1LowerStackRoles(
         platform::Platform& platform,
         std::unique_ptr<physical::Tp1MediumBackend> mediumBackend)
@@ -1546,12 +1565,14 @@ private:
         roles.transmissionOwner = std::move(transmissionServices);
         return roles;
     }
+#endif  // KNX_FEATURE_TP1
 
     LowerStackRoles _lowerStack;
 };
 
 } // namespace
 
+#if KNX_FEATURE_TP1
 std::unique_ptr<BusAccessStackPort> createTp1StackPort(platform::Platform& platform,
                                                        std::unique_ptr<physical::Tp1MacPhysical> physicalLayer)
 {
@@ -1567,6 +1588,7 @@ std::unique_ptr<BusAccessStackPort> createTp1CouplerStackPort(
                                           std::move(primaryPhysical),
                                           std::move(secondaryPhysical));
 }
+#endif  // KNX_FEATURE_TP1
 
 #if KNX_FEATURE_NETIP
 std::unique_ptr<BusAccessStackPort> createTp1StackPort(platform::Platform& platform,
@@ -1575,7 +1597,7 @@ std::unique_ptr<BusAccessStackPort> createTp1StackPort(platform::Platform& platf
     return std::make_unique<Tp1StackPort>(platform, std::move(physicalLayer));
 }
 
-#if KNX_SECURE_ENABLED
+#if KNX_SECURE_IP_TUNNELING
 std::unique_ptr<BusAccessStackPort> createTp1StackPort(platform::Platform& platform,
                                                        std::unique_ptr<physical::IpSecureTunnelingPhysical> physicalLayer)
 {
@@ -1590,11 +1612,13 @@ std::unique_ptr<BusAccessStackPort> createTp1StackPort(platform::Platform& platf
 }
 #endif  // KNX_FEATURE_NETIP
 
+#if KNX_FEATURE_TP1
 std::unique_ptr<BusAccessStackPort> createTp1StackPort(platform::Platform& platform,
                                                        std::unique_ptr<physical::Tp1MediumBackend> mediumBackend)
 {
     return std::make_unique<Tp1StackPort>(platform, std::move(mediumBackend));
 }
+#endif
 
 std::unique_ptr<BusAccessStackPort> detail::createTp1MockTestStackPort(
     platform::Platform& platform,

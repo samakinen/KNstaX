@@ -626,6 +626,7 @@ private:
     using BackboneKeyCallback = util::InplaceFunction<void(std::span<const uint8_t> key), 64>;
     void setBackboneKeyCallback(BackboneKeyCallback callback);
 
+
     BackboneKeyCallback _backboneKeyCallback{};
 #endif
 
@@ -722,6 +723,11 @@ public:
 
     explicit ManagementControl(BusAccessUnit& bau) : _bau(bau) {}
 
+    /// Declare which medium this device is on, so its Device Descriptor
+    /// reports the right mask version. See BusAccessUnit::setDeviceMedium.
+    /// Not IP-specific: every device has a medium, and TP1 is only the default.
+    void setDeviceMedium(MediumType medium) { _bau.setDeviceMedium(medium); }
+
     /// Programming mode. ETS finds an unaddressed device only while this is on.
     util::Result<void> setCommissioningMode(bool enabled) {
         return _bau.requestCommissioningMode(enabled);
@@ -747,9 +753,9 @@ public:
         return _bau.applyKnxNetIpConfiguration(config);
     }
 
-    /// Declare which medium this device is on, so its Device Descriptor
-    /// reports the right mask version. See BusAccessUnit::setDeviceMedium.
-    void setDeviceMedium(MediumType medium) { _bau.setDeviceMedium(medium); }
+    /// See BusAccessUnit::setBackboneKeyCallback. Named here so callers do not
+    /// have to reach into the private section of the unit to spell the type.
+    using BackboneKeyCallback = BusAccessUnit::BackboneKeyCallback;
 
     /// Observe ETS downloading the KNX/IP Secure Routing backbone key. See
     /// BusAccessUnit::setBackboneKeyCallback for why storing it is not enough.
@@ -952,6 +958,10 @@ public:
     virtual network::TwoPortCoupler* coupler() { return nullptr; }
 };
 
+#if KNX_FEATURE_TP1
+// TP1 entry points. Gated for the mirror of the reason the IP ones are: an
+// IP-only firmware compiles no TP1 physical, so declaring these would leave
+// bau.hpp promising symbols the library does not contain.
 std::unique_ptr<BusAccessStackPort> createTp1StackPort(platform::Platform& platform,
                                                        std::unique_ptr<physical::Tp1MacPhysical> physicalLayer);
 
@@ -975,6 +985,7 @@ std::unique_ptr<BusAccessStackPort> createTp1CouplerStackPort(
     platform::Platform& platform,
     std::unique_ptr<physical::Tp1MacPhysical> primaryPhysical,
     std::unique_ptr<physical::Tp1MacPhysical> secondaryPhysical);
+#endif  // KNX_FEATURE_TP1
 
 #if KNX_FEATURE_NETIP
 // KNXnet/IP entry points.  Gated so a TP1-only firmware neither compiles nor
@@ -983,7 +994,7 @@ std::unique_ptr<BusAccessStackPort> createTp1CouplerStackPort(
 std::unique_ptr<BusAccessStackPort> createTp1StackPort(platform::Platform& platform,
                                                        std::unique_ptr<physical::IpTunnelingPhysical> physicalLayer);
 
-#if KNX_SECURE_ENABLED
+#if KNX_SECURE_IP_TUNNELING
 std::unique_ptr<BusAccessStackPort> createTp1StackPort(platform::Platform& platform,
                                                        std::unique_ptr<physical::IpSecureTunnelingPhysical> physicalLayer);
 #endif
@@ -992,8 +1003,10 @@ std::unique_ptr<BusAccessStackPort> createTp1StackPort(platform::Platform& platf
                                                        std::unique_ptr<physical::IpRoutingPhysical> physicalLayer);
 #endif  // KNX_FEATURE_NETIP
 
+#if KNX_FEATURE_TP1
 std::unique_ptr<BusAccessStackPort> createTp1StackPort(platform::Platform& platform,
                                                        std::unique_ptr<physical::Tp1MediumBackend> mediumBackend);
+#endif
 
 namespace detail {
 std::unique_ptr<BusAccessStackPort> createTp1MockTestStackPort(

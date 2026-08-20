@@ -216,8 +216,27 @@ This means the standards/configuration plane is no longer only implied by lower-
 ## Security and IP scope
 
 - Data Secure is fully wired through the Security Interface Object and runtime transport/application flow; key provisioning is manual (inherent to the KNX commissioning model).
-- IP Secure Tunneling is supported through a dedicated physical adapter with ECDH session management.
-- Secure Routing is wired in `IpRoutingPhysical` and activated opt-in via `secureRoutingEnabled_`; it is not the default routing configuration.
+- IP Secure Tunneling is supported through a dedicated physical adapter with ECDH session management, gated by `KNX_SECURE_IP_TUNNELING` so a routing-only device does not compile the session machinery it cannot use.
+- Secure Routing is wired in `IpRoutingPhysical` and applied from a `PID_BACKBONE_KEY` download at runtime, which is how ETS enables it; it is not the default routing configuration.
+
+## KNXnet/IP scope
+
+The IP medium is implemented as a KNX IP device (03/02/06) rather than only as a
+transport for the TP1 stack:
+
+- `RoutingEndpoint` owns the one socket the medium needs and classifies every
+  datagram from the KNXnet/IP header before anything else touches it. That
+  ordering is what lets Secure Routing coexist with the services specified to
+  travel in the clear on a secured group.
+- `RoutingFlowControl` holds the egress budget (50 datagrams/s, 5 ms floor) and
+  the ROUTING_BUSY back-off as clock arithmetic, so both are testable at
+  simulated time.
+- `CoreServerResponder` answers discovery and self-description on that same
+  socket. Core is mandatory for Device Class C; Device Management and Tunnelling
+  servers are not implemented.
+- `netip/system_broadcast.hpp` decides which broadcasts belong to the
+  system-broadcast domain, which on IP is a service type rather than a control
+  field bit.
 
 ## Testing strategy
 

@@ -64,9 +64,17 @@ if(DEFINED IDF_PATH OR COMMAND idf_component_register)
     if(KNX_FEATURE_SECURE)
         list(APPEND KNX_COMPONENT_SOURCES ${KNX_SOURCES_SECURE_DATA})
         if(KNX_FEATURE_NETIP)
-            list(APPEND KNX_COMPONENT_SOURCES
-                ${KNX_SOURCES_SECURE_IP_CRYPTO}
-                ${KNX_SOURCES_SECURE_NETIP})
+            list(APPEND KNX_COMPONENT_SOURCES ${KNX_SOURCES_SECURE_ROUTING})
+            # Only a tunnelling client needs the session machinery, and only
+            # the session machinery needs X25519 and PBKDF2. Keeping them out
+            # of a routing-only device is not just size: they call legacy
+            # mbedTLS entry points that mbedTLS 4 — what recent ESP-IDF ships —
+            # no longer provides.
+            if(CONFIG_KNX_ENABLE_TUNNELING)
+                list(APPEND KNX_COMPONENT_SOURCES
+                    ${KNX_SOURCES_SECURE_IP_CRYPTO}
+                    ${KNX_SOURCES_SECURE_TUNNELING})
+            endif()
         endif()
     endif()
 
@@ -107,10 +115,20 @@ if(DEFINED IDF_PATH OR COMMAND idf_component_register)
     # when the macro is not defined, so leaving it out of the ESP-IDF branch
     # silently compiled KNX Secure out of the firmware even with
     # CONFIG_KNX_ENABLE_SECURITY=y.
+    set(KNX_FEATURE_SECURE_IP_TUNNELING 0)
+    if(KNX_FEATURE_SECURE AND KNX_FEATURE_NETIP AND CONFIG_KNX_ENABLE_TUNNELING)
+        set(KNX_FEATURE_SECURE_IP_TUNNELING 1)
+    endif()
+
     target_compile_definitions(${COMPONENT_LIB} PUBLIC
         KNX_FEATURE_NETIP=${KNX_FEATURE_NETIP}
         KNX_FEATURE_TP1=${KNX_FEATURE_TP1}
         KNX_SECURE_ENABLED=${KNX_FEATURE_SECURE}
+        # PUBLIC for the same reason as the others: application code includes
+        # bau.hpp, and a header that disagrees with the library about whether
+        # the secure tunnelling entry points exist produces a link error rather
+        # than a compile one.
+        KNX_SECURE_IP_TUNNELING=${KNX_FEATURE_SECURE_IP_TUNNELING}
     )
     target_compile_definitions(${COMPONENT_LIB} PRIVATE
         KNX_STACK_VERSION="${KNX_VERSION_STRING}"
@@ -330,6 +348,9 @@ else()
     target_compile_definitions(knx_core PUBLIC
         KNX_STACK_VERSION="${KNX_VERSION_STRING}"
         KNX_SECURE_ENABLED=$<IF:$<BOOL:${KNX_SECURE_ENABLED}>,1,0>
+        # The standalone build has full mbedTLS available, so it keeps both
+        # halves of IP Secure; only the ESP-IDF branch has a reason to split.
+        KNX_SECURE_IP_TUNNELING=$<IF:$<AND:$<BOOL:${KNX_SECURE_ENABLED}>,$<BOOL:${KNX_FEATURE_NETIP}>>,1,0>
         KNX_HAS_ZLIB=$<IF:$<BOOL:${KNX_HAS_ZLIB}>,1,0>
         KNX_FEATURE_NETIP=$<IF:$<BOOL:${KNX_FEATURE_NETIP}>,1,0>
         KNX_FEATURE_TP1=$<IF:$<BOOL:${KNX_FEATURE_TP1}>,1,0>

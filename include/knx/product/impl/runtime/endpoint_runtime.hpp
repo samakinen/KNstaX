@@ -212,6 +212,7 @@ public:
         return _bau->groupObjectTransmitPolicy(GroupObjectIndex(descriptor->slot));
     }
 
+#if KNX_FEATURE_TP1
     util::Result<void> start(platform::Platform& platform,
                              std::unique_ptr<medium_backend_type> mediumBackend)
     {
@@ -222,6 +223,7 @@ public:
         _bau = std::make_unique<bau::BusAccessUnit>(platform, std::move(mediumBackend));
         return finishStart();
     }
+#endif
 
     util::Result<void> start(platform::Platform& platform,
                              std::unique_ptr<bau::BusAccessStackPort> stackPort)
@@ -234,6 +236,7 @@ public:
         return finishStart();
     }
 
+#if KNX_FEATURE_TP1
     util::Result<void> start(platform::Platform& platform,
                              std::unique_ptr<physical::Tp1MacPhysical> physical)
     {
@@ -245,6 +248,7 @@ public:
         _bau = std::make_unique<bau::BusAccessUnit>(platform, std::move(stackPort));
         return finishStart();
     }
+#endif
 
 #if KNX_FEATURE_NETIP
     util::Result<void> start(platform::Platform& platform,
@@ -465,6 +469,14 @@ public:
             return util::ErrorCode::OperationNotReady;
         }
         return _bau->management().applyKnxNetIpConfiguration(config);
+    }
+
+    /// Observe ETS downloading the KNX/IP Secure Routing backbone key.
+    void setBackboneKeyCallback(bau::ManagementControl::BackboneKeyCallback callback)
+    {
+        if (_bau) {
+            _bau->management().setBackboneKeyCallback(std::move(callback));
+        }
     }
 #endif
 

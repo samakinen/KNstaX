@@ -730,11 +730,13 @@ private:
 };
 
 
+#if KNX_FEATURE_TP1
 BusAccessUnit::BusAccessUnit(platform::Platform& platform,
                              std::unique_ptr<physical::Tp1MediumBackend> mediumBackend)
     : BusAccessUnit(platform, createTp1StackPort(platform, std::move(mediumBackend)))
 {
 }
+#endif
 
 BusAccessUnit::BusAccessUnit(platform::Platform& platform,
                              std::unique_ptr<BusAccessStackPort> stackPort)

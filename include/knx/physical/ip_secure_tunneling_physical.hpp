@@ -3,7 +3,7 @@
 
 #pragma once
 
-#if KNX_SECURE_ENABLED
+#if KNX_SECURE_IP_TUNNELING
 
 #include "knx/physical/tp1_physical_layer.hpp"
 #include "knx/netip/ip_secure/secure_tunneling_client.hpp"
@@ -94,4 +94,4 @@ private:
 } // namespace physical
 } // namespace knx
 
-#endif // KNX_SECURE_ENABLED
+#endif // KNX_SECURE_IP_TUNNELING

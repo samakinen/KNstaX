@@ -127,7 +127,7 @@ std::unique_ptr<IpTunnelingPhysical> createConfiguredIpTunnelingPhysical(platfor
 										  NetIpPort port,
 										  netip::NetIpSecurity* security = nullptr);
 
-#if KNX_SECURE_ENABLED
+#if KNX_SECURE_IP_TUNNELING
 /**
  * @brief Create an IP Secure Tunneling physical adapter (TCP + KNX/IP Secure)
  *

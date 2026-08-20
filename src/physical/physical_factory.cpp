@@ -18,7 +18,7 @@
 #include "tpuart_physical.hpp"
 #endif
 
-#if KNX_SECURE_ENABLED
+#if KNX_SECURE_IP_TUNNELING
 #include "knx/physical/ip_secure_tunneling_physical.hpp"
 #endif
 
@@ -131,7 +131,7 @@ std::unique_ptr<IpTunnelingPhysical> createConfiguredIpTunnelingPhysical(platfor
     return phys;
 }
 
-#if KNX_SECURE_ENABLED
+#if KNX_SECURE_IP_TUNNELING
 std::unique_ptr<IpSecureTunnelingPhysical> createIpSecureTunnelingPhysical(IpAddress host, NetIpPort port) {
     auto phys = std::make_unique<IpSecureTunnelingPhysical>();
     phys->setGateway(host, port);

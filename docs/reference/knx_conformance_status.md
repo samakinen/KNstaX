@@ -140,7 +140,7 @@ than a client's declaration.
 
 | Type | # | Status |
 |---|---|---|
-| KNXnet/IP Parameter | 11 | Auto-registered on IP builds; individual address, installation id, MAC, friendly name and device capabilities are seeded from the device. Current IP address is filled by the transport once bound. |
+| KNXnet/IP Parameter | 11 | Auto-registered on IP builds; individual address, installation id and friendly name are seeded at start-up. The address-bearing properties — current IP address, subnet mask, gateway, routing multicast address, TTL, MAC, assignment method and device capabilities — are supplied by the firmware through `applyKnxNetIpConfiguration()`, since none of them is knowable before the interface has a lease and most change again when one is renewed. `PID_BACKBONE_KEY` is not inert storage: writing it applies a Secure Routing group key to the live socket. |
 | Router | 6 | Published by `BusAccessUnit::configureRouterRole()`. Opt-in on purpose: a plain end device advertising a Router Object would claim routing it does not perform. Once declared, `PID_ROUTETABLE_CONTROL` (a Function Property) applies ETS filter-table downloads to the coupler's live `FilterTable`, and `PID_*_LCCONFIG` / `PID_*_LCGRPCONFIG` reach the live `CouplerRoutingPolicy` via `syncRouterRoutingConfig()`. |
 | cEMI Server | 8 | Manifest present, no live wiring. |
 | Interface Program, LTE routing, Polling Master, File Server, RF Medium, E-mode objects | 4, 7, 10, 13, 19, … | Manifest only, via `setReferenceInterfaceObjectTypes()`. |
@@ -201,7 +201,8 @@ Behaviour required of Type 1 and covered by tests in `test_device_object.cpp`:
 | Data Secure — sequence-number persistence | Implemented. `PID_SEQUENCE_NUMBER_SENDING` is persisted as an ordinary property. Each partner's *last valid* sequence number is written through into its entry of `PID_SECURITY_INDIVIDUAL_ADDRESS_TABLE` as 03/05/01 §6.3.8.4 requires, and adopted back from it after a download or a restore; the Sequence Number for Tool Access (§6.2), which is deliberately not a Property, has its own persistence record. Both are checkpointed at most once a minute and always on the restart path, so sustained secure traffic does not turn into flash wear. The residual exposure is an *unexpected* power loss: sequence numbers accepted since the last checkpoint are replayable once, until the next S-A_Sync. |
 | Access Policies (03/4/1 §6.2) | Enforced at two levels by `application/security_access_policy.*`. **Per Resource:** the Security Interface Object admits only the Role "Tool" with A+C — no unsecured write to any of its properties, and no read at all of the key tables, the Tool Key, the Security Individual Address Table, `PID_SEQUENCE_NUMBER_SENDING` or `PID_GO_SECURITY_FLAGS`. Object identity, load state and the security mode stay readable in plain, because ETS reads them before it has a secure link. This does not depend on the current mode: §6.3.5 requires that "even if Security Mode is disabled, it shall only be possible to enable it by using secure communication". **Per service:** once Security Mode is on, every management write (property, memory, function property, individual address, restart, authorise/key write, network parameter) requires tool-secured communication and is otherwise dropped without an answer. Roles R0–R15 are not configurable — a sender is "Tool" or "Unlisted" — so the Roles column of the Point-to-point Key Table is stored but not evaluated. |
 | KNXnet/IP Secure Tunnelling | Implemented, with ECDH session establishment and `.knxkeys` import. |
-| KNX Secure Routing | Implemented, opt-in via `IpRoutingPhysical::secureRoutingEnabled_`. Not the default. |
+| KNX Secure Routing | Implemented, and reachable the way ETS reaches it: a `PID_BACKBONE_KEY` download applies the group key to the live routing socket without a restart, and clearing the key turns it off again. Discovery and ROUTING_SYSTEM_BROADCAST stay in the clear on a secured group as 03/02/06 §4.1.3 requires, and plain routing indications are dropped once a group is secured. Verified against the CCM vectors and by host tests; **never run against a real peer.** |
+| IP Secure tunnelling sessions | Implemented, and separable: `KNX_SECURE_IP_TUNNELING` gates the ECDH/PBKDF2 session machinery apart from the rest of KNX Secure. A routing-only device compiles it out — it is not a tunnelling client, and the primitives call legacy mbedTLS entry points that mbedTLS 4 (recent ESP-IDF) no longer provides. |
 | FDSK / device certificate | **Not implemented, by design.** A Factory Default Setup Key is per-device, and this stack is used with a single firmware image flashed to many devices. The tool key is instead provisioned into NVS at first boot. This is a deliberate deployment trade-off, not an oversight: it means secure commissioning is a lab/self-service flow rather than the certificate-based flow an integrator expects from a catalogue product. |
 
 ## Media
@@ -211,7 +212,10 @@ Behaviour required of Type 1 and covered by tests in `test_device_object.cpp`:
 | TP1 — timer-ISR bitbang | Primary, and the only path validated on real hardware. |
 | TP1 — TPUART | Implemented behind the same MAC engine; **never run against an NCN5120-class transceiver.** |
 | KNXnet/IP tunnelling (unicast) | Implemented; compiled out entirely unless `CONFIG_KNX_MEDIUM_IP` / `KNX_FEATURE_NETIP` is set. **Validated only by host interop against `xknx`** — never against real ETS or a real gateway. |
-| KNXnet/IP routing (multicast) | Implemented, same gating, same validation gap. |
+| KNXnet/IP routing (multicast) | Implemented as a KNX IP medium (03/02/06), not only as a transport: Core discovery and self-description are answered, the system-broadcast domain is carried on ROUTING_SYSTEM_BROADCAST, the egress budget and ROUTING_BUSY back-off are enforced, and the Device Descriptor reports the KNX IP mask version. Wire formats are covered octet by octet by host tests against the specification's own layouts. **Still never run against real ETS or on hardware.** |
+| KNXnet/IP Core (server side) | SEARCH_REQUEST, SEARCH_REQUEST_EXTENDED and DESCRIPTION_REQUEST are answered, with the full Search Request Parameter set including the unknown-SRP rule. Mandatory for Device Class C (03/08/01 Table 2). Shares the routing socket, so it is present exactly when routing is. |
+| KNXnet/IP Device Management (server side) | **Not implemented.** Mandatory for Device Class C. A KNX IP end device is commissioned over the KNX network rather than through a management connection, so nothing in the routing commissioning path depends on it — but a conformance run would flag it. |
+| KNXnet/IP Tunnelling (server side) | **Not implemented**, and optional for Device Class C. The device is an end device on the medium, not a gateway; ETS cannot use it as an interface. |
 | RF | Not implemented, and not planned — no RF hardware is available to develop or validate against. |
 | Powerline | Not implemented, and not planned, for the same reason. |
 
@@ -229,6 +233,12 @@ device:
    and Secure Routing are implemented and verified against the specification's
    CCM vectors, but neither has run against a real peer, so the session and
    wrapper mechanics are unconfirmed on the wire.
+
+   The same caveat now covers the whole KNX IP medium, and it is the honest
+   summary of where that work stands: the wire formats are tested against the
+   specification octet by octet, and no part of it has yet answered a real tool.
+   That is a different and weaker claim than the one Data Secure on TP1 can
+   make, which is that a full ETS6 download completed on hardware.
 
    Data Secure itself is *not* in this list any more: a full ETS secure download
    and secure group communication have both completed on hardware, which

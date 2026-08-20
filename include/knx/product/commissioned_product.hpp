@@ -1176,6 +1176,7 @@ public:
      * parameters, persistence, ETS commissioning — and forwarding between the
      * two ports is added on top.
      */
+#if KNX_FEATURE_TP1
     auto start(platform::Platform& platform, CouplerOptions options) -> util::Result<void>
     {
         if (!options.primary || !options.secondary) {
@@ -1226,6 +1227,7 @@ public:
             return util::ErrorCode::InvalidParameter;
         }
 
+
         auto startResult = _runtime.start(platform, std::move(physical));
         if (startResult.isError()) {
             return startResult.error();
@@ -1244,6 +1246,7 @@ public:
 
         return util::Result<void>::ok();
     }
+#endif  // KNX_FEATURE_TP1
 
 #if KNX_FEATURE_NETIP
     auto start(platform::Platform& platform,
@@ -1421,6 +1424,11 @@ public:
         }
 #endif
 
+        // Kept across the move: the stack port owns the physical for as long
+        // as the runtime lives, and the backbone-key observer below has to
+        // reach it after start().
+        auto* routing = physical.get();
+
         auto startResult = _runtime.start(platform, std::move(physical));
         if (startResult.isError()) {
             return startResult.error();
@@ -1429,6 +1437,20 @@ public:
         _transportPath = CommissionedTransportPath::IpRoutingManaged;
         _secureOptions = options.secure;
         applySecureOptions();
+
+#if KNX_SECURE_ENABLED
+        // ETS enables KNX/IP Secure Routing by downloading the backbone key as
+        // an ordinary property write, and expects it to take effect at once.
+        // Wired here rather than left to the firmware because there is exactly
+        // one correct thing to do with that key, and a device that stores it
+        // and keeps multicasting in the clear looks secured in the project and
+        // is not on the wire.
+        _runtime.setBackboneKeyCallback([routing](std::span<const uint8_t> key) {
+            (void)routing->applySecureRouting(key);
+        });
+#else
+        (void)routing;
+#endif
 
         _runtime.wireParameterDataCallback([this](std::span<const uint8_t> data) {
             _parametersState.applyFromBytes(data);

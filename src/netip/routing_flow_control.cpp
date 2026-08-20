@@ -115,7 +115,7 @@ void RoutingFlowControl::noteBusyReceived(const RoutingBusyInfo& info,
     if (!hasBusy_ || (nowMs - lastBusyMs_) >= kBusyCounterHoldoffMs) {
         busyCounter_ = decayedBusyCounter(nowMs) + 1;
     } else {
-        busyCounter_ = std::max(decayedBusyCounter(nowMs), 1u);
+        busyCounter_ = std::max<uint32_t>(decayedBusyCounter(nowMs), 1u);
     }
     hasBusy_ = true;
     lastBusyMs_ = nowMs;
