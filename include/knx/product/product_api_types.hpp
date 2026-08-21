@@ -121,4 +121,36 @@ constexpr bool isNetworkMedium(Medium medium) noexcept
 	return false;
 }
 
+/**
+ * @brief The KNX medium a product's transport is, as KNX itself names media.
+ *
+ * `Medium` records how this stack reaches the network, which splits IP three
+ * ways — routing, tunnelling, secure tunnelling. KNX knows only "IP": the
+ * Device Descriptor, PID_MEDIUM_TYPE and the ETS master data all collapse the
+ * three into one medium, and everything ETS decides about the device (its mask
+ * version, which lines it may sit on) follows from that one value.
+ *
+ * Both the running device and the exported catalogue entry go through here, so
+ * the medium a device reports and the medium its knxprod declares are the same
+ * fact rather than two hand-maintained ones.
+ */
+constexpr MediumType knxMediumType(Medium medium) noexcept
+{
+	switch (medium) {
+		case Medium::IP_Tunneling:
+		case Medium::IP_Routing:
+#if KNX_SECURE_ENABLED
+		case Medium::IP_Secure_Tunneling:
+#endif
+			return MediumType::IP;
+		case Medium::TP1:
+			break;
+	}
+
+	return MediumType::TP1;
+}
+
+static_assert(knxMediumType(Medium::TP1) == MediumType::TP1);
+static_assert(knxMediumType(Medium::IP_Routing) == MediumType::IP);
+
 } // namespace knx::product

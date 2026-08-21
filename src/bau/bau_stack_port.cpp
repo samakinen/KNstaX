@@ -61,20 +61,6 @@ application::SendOptions toApplicationTransmissionOptions(const BusAccessUnit::T
     return converted;
 }
 
-/// The medium nibble of Device Descriptor Type 0 (03/05/01 Table 7). These are
-/// positions in the mask version, not the MediumType bit values — DPT_Media
-/// uses one bit per medium, the descriptor uses a small ordinal.
-uint8_t mediumNibble(MediumType medium)
-{
-    switch (medium) {
-        case MediumType::TP1:   return 0x0;
-        case MediumType::PL110: return 0x1;
-        case MediumType::RF:    return 0x2;
-        case MediumType::IP:    return 0x5;
-    }
-    return 0x0;
-}
-
 BusAccessUnit::TransmissionProgressState toBauTransmissionProgressState(application::ApplicationLayer::SendProgressState state)
 {
     switch (state) {
@@ -631,12 +617,14 @@ public:
             return;
         }
 
-        // Mask version byte 0 is {MediumType[3:0], FirmwareType[3:0]}
-        // (03/05/01 §4.1.2). Only the medium nibble changes: the firmware type
-        // and version identify the stack, not the wire it sits on.
+        // Only the medium nibble of the mask version changes: the firmware type
+        // and version identify the stack, not the wire it sits on. The same
+        // table numbers the medium in the exported catalogue entry, which is
+        // what ETS compares this descriptor against.
+        const uint16_t mask = application::systemBMaskVersion(medium);
         auto descriptor = application::DeviceDescriptor::createDefault();
-        descriptor.type0.maskHigh =
-            static_cast<uint8_t>((mediumNibble(medium) << 4) | (descriptor.type0.maskHigh & 0x0F));
+        descriptor.type0.maskHigh = static_cast<uint8_t>(mask >> 8);
+        descriptor.type0.maskLow = static_cast<uint8_t>(mask & 0xFFu);
         descriptor.type2.mediumType = medium;
         _application->deviceDescriptorService().setDescriptor(descriptor);
     }

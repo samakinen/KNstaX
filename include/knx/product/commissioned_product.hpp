@@ -1370,9 +1370,10 @@ public:
                 description.individualAddress = _runtime.individualAddress();
                 description.routingMulticastAddress = multicastGroup;
                 description.maxLocalApduLength = _runtime.compiledDefinition().identity.maxApduLength;
-                // System B on KNX IP. Matches what setDeviceMedium() puts in
-                // the Device Descriptor, which is what ETS cross-checks.
-                description.deviceDescriptorType0 = 0x57B0;
+                // The same mask version setDeviceMedium() puts in the Device
+                // Descriptor, from the same table — ETS cross-checks the two.
+                description.deviceDescriptorType0 =
+                    application::systemBMaskVersion(MediumType::IP);
 
                 network.macAddress(description.macAddress);
 

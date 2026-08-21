@@ -21,7 +21,9 @@ NS = {'k': 'http://knx.org/xml/project/23'}
 def _doc(parameters):
     return {
         'identity': {'profileKey': 't', 'productDisplayName': 'T', 'manufacturerId': 250,
-                     'medium': 0, 'applicationProgram': {'number': 1, 'version': 1}},
+                     'medium': {'code': 0, 'name': 'TP', 'maskVersion': 0x07B0,
+                                'ipEnabled': False},
+                     'applicationProgram': {'number': 1, 'version': 1}},
         'features': {}, 'capacities': {},
         'communicationObjects': [{
             'exportNumber': 0, 'logicalId': 0, 'key': 'k', 'displayName': 'K',

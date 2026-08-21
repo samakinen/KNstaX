@@ -577,6 +577,15 @@ else()
     )
     add_test(NAME test_frame_encoding COMMAND test_frame_encoding)
 
+    # The reference products the exporter tests render. Built into the source
+    # tree because tools/knxprod_exporter/run_exporter.sh runs it from there;
+    # it used to be a committed binary, which went stale the moment the
+    # descriptor types moved and could not be rebuilt from anything in-tree.
+    add_executable(product_exporter tools/product_exporter/main.cpp)
+    target_link_libraries(product_exporter PRIVATE knx_core)
+    set_target_properties(product_exporter PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/tools/product_exporter)
+
     # Test: knxprod exporter validation (runs wrapper + basic XML checks)
     add_test(NAME test_knxprod_exporter COMMAND python3 ${CMAKE_SOURCE_DIR}/tools/knxprod_exporter/test_validate_knxprod.py)
     # Test: knxprod XSD validation (runs wrapper + XSD validation via xmlschema)
@@ -1308,6 +1317,10 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/knx_product.cmake)
         unity
     )
     add_test(NAME test_netip_secure_session_bootstrap COMMAND test_netip_secure_session_bootstrap)
+    # Reads test/vectors/... by relative path, like the other vector tests.
+    set_tests_properties(test_netip_secure_session_bootstrap PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    )
 
     add_executable(test_netip_routing_flow_control
         test/unit/test_netip_routing_flow_control.cpp

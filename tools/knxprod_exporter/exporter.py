@@ -33,7 +33,12 @@ def export_product_json_to_kaenx(json_obj) -> str:
     ET.SubElement(product, 'ProfileKey').text = identity.get('profileKey', '')
     ET.SubElement(product, 'DisplayName').text = identity.get('productDisplayName', '')
     ET.SubElement(product, 'ManufacturerId').text = str(identity.get('manufacturerId', ''))
-    ET.SubElement(product, 'Medium').text = str(identity.get('medium', ''))
+    medium_code, medium_name, mask_version, ip_enabled = _medium_facts(identity)
+    medium_elem = ET.SubElement(product, 'Medium')
+    medium_elem.text = medium_name
+    medium_elem.set('Code', str(medium_code))
+    medium_elem.set('MaskVersion', str(mask_version))
+    medium_elem.set('IpEnabled', str(ip_enabled).lower())
 
     app = ET.SubElement(product, 'ApplicationProgram')
     applicationProgram = identity.get('applicationProgram', {})
@@ -473,6 +478,36 @@ def _dpt_id(dpt_main: int, dpt_sub) -> str:
     return f'DPST-{dpt_main}-{dpt_sub}'
 
 
+# Length of the domain address on each medium, in bits (KNX master data). Open
+# media address a domain, TP1 and IP do not.
+_MEDIUM_DOMAIN_ADDRESS_LENGTH = {0: 0, 1: 16, 2: 48, 5: 0}
+
+
+def _medium_facts(identity):
+    """The medium as KNX numbers it, plus the mask version that goes with it.
+
+    Returns (code, name, mask_version, ip_enabled). Every one of these comes
+    from the C++ product definition rather than being decided here: the medium
+    decides which lines ETS will let the device sit on, and the mask version is
+    cross-checked against the Device Descriptor the device reports, so neither
+    is the renderer's to guess.
+
+    Exports older than that carried `medium` as a bare integer holding the C++
+    enum's ordinal — 2 for IP_Routing, which KNX reads as RF. Rejected outright:
+    silently rendering it produced a plausible-looking product declaring the
+    wrong bus."""
+    medium = identity.get('medium', {})
+    if not isinstance(medium, dict):
+        raise SystemExit(
+            'identity.medium is a bare number, so this export predates the '
+            'medium fix: the value is a C++ enum ordinal, not a KNX medium '
+            'code. Regenerate the JSON with the current product exporter.')
+    return (int(medium.get('code', 0)),
+            medium.get('name', 'TP'),
+            int(medium.get('maskVersion', 0x07B0)),
+            bool(medium.get('ipEnabled', False)))
+
+
 def _ets_id_part(text: str, fallback: str = 'PRODUCT') -> str:
     """Encode a free-form name as an ETS identifier fragment.
 
@@ -507,7 +542,13 @@ def export_product_json_to_knxprod(json_obj) -> str:
     # OpenKNX/Kaenx importer expects ETS-style IDs with hex-encoded parts.
     manu_ref = f'M-{manufacturer_id:04X}'
     app_ref = f'{manu_ref}_A-{app_number:06X}-{app_version:02X}-0000'
-    hardware_ref = f'{manu_ref}_H-0001'
+    # ETS keys hardware by manufacturer + serial + version, and its ids encode
+    # that. A fixed 'H-0001' made every product of one manufacturer collide:
+    # importing the second one hit "the product has a different hash than the
+    # existing product", because the id already named something else.
+    hardware_serial = int(identity.get('hardwareSerialNumber', 1))
+    hardware_version = int(identity.get('hardwareVersion', 1))
+    hardware_ref = f'{manu_ref}_H-{hardware_serial:04d}-{hardware_version}'
     # Derived from the product's own identity: two products from one
     # manufacturer must not collide, and no product name belongs in this file.
     product_display_name = identity.get('productDisplayName') or identity.get('profileKey', '')
@@ -517,8 +558,17 @@ def export_product_json_to_knxprod(json_obj) -> str:
     hardware2prog_ref = f'{hardware_ref}_HP-0001-{app_number:04X}-{app_version:02X}'
     catalog_section_ref = f'{manu_ref}_CS-{profile_id}'
     catalog_item_ref = f'{manu_ref}_CI-{order_id}'
-    mask_version_id = 'MV-07B0'
-    medium_type_id = 'MT-0'
+    # The medium and its mask version come from the C++ product definition, in
+    # the numbering KNX uses (MediumType/@Number, 03/05/01 Table 7). ETS
+    # resolves MT-*/MV-* against its own master data by *id*, so the ids have to
+    # follow the values — writing MT-0 with Number=5 would silently keep the
+    # product on TP1.
+    # Hardware/@IsIPEnabled below: the device has a KNXnet/IP interface, which
+    # is what makes ETS offer the IP configuration tab. Distinct from the
+    # medium — an IP router is TP1 medium and IP-enabled both.
+    medium_code, medium_name, mask_version, ip_enabled = _medium_facts(identity)
+    medium_type_id = f'MT-{medium_code}'
+    mask_version_id = f'MV-{mask_version:04X}'
 
     # Collect unique DPTs used across all COs (preserve insertion order)
     seen_dpts: dict[tuple, None] = {}
@@ -565,22 +615,28 @@ def export_product_json_to_knxprod(json_obj) -> str:
     medium_types = ET.SubElement(master, 'MediumTypes')
     mt = ET.SubElement(medium_types, 'MediumType')
     mt.set('Id', medium_type_id)
-    mt.set('Number', str(identity.get('medium', 0)))
-    mt.set('Name', 'MT-0')
-    mt.set('DomainAddressLength', '16')
+    mt.set('Number', str(medium_code))
+    mt.set('Name', medium_name)
+    mt.set('DomainAddressLength', str(_MEDIUM_DOMAIN_ADDRESS_LENGTH.get(medium_code, 0)))
 
     mask_versions = ET.SubElement(master, 'MaskVersions')
     mv = ET.SubElement(mask_versions, 'MaskVersion')
     mv.set('Id', mask_version_id)
-    mv.set('Name', 'Default')
-    mv.set('MaskVersion', '1968')  # 0x07B0 decimal
+    mv.set('Name', mask_version_id)
+    mv.set('MaskVersion', str(mask_version))  # decimal, e.g. 1968 = 0x07B0
     mv.set('ManagementModel', 'SystemB')
     mv.set('MediumTypeRefId', medium_type_id)
 
     manufacturers = ET.SubElement(master, 'Manufacturers')
     m = ET.SubElement(manufacturers, 'Manufacturer')
     m.set('Id', manu_ref)
-    m.set('Name', identity.get('productDisplayName', 'Manufacturer'))
+    # A manufacturer, not a product: this entry is master data shared by every
+    # product of M-xxxx, and two files that name the same id differently are
+    # describing one entity two ways. It used to carry the product's display
+    # name, so the TP1 and IP files disagreed. ETS shows its own registered name
+    # for the manufacturer id regardless; what the integrator browses by is the
+    # catalogue section and item below, which do carry the product name.
+    m.set('Name', f'Manufacturer {manufacturer_id:04X}')
     m.set('KnxManufacturerId', str(manufacturer_id))
 
     # ManufacturerData / Manufacturer / ApplicationPrograms / ApplicationProgram
@@ -614,11 +670,16 @@ def export_product_json_to_knxprod(json_obj) -> str:
     hard.set('Name', product_display_name)
     # Must match what the device reports in PID_HARDWARE_TYPE / PID_VERSION:
     # ETS checks the catalogue entry against the device before downloading.
-    hard.set('SerialNumber', '%04d' % int(identity.get('hardwareSerialNumber', 1)))
-    hard.set('VersionNumber', str(int(identity.get('hardwareVersion', 1))))
+    hard.set('SerialNumber', '%04d' % hardware_serial)
+    hard.set('VersionNumber', str(hardware_version))
     hard.set('BusCurrent', '10')
     hard.set('HasApplicationProgram', 'true')
     hard.set('HasIndividualAddress', 'true')
+    if ip_enabled:
+        # Without this ETS never shows the device's IP settings, so a KNXnet/IP
+        # device cannot be given an address assignment method or additional
+        # individual addresses.
+        hard.set('IsIPEnabled', 'true')
 
     products = ET.SubElement(hard, 'Products')
     product = ET.SubElement(products, 'Product')

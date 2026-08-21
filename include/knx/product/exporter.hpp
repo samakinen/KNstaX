@@ -8,7 +8,9 @@
 
 #pragma once
 
+#include "knx/application/device_descriptor.hpp"
 #include "knx/product/export_descriptor.hpp"
+#include "knx/product/product_api_types.hpp"
 
 #include <cstdio>
 #include <iomanip>
@@ -55,7 +57,14 @@ std::string exportDescriptorToJson(const DescT& d)
     o << "\"identity\":{\"profileKey\":\"" << d.identity.profileKey << "\",";
     o << "\"productDisplayName\":\"" << d.identity.productDisplayName << "\",";
     o << "\"manufacturerId\":" << static_cast<uint16_t>(d.identity.manufacturerId.value()) << ",";
-    o << "\"medium\":" << static_cast<int>(d.identity.medium) << ",";
+    // The medium is emitted as KNX names it, never as the C++ enum's ordinal:
+    // the renderer downstream writes these straight into the catalogue entry,
+    // where they have to mean what ETS thinks they mean.
+    const MediumType knxMedium = knxMediumType(d.identity.medium);
+    o << "\"medium\":{\"code\":" << static_cast<int>(application::mediumCode(knxMedium))
+      << ",\"name\":\"" << application::mediumName(knxMedium) << "\""
+      << ",\"maskVersion\":" << application::systemBMaskVersion(knxMedium)
+      << ",\"ipEnabled\":" << isNetworkMedium(d.identity.medium) << "},";
     o << "\"applicationProgram\":{\"number\":" << d.identity.applicationProgram.applicationNumber
       << ",\"version\":" << d.identity.applicationProgram.applicationVersion << "},";
     o << "\"hardwareSerialNumber\":" << d.identity.hardwareSerialNumber << ",";
@@ -177,7 +186,11 @@ std::string exportDescriptorToKaenxXml(const DescT& d)
   o << "    <ProfileKey>" << xmlEscape(d.identity.profileKey) << "</ProfileKey>\n";
   o << "    <DisplayName>" << xmlEscape(d.identity.productDisplayName) << "</DisplayName>\n";
   o << "    <ManufacturerId>" << static_cast<uint16_t>(d.identity.manufacturerId.value()) << "</ManufacturerId>\n";
-  o << "    <Medium>" << static_cast<int>(d.identity.medium) << "</Medium>\n";
+  const MediumType knxMedium = knxMediumType(d.identity.medium);
+  o << "    <Medium Code=\"" << static_cast<int>(application::mediumCode(knxMedium))
+    << "\" MaskVersion=\"" << application::systemBMaskVersion(knxMedium)
+    << "\" IpEnabled=\"" << (isNetworkMedium(d.identity.medium) ? "true" : "false")
+    << "\">" << application::mediumName(knxMedium) << "</Medium>\n";
   o << "    <ApplicationProgram>\n";
   o << "      <Number>" << d.identity.applicationProgram.applicationNumber << "</Number>\n";
   o << "      <Version>" << d.identity.applicationProgram.applicationVersion << "</Version>\n";

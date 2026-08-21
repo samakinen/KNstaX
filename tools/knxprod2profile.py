@@ -197,12 +197,21 @@ def unique_names(values, fallback_factory):
 
 
 def medium_literal_for(root):
+    """The product's medium as `knx::product::Medium`.
+
+    MediumType/@Number is the KNX medium code (03/05/01 Table 7): 0 = TP1,
+    1 = PL110, 2 = RF, 5 = IP. It used to be read here as the C++ enum's
+    ordinal, which turned an RF product into IP_Routing and vice versa.
+
+    `Medium` splits IP into routing and tunnelling; a knxprod does not record
+    the difference, because it is a transport choice rather than a property of
+    the bus. Routing is the device-side answer — tunnelling is a client role.
+    """
     medium = root.find('.//knx:MasterData/knx:MediumTypes/knx:MediumType', NS)
     number = attr(medium, 'Number', '0') if medium is not None else '0'
     mapping = {
         '0': 'knx::product::Medium::TP1',
-        '1': 'knx::product::Medium::IP_Tunneling',
-        '2': 'knx::product::Medium::IP_Routing',
+        '5': 'knx::product::Medium::IP_Routing',
     }
     return mapping.get(number, 'knx::product::Medium::TP1')
 

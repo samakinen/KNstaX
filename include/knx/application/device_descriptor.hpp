@@ -31,6 +31,63 @@ enum class DescriptorType : uint8_t {
 };
 
 /**
+ * @brief The medium's code, as KNX numbers media everywhere it names one.
+ *
+ * It is the high nibble of mask version byte 0 (03/05/01 §4.1.2, Table 7) and
+ * it is MediumType/@Number in the ETS master data — the same four values in
+ * both places. Keeping one table means the mask version a device reports and
+ * the medium its catalogue entry declares cannot drift apart, which matters
+ * because ETS compares them before it will download anything.
+ *
+ * Not to be confused with `MediumType`'s own values: those are the PID_MEDIUM_TYPE
+ * bit mask (TP1 = 02h, IP = 20h), a different encoding of the same fact.
+ */
+constexpr uint8_t mediumCode(knx::MediumType medium) noexcept
+{
+    switch (medium) {
+        case knx::MediumType::TP1:   return 0x0;
+        case knx::MediumType::PL110: return 0x1;
+        case knx::MediumType::RF:    return 0x2;
+        case knx::MediumType::IP:    return 0x5;
+    }
+    return 0x0;
+}
+
+/// The medium's name in the ETS master data ("TP", "PL", "RF", "IP").
+constexpr const char* mediumName(knx::MediumType medium) noexcept
+{
+    switch (medium) {
+        case knx::MediumType::TP1:   return "TP";
+        case knx::MediumType::PL110: return "PL";
+        case knx::MediumType::RF:    return "RF";
+        case knx::MediumType::IP:    return "IP";
+    }
+    return "TP";
+}
+
+/// Mask version 07B0h with the medium nibble cleared: firmware type 7,
+/// version B, subcode 0 — the System B realisation this stack implements.
+inline constexpr uint16_t kSystemBMaskBase = 0x07B0;
+
+/**
+ * @brief This stack's mask version on a given medium: 07B0h on TP1, 57B0h on KNX IP.
+ *
+ * Only the medium nibble moves. The firmware type and version identify the
+ * realisation, not the wire it sits on, and this stack is System B on every
+ * medium it supports.
+ */
+constexpr uint16_t systemBMaskVersion(knx::MediumType medium) noexcept
+{
+    return static_cast<uint16_t>((static_cast<uint16_t>(mediumCode(medium)) << 12)
+                                 | (kSystemBMaskBase & 0x0FFFu));
+}
+
+static_assert(systemBMaskVersion(knx::MediumType::TP1) == 0x07B0,
+              "System B on TP1 is 07B0h (03/05/01 Table 7)");
+static_assert(systemBMaskVersion(knx::MediumType::IP) == 0x57B0,
+              "System B on KNX IP is 57B0h (03/05/01 Table 7)");
+
+/**
  * @brief Device Descriptor Type 0 (KNX Mask Version)
  *
  * 2-byte mask version as defined in KNX spec 03_05_01 section 4.1.2:
