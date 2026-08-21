@@ -260,6 +260,17 @@ util::Result<void> IpRoutingPhysical::init() {
         coreResponder_.setControlEndpoint(endpoint_->localAddress(), port_);
         endpoint_->setControlDatagramHandler(
             [this](std::span<const uint8_t> datagram, IpAddress source, uint16_t sourcePort) {
+                // Re-read rather than trust what open() saw. The endpoint may
+                // have opened before DHCP handed out a lease, and the address
+                // changes again on every renewal into a different subnet — and
+                // this HPAI is what ETS connects back to. A stale one lists the
+                // device and then fails to reach it.
+                if (network_) {
+                    const IpAddress current = network_->ipAddress();
+                    if (!current.isZero()) {
+                        coreResponder_.setControlEndpoint(current, port_);
+                    }
+                }
                 netip::CoreServerResponder::Reply reply;
                 if (!coreResponder_.handle(datagram, source, sourcePort, reply)) return;
                 if (reply.datagram.empty()) return;
