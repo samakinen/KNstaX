@@ -13,6 +13,7 @@
 #include "lwip/sockets.h"
 #include "lwip/netdb.h"
 #include <cstring>
+#include <sys/select.h>
 
 static const char* TAG = "KNX.Network";
 
@@ -208,13 +209,30 @@ size_t Esp32UdpSocket::available() const {
     if (_socket < 0) {
         return 0;
     }
-    
-    int bytes;
-    if (ioctl(_socket, FIONREAD, &bytes) < 0) {
-        return 0;
-    }
-    
-    return bytes;
+
+    // Readiness, not a byte count -- and deliberately not ioctl(FIONREAD).
+    // lwIP compiles that case in only when LWIP_SO_RCVBUF or
+    // LWIP_FIONREAD_LINUXMODE is set, and ESP-IDF leaves both off by default
+    // (CONFIG_LWIP_SO_RCVBUF defaults to n). With them off the call does not
+    // fail loudly: it returns -1/ENOSYS for every socket, which reads here as
+    // "nothing waiting" and silences the entire KNXnet/IP receive path. The
+    // device joins the routing group, answers no SEARCH_REQUEST and no
+    // DESCRIPTION_REQUEST, and looks unreachable to ETS while it still pings.
+    //
+    // Every caller asks the same question -- is a datagram waiting? -- so the
+    // 1 below is a flag. select() also answers correctly for a zero-length
+    // datagram, which a peek-based count would report as an empty queue and
+    // then never consume.
+    fd_set readable;
+    FD_ZERO(&readable);
+    FD_SET(_socket, &readable);
+
+    struct timeval immediate;
+    immediate.tv_sec = 0;
+    immediate.tv_usec = 0;
+
+    const int ready = select(_socket + 1, &readable, nullptr, nullptr, &immediate);
+    return (ready > 0 && FD_ISSET(_socket, &readable)) ? 1u : 0u;
 }
 
 uint16_t Esp32UdpSocket::localPort() const {

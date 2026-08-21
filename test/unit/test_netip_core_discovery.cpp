@@ -425,6 +425,42 @@ void test_truncated_datagrams_are_not_answered(void)
     TEST_ASSERT_TRUE(second.datagram.empty());
 }
 
+// The two datagrams ETS6 actually puts on 224.0.23.12, byte for byte off the
+// wire (10.5.5.57:64021 as the discovery endpoint). The extended one asks for
+// DIB 07 (TUNNELING_INFO), which this device does not have, and pads the SRP
+// to an even length with a 00 that is not a DIB code at all. Neither is a
+// reason to stay silent: a KNX IP device that answers the unicast probe and
+// not the multicast scan is one ETS never lists.
+void test_ets_multicast_search_requests_are_answered(void)
+{
+    auto device = makeDevice();
+    device.programmingMode = true;
+    auto responder = makeResponder(device);
+
+    const std::vector<uint8_t> plain = {
+        0x06, 0x10, 0x02, 0x01, 0x00, 0x0E,
+        0x08, 0x01, 10, 5, 5, 57, 0xFA, 0x15,
+    };
+    CoreServerResponder::Reply plainReply;
+    TEST_ASSERT_TRUE(responder.handle(plain, IpAddress::fromOctets(10, 5, 5, 57), 64021, plainReply));
+    TEST_ASSERT_FALSE(plainReply.datagram.empty());
+    TEST_ASSERT_EQUAL_UINT8(0x02, plainReply.datagram[2]);  // SEARCH_RESPONSE
+    TEST_ASSERT_EQUAL_UINT8(0x02, plainReply.datagram[3]);
+    TEST_ASSERT_EQUAL_UINT32(64021u, plainReply.port.value());
+
+    const std::vector<uint8_t> extended = {
+        0x06, 0x10, 0x02, 0x0B, 0x00, 0x16,
+        0x08, 0x01, 10, 5, 5, 57, 0xFA, 0x15,
+        0x08, 0x84, 0x01, 0x02, 0x08, 0x06, 0x07, 0x00,
+    };
+    CoreServerResponder::Reply extendedReply;
+    TEST_ASSERT_TRUE(responder.handle(extended, IpAddress::fromOctets(10, 5, 5, 57), 64021, extendedReply));
+    TEST_ASSERT_FALSE(extendedReply.datagram.empty());
+    TEST_ASSERT_EQUAL_UINT8(0x02, extendedReply.datagram[2]);  // SEARCH_RESPONSE_EXTENDED
+    TEST_ASSERT_EQUAL_UINT8(0x0C, extendedReply.datagram[3]);
+    TEST_ASSERT_EQUAL_UINT32(64021u, extendedReply.port.value());
+}
+
 int main()
 {
     UNITY_BEGIN();
@@ -443,5 +479,6 @@ int main()
     RUN_TEST(test_malformed_srp_block_does_not_loop_or_read_past_the_datagram);
     RUN_TEST(test_unrelated_service_types_are_left_alone);
     RUN_TEST(test_truncated_datagrams_are_not_answered);
+    RUN_TEST(test_ets_multicast_search_requests_are_answered);
     return UNITY_END();
 }
