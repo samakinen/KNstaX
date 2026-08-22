@@ -366,33 +366,46 @@ void test_KnxNetIpParam_SyncLatencyFraction_WriteRead(void)
     TEST_ASSERT_EQUAL_HEX8(0x0A, buf[0]);
 }
 
-void test_KnxNetIpParam_SecuredServiceFamilies_WriteRead(void)
+void test_KnxNetIpParam_SecuredServiceFamilies_IsAFunctionProperty(void)
 {
     GenericInterfaceObject paramObj(InterfaceObjectType::knxNetIpParameter());
     InterfaceObjectManager mgr;
     TEST_ASSERT_TRUE(mgr.init(false).isOk());
     mgr.registerReferenceObject(paramObj);
 
-    // PID 94: GenericData (1 byte/element) — write two elements:
-    //   element 1 = 0x02 (family: tunnelling), element 2 = 0x01 (version: secure required)
-    const std::vector<uint8_t> entry = {0x02, 0x01};
-    auto wres = mgr.writeProperty(
-        InterfaceObjectType::knxNetIpParameter(),
-        InterfaceObjectInstance(1),
-        kPidSecuredSvcFamilies,
-        1, entry); // startIndex=1, writes 2 elements
-    TEST_ASSERT_EQUAL(PropertyAccessResult::Success, wres);
+    // 03/08/09 §2.3.1.5: "Property Datatype: PDT_FUNCTION [...] The coding of
+    // the data depends on whether data is written to the function or responded
+    // by the function. No single DPT can be given."
+    //
+    // This used to be declared as generic data, which told a client it could
+    // write a security requirement straight into the property. It could — and
+    // nothing acted on it, because the requirement is only meaningful when it
+    // arrives through the function property service where the device can refuse
+    // what it cannot enforce.
+    knx::application::PropertyDataType type{};
+    uint16_t maxElements = 0;
+    uint8_t access = 0;
+    knx::application::PropertyID resolvedId = static_cast<knx::application::PropertyID>(0);
+    uint8_t readLevel = 0;
+    uint8_t writeLevel = 0;
 
-    knx::application::PropertyServiceDataBuffer buf;
-    auto rres = mgr.readProperty(
+    auto res = mgr.describeProperty(
         InterfaceObjectType::knxNetIpParameter(),
         InterfaceObjectInstance(1),
         kPidSecuredSvcFamilies,
-        1, 2, buf); // startIndex=1, elementCount=2
-    TEST_ASSERT_EQUAL(PropertyAccessResult::Success, rres);
-    TEST_ASSERT_EQUAL_UINT32(2, static_cast<uint32_t>(buf.size()));
-    TEST_ASSERT_EQUAL_HEX8(0x02, buf[0]);
-    TEST_ASSERT_EQUAL_HEX8(0x01, buf[1]);
+        knx::PropertyIndex(0),
+        resolvedId,
+        type,
+        maxElements,
+        access,
+        readLevel,
+        writeLevel);
+
+    TEST_ASSERT_EQUAL(PropertyAccessResult::Success, res);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(kPidSecuredSvcFamilies),
+                            static_cast<uint8_t>(resolvedId));
+    TEST_ASSERT_EQUAL(knx::application::PropertyDataType::Function, type);
+    TEST_ASSERT_EQUAL_UINT16(1, maxElements);
 }
 
 void test_KnxNetIpParam_TunnellingUsers_Describe(void)
@@ -464,7 +477,7 @@ int main(int argc, char** argv) {
     RUN_TEST(test_KnxNetIpParam_BackboneKey_WriteRead);
     RUN_TEST(test_KnxNetIpParam_MulticastLatencyTolerance_WriteRead);
     RUN_TEST(test_KnxNetIpParam_SyncLatencyFraction_WriteRead);
-    RUN_TEST(test_KnxNetIpParam_SecuredServiceFamilies_WriteRead);
+    RUN_TEST(test_KnxNetIpParam_SecuredServiceFamilies_IsAFunctionProperty);
     RUN_TEST(test_KnxNetIpParam_TunnellingUsers_Describe);
     RUN_TEST(test_KnxNetIpParam_UndeclaredPid_RejectsInvalid);
 

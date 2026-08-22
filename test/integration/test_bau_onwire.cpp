@@ -1348,12 +1348,130 @@ void test_bau_security_sequence_numbers_survive_restart(void) {
     clearPersistenceStore();
 }
 
+
+// ETS opens a secure Download All by telling the device which KNXnet/IP service
+// families need encrypting — PID_SECURED_SERVICE_FAMILIES on the KNXnet/IP
+// Parameter Object (03/08/09 §2.3.1.5). The device used to have no handler for
+// function properties on that object at all and answered E_DATA_TYPE_CONFLICT,
+// which reached ETS as a bare "ResultCode=FE" in the middle of a download.
+//
+// §2.3.1.5.2: "Regardless of the device Security Mode, command access to this
+// Property shall only be possible using secure communication" — note
+// "regardless", unlike the Security Interface Object's own properties. So an
+// unsecured command is refused, and refused with an access error rather than
+// the datatype error that used to come out.
+void test_bau_secured_service_families_command_refused_when_unsecured(void) {
+    const std::vector<uint8_t> incoming = withChecksum({
+        0x30,       // ctrl: extended, not repeated, system priority, no ACK request
+        0x60,       // ctrle: individually addressed, hop count 6
+        0x11, 0x0B, // src 1.1.11
+        0x11, 0x0A, // dest 1.1.10 (our own individual address)
+        0x0A,       // length: 11 TPDU octets - 1
+        0x01, 0xD4, // TPDU: T_Data_Individual + APCI 0x1D4 FunctionPropertyExtCommand
+        0x00, 0x0B, // interface_object_type = 11 (KNXnet/IP Parameter Object)
+        0x00, 0x10, // object_instance = 1 + high nibble of property_id
+        0x5E,       // property_id = 94 (PID_SECURED_SERVICE_FAMILIES)
+        0x00,       // Reserved
+        0x00,       // WriteServiceID 00h - Write Service Family Security Requirement
+        0x05,       // ServiceInfo: Service Family ID 05h = KNXnet/IP Routing
+        0x00        // Security Version 00h = plain allowed
+    });
+
+    physicalLayer->injectFrame(incoming);
+
+    std::vector<uint8_t> sent;
+    for (int attempt = 0; attempt < 200 && !physicalLayer->getSentFrame(sent); ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    TEST_ASSERT_FALSE(sent.empty());
+
+    TEST_ASSERT_EQUAL_HEX8(0x01, sent[6]);
+    TEST_ASSERT_EQUAL_HEX8(0xD6, sent[7]);   // A_FunctionPropertyExtState_Response
+    TEST_ASSERT_EQUAL_HEX8(0x5E, sent[12]);  // property_id = 94
+    TEST_ASSERT_EQUAL_HEX8(0xFC, sent[13]);  // E_ACCESS_DENIED, not E_DATA_TYPE_CONFLICT
+
+    // And nothing was recorded: a refused command must not move the setting.
+    TEST_ASSERT_EQUAL_HEX8(0x00, bauInstance->management().securedServiceFamilyVersion(0x05));
+}
+
+// Reading the requirement is not restricted the same way — a client has to be
+// able to discover what a device needs before it can meet it. Figure 27:
+// Return Code | ServiceID | ServiceFamilyID | SecurityVersion.
+void test_bau_secured_service_families_state_read_answers_in_the_clear(void) {
+    const std::vector<uint8_t> incoming = withChecksum({
+        0x30,       // ctrl: extended, not repeated, system priority, no ACK request
+        0x60,       // ctrle: individually addressed, hop count 6
+        0x11, 0x0B, // src 1.1.11
+        0x11, 0x0A, // dest 1.1.10
+        0x09,       // length: 10 TPDU octets - 1
+        0x01, 0xD5, // TPDU: T_Data_Individual + APCI 0x1D5 FunctionPropertyExtStateRead
+        0x00, 0x0B, // interface_object_type = 11 (KNXnet/IP Parameter Object)
+        0x00, 0x10, // object_instance = 1 + high nibble of property_id
+        0x5E,       // property_id = 94
+        0x00,       // Reserved
+        0x00,       // ReadServiceID 00h
+        0x04        // ServiceInfo: Service Family ID 04h = KNXnet/IP Tunnelling
+    });
+
+    physicalLayer->injectFrame(incoming);
+
+    std::vector<uint8_t> sent;
+    for (int attempt = 0; attempt < 200 && !physicalLayer->getSentFrame(sent); ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    TEST_ASSERT_FALSE(sent.empty());
+
+    TEST_ASSERT_EQUAL_HEX8(0xD6, sent[7]);   // A_FunctionPropertyExtState_Response
+    TEST_ASSERT_EQUAL_HEX8(0x5E, sent[12]);  // property_id = 94
+    TEST_ASSERT_EQUAL_HEX8(0x00, sent[13]);  // Return Code: success
+    TEST_ASSERT_EQUAL_HEX8(0x00, sent[14]);  // ServiceID, echoed
+    TEST_ASSERT_EQUAL_HEX8(0x04, sent[15]);  // Service Family ID, as in the request
+    // §2.3.1.5.3: "The initial state of all service families supported by the
+    // device shall be set to not require security."
+    TEST_ASSERT_EQUAL_HEX8(0x00, sent[16]);  // Security Version
+}
+
+// A Service Family the standard does not allow to be secured is E_DATA_VOID,
+// and the answer still repeats the ServiceID so a client with several commands
+// outstanding can tell which one was refused. Core (02h) is the case that
+// matters: §2.3.1.5.1 keeps discovery unsecured on purpose.
+void test_bau_secured_service_families_rejects_unsecurable_family(void) {
+    const std::vector<uint8_t> incoming = withChecksum({
+        0x30, 0x60,
+        0x11, 0x0B,
+        0x11, 0x0A,
+        0x09,
+        0x01, 0xD5, // FunctionPropertyExtStateRead
+        0x00, 0x0B, // KNXnet/IP Parameter Object
+        0x00, 0x10,
+        0x5E,       // PID_SECURED_SERVICE_FAMILIES
+        0x00,       // Reserved
+        0x00,       // ReadServiceID 00h
+        0x02        // Service Family ID 02h = Core, which is never secured
+    });
+
+    physicalLayer->injectFrame(incoming);
+
+    std::vector<uint8_t> sent;
+    for (int attempt = 0; attempt < 200 && !physicalLayer->getSentFrame(sent); ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    TEST_ASSERT_FALSE(sent.empty());
+
+    TEST_ASSERT_EQUAL_HEX8(0x5E, sent[12]);  // property_id = 94
+    TEST_ASSERT_EQUAL_HEX8(0xF8, sent[13]);  // E_DATA_VOID
+    TEST_ASSERT_EQUAL_HEX8(0x00, sent[14]);  // ServiceID, repeated
+}
+
 int main(void) {
     UNITY_BEGIN();
 
     RUN_TEST(test_bau_function_property_ext_state_read_reports_security_mode_onwire);
     RUN_TEST(test_bau_function_property_command_security_mode_refused_when_unsecured);
     RUN_TEST(test_bau_function_property_load_state_refused_when_unsecured);
+    RUN_TEST(test_bau_secured_service_families_command_refused_when_unsecured);
+    RUN_TEST(test_bau_secured_service_families_state_read_answers_in_the_clear);
+    RUN_TEST(test_bau_secured_service_families_rejects_unsecurable_family);
     RUN_TEST(test_bau_downloaded_group_key_table_becomes_usable_key);
     RUN_TEST(test_bau_go_diagnostics_send_group_value_read_puts_read_on_bus);
     RUN_TEST(test_bau_go_diagnostics_refuses_secure_read_without_group_key);

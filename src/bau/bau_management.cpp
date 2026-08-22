@@ -20,6 +20,9 @@
 #include "knx/objects/generic_interface_object.hpp"
 #include "knx/objects/security_interface_object.hpp"
 #include "knx/util/log.hpp"
+#if KNX_FEATURE_NETIP
+#include "knx/netip/secured_service_families.hpp"
+#endif
 
 #include <algorithm>
 #include <span>
@@ -205,6 +208,7 @@ enum : uint8_t {
     kPidKnxNetIpDeviceCapabilities = 68,
     kPidKnxNetIpFriendlyName = 76,
     kPidKnxNetIpBackboneKey = 91,
+    kPidKnxNetIpSecuredServiceFamilies = 94,
 
     kPidRouterLineStatus = 51,
     kPidRouterMainLcConfig = 52,
@@ -485,6 +489,127 @@ util::Result<void> BusAccessUnit::syncRouterRoutingConfig()
     return util::Result<void>::ok();
 }
 
+#if KNX_FEATURE_NETIP
+
+/**
+ * @brief PID_SECURED_SERVICE_FAMILIES (03/08/09 §2.3.1.5)
+ *
+ * ETS drives this at the start of a secure download to say which KNXnet/IP
+ * service families must be encrypted. It is a Function Property, so a plain
+ * property write is not how it is reached — and answering "not a function
+ * property" (E_DATA_TYPE_CONFLICT) left ETS with a bare ResultCode=FE in the
+ * middle of a Download All.
+ *
+ * Requesting security is refused unless the product has said it can honour it.
+ * Recording the requirement and answering Success would be the worse failure:
+ * ETS would show an installation as secured while the frames went out in the
+ * clear, and neither side would ever say otherwise.
+ */
+util::Result<application::FunctionPropertyResult> BusAccessUnit::handleKnxNetIpFunctionProperty(
+    const IndividualAddress& source,
+    const application::FunctionPropertyRequest& request)
+{
+    using application::FunctionPropertyInvocation;
+    using application::FunctionPropertyReturnCode;
+
+    if (request.propertyId
+            != static_cast<application::PropertyID>(kPidKnxNetIpSecuredServiceFamilies)) {
+        return util::ErrorCode::OperationNotSupported;
+    }
+
+    const bool isCommand = (request.invocation == FunctionPropertyInvocation::Command);
+
+    // §2.3.1.5.2: "Regardless of the device Security Mode, command access to
+    // this Property shall only be possible using secure communication." Note
+    // "regardless" — unlike the Security Interface Object's properties, this
+    // one is not gated on the Security Mode being on. Reading is not
+    // restricted that way; a client has to be able to discover the
+    // requirements before it can meet them.
+    if (isCommand && !request.security.toolSecured()) {
+        KNX_LOGW(TAG,
+                 "Refusing PID_SECURED_SERVICE_FAMILIES command from 0x%04X: "
+                 "§2.3.1.5.2 requires secure communication",
+                 source.raw);
+        application::FunctionPropertyResult denied;
+        denied.returnCode = FunctionPropertyReturnCode::AccessDenied;
+        return denied;
+    }
+
+    const auto decoded = netip::decodeSecuredServiceFamiliesRequest(request.data.span(), isCommand);
+
+    application::FunctionPropertyResult result;
+    const auto answer = [&result, &decoded](FunctionPropertyReturnCode code) {
+        result.returnCode = code;
+        result.data.clear();
+        if (decoded.hasServiceId) {
+            (void)result.data.push_back(decoded.serviceId);
+        }
+        return result;
+    };
+
+    if (!decoded.ok()) {
+        return answer(decoded.returnCode);
+    }
+
+    if (!isCommand) {
+        // Figure 27: Return Code | ServiceID | ServiceFamilyID | SecurityVersion.
+        answer(FunctionPropertyReturnCode::Success);
+        (void)result.data.push_back(decoded.serviceFamilyId);
+        (void)result.data.push_back(securedServiceFamilyVersion(decoded.serviceFamilyId));
+        return result;
+    }
+
+    if (decoded.securityVersion == netip::kSecurityVersionRequired
+            && !_securedServiceFamilyCallback) {
+        // Nothing in this device can encrypt that family. Saying so is the
+        // whole point of the branch: recording the requirement and answering
+        // Success would leave ETS showing an installation as secured while the
+        // frames went out in the clear, and neither side would ever say
+        // otherwise. E_ERROR is Table 4's "failed, no closer indication".
+        KNX_LOGW(TAG,
+                 "0x%04X asked for security on KNXnet/IP service family 0x%02X, "
+                 "which this device cannot enforce",
+                 source.raw, static_cast<unsigned>(decoded.serviceFamilyId));
+        return answer(FunctionPropertyReturnCode::Error);
+    }
+
+    if (_securedServiceFamilyCallback
+            && !_securedServiceFamilyCallback(decoded.serviceFamilyId, decoded.securityVersion)) {
+        return answer(FunctionPropertyReturnCode::Error);
+    }
+
+    setSecuredServiceFamilyVersion(decoded.serviceFamilyId, decoded.securityVersion);
+    KNX_LOGI(TAG, "KNXnet/IP service family 0x%02X security version set to %u by 0x%04X",
+             static_cast<unsigned>(decoded.serviceFamilyId),
+             static_cast<unsigned>(decoded.securityVersion), source.raw);
+
+    // Figure 24: Return Code | ServiceID.
+    return answer(FunctionPropertyReturnCode::Success);
+}
+
+void BusAccessUnit::setSecuredServiceFamilyCallback(SecuredServiceFamilyCallback callback)
+{
+    _securedServiceFamilyCallback = std::move(callback);
+}
+
+uint8_t BusAccessUnit::securedServiceFamilyVersion(uint8_t serviceFamilyId) const
+{
+    if (!netip::isSecurableServiceFamily(serviceFamilyId)) {
+        return netip::kSecurityVersionPlain;
+    }
+    return _securedServiceFamilyVersions[netip::securableServiceFamilyIndex(serviceFamilyId)];
+}
+
+void BusAccessUnit::setSecuredServiceFamilyVersion(uint8_t serviceFamilyId, uint8_t version)
+{
+    if (!netip::isSecurableServiceFamily(serviceFamilyId)) {
+        return;
+    }
+    _securedServiceFamilyVersions[netip::securableServiceFamilyIndex(serviceFamilyId)] = version;
+}
+
+#endif  // KNX_FEATURE_NETIP
+
 util::Result<application::FunctionPropertyResult> BusAccessUnit::handleRouterFunctionProperty(
     const application::FunctionPropertyRequest& request)
 {
@@ -620,6 +745,11 @@ void BusAccessUnit::wireManagementServices()
                 return util::ErrorCode::InvalidAddress;
             }
 
+#if KNX_FEATURE_NETIP
+            if (*objectType == InterfaceObjectType::knxNetIpParameter()) {
+                return handleKnxNetIpFunctionProperty(source, request);
+            }
+#endif
             if (*objectType == InterfaceObjectType::security()) {
                 return handleSecurityFunctionProperty(_securityObject, source, request);
             }
@@ -670,6 +800,11 @@ void BusAccessUnit::wireManagementServices()
 
             const InterfaceObjectType objectType{static_cast<uint16_t>(header.objectType)};
             util::Result<FunctionPropertyResult> result = util::ErrorCode::OperationNotSupported;
+#if KNX_FEATURE_NETIP
+            if (objectType == InterfaceObjectType::knxNetIpParameter()) {
+                result = handleKnxNetIpFunctionProperty(source, request);
+            } else
+#endif
             if (objectType == InterfaceObjectType::security()) {
                 result = handleSecurityFunctionProperty(_securityObject, source, request);
             } else if (objectType == InterfaceObjectType::router()) {

@@ -591,6 +591,11 @@ private:
 
     /// Dispatch a Function Property invocation on the Router Object
     /// (PID_ROUTETABLE_CONTROL) to the coupler's filter table.
+    util::Result<application::FunctionPropertyResult> handleKnxNetIpFunctionProperty(
+        const IndividualAddress& source,
+        const application::FunctionPropertyRequest& request);
+    void setSecuredServiceFamilyVersion(uint8_t serviceFamilyId, uint8_t version);
+
     util::Result<application::FunctionPropertyResult> handleRouterFunctionProperty(
         const application::FunctionPropertyRequest& request);
 
@@ -660,8 +665,34 @@ private:
     using BackboneKeyCallback = util::InplaceFunction<void(std::span<const uint8_t> key), 64>;
     void setBackboneKeyCallback(BackboneKeyCallback callback);
 
+    /**
+     * @brief Accept or refuse a security requirement on a KNXnet/IP service family
+     *
+     * 03/08/09 §2.3.1.5: ETS uses PID_SECURED_SERVICE_FAMILIES to say which of
+     * Device Management (03h), Tunnelling (04h) and Routing (05h) must be
+     * encrypted, with version 00h meaning plain is allowed and 01h meaning KNX
+     * IP Secure is required.
+     *
+     * Only the code that implements a service family knows whether it can
+     * encrypt it, so requiring security is refused outright unless this is set.
+     * Recording the requirement and answering Success would let ETS show an
+     * installation as secured while the frames went out in the clear.
+     *
+     * Return false to refuse; the client is told with E_ERROR.
+     */
+    using SecuredServiceFamilyCallback =
+        util::InplaceFunction<bool(uint8_t serviceFamilyId, uint8_t securityVersion), 64>;
+    void setSecuredServiceFamilyCallback(SecuredServiceFamilyCallback callback);
+
+    /// The security version currently configured for a service family, 0 when
+    /// plain communication is allowed. Unknown families read as 0.
+    [[nodiscard]] uint8_t securedServiceFamilyVersion(uint8_t serviceFamilyId) const;
 
     BackboneKeyCallback _backboneKeyCallback{};
+    SecuredServiceFamilyCallback _securedServiceFamilyCallback{};
+
+    /// Indexed by the three securable families; see kSecurableServiceFamilies.
+    std::array<uint8_t, 3> _securedServiceFamilyVersions{};
 #endif
 
     util::Result<void> setReferenceObjectProperty(InterfaceObjectType objectType,
@@ -795,6 +826,23 @@ public:
     /// BusAccessUnit::setBackboneKeyCallback for why storing it is not enough.
     void setBackboneKeyCallback(BusAccessUnit::BackboneKeyCallback callback) {
         _bau.setBackboneKeyCallback(std::move(callback));
+    }
+
+    /// See BusAccessUnit::setSecuredServiceFamilyCallback.
+    using SecuredServiceFamilyCallback = BusAccessUnit::SecuredServiceFamilyCallback;
+
+    /// Decide whether this device can encrypt a KNXnet/IP service family ETS
+    /// asks to secure. Without one, requiring security is refused — see
+    /// BusAccessUnit::setSecuredServiceFamilyCallback for why that is the safe
+    /// default rather than the unhelpful one.
+    void setSecuredServiceFamilyCallback(BusAccessUnit::SecuredServiceFamilyCallback callback) {
+        _bau.setSecuredServiceFamilyCallback(std::move(callback));
+    }
+
+    /// The security version currently configured for a KNXnet/IP service
+    /// family; 0 when plain communication is allowed.
+    [[nodiscard]] uint8_t securedServiceFamilyVersion(uint8_t serviceFamilyId) const {
+        return _bau.securedServiceFamilyVersion(serviceFamilyId);
     }
 #endif
 

@@ -2079,6 +2079,17 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/knx_product.cmake)
     )
     add_test(NAME test_knxnetip_discovery COMMAND test_knxnetip_discovery)
 
+    # Test executable: test_netip_secured_service_families
+    add_executable(test_netip_secured_service_families
+        test/unit/test_netip_secured_service_families.cpp
+    )
+    target_link_libraries(test_netip_secured_service_families PRIVATE
+        knx_core
+        unity
+    )
+    add_test(NAME test_netip_secured_service_families COMMAND test_netip_secured_service_families)
+    set_tests_properties(test_netip_secured_service_families PROPERTIES LABELS "unit" TIMEOUT 20)
+
     # Test executable: test_netip_socket_wait (event-driven receive plumbing)
     add_executable(test_netip_socket_wait
         test/unit/test_netip_socket_wait.cpp

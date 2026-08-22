@@ -316,7 +316,12 @@ std::span<const PropertyManifestEntry> referenceObjectPropertyManifestEntries(In
             entry(toPid(ReferencePropertyId::KnxNetIpBackboneKey), PDT::Generic16, PA::ReadWrite, 1),
             entry(toPid(ReferencePropertyId::KnxNetIpMulticastLatencyTolerance), PDT::UnsignedInt, PA::ReadWrite, 1),
             entry(toPid(ReferencePropertyId::KnxNetIpSyncLatencyFraction), PDT::UnsignedChar, PA::ReadWrite, 1),
-            entry(toPid(ReferencePropertyId::KnxNetIpSecuredServiceFamilies), PDT::GenericData, PA::ReadWrite, 0xFFFFu),
+            // PDT_FUNCTION, not stored data: 03/08/09 §2.3.1.5 defines it as a
+            // Function Property whose encoding differs between the write and
+            // the response, so no single datatype describes it. Declaring it as
+            // generic data told a client to write into it directly, which
+            // records a security requirement nothing acts on.
+            entry(toPid(ReferencePropertyId::KnxNetIpSecuredServiceFamilies), PDT::Function, PA::ReadWrite, 1),
         };
         return regs;
     }
