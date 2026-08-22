@@ -1043,6 +1043,10 @@ util::Result<void> BusAccessUnit::refreshStackPortMulticastMembership() {
                       : util::Result<void>::err(util::ErrorCode::NotInitialized);
 }
 
+LinkDiagnostics BusAccessUnit::stackPortLinkDiagnostics() const {
+    return _stackPort ? _stackPort->linkDiagnostics() : LinkDiagnostics{};
+}
+
 std::vector<uint8_t> BusAccessUnit::referenceObjectPropertyValue(
     InterfaceObjectType objectType, application::PropertyID propertyId) const {
     if (!_propertyAccessBridge) {

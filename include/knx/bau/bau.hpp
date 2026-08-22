@@ -87,6 +87,38 @@ using GroupObjectWriteCallback = util::InplaceFunction<void(GroupObjectIndex, st
 using GroupObjectReadCallback = util::InplaceFunction<void(GroupObjectIndex), 32>;
 
 /**
+ * @brief A snapshot of what the lower stack has seen arrive
+ *
+ * Deliberately one struct spanning two layers. The question it answers —
+ * "is anything reaching this device at all?" — cannot be answered from either
+ * layer alone: the medium counts datagrams, the data link counts the frames it
+ * recognised out of them, and a device that is being addressed but not answering
+ * looks entirely different depending on which of the two has stopped moving.
+ */
+struct LinkDiagnostics {
+    /// Data link: frames addressed to this device and delivered upward.
+    uint32_t rxFrames{0};
+    /// Data link: frames that arrived and were not for this device. Movement
+    /// here with none in rxFrames means the bus is live and the address filter
+    /// is not matching.
+    uint32_t rxFilterDropped{0};
+    /// Data link: frames lost because the frame pool was exhausted.
+    uint32_t rxPoolDropped{0};
+    /// Data link: frames that failed to decode.
+    uint32_t rxDecodeFailed{0};
+
+    /// Medium: datagrams read off the socket (KNXnet/IP ports only).
+    uint64_t mediumDatagramsReceived{0};
+    /// Medium: datagrams discarded because the inbound queue was full.
+    uint64_t mediumDatagramsDropped{0};
+    /// Medium: multicast group memberships re-issued after a long silence.
+    uint64_t multicastRefreshes{0};
+    /// Medium: milliseconds since the last datagram arrived. Grows without
+    /// bound on a device the group is no longer being delivered to.
+    uint32_t msSinceLastInbound{0};
+};
+
+/**
  * @brief Base Bus Access Unit
  * 
  * Manages protocol stack and device objects.
@@ -430,6 +462,7 @@ private:
     void setDataLinkPromiscuousMode(datalink::PromiscuousMode mode);
     network::TwoPortCoupler* stackPortCoupler();
     util::Result<void> refreshStackPortMulticastMembership();
+    LinkDiagnostics stackPortLinkDiagnostics() const;
     void setReferenceInterfaceObjectTypes(std::vector<InterfaceObjectType> objectTypes);
     const std::vector<InterfaceObjectType>& referenceInterfaceObjectTypes() const;
     util::Result<void> configureRouterRole(const RouterRoleConfig& config);
@@ -838,6 +871,9 @@ public:
         return _bau.refreshStackPortMulticastMembership();
     }
 
+    /// Counters for the port. See LinkDiagnostics for what they distinguish.
+    LinkDiagnostics diagnostics() const { return _bau.stackPortLinkDiagnostics(); }
+
 private:
     BusAccessUnit& _bau;
 };
@@ -975,6 +1011,19 @@ public:
     virtual util::Result<void> refreshMulticastMembership() {
         return util::ErrorCode::OperationNotSupported;
     }
+
+    /**
+     * @brief Counters for the port, for telling silence apart from loss.
+     *
+     * A device that has stopped answering has three possible stories, and a
+     * capture taken on the network can only distinguish the first two:
+     * the telegram never reached the device, it reached the device and was
+     * filtered or dropped, or it was handled and the answer went missing on
+     * the way back. These counters separate the middle one from the first.
+     *
+     * Zero-filled on a port that does not keep the counter concerned.
+     */
+    virtual LinkDiagnostics linkDiagnostics() const { return {}; }
 };
 
 #if KNX_FEATURE_TP1

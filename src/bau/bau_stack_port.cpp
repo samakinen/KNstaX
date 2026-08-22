@@ -1304,6 +1304,34 @@ public:
         return util::ErrorCode::OperationNotSupported;
     }
 
+    LinkDiagnostics linkDiagnostics() const override {
+        LinkDiagnostics out;
+        if (!_lowerStack.context) {
+            return out;
+        }
+
+        if (const auto* dataLink = _lowerStack.context->medium.dataLinkLayer()) {
+            const auto stats = dataLink->getStatistics();
+            out.rxFrames = stats.rxFrames;
+            out.rxFilterDropped = stats.filterDropped;
+            out.rxPoolDropped = stats.rxDropped;
+            out.rxDecodeFailed = stats.decodeFailed;
+        }
+
+#if KNX_FEATURE_NETIP
+        // Only a routing port keeps these; every other medium leaves them zero,
+        // which is the honest answer rather than a fabricated one.
+        if (const auto* routing = _lowerStack.context->medium.ipRoutingPhysical()) {
+            const auto link = routing->linkStatistics();
+            out.mediumDatagramsReceived = link.datagramsReceived;
+            out.mediumDatagramsDropped = link.datagramsDropped;
+            out.multicastRefreshes = link.membershipRefreshes;
+            out.msSinceLastInbound = link.msSinceLastInbound;
+        }
+#endif
+        return out;
+    }
+
 #if KNX_FEATURE_NETIP
     Tp1StackPort(platform::Platform& platform,
                  std::unique_ptr<physical::IpTunnelingPhysical> physicalLayer)

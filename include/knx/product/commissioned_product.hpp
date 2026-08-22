@@ -1520,6 +1520,22 @@ public:
 #endif
 
     /**
+     * @brief Counters for the port this product is running on.
+     *
+     * For the question a capture taken on the network cannot answer: when the
+     * device stops responding, did the telegram reach it at all? On a KNXnet/IP
+     * routing port, `mediumDatagramsReceived` standing still while a client is
+     * plainly transmitting means the group is no longer being delivered here,
+     * and nothing above the socket can fix that.
+     *
+     * Zero-filled before start() and on a port that keeps no such counter.
+     */
+    bau::LinkDiagnostics linkDiagnostics() const
+    {
+        return _runtime.linkDiagnostics();
+    }
+
+    /**
      * @brief The coupler, when the product was started with `CouplerOptions`.
      *
      * nullptr for an ordinary end device. Use it to reach the filter table, the

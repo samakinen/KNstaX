@@ -288,6 +288,12 @@ public:
     }
 #endif
 
+    /// Counters for the port; see bau::LinkDiagnostics.
+    bau::LinkDiagnostics linkDiagnostics() const
+    {
+        return _bau ? _bau->link().diagnostics() : bau::LinkDiagnostics{};
+    }
+
     void stop()
     {
         if (_bau) {

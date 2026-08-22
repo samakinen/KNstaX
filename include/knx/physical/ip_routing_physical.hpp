@@ -127,6 +127,30 @@ public:
     /// not joined can transmit and cannot receive.
     [[nodiscard]] bool multicastJoined() const;
 
+    /**
+     * @brief Counters for the routing socket
+     *
+     * Exists to answer the one question a capture taken anywhere else cannot:
+     * when a device stops answering, did the telegram never arrive, or did it
+     * arrive and get dropped in here? `datagramsReceived` standing still while
+     * a client is plainly transmitting is the first case, and no amount of
+     * stack work fixes it.
+     */
+    struct LinkStatistics {
+        /// Datagrams read off the socket, whatever they turned out to contain.
+        uint64_t datagramsReceived{0};
+        /// Datagrams discarded because the inbound queue was already full.
+        uint64_t datagramsDropped{0};
+        /// Group memberships re-issued after a long silence; see
+        /// refreshMulticastMembership().
+        uint64_t membershipRefreshes{0};
+        /// Milliseconds since the last datagram. Grows without bound on a
+        /// device that has gone deaf.
+        uint32_t msSinceLastInbound{0};
+    };
+
+    [[nodiscard]] LinkStatistics linkStatistics() const;
+
     util::Result<size_t> sendFrame(std::span<const uint8_t> frame);
     util::Result<uint32_t> beginTransmit(std::span<const uint8_t> frame);
     util::Result<ProgressState> pollTransmit(uint32_t sequence);
@@ -140,6 +164,10 @@ public:
 private:
     void drainInboundOnce(uint32_t timeoutMs);
     void enqueueFrame(std::span<const uint8_t> cemi);
+
+    /// Re-join the group when nothing has arrived for a long time. See the
+    /// definition for why silence, and not a plain interval, is the trigger.
+    void refreshMembershipIfDeaf();
 
     platform::NetworkInterface* network_;
 
@@ -160,6 +188,12 @@ private:
 
     std::atomic<size_t> maxRxQueueDepth_;
     std::atomic<uint64_t> rxDropped_;
+    std::atomic<uint64_t> rxDatagrams_{0};
+    std::atomic<uint64_t> membershipRefreshes_{0};
+
+    /// Both touched only from the receive path, which is single-threaded.
+    uint32_t lastInboundMs_{0};
+    bool lastInboundValid_{false};
 
     std::unique_ptr<netip::RoutingEndpoint> endpoint_;
 

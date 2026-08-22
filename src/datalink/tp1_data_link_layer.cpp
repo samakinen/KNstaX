@@ -768,33 +768,21 @@ size_t Tp1DataLinkLayer::processRxAvailableInternal(uint32_t firstReadTimeoutMs)
         return 0u;
     }
 
-    for (;;) {
-        auto progress = pollReceive();
-        if (progress.isError()) {
-            KNX_LOGW(TAG, "pollReceive failed: %s", util::errorCodeToString(progress.error()));
-            finishRxOperation();
-            return _lastRxProgressDeliveredCount;
-        }
-
-        switch (progress.value()) {
-            case RxProgressState::Pending:
-                KNX_LOGD(TAG, "RX poll pending, no new frames available");
-                finishRxOperation();
-                return _lastRxProgressDeliveredCount;
-            case RxProgressState::Complete:
-                finishRxOperation();
-                return _lastRxProgressDeliveredCount;
-            case RxProgressState::Busy:
-                finishRxOperation();
-                return _lastRxProgressDeliveredCount;
-            case RxProgressState::TransmissionFailed:
-                finishRxOperation();
-                return _lastRxProgressDeliveredCount;
-            case RxProgressState::Timeout:
-                finishRxOperation();
-                return _lastRxProgressDeliveredCount;
-        }
+    // One call is the whole pass. pollReceive() runs its own loop over the
+    // physical layer and only comes back once the medium has nothing left, so
+    // every frame waiting on the socket is delivered here — the outcome only
+    // says why it stopped, and none of the reasons are worth polling again for.
+    // This used to be written as a loop whose every branch returned, which read
+    // as though the drain lived at this level. It does not.
+    auto progress = pollReceive();
+    if (progress.isError()) {
+        KNX_LOGW(TAG, "pollReceive failed: %s", util::errorCodeToString(progress.error()));
+    } else if (progress.value() == RxProgressState::Pending) {
+        KNX_LOGD(TAG, "RX poll pending, no new frames available");
     }
+
+    finishRxOperation();
+    return _lastRxProgressDeliveredCount;
 }
 
 } // namespace datalink

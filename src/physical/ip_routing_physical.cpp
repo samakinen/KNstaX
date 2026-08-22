@@ -14,6 +14,7 @@
 #include "knx/netip/routing_endpoint.hpp"
 #include "knx/netip/system_broadcast.hpp"
 #include "knx/util/result.hpp"
+#include "knx/util/log.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -25,6 +26,8 @@
 
 namespace knx {
 namespace physical {
+
+static const char* TAG = "KNX.IpRouting";
 
 IpRoutingPhysical::IpRoutingPhysical()
     : network_(nullptr)
@@ -82,6 +85,63 @@ void IpRoutingPhysical::enqueueFrame(std::span<const uint8_t> cemi)
     }
 }
 
+/// How long the socket may stay silent before the group membership is re-issued.
+///
+/// A blind periodic re-join is the wrong shape: refreshMulticastMembership()
+/// leaves the group before joining it again, so on a busy group it would open a
+/// window in which inbound telegrams are legitimately not delivered. Silence
+/// cannot lose what is not arriving, so triggering on it is free — and silence
+/// is also the only symptom the device can actually observe when a switch or an
+/// access point has aged its snooping entry out and stopped forwarding the
+/// group. A device in that state transmits perfectly and hears nothing, which
+/// reads from the outside exactly like a firmware that ignores the bus.
+static constexpr uint32_t kMembershipRefreshIdleMs = 60000u;
+
+void IpRoutingPhysical::refreshMembershipIfDeaf()
+{
+    if (!multicastJoined()) {
+        return;
+    }
+
+    const uint32_t now = netip::detail::nowMs(timingPlatform_);
+    if (!lastInboundValid_) {
+        // First pass: start the clock rather than treating "never heard
+        // anything" as a 1970-length silence.
+        lastInboundMs_ = now;
+        lastInboundValid_ = true;
+        return;
+    }
+
+    if ((now - lastInboundMs_) < kMembershipRefreshIdleMs) {
+        return;
+    }
+
+    // Reset the clock either way. A refresh that failed is not worth retrying
+    // twenty times a second, and one that succeeded has not yet been answered.
+    lastInboundMs_ = now;
+    if (refreshMulticastMembership().isOk()) {
+        membershipRefreshes_.fetch_add(1);
+        // Deliberately INFO and deliberately not rate-limited beyond the idle
+        // window itself: on a group that carries traffic this never prints, and
+        // on one that has stopped being delivered it is the only line anywhere
+        // that says so.
+        KNX_LOGI(TAG, "No inbound datagram for %u ms - re-issued the routing group membership",
+                 static_cast<unsigned>(kMembershipRefreshIdleMs));
+    }
+}
+
+IpRoutingPhysical::LinkStatistics IpRoutingPhysical::linkStatistics() const
+{
+    LinkStatistics out;
+    out.datagramsReceived = rxDatagrams_.load();
+    out.datagramsDropped = rxDropped_.load();
+    out.membershipRefreshes = membershipRefreshes_.load();
+    if (lastInboundValid_) {
+        out.msSinceLastInbound = netip::detail::nowMs(timingPlatform_) - lastInboundMs_;
+    }
+    return out;
+}
+
 void IpRoutingPhysical::drainInboundOnce(uint32_t timeoutMs)
 {
     if (!initialized_.load() || !endpoint_ || !endpoint_->isOpen()) {
@@ -91,8 +151,16 @@ void IpRoutingPhysical::drainInboundOnce(uint32_t timeoutMs)
     std::array<uint8_t, netip::kMaxCemiLDataSize> cemi{};
     auto recvRes = endpoint_->receive(cemi, timeoutMs);
     if (!recvRes.isOk()) {
+        refreshMembershipIfDeaf();
         return;
     }
+
+    // Counted before the kind is examined: a datagram that turned out to be a
+    // search request, or one this device could not decode, still proves the
+    // group is being delivered here.
+    rxDatagrams_.fetch_add(1);
+    lastInboundMs_ = netip::detail::nowMs(timingPlatform_);
+    lastInboundValid_ = true;
 
     const auto inbound = recvRes.value();
     // Both domains carry an ordinary cEMI L_Data frame; which service type
