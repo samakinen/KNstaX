@@ -158,11 +158,44 @@ void test_cemi_rejects_trailing_bytes_beyond_datalen(void) {
     TEST_ASSERT_TRUE(decodeCemiLData(std::span<const uint8_t>(buf.data(), encoded.value() + 1), out, decodedCode).isError());
 }
 
+// T_Connect, T_Disconnect and T_ACK are one octet with NPDU length 0. They are
+// the whole of the connection-oriented handshake, so a cEMI layer that will not
+// carry them leaves a device that answers every broadcast and cannot be
+// downloaded to: ETS opens a connection, the device never sees it, and the
+// first numbered frame arrives on a connection that was never created.
+void test_cemi_carries_one_octet_control_tpdus(void) {
+    // T_Connect, T_Disconnect, T_ACK.
+    for (const uint8_t controlOctet : {uint8_t{0x80}, uint8_t{0x81}, uint8_t{0xC2}}) {
+        LDataFrame in = makeFrame();
+        in.destination = GroupAddress(0x0101);  // 0.1.1, point to point
+        in.destinationType = AddressType::Individual;
+        in.tpdu.clear();
+        TEST_ASSERT_TRUE(in.tpdu.push_back(controlOctet));
+
+        std::array<uint8_t, kMaxCemiLDataSize> buf{};
+        auto encoded = encodeCemiLData(in, 0x29, buf);
+        TEST_ASSERT_TRUE(encoded.isOk());
+
+        // NPDU length is the octet before the TPDU and must read 0.
+        const size_t npduLenIndex = encoded.value() - 2;
+        TEST_ASSERT_EQUAL_UINT8(0x00, buf[npduLenIndex]);
+
+        LDataFrame out;
+        uint8_t decodedCode = 0;
+        auto decoded = decodeCemiLData(std::span<const uint8_t>(buf.data(), encoded.value()),
+                                       out, decodedCode);
+        TEST_ASSERT_TRUE(decoded.isOk());
+        TEST_ASSERT_EQUAL_UINT32(1u, out.tpdu.size());
+        TEST_ASSERT_EQUAL_UINT8(controlOctet, out.tpdu[0]);
+    }
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(test_cemi_roundtrip);
     RUN_TEST(test_cemi_encodes_short_apdu_data6);
     RUN_TEST(test_cemi_rejects_nonzero_ctrl2_low_nibble_for_standard);
     RUN_TEST(test_cemi_rejects_trailing_bytes_beyond_datalen);
+    RUN_TEST(test_cemi_carries_one_octet_control_tpdus);
     return UNITY_END();
 }

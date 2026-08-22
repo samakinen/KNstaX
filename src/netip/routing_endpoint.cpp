@@ -17,6 +17,10 @@ namespace netip {
 
 static const char* TAG = "KNX.RoutingEndpoint";
 
+/// ETS repeats a secured scan every second or so. Once, then a heartbeat, says
+/// the same thing without burying the rest of the log.
+static constexpr uint32_t kSecureDropLogIntervalMs = 30000u;
+
 RoutingEndpoint::RoutingEndpoint()
     : sock_(nullptr)
     , options_()
@@ -293,7 +297,23 @@ util::Result<RoutingEndpoint::Inbound> RoutingEndpoint::receive(std::span<uint8_
 
     if (hdr.serviceType == ip_secure::SecureWrapper::kServiceTypeSecureWrapper) {
         if (!security) {
-            KNX_LOGD(TAG, "SECURE_WRAPPER received but secure routing is not configured");
+            // Worth a warning rather than a debug line, and worth it in a
+            // release image. This is what a device looks like when the
+            // installation secured its backbone and this one was never given
+            // the key: discovery still answers, because it travels in the
+            // clear, so the device is visible in every scanner and deaf to
+            // everything else. Nothing else in the log says so.
+            const uint64_t dropped = secureWrappersUnreadable_.fetch_add(1) + 1;
+            const uint32_t now = nowMs();
+            if (!secureDropEverLogged_ || (now - secureDropLoggedMs_) >= kSecureDropLogIntervalMs) {
+                secureDropEverLogged_ = true;
+                secureDropLoggedMs_ = now;
+                KNX_LOGW(TAG,
+                         "SECURE_WRAPPER on the routing group but no backbone key is loaded "
+                         "-- dropped %llu so far. The group is running KNX/IP Secure Routing "
+                         "and this device cannot read it.",
+                         static_cast<unsigned long long>(dropped));
+            }
             return util::ErrorCode::OperationNotSupported;
         }
         SecurePacketCodec codec(*security, secureWrapBuffer_.span(), securePlainBuffer_.span());

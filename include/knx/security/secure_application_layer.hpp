@@ -157,6 +157,25 @@ private:
     };
     static constexpr size_t kPeerContexts = 4;
 
+    /// Can this device speak Data Secure at all, as opposed to being required
+    /// to?
+    ///
+    /// The two are different states and conflating them strands a factory
+    /// device. PID_SECURITY_MODE is ETS's to set and is off until it completes
+    /// a secure download, but the FDSK is on the device from the factory, and
+    /// ETS opens the very first exchange -- an S-A_Sync_Request -- already
+    /// secured with it. A device that answers "security is disabled" to that
+    /// cannot be commissioned securely at all.
+    ///
+    /// So the mode governs *enforcement*: whether unsecured access is refused.
+    /// Whether a secured frame can be verified and answered depends only on
+    /// holding a key. Nothing is weakened by the distinction -- a frame still
+    /// has to authenticate against that key to be accepted.
+    [[nodiscard]] bool securityUsable() const
+    {
+        return _securityObject.isSecurityEnabled() || _securityObject.hasToolKey();
+    }
+
     [[nodiscard]] SecureBlockContext blockContext(const SecureFrameInfo& info) const;
 
     [[nodiscard]] util::Result<Key> selectKey(const SecureFrameInfo& info,

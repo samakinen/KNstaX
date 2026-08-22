@@ -263,8 +263,8 @@ SecureRxResult SecureApplicationLayer::processIncoming(const SecureFrameInfo& in
         return {SecureRxDisposition::Plain, 0};
     }
 
-    if (!_securityObject.isSecurityEnabled()) {
-        KNX_LOGW(TAG, "Secure APDU from 0x%04X but security is disabled", info.source.raw);
+    if (!securityUsable()) {
+        KNX_LOGW(TAG, "Secure APDU from 0x%04X but this device holds no key", info.source.raw);
         return {SecureRxDisposition::Rejected, 0};
     }
 
@@ -529,7 +529,12 @@ util::Result<size_t> SecureApplicationLayer::processOutgoing(const SecureFrameIn
                                                              std::span<const uint8_t> plainTpdu,
                                                              std::span<uint8_t> secureOut)
 {
-    if (!_securityObject.isSecurityEnabled() || plainTpdu.size() < 2) {
+    // securityUsable() rather than the mode: an answer must carry the same
+    // protection the request did, and ETS's bootstrap exchange is secured
+    // before the mode is on. The mirroring below still decides case by case --
+    // a plain request is answered plain, and a spontaneous broadcast is never
+    // secured.
+    if (!securityUsable() || plainTpdu.size() < 2) {
         return static_cast<size_t>(0);
     }
     // Already secured (an S-A_Sync_Response the S-AL built itself).

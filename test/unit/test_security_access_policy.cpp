@@ -132,6 +132,12 @@ void test_management_writes_stay_open_while_security_mode_is_off(void) {
     TEST_ASSERT_TRUE(managementWritePermitted(APCIService::MemoryWrite, false, kPlain));
     TEST_ASSERT_TRUE(managementWritePermitted(APCIService::Restart, false, kPlain));
     TEST_ASSERT_TRUE(managementWritePermitted(APCIService::IndividualAddressWrite, false, kPlain));
+    // The one that stalled a real ETS6 download: ETS sends A_Authorize_Request
+    // in the clear to a device its project does not treat as secure, and a
+    // device that refuses it drops the APDU with no answer, so ETS waits out
+    // its timeout and disconnects mid-commissioning.
+    TEST_ASSERT_TRUE(managementWritePermitted(APCIService::AuthorizeRequest, false, kPlain));
+    TEST_ASSERT_TRUE(managementWritePermitted(APCIService::KeyWrite, false, kPlain));
 }
 
 // "Full management access to the device is possible even in device security

@@ -581,6 +581,112 @@ void test_group_replay_window_is_per_sender_not_per_group_address(void) {
     TEST_ASSERT_TRUE(seqUs > seqOther);
 }
 
+// --- Security Mode is enforcement, not capability ---------------------------
+//
+// A factory device has PID_SECURITY_MODE off and its FDSK on board. ETS opens
+// secure commissioning already secured with that key, so a device that treats
+// the mode as a master switch over the S-AL answers nothing and can never be
+// commissioned securely. The mode decides whether *unsecured* access is
+// refused; verifying a secured frame needs only a key.
+void test_secured_apdu_is_verified_before_ets_enables_the_mode(void) {
+    Harness harness;
+    harness.securityObject.setSecurityMode(objects::SecurityMode::Disabled);
+
+    // The C.1.1 request, unchanged. Only the mode differs from the test above.
+    const std::vector<uint8_t> tpdu{
+        0x03, 0xF1, 0x90,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x04,
+        0x67, 0x67, 0x24, 0x2a, 0x23, 0x08, 0xca, 0x76, 0xa1, 0x17, 0x74, 0x21,
+        0x4e, 0xe4, 0xcf, 0x5d, 0x94, 0x90, 0x9f, 0x74, 0x3d, 0x05,
+        0x0d, 0x8f, 0xc1, 0x68};
+
+    SecureFrameInfo info;
+    info.source = IndividualAddress(0xFF67);
+    info.destination = 0xFF00;
+    info.destinationType = AddressType::Individual;
+
+    std::array<uint8_t, 64> plain{};
+    const auto result = harness.sal->processIncoming(info, tpdu, plain);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(SecureRxDisposition::Unwrapped),
+                          static_cast<int>(result.disposition));
+    TEST_ASSERT_TRUE(result.security.secured);
+    TEST_ASSERT_TRUE(result.security.toolAccess);
+}
+
+// The answer has to be secured too, or ETS sees its S-A_Sync go unanswered.
+void test_answer_to_a_secured_request_is_secured_with_the_mode_off(void) {
+    Harness harness;
+    harness.securityObject.setSecurityMode(objects::SecurityMode::Disabled);
+    harness.securityObject.setSendingSequence(0x000000000010ULL);
+
+    const std::vector<uint8_t> request{
+        0x03, 0xF1, 0x90,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x04,
+        0x67, 0x67, 0x24, 0x2a, 0x23, 0x08, 0xca, 0x76, 0xa1, 0x17, 0x74, 0x21,
+        0x4e, 0xe4, 0xcf, 0x5d, 0x94, 0x90, 0x9f, 0x74, 0x3d, 0x05,
+        0x0d, 0x8f, 0xc1, 0x68};
+
+    SecureFrameInfo rx;
+    rx.source = IndividualAddress(0xFF67);
+    rx.destination = 0xFF00;
+    rx.destinationType = AddressType::Individual;
+
+    std::array<uint8_t, 64> plain{};
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(SecureRxDisposition::Unwrapped),
+                          static_cast<int>(harness.sal->processIncoming(rx, request, plain).disposition));
+
+    // Byte-identical to the mode-on case (C.1.2): the mode must not change what
+    // goes on the wire, only what is refused.
+    harness.securityObject.setSendingSequence(2u);
+    const std::vector<uint8_t> responsePlain{
+        0x03, 0xD6, 0x05, 0x35, 0x10, 0x01,
+        0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
+        0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F};
+
+    SecureFrameInfo tx;
+    tx.source = IndividualAddress(0xFF00);
+    tx.destination = 0xFF67;
+    tx.destinationType = AddressType::Individual;
+
+    std::array<uint8_t, 128> secured{};
+    const auto txResult = harness.sal->processOutgoing(tx, responsePlain, secured);
+    TEST_ASSERT_TRUE(txResult.isOk());
+
+    const std::vector<uint8_t> expected{
+        0x03, 0xF1, 0x90,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x03,
+        0x70, 0x6f, 0x53, 0x31, 0x05, 0x50, 0x35, 0x57, 0xcb, 0x2b, 0x24, 0xf1,
+        0xdd, 0x34, 0x1b, 0x60, 0xb7, 0xe0, 0x17, 0xec, 0xd6, 0xb0,
+        0x68, 0x49, 0xa7, 0x2b};
+    assertBytes("secured response with the mode off",
+                expected,
+                std::span<const uint8_t>(secured.data(), txResult.value()));
+}
+
+// Capability is the key, so no key means no secure exchange -- the loosened
+// gate must not become "accept anything".
+void test_secured_apdu_is_rejected_when_the_device_holds_no_key(void) {
+    Harness harness;
+    harness.securityObject.setSecurityMode(objects::SecurityMode::Disabled);
+    harness.securityObject.setToolKey(SecureApplicationLayer::Key{});  // all zero == absent
+
+    const std::vector<uint8_t> tpdu{
+        0x03, 0xF1, 0x90,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x04,
+        0x67, 0x67, 0x24, 0x2a, 0x23, 0x08, 0xca, 0x76, 0xa1, 0x17, 0x74, 0x21,
+        0x4e, 0xe4, 0xcf, 0x5d, 0x94, 0x90, 0x9f, 0x74, 0x3d, 0x05,
+        0x0d, 0x8f, 0xc1, 0x68};
+
+    SecureFrameInfo info;
+    info.source = IndividualAddress(0xFF67);
+    info.destination = 0xFF00;
+    info.destinationType = AddressType::Individual;
+
+    std::array<uint8_t, 64> plain{};
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(SecureRxDisposition::Rejected),
+                          static_cast<int>(harness.sal->processIncoming(info, tpdu, plain).disposition));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_spec_c11_data_apdu_is_verified_and_decrypted);
@@ -598,5 +704,8 @@ int main(void) {
     RUN_TEST(test_group_telegrams_are_secured_on_every_group_address);
     RUN_TEST(test_group_telegram_round_trips_and_replay_is_rejected);
     RUN_TEST(test_group_replay_window_is_per_sender_not_per_group_address);
+    RUN_TEST(test_secured_apdu_is_verified_before_ets_enables_the_mode);
+    RUN_TEST(test_answer_to_a_secured_request_is_secured_with_the_mode_off);
+    RUN_TEST(test_secured_apdu_is_rejected_when_the_device_holds_no_key);
     return UNITY_END();
 }

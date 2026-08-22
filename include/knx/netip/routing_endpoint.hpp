@@ -155,6 +155,9 @@ public:
     uint64_t routingLostCountTotal() const { return lostCountTotal_.load(); }
     uint64_t routingBusySeen() const { return busySeen_.load(); }
     uint64_t txDeferred() const { return txDeferred_.load(); }
+    /// SECURE_WRAPPER datagrams discarded because no backbone key is loaded.
+    /// Non-zero means a secured installation is talking to an unsecured device.
+    uint64_t secureWrappersUnreadable() const { return secureWrappersUnreadable_.load(); }
 
 private:
     util::Result<void> sendCemiCarrier(NetIpServiceType serviceType, std::span<const uint8_t> cemi, bool allowSecure);
@@ -186,6 +189,10 @@ private:
     std::atomic<uint64_t> lostCountTotal_{0};
     std::atomic<uint64_t> busySeen_{0};
     std::atomic<uint64_t> txDeferred_{0};
+    std::atomic<uint64_t> secureWrappersUnreadable_{0};
+    /// Throttle for the warning above. Touched only on the receive task.
+    uint32_t secureDropLoggedMs_{0};
+    bool secureDropEverLogged_{false};
 };
 
 } // namespace netip

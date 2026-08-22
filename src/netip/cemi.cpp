@@ -55,9 +55,14 @@ util::Result<size_t> encodeCemiLData(const datalink::LDataFrame& frame,
         return util::ErrorCode::InvalidParameter;
     }
 
-    // cEMI NPDU length is a single byte.
-    // TPDU must include at least the 2-byte TPCI/APCI header.
-    if (frame.tpdu.size() < 2 || frame.tpdu.size() > 256) {
+    // cEMI NPDU length is a single byte, so the TPDU tops out at 256 octets.
+    //
+    // The floor is one octet, not two. A connection-oriented control TPDU --
+    // T_Connect (80h), T_Disconnect (81h), T_ACK/T_NAK (Cxh) -- is a single
+    // octet with NPDU length 0; only a TPDU that also carries an APCI needs
+    // two. Requiring two here silently refused to put any of them on the wire,
+    // and with no T_ACK a download cannot be acknowledged.
+    if (frame.tpdu.empty() || frame.tpdu.size() > 256) {
         return util::ErrorCode::InvalidParameter;
     }
 
@@ -118,8 +123,11 @@ util::Result<size_t> encodeCemiLData(const datalink::LDataFrame& frame,
 util::Result<void> decodeCemiLData(std::span<const uint8_t> buffer,
                                    datalink::LDataFrame& frame,
                                    uint8_t& messageCode) {
-    // Minimal cEMI L_Data with AddInfoLen=0 and 2-byte TPDU header.
-    if (buffer.size() < 11) {
+    // Minimal cEMI L_Data with AddInfoLen=0: message code, AddInfoLen, two
+    // control fields, source, destination, NPDU length and a one-octet control
+    // TPDU. Ten, not eleven -- assuming a two-octet TPDU here rejected
+    // T_Connect and its siblings before the length field was even read.
+    if (buffer.size() < 10) {
         return util::ErrorCode::InvalidFrameSize;
     }
 
@@ -174,7 +182,13 @@ util::Result<void> decodeCemiLData(std::span<const uint8_t> buffer,
     // NPDU length (APDU length). TPDU total length is NPDU+1 (first TPDU byte carries TPCI/APCI high bits).
     uint8_t npduLen = buffer[idx++];
     const uint16_t tpduLen = static_cast<uint16_t>(npduLen) + 1u;
-    if (tpduLen < 2) {
+    // tpduLen is npduLen + 1 and so is never 0; a one-octet TPDU is the
+    // connection-oriented control frame (see encodeCemiLData). Rejecting it
+    // dropped every T_Connect, T_Disconnect and T_ACK arriving over routing,
+    // which let broadcast services work while no point-to-point connection
+    // could ever be opened -- so ETS could find the device and never download
+    // to it.
+    if (tpduLen < 1) {
         return util::ErrorCode::DecodeFailed;
     }
     if (buffer.size() < idx + tpduLen) {

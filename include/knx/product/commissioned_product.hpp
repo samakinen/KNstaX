@@ -774,6 +774,22 @@ struct IpRoutingOptions {
     uint8_t timeToLive{16};
 
     /**
+     * Deliver this device's own multicast back to its own socket.
+     *
+     * Off, because a device has nothing to learn from its own echo and a good
+     * deal to lose. The looped-back copy re-enters the stack as an ordinary
+     * inbound frame, so a Data Secure device sees its own responses arriving
+     * from its own individual address with sequence numbers it has already
+     * spent, records each as a security failure against itself, and reports
+     * that count to ETS.
+     *
+     * Worth having as a switch rather than a constant: two endpoints sharing
+     * one host only reach each other when the sender loops back, which is how
+     * the host tests put two devices on one machine.
+     */
+    Toggle multicastLoopback{Toggle::Disable};
+
+    /**
      * Answer KNXnet/IP discovery and self-description on the routing socket.
      *
      * On by default, because Core is mandatory for a KNXnet/IP device
@@ -1409,7 +1425,7 @@ public:
         auto physical = std::make_unique<physical::IpRoutingPhysical>();
         physical->setNetworkInterface(network);
         physical->setMulticast(options.multicastGroup, options.port, options.interfaceAddress);
-        physical->setMulticastSocketOptions(options.timeToLive, Toggle::Enable);
+        physical->setMulticastSocketOptions(options.timeToLive, options.multicastLoopback);
 
         if (options.announceOnNetwork) {
             configureCoreDiscovery(*physical, *network, options);
@@ -1776,6 +1792,27 @@ public:
     util::Result<void> applyEtsGroupKey(GroupAddress address, const std::array<uint8_t, 16>& key)
     {
         _runtime.applyGroupKey(address, key);
+        return util::Result<void>::ok();
+    }
+
+    /// Install the factory Tool Key (FDSK) without asserting Security Mode.
+    ///
+    /// This is what a device should do at power-up. PID_SECURITY_MODE belongs
+    /// to ETS: a device leaves the factory with it off, is commissioned over
+    /// plain management by a project that does not use security, and has the
+    /// mode switched on by ETS at the end of a secure download. The property
+    /// is persisted, so that decision survives a restart -- and firmware that
+    /// re-asserts the mode on every boot overwrites it, leaving a device no
+    /// unsecured project can ever commission.
+    ///
+    /// The key is still installed, so ETS can open a secured exchange whenever
+    /// it chooses to. Capability without enforcement; see
+    /// SecureApplicationLayer::securityUsable().
+    ///
+    /// Must be called after start().
+    util::Result<void> installFactoryToolKey(const std::array<uint8_t, 16>& key)
+    {
+        _runtime.applyToolKey(key);
         return util::Result<void>::ok();
     }
 
