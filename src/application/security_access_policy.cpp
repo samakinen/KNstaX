@@ -101,6 +101,7 @@ bool isManagementWriteService(APCIService service) noexcept
         case APCIService::MemoryExtendedWrite:
         case APCIService::IndividualAddressWrite:
         case APCIService::IndividualAddressSerialNumberWrite:
+        case APCIService::DomainAddressSerialNumberWrite:
         case APCIService::NetworkParameterWrite:
         case APCIService::SystemNetworkParameterWrite:
         case APCIService::AuthorizeRequest:

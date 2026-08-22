@@ -78,6 +78,27 @@ void test_individual_address_write_stays_an_ordinary_broadcast(void)
     TEST_ASSERT_FALSE(isSystemBroadcast(frame));
 }
 
+void test_domain_address_serial_number_services_are_system_broadcasts(void)
+{
+    // 03/03/07 §3.3.6/§3.3.7 pass all three to T_Data_SystemBroadcast. On
+    // KNXnet/IP the two domains are different service types, so a response sent
+    // as an ordinary routing indication never reaches the client that asked.
+    TEST_ASSERT_TRUE(isSystemBroadcast(broadcastFrame({0x03, 0xEC, 0x00, 0x00})));  // Read
+    TEST_ASSERT_TRUE(isSystemBroadcast(broadcastFrame({0x03, 0xED, 0x00, 0x00})));  // Response
+    TEST_ASSERT_TRUE(isSystemBroadcast(broadcastFrame({0x03, 0xEE, 0x00, 0x00})));  // Write
+}
+
+void test_individual_address_serial_number_services_stay_ordinary_broadcasts(void)
+{
+    // The neighbouring trio at 0x3DC..0x3DE is the contrast that matters: same
+    // escape block, same serial-number addressing, but §3.2.4/§3.2.5 send them
+    // with T_Data_Broadcast. Sweeping the whole block into the system domain
+    // would move these with it.
+    TEST_ASSERT_FALSE(isSystemBroadcast(broadcastFrame({0x03, 0xDC, 0x00, 0x00})));
+    TEST_ASSERT_FALSE(isSystemBroadcast(broadcastFrame({0x03, 0xDD, 0x00, 0x00})));
+    TEST_ASSERT_FALSE(isSystemBroadcast(broadcastFrame({0x03, 0xDE, 0x00, 0x00})));
+}
+
 void test_system_network_parameter_services_are_system_broadcasts(void)
 {
     // A_SystemNetworkParameter_Read / _Response / _Write, 0x1C8..0x1CA.
@@ -132,6 +153,8 @@ int main()
     RUN_TEST(test_secure_apdu_with_sbc_set_is_a_system_broadcast);
     RUN_TEST(test_secure_apdu_without_sbc_is_an_ordinary_broadcast);
     RUN_TEST(test_individual_address_write_stays_an_ordinary_broadcast);
+    RUN_TEST(test_domain_address_serial_number_services_are_system_broadcasts);
+    RUN_TEST(test_individual_address_serial_number_services_stay_ordinary_broadcasts);
     RUN_TEST(test_system_network_parameter_services_are_system_broadcasts);
     RUN_TEST(test_adc_response_is_not_mistaken_for_a_system_network_parameter);
     RUN_TEST(test_group_and_point_to_point_frames_are_never_system_broadcasts);

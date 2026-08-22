@@ -147,6 +147,8 @@ public:
     virtual void setExtendedFunctionPropertyProvider(
         application::PropertyExtServices::FunctionProvider provider) = 0;
     virtual void setCommissioningSerialNumber(const application::KnxSerialNumber& serialNumber) = 0;
+    virtual void setDomainAddress(std::span<const uint8_t> domainAddress) = 0;
+    virtual void setDomainAddressWriteCallback(application::DomainAddressWriteCallback callback) = 0;
     virtual void setDeviceMedium(MediumType medium) = 0;
 };
 
@@ -613,6 +615,18 @@ public:
         }
     }
 
+    void setDomainAddress(std::span<const uint8_t> domainAddress) {
+        if (_application) {
+            _application->networkParameterService().setDomainAddress(domainAddress);
+        }
+    }
+
+    void setDomainAddressWriteCallback(application::DomainAddressWriteCallback callback) {
+        if (_application) {
+            _application->networkParameterService().setDomainAddressWriteCallback(std::move(callback));
+        }
+    }
+
     void setCommissioningSerialNumber(const application::KnxSerialNumber& serialNumber) {
         if (_application) {
             _application->networkParameterService().setSerialNumber(serialNumber);
@@ -1076,6 +1090,14 @@ public:
         _context->application.setCommissioningSerialNumber(serialNumber);
     }
 
+    void setDomainAddress(std::span<const uint8_t> domainAddress) override {
+        _context->application.setDomainAddress(domainAddress);
+    }
+
+    void setDomainAddressWriteCallback(application::DomainAddressWriteCallback callback) override {
+        _context->application.setDomainAddressWriteCallback(std::move(callback));
+    }
+
     void setDeviceMedium(MediumType medium) override {
         _context->application.setDeviceMedium(medium);
     }
@@ -1424,6 +1446,14 @@ public:
 
     void setCommissioningSerialNumber(const application::KnxSerialNumber& serialNumber) override {
         _lowerStack.security->setCommissioningSerialNumber(serialNumber);
+    }
+
+    void setDomainAddress(std::span<const uint8_t> domainAddress) override {
+        _lowerStack.security->setDomainAddress(domainAddress);
+    }
+
+    void setDomainAddressWriteCallback(application::DomainAddressWriteCallback callback) override {
+        _lowerStack.security->setDomainAddressWriteCallback(std::move(callback));
     }
 
     void setDeviceMedium(MediumType medium) override {

@@ -1520,6 +1520,22 @@ public:
 #endif
 
     /**
+     * @brief Decide whether ETS may move this device to another routing group.
+     *
+     * On KNX IP the Domain Address is the routing multicast address, and ETS
+     * writes it by serial number during commissioning (03/03/07 §3.3.7). Only
+     * the firmware knows whether it can re-join a different group, so returning
+     * an error refuses the change and the device keeps answering with the
+     * address it is actually listening on. Without a callback the write is
+     * refused, which is the safe default: a recorded address the device is not
+     * reachable on is worse than a refusal.
+     */
+    void onDomainAddressWrite(application::DomainAddressWriteCallback callback)
+    {
+        _runtime.setDomainAddressWriteCallback(std::move(callback));
+    }
+
+    /**
      * @brief Counters for the port this product is running on.
      *
      * For the question a capture taken on the network cannot answer: when the

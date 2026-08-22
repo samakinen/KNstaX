@@ -664,6 +664,23 @@ void ApplicationLayer::wireServiceCallbacks() {
                                 _serviceResponseSendOptions);
         });
 
+    _networkParameterService->setDomainAddressResponseCallback(
+        [this](const KnxSerialNumber& serialNumber, std::span<const uint8_t> domainAddress) {
+            // Figures 27/28/31: serial_number then the domain address at its
+            // medium's width, and no reserved tail — unlike the individual
+            // address response, which pads to a fixed length.
+            ResponsePayload payload;
+            if (!appendPayloadBytes(payload, serialNumber)
+                || !appendPayloadBytes(payload, domainAddress)) {
+                logOversizedServiceResponse("DomainAddressSerialNumberResponse",
+                                            serialNumber.size() + domainAddress.size());
+                return;
+            }
+            (void)sendBroadcast(APCIService::DomainAddressSerialNumberResponse,
+                                payload,
+                                _serviceResponseSendOptions);
+        });
+
     _networkParameterService->setNetworkParameterResponseCallback(
         [this](InterfaceObjectType objectType,
                PropertyID propertyId,
@@ -859,6 +876,31 @@ void ApplicationLayer::handleIndividualAddressSerialNumberWrite(const ADataFrame
         (static_cast<uint16_t>(frame.data[kKnxSerialNumberBytes]) << 8)
         | frame.data[kKnxSerialNumberBytes + 1u]));
     (void)_networkParameterService->handleSerialNumberWrite(request);
+}
+
+void ApplicationLayer::handleDomainAddressSerialNumberRead(const ADataFrame& frame) {
+    // 03/03/07 Figure 26: serial_number(6), nothing else.
+    if (frame.data.size() < kKnxSerialNumberBytes) {
+        return;
+    }
+    KnxSerialNumber serial{};
+    std::copy_n(frame.data.begin(), kKnxSerialNumberBytes, serial.begin());
+    (void)_networkParameterService->handleDomainAddressSerialNumberRead(serial);
+}
+
+void ApplicationLayer::handleDomainAddressSerialNumberWrite(const ADataFrame& frame) {
+    // Figures 29/30/31: serial_number(6) then the domain address, whose width
+    // is the medium's — 2 octets on PL110, 6 on RF, 4 on plain KNX IP. The
+    // service checks the width against its own, because only it knows which
+    // medium this device is.
+    if (frame.data.size() <= kKnxSerialNumberBytes) {
+        return;
+    }
+    KnxSerialNumber serial{};
+    std::copy_n(frame.data.begin(), kKnxSerialNumberBytes, serial.begin());
+    const auto domainAddress =
+        std::span<const uint8_t>(frame.data).subspan(kKnxSerialNumberBytes);
+    (void)_networkParameterService->handleDomainAddressSerialNumberWrite(serial, domainAddress);
 }
 
 namespace {
@@ -1665,6 +1707,14 @@ void ApplicationLayer::dispatchService(const ADataFrame& aFrame) {
 
         case APCIService::IndividualAddressSerialNumberRead:
             handleIndividualAddressSerialNumberRead(aFrame);
+            return;
+
+        case APCIService::DomainAddressSerialNumberRead:
+            handleDomainAddressSerialNumberRead(aFrame);
+            return;
+
+        case APCIService::DomainAddressSerialNumberWrite:
+            handleDomainAddressSerialNumberWrite(aFrame);
             return;
 
         case APCIService::IndividualAddressSerialNumberWrite:

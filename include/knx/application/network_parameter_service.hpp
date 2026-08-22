@@ -79,6 +79,32 @@ using SerialNumberAddressWriteCallback = util::InplaceFunction<
     util::Result<void>(const IndividualAddress& newAddress), 64>;
 
 /**
+ * @brief The Domain Address in the encoding its medium uses.
+ *
+ * 03/03/07 §3.3.7: two octets on KNX-PL110, six on KNX-RF, and four on plain
+ * KNX IP where it is the routing multicast address. One value, three widths —
+ * so it is carried as bytes and the length is what says which medium this is.
+ */
+using DomainAddressBuffer = util::FixedVector<uint8_t, 6>;
+
+/**
+ * @brief Emits an A_DomainAddressSerialNumber_Response system broadcast.
+ */
+using DomainAddressResponseCallback = util::InplaceFunction<
+    void(const KnxSerialNumber& serialNumber, std::span<const uint8_t> domainAddress), 64>;
+
+/**
+ * @brief Applies a Domain Address addressed by serial number.
+ *
+ * Returning an error refuses the change and leaves the stored value alone. A
+ * device that cannot move media — a KNX IP device would have to re-join a
+ * different multicast group — should refuse rather than record an address it
+ * is not actually listening on.
+ */
+using DomainAddressWriteCallback = util::InplaceFunction<
+    util::Result<void>(std::span<const uint8_t> domainAddress), 64>;
+
+/**
  * @brief Answers A_NetworkParameter_Read.  Returning an error means "this
  * device does not expose that parameter", which per spec means stay silent.
  */
@@ -103,9 +129,25 @@ public:
     void setSerialNumber(const KnxSerialNumber& serialNumber) { _serialNumber = serialNumber; }
     const KnxSerialNumber& serialNumber() const { return _serialNumber; }
 
-    /// Domain address reported in the serial-number response.  Zero on TP1,
-    /// where the concept only exists for open media (PL/RF).
-    void setDomainAddress(uint16_t domainAddress) { _domainAddress = domainAddress; }
+    /**
+     * @brief The device's Domain Address, in its medium's encoding.
+     *
+     * Empty on TP1, where the concept only exists for open media. The length
+     * set here is the length this device will accept in a write and emit in a
+     * response, so it is also how the service learns which medium it is on.
+     */
+    void setDomainAddress(std::span<const uint8_t> domainAddress) {
+        _domainAddress.clear();
+        (void)_domainAddress.assign(domainAddress);
+    }
+    [[nodiscard]] std::span<const uint8_t> domainAddress() const { return _domainAddress.span(); }
+
+    void setDomainAddressResponseCallback(DomainAddressResponseCallback callback) {
+        _domainAddressResponseCallback = std::move(callback);
+    }
+    void setDomainAddressWriteCallback(DomainAddressWriteCallback callback) {
+        _domainAddressWriteCallback = std::move(callback);
+    }
 
     void setSerialNumberResponseCallback(SerialNumberResponseCallback callback) {
         _serialResponseCallback = std::move(callback);
@@ -137,6 +179,14 @@ public:
      */
     util::Result<void> handleSerialNumberWrite(const IndividualAddressSerialNumberWrite& request);
 
+    /// A_DomainAddressSerialNumber_Read.ind: answer only when the serial is ours.
+    util::Result<void> handleDomainAddressSerialNumberRead(const KnxSerialNumber& requested);
+
+    /// A_DomainAddressSerialNumber_Write.ind: apply only when the serial is ours
+    /// and the address is the width this medium uses.
+    util::Result<void> handleDomainAddressSerialNumberWrite(const KnxSerialNumber& requested,
+                                                            std::span<const uint8_t> domainAddress);
+
     util::Result<void> handleNetworkParameterRead(const NetworkParameterRequest& request);
     util::Result<void> handleNetworkParameterWrite(const NetworkParameterRequest& request);
 
@@ -163,7 +213,9 @@ public:
 
 private:
     KnxSerialNumber _serialNumber{};
-    uint16_t _domainAddress{0};
+    DomainAddressBuffer _domainAddress{};
+    DomainAddressResponseCallback _domainAddressResponseCallback{};
+    DomainAddressWriteCallback _domainAddressWriteCallback{};
     SerialNumberResponseCallback _serialResponseCallback{};
     SerialNumberAddressWriteCallback _addressWriteCallback{};
     NetworkParameterReadHandler _networkParameterRead{};

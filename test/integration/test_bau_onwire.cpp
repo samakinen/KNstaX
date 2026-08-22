@@ -12,6 +12,7 @@
 #include "knx/datalink/frame_codec.hpp"
 #include "knx/physical/tp1_medium_backend.hpp"
 #include "knx/types.hpp"
+#include "knx/netip/netip_parameter_object.hpp"
 #include "knx/platform/linux_platform.hpp"
 
 #include "../mocks/mock_physical_layer.hpp"
@@ -1463,6 +1464,81 @@ void test_bau_secured_service_families_rejects_unsecurable_family(void) {
     TEST_ASSERT_EQUAL_HEX8(0x00, sent[14]);  // ServiceID, repeated
 }
 
+
+// ETS reads and writes the Domain Address by serial number during
+// commissioning (03/03/07 §3.3.6/§3.3.7). On KNX IP the Domain Address is the
+// routing multicast address — four octets, per Figure 31 — and the device had
+// no handler for either service, so ETS's write was silently ignored and every
+// answer reported a domain address of zero.
+static std::vector<uint8_t> domainAddressReadFrame(const std::array<uint8_t, 6>& serial) {
+    return withChecksum({
+        0x30,       // ctrl: extended, not repeated, system priority, no ACK request
+        0x60,       // ctrle: individually addressed... overwritten below
+        0x11, 0x0B, // src 1.1.11
+        0x00, 0x00, // dest 0/0/0 broadcast
+        0x07,       // length: 8 TPDU octets - 1
+        0x03, 0xEC, // TPDU: T_Data_Broadcast + APCI 0x3EC DomainAddressSerialNumber_Read
+        serial[0], serial[1], serial[2], serial[3], serial[4], serial[5],
+    });
+}
+
+void test_bau_domain_address_read_answers_with_the_routing_group(void) {
+    // Give the device a serial the test can address it by; the fixture boots
+    // with the all-zero placeholder.
+    const std::array<uint8_t, 6> serial{0x00, 0xFA, 0x11, 0x22, 0x33, 0x44};
+    bauInstance->deviceObject().setSerialNumber(serial);
+
+    // Seed the KNXnet/IP configuration the way the firmware does at start-up:
+    // the Domain Address follows the routing multicast address.
+    knx::netip::KnxNetIpConfiguration config{};
+    config.routingMulticastAddress = knx::IpAddress::fromOctets(224, 0, 23, 12);
+    (void)bauInstance->management().applyKnxNetIpConfiguration(config);
+
+    auto frame = domainAddressReadFrame(serial);
+    frame[1] = 0xE0;  // group-addressed, hop count 6
+    frame[frame.size() - 1] =
+        knx::datalink::FrameCodec::calculateChecksum(std::span(frame).first(frame.size() - 1));
+
+    physicalLayer->injectFrame(frame);
+
+    std::vector<uint8_t> sent;
+    for (int attempt = 0; attempt < 200 && !physicalLayer->getSentFrame(sent); ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    TEST_ASSERT_FALSE(sent.empty());
+
+    // A_DomainAddressSerialNumber_Response: serial(6) then the four-octet
+    // multicast address, and no reserved tail.
+    // Standard frame: ctrl, src(2), dst(2), length, then the TPDU.
+    TEST_ASSERT_EQUAL_HEX8(0x03, sent[6]);   // T_Data_Broadcast + APCI high
+    TEST_ASSERT_EQUAL_HEX8(0xED, sent[7]);   // APCI low: 0x3ED
+    for (size_t i = 0; i < serial.size(); ++i) {
+        TEST_ASSERT_EQUAL_HEX8(serial[i], sent[8 + i]);
+    }
+    TEST_ASSERT_EQUAL_HEX8(224, sent[14]);
+    TEST_ASSERT_EQUAL_HEX8(0, sent[15]);
+    TEST_ASSERT_EQUAL_HEX8(23, sent[16]);
+    TEST_ASSERT_EQUAL_HEX8(12, sent[17]);
+}
+
+// Somebody else's serial number must go unanswered: every device on the system
+// broadcast hears the same frame, and two answers collide.
+void test_bau_domain_address_read_ignores_another_serial(void) {
+    auto frame = domainAddressReadFrame({0x00, 0xFA, 0xDE, 0xAD, 0xBE, 0xEF});
+    frame[1] = 0xE0;
+    frame[frame.size() - 1] =
+        knx::datalink::FrameCodec::calculateChecksum(std::span(frame).first(frame.size() - 1));
+
+    physicalLayer->injectFrame(frame);
+
+    std::vector<uint8_t> sent;
+    for (int attempt = 0; attempt < 30; ++attempt) {
+        if (physicalLayer->getSentFrame(sent)) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    TEST_ASSERT_TRUE(sent.empty());
+}
+
 int main(void) {
     UNITY_BEGIN();
 
@@ -1472,6 +1548,8 @@ int main(void) {
     RUN_TEST(test_bau_secured_service_families_command_refused_when_unsecured);
     RUN_TEST(test_bau_secured_service_families_state_read_answers_in_the_clear);
     RUN_TEST(test_bau_secured_service_families_rejects_unsecurable_family);
+    RUN_TEST(test_bau_domain_address_read_answers_with_the_routing_group);
+    RUN_TEST(test_bau_domain_address_read_ignores_another_serial);
     RUN_TEST(test_bau_downloaded_group_key_table_becomes_usable_key);
     RUN_TEST(test_bau_go_diagnostics_send_group_value_read_puts_read_on_bus);
     RUN_TEST(test_bau_go_diagnostics_refuses_secure_read_without_group_key);

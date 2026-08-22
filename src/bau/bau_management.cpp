@@ -935,6 +935,14 @@ util::Result<void> BusAccessUnit::applyKnxNetIpConfiguration(const netip::KnxNet
     record(write(kPidKnxNetIpCurrentSubnetMask, ipOctets(config.currentSubnetMask)));
     record(write(kPidKnxNetIpCurrentDefaultGateway, ipOctets(config.currentDefaultGateway)));
     record(write(kPidKnxNetIpRoutingMulticastAddress, ipOctets(config.routingMulticastAddress)));
+
+    // 03/03/07 §3.3.7: "For KNX IP plain this shall be a 4 octet value that
+    // shall consist of the IP multicast address only." The Domain Address and
+    // the routing multicast address are the same thing on this medium, so they
+    // are set from one place rather than left to drift apart — which is what
+    // made the device answer A_IndividualAddressSerialNumber_Read with a domain
+    // address of zero while ETS was busy writing it a real one.
+    setDomainAddress(ipOctets(config.routingMulticastAddress));
     record(write(kPidKnxNetIpSystemSetupMulticastAddress, ipOctets(config.systemSetupMulticastAddress)));
 
     const std::array<uint8_t, 1> ttl{config.timeToLive};

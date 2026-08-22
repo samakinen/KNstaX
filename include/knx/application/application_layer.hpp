@@ -502,6 +502,8 @@ private:
     void handleFunctionProperty(const ADataFrame& frame);
     void handleIndividualAddressSerialNumberRead(const ADataFrame& frame);
     void handleIndividualAddressSerialNumberWrite(const ADataFrame& frame);
+    void handleDomainAddressSerialNumberRead(const ADataFrame& frame);
+    void handleDomainAddressSerialNumberWrite(const ADataFrame& frame);
     void handleNetworkParameterRead(const ADataFrame& frame);
     void handleNetworkParameterWrite(const ADataFrame& frame);
     void handleMemoryRead(const ADataFrame& frame);

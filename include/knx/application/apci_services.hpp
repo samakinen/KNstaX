@@ -126,6 +126,12 @@ enum class APCIService : uint16_t {
     IndividualAddressSerialNumberResponse = 0x3DD, ///< A_IndividualAddressSerialNumber_Response
     IndividualAddressSerialNumberWrite = 0x3DE,    ///< A_IndividualAddressSerialNumber_Write
 
+    // 03/03/07 §3.3.6 and §3.3.7. Unlike the individual-address trio above,
+    // these travel as T_Data_SystemBroadcast — see isDomainAddressSerialNumber().
+    DomainAddressSerialNumberRead = 0x3EC,         ///< A_DomainAddressSerialNumber_Read
+    DomainAddressSerialNumberResponse = 0x3ED,     ///< A_DomainAddressSerialNumber_Response
+    DomainAddressSerialNumberWrite = 0x3EE,        ///< A_DomainAddressSerialNumber_Write
+
     // System network parameter services (03/03/07 §3.3.8, §3.3.9, Table 1).
     // A third block inside the nominal A_ADC_Response span that carries the
     // full 10-bit APCI.  ETS uses the Read for NM_Read_SerialNumber_By_-
@@ -217,6 +223,21 @@ struct APCIField {
         const uint16_t full = raw & 0x03FF;
         return full >= static_cast<uint16_t>(APCIService::SystemNetworkParameterRead)
             && full <= static_cast<uint16_t>(APCIService::SystemNetworkParameterWrite);
+    }
+
+    /**
+     * @brief True for the three domain-address serial-number services.
+     *
+     * They are the only broadcasts outside the A_SystemNetworkParameter_*
+     * group that 03/03/07 sends with T_Data_SystemBroadcast rather than
+     * T_Data_Broadcast (§3.3.6, §3.3.7). On KNXnet/IP the two ride different
+     * service types, so a response sent in the wrong domain reaches a client
+     * that is not listening for it.
+     */
+    constexpr bool isDomainAddressSerialNumber() const {
+        const uint16_t full = raw & 0x03FF;
+        return full >= static_cast<uint16_t>(APCIService::DomainAddressSerialNumberRead)
+            && full <= static_cast<uint16_t>(APCIService::DomainAddressSerialNumberWrite);
     }
 
     constexpr bool isPropertyExtended() const {

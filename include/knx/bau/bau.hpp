@@ -463,6 +463,8 @@ private:
     network::TwoPortCoupler* stackPortCoupler();
     util::Result<void> refreshStackPortMulticastMembership();
     LinkDiagnostics stackPortLinkDiagnostics() const;
+    void setDomainAddress(std::span<const uint8_t> domainAddress);
+    void setStackPortDomainAddressWriteCallback(application::DomainAddressWriteCallback callback);
     void setReferenceInterfaceObjectTypes(std::vector<InterfaceObjectType> objectTypes);
     const std::vector<InterfaceObjectType>& referenceInterfaceObjectTypes() const;
     util::Result<void> configureRouterRole(const RouterRoleConfig& config);
@@ -844,6 +846,22 @@ public:
     [[nodiscard]] uint8_t securedServiceFamilyVersion(uint8_t serviceFamilyId) const {
         return _bau.securedServiceFamilyVersion(serviceFamilyId);
     }
+
+    /// See application::DomainAddressWriteCallback.
+    using DomainAddressWriteCallback = application::DomainAddressWriteCallback;
+
+    /**
+     * @brief Decide whether a Domain Address written by serial number is applied.
+     *
+     * On KNX IP the Domain Address is the routing multicast address, so
+     * accepting one means re-joining a different group. Only the owner knows
+     * whether it can do that, and returning an error refuses the change — which
+     * is the honest answer for a device whose group is fixed at start-up.
+     * Without a callback the write is refused.
+     */
+    void setDomainAddressWriteCallback(DomainAddressWriteCallback callback) {
+        _bau.setStackPortDomainAddressWriteCallback(std::move(callback));
+    }
 #endif
 
     /// Write a property of a reference interface object (Router, KNXnet/IP
@@ -996,6 +1014,14 @@ public:
     /// Publish this device's 6-octet KNX serial number so it can be addressed
     /// by A_IndividualAddressSerialNumber_Read/_Write without programming mode.
     virtual void setCommissioningSerialNumber(const application::KnxSerialNumber& serialNumber) = 0;
+
+    /// The device's Domain Address in its medium's encoding; see
+    /// application::NetworkParameterService::setDomainAddress. A port without
+    /// an application layer has nowhere to put it.
+    virtual void setDomainAddress(std::span<const uint8_t> domainAddress) { (void)domainAddress; }
+    virtual void setDomainAddressWriteCallback(application::DomainAddressWriteCallback callback) {
+        (void)callback;
+    }
     /**
      * Declare which medium this device is on.
      *

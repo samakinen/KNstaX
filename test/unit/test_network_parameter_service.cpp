@@ -13,6 +13,8 @@
  */
 
 #include "unity.h"
+
+#include <array>
 #include "knx/application/network_parameter_service.hpp"
 #include "knx/protocol/tpdu_codec.hpp"
 
@@ -30,8 +32,13 @@ struct Captured {
     int serialResponses{0};
     int addressWrites{0};
     int parameterResponses{0};
+    int domainResponses{0};
+    int domainWrites{0};
+    bool refuseDomainWrite{false};
     IndividualAddress lastAddress{};
     uint16_t lastDomain{0};
+    std::vector<uint8_t> lastDomainResponse;
+    std::vector<uint8_t> lastDomainWrite;
     std::vector<uint8_t> lastParameterValue;
 };
 
@@ -45,6 +52,20 @@ NetworkParameterService makeService() {
         [](const KnxSerialNumber&, uint16_t domainAddress) {
             ++g_captured.serialResponses;
             g_captured.lastDomain = domainAddress;
+        });
+    service.setDomainAddressResponseCallback(
+        [](const KnxSerialNumber&, std::span<const uint8_t> domainAddress) {
+            ++g_captured.domainResponses;
+            g_captured.lastDomainResponse.assign(domainAddress.begin(), domainAddress.end());
+        });
+    service.setDomainAddressWriteCallback(
+        [](std::span<const uint8_t> domainAddress) -> util::Result<void> {
+            ++g_captured.domainWrites;
+            g_captured.lastDomainWrite.assign(domainAddress.begin(), domainAddress.end());
+            if (g_captured.refuseDomainWrite) {
+                return util::ErrorCode::OperationNotSupported;
+            }
+            return util::Result<void>::ok();
         });
     service.setAddressWriteCallback([](const IndividualAddress& address) -> util::Result<void> {
         ++g_captured.addressWrites;
@@ -63,11 +84,27 @@ void tearDown(void) {}
 
 void test_serial_read_answers_own_serial(void) {
     auto service = makeService();
-    service.setDomainAddress(0xBEEF);
+    // A two-octet domain address is the PL110 form, and the only one that fits
+    // the fixed field of A_IndividualAddressSerialNumber_Response.
+    const std::array<uint8_t, 2> doa{0xBE, 0xEF};
+    service.setDomainAddress(doa);
 
     TEST_ASSERT_TRUE(service.handleSerialNumberRead(kOurSerial).isOk());
     TEST_ASSERT_EQUAL(1, g_captured.serialResponses);
     TEST_ASSERT_EQUAL(0xBEEF, g_captured.lastDomain);
+}
+
+// A KNX IP device's domain address is the four-octet multicast address, which
+// does not fit that field — so it reports zero there, and the full value only
+// through A_DomainAddressSerialNumber_Read.
+void test_serial_read_reports_zero_for_a_wide_domain_address(void) {
+    auto service = makeService();
+    const std::array<uint8_t, 4> doa{224, 0, 23, 12};
+    service.setDomainAddress(doa);
+
+    TEST_ASSERT_TRUE(service.handleSerialNumberRead(kOurSerial).isOk());
+    TEST_ASSERT_EQUAL(1, g_captured.serialResponses);
+    TEST_ASSERT_EQUAL(0x0000, g_captured.lastDomain);
 }
 
 void test_serial_read_ignores_other_serial(void) {
@@ -253,9 +290,114 @@ void test_network_parameter_codec_round_trip(void) {
     TEST_ASSERT_EQUAL(0xDE, decoded.value().value[0]);
 }
 
+
+// --- Domain address by serial number (03/03/07 §3.3.6, §3.3.7) -------------
+
+// The KNX IP form: four octets, the routing multicast address.
+void test_domain_read_answers_own_serial(void) {
+    auto service = makeService();
+    const std::array<uint8_t, 4> doa{224, 0, 23, 12};
+    service.setDomainAddress(doa);
+
+    TEST_ASSERT_TRUE(service.handleDomainAddressSerialNumberRead(kOurSerial).isOk());
+    TEST_ASSERT_EQUAL(1, g_captured.domainResponses);
+    TEST_ASSERT_EQUAL_UINT32(4, g_captured.lastDomainResponse.size());
+    TEST_ASSERT_EQUAL_HEX8(224, g_captured.lastDomainResponse[0]);
+    TEST_ASSERT_EQUAL_HEX8(12, g_captured.lastDomainResponse[3]);
+}
+
+// Every device on the system broadcast hears the request; only one may answer.
+void test_domain_read_ignores_other_serial(void) {
+    auto service = makeService();
+    const std::array<uint8_t, 4> doa{224, 0, 23, 12};
+    service.setDomainAddress(doa);
+
+    TEST_ASSERT_TRUE(service.handleDomainAddressSerialNumberRead(kOtherSerial).isOk());
+    TEST_ASSERT_EQUAL(0, g_captured.domainResponses);
+}
+
+void test_domain_write_applies_and_is_read_back(void) {
+    auto service = makeService();
+    const std::array<uint8_t, 4> configured{224, 0, 23, 12};
+    service.setDomainAddress(configured);
+
+    const std::array<uint8_t, 4> requested{239, 192, 0, 5};
+    TEST_ASSERT_TRUE(service.handleDomainAddressSerialNumberWrite(kOurSerial, requested).isOk());
+    TEST_ASSERT_EQUAL(1, g_captured.domainWrites);
+    TEST_ASSERT_EQUAL_UINT32(4, g_captured.lastDomainWrite.size());
+    TEST_ASSERT_EQUAL_HEX8(239, g_captured.lastDomainWrite[0]);
+
+    // Stored, so the next read reports what the device is actually on.
+    TEST_ASSERT_TRUE(service.handleDomainAddressSerialNumberRead(kOurSerial).isOk());
+    TEST_ASSERT_EQUAL_HEX8(239, g_captured.lastDomainResponse[0]);
+    TEST_ASSERT_EQUAL_HEX8(5, g_captured.lastDomainResponse[3]);
+}
+
+void test_domain_write_ignores_other_serial(void) {
+    auto service = makeService();
+    const std::array<uint8_t, 4> configured{224, 0, 23, 12};
+    service.setDomainAddress(configured);
+
+    const std::array<uint8_t, 4> requested{239, 192, 0, 5};
+    TEST_ASSERT_TRUE(service.handleDomainAddressSerialNumberWrite(kOtherSerial, requested).isOk());
+    TEST_ASSERT_EQUAL(0, g_captured.domainWrites);
+}
+
+// An owner that cannot re-join a different group refuses, and the stored value
+// must not move — otherwise the device reports an address it is not on.
+void test_domain_write_refused_by_owner_keeps_the_old_address(void) {
+    auto service = makeService();
+    const std::array<uint8_t, 4> configured{224, 0, 23, 12};
+    service.setDomainAddress(configured);
+    g_captured.refuseDomainWrite = true;
+
+    const std::array<uint8_t, 4> requested{239, 192, 0, 5};
+    TEST_ASSERT_FALSE(service.handleDomainAddressSerialNumberWrite(kOurSerial, requested).isOk());
+
+    TEST_ASSERT_TRUE(service.handleDomainAddressSerialNumberRead(kOurSerial).isOk());
+    TEST_ASSERT_EQUAL_HEX8(224, g_captured.lastDomainResponse[0]);
+    TEST_ASSERT_EQUAL_HEX8(12, g_captured.lastDomainResponse[3]);
+}
+
+// §3.3.7 gives the address one width per medium. A write of another width is
+// meant for a device on another medium, and applying it would leave this one
+// reporting an address of the wrong shape.
+void test_domain_write_rejects_a_foreign_width(void) {
+    auto service = makeService();
+    const std::array<uint8_t, 4> configured{224, 0, 23, 12};
+    service.setDomainAddress(configured);
+
+    const std::array<uint8_t, 2> pl110{0xBE, 0xEF};
+    TEST_ASSERT_FALSE(service.handleDomainAddressSerialNumberWrite(kOurSerial, pl110).isOk());
+    TEST_ASSERT_EQUAL(0, g_captured.domainWrites);
+}
+
+// Without an owner to apply it there is nothing to record: a stored address the
+// device is not listening on is worse than no answer.
+void test_domain_write_without_a_callback_is_refused(void) {
+    g_captured = Captured{};
+    NetworkParameterService service;
+    service.setSerialNumber(kOurSerial);
+    const std::array<uint8_t, 4> configured{224, 0, 23, 12};
+    service.setDomainAddress(configured);
+
+    const std::array<uint8_t, 4> requested{239, 192, 0, 5};
+    TEST_ASSERT_FALSE(service.handleDomainAddressSerialNumberWrite(kOurSerial, requested).isOk());
+    TEST_ASSERT_EQUAL_UINT32(4, service.domainAddress().size());
+    TEST_ASSERT_EQUAL_HEX8(224, service.domainAddress()[0]);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_serial_read_answers_own_serial);
+    RUN_TEST(test_serial_read_reports_zero_for_a_wide_domain_address);
+    RUN_TEST(test_domain_read_answers_own_serial);
+    RUN_TEST(test_domain_read_ignores_other_serial);
+    RUN_TEST(test_domain_write_applies_and_is_read_back);
+    RUN_TEST(test_domain_write_ignores_other_serial);
+    RUN_TEST(test_domain_write_refused_by_owner_keeps_the_old_address);
+    RUN_TEST(test_domain_write_rejects_a_foreign_width);
+    RUN_TEST(test_domain_write_without_a_callback_is_refused);
     RUN_TEST(test_serial_read_ignores_other_serial);
     RUN_TEST(test_serial_write_applies_address_for_own_serial);
     RUN_TEST(test_serial_write_ignores_other_serial);

@@ -288,6 +288,14 @@ public:
     }
 #endif
 
+    /// See bau::ManagementControl::setDomainAddressWriteCallback.
+    void setDomainAddressWriteCallback(application::DomainAddressWriteCallback callback)
+    {
+        if (_bau) {
+            _bau->management().setDomainAddressWriteCallback(std::move(callback));
+        }
+    }
+
     /// Counters for the port; see bau::LinkDiagnostics.
     bau::LinkDiagnostics linkDiagnostics() const
     {

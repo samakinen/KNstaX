@@ -36,6 +36,15 @@ bool isSystemBroadcastApdu(std::span<const uint8_t> tpdu) noexcept
         return true;
     }
 
+    // 03/03/07 §3.3.6/§3.3.7 pass the domain-address serial-number services to
+    // T_Data_SystemBroadcast as well. Sending the response as an ordinary
+    // routing indication would put it in the domain the asking client is not
+    // listening to, which looks from the outside like a device that never
+    // answered.
+    if (apci.isDomainAddressSerialNumber()) {
+        return true;
+    }
+
     // A secure APDU carries the answer itself, in the SCF that follows the
     // two APCI octets. Compared against the assembled ten-bit APCI rather than
     // the raw first octet, whose top six bits are the TPCI.

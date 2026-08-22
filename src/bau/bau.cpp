@@ -1043,6 +1043,19 @@ util::Result<void> BusAccessUnit::refreshStackPortMulticastMembership() {
                       : util::Result<void>::err(util::ErrorCode::NotInitialized);
 }
 
+void BusAccessUnit::setDomainAddress(std::span<const uint8_t> domainAddress) {
+    if (_stackPort) {
+        _stackPort->setDomainAddress(domainAddress);
+    }
+}
+
+void BusAccessUnit::setStackPortDomainAddressWriteCallback(
+    application::DomainAddressWriteCallback callback) {
+    if (_stackPort) {
+        _stackPort->setDomainAddressWriteCallback(std::move(callback));
+    }
+}
+
 LinkDiagnostics BusAccessUnit::stackPortLinkDiagnostics() const {
     return _stackPort ? _stackPort->linkDiagnostics() : LinkDiagnostics{};
 }
