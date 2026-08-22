@@ -284,6 +284,17 @@ util::Result<void> IpRoutingPhysical::init() {
     return util::Result<void>::ok();
 }
 
+util::Result<void> IpRoutingPhysical::refreshMulticastMembership() {
+    if (!initialized_.load() || !endpoint_) {
+        return util::ErrorCode::NotInitialized;
+    }
+    return endpoint_->refreshMulticastMembership();
+}
+
+bool IpRoutingPhysical::multicastJoined() const {
+    return initialized_.load() && endpoint_ && endpoint_->multicastJoined();
+}
+
 void IpRoutingPhysical::close() {
     if (!initialized_.load()) return;
     if (endpoint_) {

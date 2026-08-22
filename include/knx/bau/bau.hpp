@@ -429,6 +429,7 @@ private:
     util::Result<void> sendDataLinkFrame(const datalink::LDataFrame& frame);
     void setDataLinkPromiscuousMode(datalink::PromiscuousMode mode);
     network::TwoPortCoupler* stackPortCoupler();
+    util::Result<void> refreshStackPortMulticastMembership();
     void setReferenceInterfaceObjectTypes(std::vector<InterfaceObjectType> objectTypes);
     const std::vector<InterfaceObjectType>& referenceInterfaceObjectTypes() const;
     util::Result<void> configureRouterRole(const RouterRoleConfig& config);
@@ -831,6 +832,12 @@ public:
     /// otherwise. Gives access to the filter table and the routing policy.
     network::TwoPortCoupler* coupler() { return _bau.stackPortCoupler(); }
 
+    /// Re-issue the routing group membership, for a stack port that has one.
+    /// OperationNotSupported on any other medium.
+    util::Result<void> refreshMulticastMembership() {
+        return _bau.refreshStackPortMulticastMembership();
+    }
+
 private:
     BusAccessUnit& _bau;
 };
@@ -956,6 +963,18 @@ public:
      * policy — see `network::TwoPortCoupler`.
      */
     virtual network::TwoPortCoupler* coupler() { return nullptr; }
+
+    /**
+     * @brief Re-issue the multicast membership of an IP routing port.
+     *
+     * OperationNotSupported for every port that is not KNXnet/IP Routing,
+     * which is the honest answer for a TP1 device rather than a silent
+     * success. See `physical::IpRoutingPhysical::refreshMulticastMembership()`
+     * for why a host has to ask for this at all.
+     */
+    virtual util::Result<void> refreshMulticastMembership() {
+        return util::ErrorCode::OperationNotSupported;
+    }
 };
 
 #if KNX_FEATURE_TP1

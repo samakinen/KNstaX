@@ -295,6 +295,14 @@ public:
         return _dataLink.get();
     }
 
+#if KNX_FEATURE_NETIP
+    /// The routing physical, when this bundle was built from one. Null for
+    /// every other medium, which is how the caller tells them apart.
+    physical::IpRoutingPhysical* ipRoutingPhysical() {
+        return _ipRoutingPhysical.get();
+    }
+#endif
+
 private:
     template <typename PhysicalT>
     void assignPhysical(std::unique_ptr<PhysicalT> physicalLayer)
@@ -1277,6 +1285,17 @@ public:
 
     network::TwoPortCoupler* coupler() override {
         return _lowerStack.context ? _lowerStack.context->couplerState.coupler.get() : nullptr;
+    }
+
+    util::Result<void> refreshMulticastMembership() override {
+#if KNX_FEATURE_NETIP
+        if (_lowerStack.context) {
+            if (auto* routing = _lowerStack.context->medium.ipRoutingPhysical()) {
+                return routing->refreshMulticastMembership();
+            }
+        }
+#endif
+        return util::ErrorCode::OperationNotSupported;
     }
 
 #if KNX_FEATURE_NETIP

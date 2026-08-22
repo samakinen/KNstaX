@@ -63,10 +63,20 @@ util::Result<void> RoutingEndpoint::open(platform::NetworkInterface& network, co
     (void)sock_->setMulticastLoopback(options_.loopback ? platform::MulticastLoopbackMode::Enable : platform::MulticastLoopbackMode::Disable);
     (void)sock_->setMulticastTtl(options_.ttl);
 
+    network_ = &network;
+
+    // A failed join is not a failed open. The interface may simply not be up
+    // yet -- a device whose access point is down at power-up still has to run
+    // its application with the parameters ETS gave it, not with compiled
+    // defaults, and a stack that refused to start here is a stack that stays
+    // unstarted until someone reboots the device. The socket is bound and
+    // usable; what is missing is the group membership, and
+    // refreshMulticastMembership() completes it when the interface arrives.
     auto joinRes = sock_->joinMulticast(multicastAddr_, interfaceAddr_);
-    if (joinRes.isError()) {
-        close();
-        return joinRes.error();
+    joined_ = !joinRes.isError();
+    if (!joined_) {
+        KNX_LOGW(TAG, "Routing group not joined yet (no interface?) -- the socket is "
+                      "open and the membership is retried when the host reports one");
     }
 
     // Preferred over the interface address in the options because that one is
@@ -77,13 +87,49 @@ util::Result<void> RoutingEndpoint::open(platform::NetworkInterface& network, co
     return util::Result<void>::ok();
 }
 
+util::Result<void> RoutingEndpoint::refreshMulticastMembership()
+{
+    if (!sock_ || !sock_->isOpen()) {
+        return util::ErrorCode::NotInitialized;
+    }
+
+    // Dropped first when one is held: an interface that changed address keeps
+    // the old membership alive on a route that no longer carries traffic, and
+    // joining again on top of it is a no-op rather than a repair. Leaving a
+    // group that was never joined is what the flag guards against.
+    if (joined_) {
+        sock_->leaveMulticast(multicastAddr_, interfaceAddr_);
+        joined_ = false;
+    }
+
+    (void)sock_->setMulticastInterface(interfaceAddr_);
+
+    auto joinRes = sock_->joinMulticast(multicastAddr_, interfaceAddr_);
+    if (joinRes.isError()) {
+        return joinRes.error();
+    }
+    joined_ = true;
+
+    // The address the search responses advertise is read from here, and this is
+    // the moment it is known to have changed.
+    if (interfaceAddr_.isZero() && network_ != nullptr) {
+        localAddr_ = network_->ipAddress();
+    }
+
+    return util::Result<void>::ok();
+}
+
 void RoutingEndpoint::close()
 {
-    if (sock_) {
+    if (sock_ && joined_) {
         sock_->leaveMulticast(multicastAddr_, interfaceAddr_);
+    }
+    if (sock_) {
         sock_->close();
         sock_.reset();
     }
+    joined_ = false;
+    network_ = nullptr;
     multicastAddr_ = IpAddress(0);
     interfaceAddr_ = IpAddress(0);
     localAddr_ = IpAddress(0);

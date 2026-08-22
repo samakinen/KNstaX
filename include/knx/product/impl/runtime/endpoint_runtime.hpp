@@ -276,6 +276,18 @@ public:
     }
 #endif  // KNX_FEATURE_NETIP
 
+#if KNX_FEATURE_NETIP
+    /// Re-issue the routing group membership; see
+    /// physical::IpRoutingPhysical::refreshMulticastMembership().
+    util::Result<void> refreshMulticastMembership()
+    {
+        if (!_bau) {
+            return util::ErrorCode::NotInitialized;
+        }
+        return _bau->link().refreshMulticastMembership();
+    }
+#endif
+
     void stop()
     {
         if (_bau) {

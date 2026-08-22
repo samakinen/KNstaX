@@ -1038,6 +1038,11 @@ network::TwoPortCoupler* BusAccessUnit::stackPortCoupler() {
     return _stackPort ? _stackPort->coupler() : nullptr;
 }
 
+util::Result<void> BusAccessUnit::refreshStackPortMulticastMembership() {
+    return _stackPort ? _stackPort->refreshMulticastMembership()
+                      : util::Result<void>::err(util::ErrorCode::NotInitialized);
+}
+
 std::vector<uint8_t> BusAccessUnit::referenceObjectPropertyValue(
     InterfaceObjectType objectType, application::PropertyID propertyId) const {
     if (!_propertyAccessBridge) {

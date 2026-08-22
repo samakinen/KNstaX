@@ -1429,6 +1429,16 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/knx_product.cmake)
     )
     add_test(NAME test_netip_routing COMMAND test_netip_routing)
 
+    # Test executable: test_netip_routing_membership (multicast join / rejoin)
+    add_executable(test_netip_routing_membership
+        test/unit/test_netip_routing_membership.cpp
+    )
+    target_link_libraries(test_netip_routing_membership PRIVATE
+        knx_core
+        unity
+    )
+    add_test(NAME test_netip_routing_membership COMMAND test_netip_routing_membership)
+
     # Test executable: test_netip_security_plumbing (transport security wrapper wiring)
     add_executable(test_netip_security_plumbing
         test/unit/test_netip_security_plumbing.cpp
@@ -1623,6 +1633,7 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/knx_product.cmake)
             test_netip_udp_datagram_channel
             test_netip_tcp_frame_channel
             test_netip_routing
+            test_netip_routing_membership
             test_netip_security_plumbing
             test_secure_vectors
             test_data_secure_roundtrip

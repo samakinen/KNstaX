@@ -127,6 +127,30 @@ public:
     bool isSendBlocked() const;
     uint32_t millisecondsUntilSendable() const;
 
+    /**
+     * Re-issue the IGMP membership for the routing group.
+     *
+     * The join is attempted at open(), and on a device whose interface is not
+     * up yet there is nothing to join on: the endpoint opens anyway, because a
+     * KNXnet/IP stack that refuses to start until the network arrives is a
+     * device that boots with default parameters instead of its commissioned
+     * ones. This is how the membership is completed afterwards — the host calls
+     * it when the interface gains an address.
+     *
+     * Also the repair for an address that changed underneath a membership that
+     * was already established (a DHCP renewal into a different subnet, a roam
+     * between access points): the group is left and rejoined, so the membership
+     * follows the interface rather than pointing at one that no longer exists.
+     *
+     * Idempotent, and safe to call on an endpoint that is already correctly
+     * joined. Returns NotInitialized when the socket is not open.
+     */
+    util::Result<void> refreshMulticastMembership();
+
+    /// True once the routing group has actually been joined. False between an
+    /// open() that found no interface and the refresh that completes it.
+    [[nodiscard]] bool multicastJoined() const { return joined_; }
+
     uint64_t routingLostMessagesSeen() const { return lostMessagesSeen_.load(); }
     uint64_t routingLostCountTotal() const { return lostCountTotal_.load(); }
     uint64_t routingBusySeen() const { return busySeen_.load(); }
@@ -142,6 +166,10 @@ private:
     IpAddress multicastAddr_{IpAddress(0)};
     IpAddress interfaceAddr_{IpAddress(0)};
     IpAddress localAddr_{IpAddress(0)};
+    /// Kept so a membership refresh can re-read the address the interface holds
+    /// now. The caller owns it and outlives the endpoint.
+    platform::NetworkInterface* network_{nullptr};
+    bool joined_{false};
 
     DatagramBuffer<config::kUdpBufferSize> rxBuffer_{};
     DatagramBuffer<config::kUdpBufferSize> txBuffer_{};

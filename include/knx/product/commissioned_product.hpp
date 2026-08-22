@@ -1478,6 +1478,29 @@ public:
     {
         return _runtime.applyKnxNetIpConfiguration(config);
     }
+
+    /**
+     * @brief Re-join the routing multicast group after an interface change.
+     *
+     * The membership is an interface-local thing: it is established when the
+     * routing socket opens, and it does not follow the interface afterwards.
+     * A device that started before its network was up never joined at all, and
+     * one whose lease moved it into a different subnet holds a membership on a
+     * route that no longer carries the group. Both are silent — the socket is
+     * open, sends succeed, and nothing arrives.
+     *
+     * So the firmware, which is the only party that learns the interface
+     * changed, says so here. Call it whenever the interface gains or changes an
+     * address; it is idempotent, and cheap enough that calling it on every such
+     * event is the intended use.
+     *
+     * Returns OperationNotSupported on a product that is not running KNXnet/IP
+     * routing, and NotInitialized before start().
+     */
+    util::Result<void> refreshIpMulticastMembership()
+    {
+        return _runtime.refreshMulticastMembership();
+    }
 #endif
 
     /**

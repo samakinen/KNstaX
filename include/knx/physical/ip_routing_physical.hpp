@@ -110,6 +110,23 @@ public:
     void close();
     bool isOpen() const;
 
+    /**
+     * Re-issue the routing group membership on the open socket.
+     *
+     * init() does not fail when the join does — see
+     * netip::RoutingEndpoint::refreshMulticastMembership() — so a device that
+     * started before its interface was up runs with a socket that is bound but
+     * deaf to the group. The host calls this when the interface gains or
+     * changes an address; until it does, that device hears nothing.
+     *
+     * Returns NotInitialized when the layer is not open.
+     */
+    util::Result<void> refreshMulticastMembership();
+
+    /// True once the routing group has been joined. A device that is open but
+    /// not joined can transmit and cannot receive.
+    [[nodiscard]] bool multicastJoined() const;
+
     util::Result<size_t> sendFrame(std::span<const uint8_t> frame);
     util::Result<uint32_t> beginTransmit(std::span<const uint8_t> frame);
     util::Result<ProgressState> pollTransmit(uint32_t sequence);
