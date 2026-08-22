@@ -13,9 +13,7 @@ util::Result<bool> UdpDatagramChannel::waitReadable(platform::UdpSocket& socket,
 {
     if (!socket.isOpen()) return util::ErrorCode::NotInitialized;
 
-    return detail::waitUntilReadable(timingPlatform, timeoutMs, [&socket]() {
-        return socket.available() > 0;
-    });
+    return detail::waitUntilReadable(timingPlatform, timeoutMs, socket);
 }
 
 util::Result<size_t> UdpDatagramChannel::exchange(platform::UdpSocket& socket,

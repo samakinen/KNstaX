@@ -481,7 +481,15 @@ util::Result<IpRoutingPhysical::ProgressState> IpRoutingPhysical::pollReceive() 
         return util::ErrorCode::OperationNotReady;
     }
 
-    drainInboundOnce(0);
+    // Spend the caller's deadline inside the socket rather than returning
+    // Pending and being asked again. beginReceive() set that deadline and it
+    // was ignored here, which is what left the layer above with nothing to do
+    // but poll. A zero or already-expired deadline still reads without waiting,
+    // so the drain that follows a first hit stays non-blocking.
+    const uint64_t now = static_cast<uint64_t>(netip::detail::nowMs(timingPlatform_));
+    const uint32_t waitMs =
+        (rxDeadlineMs_ > now) ? static_cast<uint32_t>(rxDeadlineMs_ - now) : 0u;
+    drainInboundOnce(waitMs);
 
     {
         std::lock_guard<std::mutex> lock(rxMutex_);

@@ -23,6 +23,8 @@
 #include <ctime>
 #include <limits>
 #include <unistd.h>
+#include <poll.h>
+#include <cerrno>
 #include <sys/utsname.h>
 #include <ifaddrs.h>
 #include <net/if.h>
@@ -561,6 +563,23 @@ public:
                 return 0;
             }
             return static_cast<size_t>(bytes);
+        }
+
+        knx::util::Result<bool> waitReadable(uint32_t timeoutMs) override {
+            if (_fd < 0) {
+                return knx::util::ErrorCode::NotInitialized;
+            }
+            struct pollfd pfd{};
+            pfd.fd = _fd;
+            pfd.events = POLLIN;
+            const int rc = ::poll(&pfd, 1, static_cast<int>(timeoutMs));
+            if (rc < 0) {
+                // A signal is not a socket error; report "nothing yet" and let
+                // the caller's own deadline decide whether to wait again.
+                return (errno == EINTR) ? knx::util::Result<bool>(false)
+                                        : knx::util::Result<bool>(knx::util::ErrorCode::OperationFailed);
+            }
+            return rc > 0;
         }
 
         uint16_t localPort() const override { return _localPort; }

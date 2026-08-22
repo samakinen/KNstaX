@@ -125,7 +125,26 @@ public:
      * @brief Get number of bytes available to read
      */
     virtual size_t available() const = 0;
-    
+
+    /**
+     * @brief Sleep until a datagram can be read, or the timeout expires
+     *
+     * The alternative, and what every caller falls back to without this, is to
+     * ask available() on a delay. That costs a wakeup per interval whether or
+     * not anything arrived, and adds up to one interval of latency to every
+     * telegram — on a KNXnet/IP routing device, to every telegram on the bus.
+     * A platform that can hand the wait to the kernel answers the instant the
+     * datagram lands and sleeps in between.
+     *
+     * @return true when readable, false when the timeout expired.
+     *         OperationNotSupported on a platform that cannot wait, which is
+     *         the default and tells the caller to poll instead.
+     */
+    virtual knx::util::Result<bool> waitReadable(uint32_t timeoutMs) {
+        (void)timeoutMs;
+        return knx::util::ErrorCode::OperationNotSupported;
+    }
+
     /**
      * @brief Get local port
      */

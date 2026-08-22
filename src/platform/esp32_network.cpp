@@ -7,6 +7,8 @@
  */
 
 #include "esp32_network.hpp"
+
+#include <cerrno>
 #include "knx/util/log.hpp"
 #include "esp_log.h"
 #include "esp_event.h"
@@ -233,6 +235,33 @@ size_t Esp32UdpSocket::available() const {
 
     const int ready = select(_socket + 1, &readable, nullptr, nullptr, &immediate);
     return (ready > 0 && FD_ISSET(_socket, &readable)) ? 1u : 0u;
+}
+
+knx::util::Result<bool> Esp32UdpSocket::waitReadable(uint32_t timeoutMs) {
+    if (_socket < 0) {
+        return knx::util::ErrorCode::NotInitialized;
+    }
+
+    // The same select() as available(), with a deadline instead of a zero
+    // timeout. This is what keeps the receive task off the CPU: without it the
+    // task above has to re-ask on an interval, which is both a wakeup per
+    // interval and up to one interval of latency on every telegram.
+    fd_set readable;
+    FD_ZERO(&readable);
+    FD_SET(_socket, &readable);
+
+    struct timeval deadline;
+    deadline.tv_sec = static_cast<time_t>(timeoutMs / 1000u);
+    deadline.tv_usec = static_cast<suseconds_t>((timeoutMs % 1000u) * 1000u);
+
+    const int ready = select(_socket + 1, &readable, nullptr, nullptr, &deadline);
+    if (ready < 0) {
+        // A signal is not a socket error: report "nothing yet" and let the
+        // caller's own deadline decide whether to wait again.
+        return (errno == EINTR) ? knx::util::Result<bool>(false)
+                                : knx::util::Result<bool>(knx::util::ErrorCode::OperationFailed);
+    }
+    return ready > 0 && FD_ISSET(_socket, &readable);
 }
 
 uint16_t Esp32UdpSocket::localPort() const {

@@ -307,11 +307,53 @@ void test_ip_routing_physical_refreshes_membership_after_silence(void) {
     dl.close();
 }
 
+// The port waits inside the socket for the deadline it was given, instead of
+// returning Pending and being asked again. This is what lets the data link's
+// receive task sleep in the medium rather than polling it: beginReceive() set
+// that deadline all along and pollReceive() ignored it.
+void test_ip_routing_physical_receive_waits_for_the_deadline(void) {
+    knx::platform::LinuxPlatform platform;
+    auto* net = platform.network();
+    TEST_ASSERT_NOT_NULL(net);
+    TEST_ASSERT_TRUE(net->init());
+
+    IpRoutingPhysical phys;
+    phys.setNetworkInterface(net);
+    phys.setTimingPlatform(&platform);
+    phys.setMulticast(pickGroup(), NetIpPort(pickPort()), pickIface());
+    Tp1DataLinkConfig manualRx = Tp1DataLinkConfig::defaults();
+    manualRx.enableRxTask = false;
+    Tp1DataLinkLayer dl(platform, phys, manualRx);
+    TEST_ASSERT_TRUE(dl.init(IndividualAddress(0x1104)).isOk());
+
+    // Nothing is being sent, so this must spend the whole deadline asleep.
+    const uint32_t before = platform.millis();
+    TEST_ASSERT_TRUE(phys.beginReceive(200).isOk());
+    const auto progress = phys.pollReceive();
+    const uint32_t elapsed = platform.millis() - before;
+
+    TEST_ASSERT_TRUE(progress.isOk());
+    TEST_ASSERT_EQUAL(knx::util::OperationProgressState::Timeout, progress.value());
+    // Lower bound only. An upper bound would be a scheduling assertion, and
+    // what matters is that it waited at all rather than returning at once.
+    TEST_ASSERT_GREATER_OR_EQUAL(180, elapsed);
+
+    dl.close();
+}
+
+// The capability the data link reads to decide whether its receive task sleeps
+// in the medium or polls it. Silently losing this reverts the whole change.
+void test_ip_routing_physical_advertises_medium_wait(void) {
+    TEST_ASSERT_TRUE(IpRoutingPhysical::receiveWaitsForMedium());
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(test_ip_routing_physical_send_receive);
     RUN_TEST(test_ip_routing_physical_send_receive_with_explicit_progression);
     RUN_TEST(test_ip_routing_physical_counts_inbound_datagrams);
     RUN_TEST(test_ip_routing_physical_refreshes_membership_after_silence);
+    RUN_TEST(test_ip_routing_physical_receive_waits_for_the_deadline);
+    RUN_TEST(test_ip_routing_physical_advertises_medium_wait);
     return UNITY_END();
 }

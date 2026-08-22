@@ -154,6 +154,16 @@ public:
     util::Result<size_t> sendFrame(std::span<const uint8_t> frame);
     util::Result<uint32_t> beginTransmit(std::span<const uint8_t> frame);
     util::Result<ProgressState> pollTransmit(uint32_t sequence);
+    /**
+     * @brief This port waits for the medium inside beginReceive()/pollReceive()
+     *
+     * Read by the data link layer to decide whether its receive task should
+     * sleep in the socket or poll on an interval. Declared as a member so the
+     * capability is detected by its presence, the same way the queue-notify
+     * hook is, rather than by a list of media kept somewhere else.
+     */
+    [[nodiscard]] static constexpr bool receiveWaitsForMedium() { return true; }
+
     util::Result<void> beginReceive(uint32_t timeoutMs);
     util::Result<ProgressState> pollReceive();
     util::Result<std::span<const uint8_t>> receivedFrameView();

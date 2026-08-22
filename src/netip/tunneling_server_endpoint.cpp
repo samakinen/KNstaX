@@ -343,9 +343,7 @@ util::Result<bool> TunnelingServerEndpoint::poll(int timeoutMs)
 
     pruneIdleChannels();
 
-    auto waitResult = detail::waitUntilReadable(timingPlatform_, timeoutMs, [this]() {
-        return socket_ && socket_->available() > 0;
-    });
+    auto waitResult = detail::waitUntilReadable(timingPlatform_, timeoutMs, *socket_);
     if (waitResult.isError()) {
         return waitResult.error();
     }

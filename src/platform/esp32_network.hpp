@@ -42,6 +42,7 @@ public:
                IpAddress& srcAddr, uint16_t& srcPort) override;
     
     size_t available() const override;
+    knx::util::Result<bool> waitReadable(uint32_t timeoutMs) override;
     uint16_t localPort() const override;
     
 private:

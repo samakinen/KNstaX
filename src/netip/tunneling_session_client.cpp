@@ -335,9 +335,7 @@ util::Result<bool> TunnelingSessionClient::receiveOnce(int timeoutMs)
     int received = 0;
     while (true) {
         const int remainingMs = detail::remainingTimeoutMs(timingPlatform_, startMs, timeoutMs);
-        auto waitRes = detail::waitUntilReadable(timingPlatform_, remainingMs, [this]() {
-            return sock_ && sock_->available() > 0;
-        });
+        auto waitRes = detail::waitUntilReadable(timingPlatform_, remainingMs, *sock_);
         if (waitRes.isError()) return waitRes.error();
         if (!waitRes.value()) return false;
 

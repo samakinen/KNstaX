@@ -454,6 +454,9 @@ private:
         // frames when polled) are polled on a short interval instead of the
         // long notify timeout.
         bool hasQueueNotify{false};
+        /// The physical waits for the medium inside beginReceive(timeoutMs)
+        /// rather than returning at once, so the RX task can sleep in it.
+        bool receiveWaitsForMedium{false};
     };
 
     template <Tp1PhysicalLike PhysicalT>
@@ -525,6 +528,8 @@ private:
             .hasQueueNotify = requires(ConcretePhysical* p,
                                        physical::Tp1MediumBackend::QueueNotifyCallback cb,
                                        void* ctx) { p->setQueueNotifyCallback(cb, ctx); },
+            .receiveWaitsForMedium =
+                requires(ConcretePhysical* p) { { p->receiveWaitsForMedium() } -> std::same_as<bool>; },
         };
     }
 

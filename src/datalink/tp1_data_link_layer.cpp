@@ -36,6 +36,13 @@ static constexpr uint32_t kRxTaskPollTimeoutMs = 10000u;
 // Physicals without a queue-notify callback only surface received frames when
 // polled, so the RX task must wake on a short interval for them.
 static constexpr uint32_t kRxTaskNoNotifyPollMs = 10u;
+
+/// How long the RX task sleeps inside a medium that can wait for itself.
+///
+/// Not a polling interval — nothing is retried when it expires. It only bounds
+/// how long close() waits for the task to notice it should stop, and how often
+/// a medium with idle housekeeping of its own gets a turn.
+static constexpr uint32_t kRxTaskMediumWaitMs = 100u;
 static constexpr uint32_t kRxTaskIdleDelayMs = 1u;
 
 namespace knx {
@@ -746,6 +753,22 @@ void Tp1DataLinkLayer::rxTaskFunc(void* param) {
         return;
     }
     
+    // A port that waits for the medium itself is the best case: the task sleeps
+    // inside the read and wakes on the frame, so there is no interval to tune,
+    // no wakeup while the bus is quiet, and no fraction of an interval added to
+    // every telegram. The read is still bounded, because the only other thing
+    // this task has to notice is close().
+    if (self->_physicalPort.receiveWaitsForMedium) {
+        while (!self->_rxTaskStopRequested.load()) {
+            (void)self->processRxAvailableInternal(kRxTaskMediumWaitMs);
+        }
+        return;
+    }
+
+    // Otherwise the medium hands frames over asynchronously (a TP1 ISR filling
+    // a queue) or not at all, and the task waits on the notification instead —
+    // with a long timeout when there is a notifier to wake it, and a short one
+    // when the only way to find out is to look.
     const uint32_t pollTimeoutMs = self->_physicalPort.hasQueueNotify
         ? kRxTaskPollTimeoutMs
         : kRxTaskNoNotifyPollMs;

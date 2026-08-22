@@ -266,9 +266,7 @@ util::Result<RoutingEndpoint::Inbound> RoutingEndpoint::receive(std::span<uint8_
         return util::ErrorCode::NotInitialized;
     }
 
-    auto waitResult = detail::waitUntilReadable(timingPlatform_, timeoutMs, [this]() {
-        return sock_ && sock_->available() > 0;
-    });
+    auto waitResult = detail::waitUntilReadable(timingPlatform_, static_cast<int>(timeoutMs), *sock_);
     if (waitResult.isError()) {
         return waitResult.error();
     }
