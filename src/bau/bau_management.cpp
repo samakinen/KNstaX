@@ -686,6 +686,22 @@ void BusAccessUnit::wireManagementServices()
             if (result.isError()) {
                 // "Not a function property of this object" — nullopt lets the
                 // service answer E_DATA_TYPE_CONFLICT with no data field.
+                //
+                // Said out loud, because the alternative is decoding a bare
+                // "ResultCode=FE" out of an ETS trace and then working out from
+                // the object type which capability the client was asking for.
+                // ETS drives KNXnet/IP Secure commissioning through function
+                // properties of the KNXnet/IP Parameter Object (type 11), and
+                // this device answers Secure Routing through PID_BACKBONE_KEY
+                // writes instead — so a client that expects the other route
+                // gets refused here and had, until this line, no way to know it
+                // from the device.
+                KNX_LOGW(TAG,
+                         "No function property handler for object type %u PID %u "
+                         "(from 0x%04X) - answering E_DATA_TYPE_CONFLICT",
+                         static_cast<unsigned>(objectType.value()),
+                         static_cast<unsigned>(request.propertyId),
+                         source.raw);
                 return std::nullopt;
             }
 

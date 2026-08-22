@@ -77,22 +77,26 @@ void TransportLayer::beginHandleNumberedData(const IndividualAddress& remoteAddr
                                              Priority priority) {
     ConnectionEntry* entry = _connectionTable.findConnection(remoteAddress);
     if (!entry || !entry->stateMachine) {
-        KNX_LOGW(TAG, "Numbered data from unconnected device 0x%04X - refusing with T_Disconnect",
+        KNX_LOGW(TAG, "Numbered data from unconnected device 0x%04X - dropped",
                  remoteAddress.raw);
-        // 03/03/04 §5.4.2: a T_Data_Connected reaching the CLOSED state is
-        // answered with T_Disconnect, not dropped. Silence leaves the peer
-        // waiting out its own connection timeout — an ETS whose T_Connect was
-        // lost on the way here (routing multicast is neither acknowledged nor
-        // retried by 802.11) sits for three seconds and then abandons the
-        // download instead of learning at once that no connection exists.
-        // Same reasoning as refusing a T_Connect with no free slot below.
-        auto beginResult = beginControlResponse(
-            remoteAddress, protocol::TPCIField::create(protocol::TPCIControl::Disconnect), priority);
-        if (beginResult.isOk()) {
-            _receiveOperation.waitingResponse = true;
-            return;
-        }
-        _receiveOperation.terminalState = mapTxErrorToProgressState(beginResult.error());
+        // Dropped, not refused. 03/03/04 answers a T_Data_Connected in the
+        // CLOSED state with T_Disconnect, and on TP1 that is right: a lost
+        // T_Connect is nearly impossible there, so a peer talking on a
+        // connection we do not have really is confused and should be told.
+        //
+        // KNXnet/IP routing is multicast, which 802.11 neither acknowledges nor
+        // retries, and ETS opens a connection by sending T_Connect and the first
+        // request two milliseconds apart. Losing the first of that pair is
+        // routine, and it is indistinguishable here from a confused peer. ETS
+        // recovers from it on its own — it times out after 3 s and reconnects,
+        // and it was observed doing exactly that three times in a row while a
+        // device rebooted. Answering T_Disconnect instead ends that retry loop:
+        // ETS reports "connection refused" and abandons the download on the
+        // attempt that would have been the one to succeed.
+        //
+        // So the frame is dropped and the peer's own timeout does the work. The
+        // log line is the diagnosis; the silence is deliberate.
+        _receiveOperation.terminalState = ControlSendProgressState::Success;
         return;
     }
 
@@ -436,16 +440,25 @@ void TransportLayer::handleNumberedData(const IndividualAddress& remoteAddress, 
                                         std::span<const uint8_t> tpdu, Priority priority) {
     ConnectionEntry* entry = _connectionTable.findConnection(remoteAddress);
     if (!entry || !entry->stateMachine) {
-        KNX_LOGW(TAG, "Numbered data from unconnected device 0x%04X - refusing with T_Disconnect",
+        KNX_LOGW(TAG, "Numbered data from unconnected device 0x%04X - dropped",
                  remoteAddress.raw);
-        // 03/03/04 §5.4.2: a T_Data_Connected reaching the CLOSED state is
-        // answered with T_Disconnect, not dropped. Silence leaves the peer
-        // waiting out its own connection timeout — an ETS whose T_Connect was
-        // lost on the way here (routing multicast is neither acknowledged nor
-        // retried by 802.11) sits for three seconds and then abandons the
-        // download instead of learning at once that no connection exists.
-        // Same reasoning as refusing a T_Connect with no free slot below.
-        (void)sendDisconnect(remoteAddress, priority);
+        // Dropped, not refused. 03/03/04 answers a T_Data_Connected in the
+        // CLOSED state with T_Disconnect, and on TP1 that is right: a lost
+        // T_Connect is nearly impossible there, so a peer talking on a
+        // connection we do not have really is confused and should be told.
+        //
+        // KNXnet/IP routing is multicast, which 802.11 neither acknowledges nor
+        // retries, and ETS opens a connection by sending T_Connect and the first
+        // request two milliseconds apart. Losing the first of that pair is
+        // routine, and it is indistinguishable here from a confused peer. ETS
+        // recovers from it on its own — it times out after 3 s and reconnects,
+        // and it was observed doing exactly that three times in a row while a
+        // device rebooted. Answering T_Disconnect instead ends that retry loop:
+        // ETS reports "connection refused" and abandons the download on the
+        // attempt that would have been the one to succeed.
+        //
+        // So the frame is dropped and the peer's own timeout does the work. The
+        // log line is the diagnosis; the silence is deliberate.
         return;
     }
 

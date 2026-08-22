@@ -710,15 +710,18 @@ void test_InstalledClockRetransmitsFromBackgroundWork(void) {
 }
 
 /**
- * A T_Data_Connected with no connection behind it must be refused out loud.
+ * A T_Data_Connected with no connection behind it is dropped, not refused.
  *
- * Regression: the device only logged a warning and dropped the frame. When
- * ETS's T_Connect was lost — routing multicast is neither acknowledged nor
- * retried by 802.11, so that happens — ETS waited out its own timeout on a
- * device that already knew there was nothing to talk to, and abandoned the
- * download.
+ * Regression in both directions. The device used to drop it silently, which on
+ * a lost T_Connect left ETS waiting out its own timeout; answering T_Disconnect
+ * instead looked like the obvious fix and 03/03/04 prescribes it. On KNXnet/IP
+ * routing it made things worse: ETS opens a connection by sending T_Connect and
+ * the first request two milliseconds apart, multicast loses one of that pair
+ * routinely, and ETS recovers by timing out after 3 s and reconnecting. A
+ * T_Disconnect ends that retry loop — ETS reports "connection refused" and
+ * abandons the download rather than trying again.
  */
-void test_NumberedDataWithoutConnectionIsRefusedWithDisconnect(void) {
+void test_NumberedDataWithoutConnectionIsDroppedNotRefused(void) {
     const IndividualAddress remote(0x1114);
     TEST_ASSERT_FALSE(tl->isConnected(ConnectionIndex(0)));
 
@@ -729,19 +732,16 @@ void test_NumberedDataWithoutConnectionIsRefusedWithDisconnect(void) {
     );
     tl->handleNetworkRx(makeNFrame(remote.raw, 0x110A, dataTpdu));
 
-    TEST_ASSERT_EQUAL_UINT32(1, nw->getSentFrameCount());
-    const auto sent = nw->getLastSentFrame();
-    TEST_ASSERT_TRUE(sent.dlFrame.tpdu.size() >= 1);
-    const auto hdr = knx::protocol::unpackTpduHeader(
-        sent.dlFrame.tpdu[0], sent.dlFrame.tpdu.size() > 1u ? sent.dlFrame.tpdu[1] : 0u);
-    TEST_ASSERT_TRUE(hdr.tpci.isControl(knx::protocol::TPCIControl::Disconnect));
-
-    // Refusing is not the same as inventing a connection.
+    // Nothing on the wire at all: no T_Disconnect, no T_ACK, no NAK. The peer's
+    // own timeout is what recovers this, and it recovers by reconnecting.
+    TEST_ASSERT_EQUAL_UINT32(0, nw->getSentFrameCount());
+    // And nothing delivered upward: dropping is not the same as accepting.
     TEST_ASSERT_EQUAL_UINT32(0, rx.size());
 }
 
-/// A peer that reconnects after the refusal gets a working connection.
-void test_ConnectionRecoversAfterRefusedNumberedData(void) {
+/// The reconnect that follows gets a working connection, which is the whole
+/// point of leaving the peer's retry alone.
+void test_ConnectionWorksAfterDroppedNumberedData(void) {
     const IndividualAddress remote(0x1114);
 
     const auto dataTpdu = knx::protocol::buildTpdu(
@@ -760,7 +760,6 @@ void test_ConnectionRecoversAfterRefusedNumberedData(void) {
     tl->handleNetworkRx(makeNFrame(remote.raw, 0x110A, connTpdu));
     tl->handleNetworkRx(makeNFrame(remote.raw, 0x110A, dataTpdu));
 
-    // Now it is T_ACKed and delivered upward.
     const auto sent = nw->getLastSentFrame();
     const auto hdr = knx::protocol::unpackTpduHeader(
         sent.dlFrame.tpdu[0], sent.dlFrame.tpdu.size() > 1u ? sent.dlFrame.tpdu[1] : 0u);
@@ -789,7 +788,7 @@ int main(void) {
     RUN_TEST(test_SendSequenceAdvancesOnTransmitWithoutAck);
     RUN_TEST(test_AckDoesNotAdvanceSendSequenceAgain);
     RUN_TEST(test_InstalledClockRetransmitsFromBackgroundWork);
-    RUN_TEST(test_NumberedDataWithoutConnectionIsRefusedWithDisconnect);
-    RUN_TEST(test_ConnectionRecoversAfterRefusedNumberedData);
+    RUN_TEST(test_NumberedDataWithoutConnectionIsDroppedNotRefused);
+    RUN_TEST(test_ConnectionWorksAfterDroppedNumberedData);
     return UNITY_END();
 }
