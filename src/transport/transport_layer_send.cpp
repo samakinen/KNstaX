@@ -10,8 +10,11 @@ static const char* TAG = "KNX.Transport";
 namespace knx {
 namespace transport {
 
-util::Result<void> TransportLayer::buildNetworkTxFrame(const TDataFrame& frame, network::NDataFrame& nFrame) {
+util::Result<void> TransportLayer::buildNetworkTxFrame(const TDataFrame& frame,
+                                                       network::NDataFrame& nFrame,
+                                                       ConnectedTxCommit& commit) {
     TDataFrame work = frame;
+    commit = ConnectedTxCommit{};
 
     // Resolve the connection's TX sequence number before the transform runs:
     // KNX Data Secure binds the outgoing TPCI into the CCM block B0, so the
@@ -77,6 +80,12 @@ util::Result<void> TransportLayer::buildNetworkTxFrame(const TDataFrame& frame, 
         if (buildResult.isError()) {
             return buildResult.error();
         }
+        // SeqNoSend is not advanced here: 03/03/04 ties the increment to the
+        // frame actually going out, and this frame has not reached the network
+        // layer yet. The caller commits it once the send succeeds.
+        commit.connection = conn->index;
+        commit.sequenceNumber = conn->sequenceNumber & 0x0Fu;
+
         conn->pendingSeq = conn->sequenceNumber & 0x0Fu;
         conn->pendingRetransmission = true;
         conn->pendingApciRaw = header.apci.raw;
@@ -88,6 +97,27 @@ util::Result<void> TransportLayer::buildNetworkTxFrame(const TDataFrame& frame, 
     }
 
     return util::Result<void>::ok();
+}
+
+void TransportLayer::commitConnectedSeqNoSend(const ConnectedTxCommit& commit) {
+    if (!commit.valid()) {
+        return;
+    }
+
+    ConnectionEntry* entry = _connectionTable.getConnection(commit.connection);
+    if (entry == nullptr) {
+        return;
+    }
+
+    // Idempotent on purpose. A send that reports a transient error is retried
+    // with the same sequence number, and a T_Connect resynchronisation resets
+    // the counter underneath an in-flight frame; in both cases the counter has
+    // already moved off the value that went out and must not move again.
+    if ((entry->sequenceNumber & 0x0Fu) != (commit.sequenceNumber & 0x0Fu)) {
+        return;
+    }
+
+    entry->sequenceNumber = (entry->sequenceNumber + 1u) & 0x0Fu;
 }
 
 uint8_t TransportLayer::connectedTxTpci6(const IndividualAddress& peer) const {
@@ -107,12 +137,17 @@ util::Result<void> TransportLayer::sendFrame(const TDataFrame& frame) {
     }
 
     network::NDataFrame nFrame;
-    auto buildRes = buildNetworkTxFrame(frame, nFrame);
+    ConnectedTxCommit commit;
+    auto buildRes = buildNetworkTxFrame(frame, nFrame, commit);
     if (buildRes.isError()) {
         return buildRes.error();
     }
 
-    return _network.sendFrame(nFrame);
+    auto sendRes = _network.sendFrame(nFrame);
+    if (sendRes.isOk()) {
+        commitConnectedSeqNoSend(commit);
+    }
+    return sendRes;
 }
 
 util::Result<void> TransportLayer::beginTransmit(const TDataFrame& frame) {
@@ -125,7 +160,8 @@ util::Result<void> TransportLayer::beginTransmit(const TDataFrame& frame) {
     }
 
     network::NDataFrame nFrame;
-    auto buildRes = buildNetworkTxFrame(frame, nFrame);
+    ConnectedTxCommit commit;
+    auto buildRes = buildNetworkTxFrame(frame, nFrame, commit);
     if (buildRes.isError()) {
         return buildRes.error();
     }
@@ -136,7 +172,16 @@ util::Result<void> TransportLayer::beginTransmit(const TDataFrame& frame) {
     }
 
     _sendOperation.active = true;
+    _sendOperation.commit = commit;
     return util::Result<void>::ok();
+}
+
+void TransportLayer::pumpNetwork() {
+    auto progress = _network.pollForwarding();
+    if (progress.isError()) {
+        KNX_LOGW(TAG, "Background network maintenance failed: %s",
+                 util::errorCodeToString(progress.error()));
+    }
 }
 
 void TransportLayer::processBackgroundWork() {
@@ -144,10 +189,17 @@ void TransportLayer::processBackgroundWork() {
         return;
     }
 
-    auto progress = _network.pollForwarding();
-    if (progress.isError()) {
-        KNX_LOGW(TAG, "Background network maintenance failed: %s",
-                 util::errorCodeToString(progress.error()));
+    pumpNetwork();
+
+    // The connection timers are background maintenance like any other: without
+    // a periodic tick an unacknowledged frame is never retransmitted and a
+    // half-open connection is never reaped, because nothing else in the stack
+    // calls processRetransmissions(). Owners that have not installed a clock
+    // keep driving those timers themselves — as does an owner that is stepping
+    // through beginProcessRetransmissions(), which owns the same queue and must
+    // not have entries taken out from under it here.
+    if (_clock && !_retransmissionOperation.active) {
+        runConnectionTimers(_clock());
     }
 }
 
@@ -171,6 +223,7 @@ util::Result<TransportLayer::SendProgressState> TransportLayer::pollTransmit() {
         case network::NetworkLayer::TxProgressState::Pending:
             return SendProgressState::Pending;
         case network::NetworkLayer::TxProgressState::Success:
+            commitConnectedSeqNoSend(_sendOperation.commit);
             finishSendOperation();
             return SendProgressState::Success;
         case network::NetworkLayer::TxProgressState::Busy:
@@ -546,7 +599,11 @@ void TransportLayer::processRetransmissions(uint32_t currentTimeMs) {
         return;
     }
 
-    processBackgroundWork();
+    pumpNetwork();
+    runConnectionTimers(currentTimeMs);
+}
+
+void TransportLayer::runConnectionTimers(uint32_t currentTimeMs) {
     _timebaseMs = currentTimeMs;
 
     auto needsRetransmit = _connectionTable.processRetransmissions(currentTimeMs);

@@ -1682,6 +1682,7 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/knx_product.cmake)
             test_ip_tp1_routing
             test_knxnetip_integration
             test_bau_onwire
+            test_ets_connected_session
             test_product_runtime
         )
 
@@ -2109,6 +2110,17 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/knx_product.cmake)
         unity
     )
     add_test(NAME test_bau_onwire COMMAND test_bau_onwire)
+
+    # Test executable: test_ets_connected_session (connection-oriented ETS session)
+    add_executable(test_ets_connected_session
+        test/integration/test_ets_connected_session.cpp
+    )
+    target_link_libraries(test_ets_connected_session PRIVATE
+        knx_core
+        unity
+    )
+    add_test(NAME test_ets_connected_session COMMAND test_ets_connected_session)
+    set_tests_properties(test_ets_connected_session PROPERTIES TIMEOUT 30)
 
     # Test executable: test_product_runtime (M1 rewrite-lane started runtime proof)
     add_executable(test_product_runtime

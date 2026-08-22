@@ -349,6 +349,7 @@ private:
 class Tp1ApplicationStackBundle final {
 public:
     util::Result<void> init(datalink::Tp1DataLinkLayer& dataLink,
+                            platform::TimingPlatform& clock,
                             const IndividualAddress& ownAddress,
                             const StackPort::TransmissionOptions& defaultTransmissionOptions)
     {
@@ -363,6 +364,10 @@ public:
         if (!_transport) {
             _transport = std::make_unique<transport::TransportLayer>(*_network);
         }
+        // Gives the connection-oriented timers a real timebase, so the owner
+        // loop's background-work pass retransmits unacknowledged data and
+        // reaps stale connections.
+        _transport->setClock([clockPtr = &clock]() { return clockPtr->millis(); });
         auto tpInit = _transport->init(ownAddress);
         if (!tpInit) {
             return tpInit;
@@ -923,6 +928,7 @@ public:
         }
 
         auto appInit = _context->application.init(*dataLink,
+                                                  _context->platform,
                                                   ownAddress,
                                                   _context->transmission.defaultTransmissionOptions);
         if (appInit.isError()) {

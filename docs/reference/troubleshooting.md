@@ -42,6 +42,26 @@ anything application-level. Check, in order:
    definition. If the declared value exceeds what the transport actually
    handles, long property writes fail while short ones succeed.
 
+**Download over KNXnet/IP routing stalls on a Wi-Fi device**
+
+Routing is multicast, and 802.11 sends group-addressed frames without
+acknowledgement or retries, buffered at the AP until the next DTIM beacon. Two
+symptoms follow, and neither is a device fault:
+
+1. **Every inbound telegram is late by up to one DTIM interval.** With the
+   common beacon interval of 102.4 ms and DTIM 2 that is ~205 ms per telegram,
+   while the device's own answers go out in single-digit milliseconds. A
+   capture showing uniform ~150 ms inbound latency and ~10 ms outbound is this,
+   not a slow device.
+2. **Telegrams are occasionally lost outright.** The transport layer is meant
+   to absorb that — an unacknowledged frame is retransmitted, and SeqNoSend
+   keeps advancing regardless — but the loss still costs a round trip.
+
+If a download is merely slow, this is why. If it fails, capture on the
+multicast group and check whether the frame ETS is waiting for was ever sent.
+Tunnelling (unicast, acknowledged) avoids the whole class of problem; so does
+putting the device on Ethernet.
+
 **Download completes but the device behaves as before**
 
 The load state machine did not reach `Loaded`. Read PID_LOAD_STATE_CONTROL on

@@ -22,6 +22,7 @@
 #include "knx/util/result.hpp"
 #include <atomic>
 #include <array>
+#include <utility>
 #include <initializer_list>
 #include <functional>
 #include <span>
@@ -128,6 +129,16 @@ using TDataCallback = util::InplaceFunction<void(const TDataFrame&), 64>;
  * Return an error Result to drop/abort the frame.
  */
 using TDataTransform = util::InplaceFunction<util::Result<void>(TDataFrame&), 64>;
+
+/**
+ * @brief Monotonic millisecond clock for the connection-oriented timers
+ *
+ * The connection state machine needs real time for the T_ACK timeout, the
+ * retransmission backoff and the 6 s connection timeout. Injected rather than
+ * taken as a constructor dependency so a unit test can keep driving
+ * processRetransmissions() with a synthetic timestamp instead.
+ */
+using TClock = util::InplaceFunction<uint32_t(), 32>;
 
 /**
  * @brief Transport layer (connectionless)
@@ -260,6 +271,18 @@ public:
      * @note This is typically called from a timer task
      */
     void processRetransmissions(uint32_t currentTimeMs);
+
+    /**
+     * @brief Supply the monotonic clock that drives the connection timers
+     *
+     * With a clock installed, processBackgroundWork() services the connection
+     * timers on its own, so an owner loop that already pumps background work
+     * gets retransmission and connection-timeout handling for free. Without
+     * one the timers only advance when processRetransmissions() is called with
+     * an explicit timestamp.
+     */
+    void setClock(TClock clock) { _clock = std::move(clock); }
+
     util::Result<void> beginProcessRetransmissions(uint32_t currentTimeMs);
     util::Result<ControlSendProgressState> pollProcessRetransmissions();
 
@@ -280,6 +303,21 @@ public:
     static uint8_t extractSeqNum(protocol::TPCIField tpci) { return tpci.seqNum(); }
 
 private:
+    /**
+     * @brief A connection-oriented frame that has been built but not yet sent
+     *
+     * 03/03/04 advances SeqNoSend as part of transmitting the frame, so the
+     * counter may only move once the send has actually succeeded — which
+     * buildNetworkTxFrame() cannot know. It records what it stamped on the
+     * frame here and the caller commits it afterwards.
+     */
+    struct ConnectedTxCommit {
+        ConnectionIndex connection{ConnectionIndex::invalid()};
+        uint8_t sequenceNumber{0};
+
+        bool valid() const { return connection.isValid(); }
+    };
+
     network::NetworkLayer& _network;
     IndividualAddress _ownAddress;
     std::atomic<const TDataCallback*> _rxCallback;
@@ -288,11 +326,16 @@ private:
     TDataTransform _rxTransform;
     bool _initialized;
 
-    // Timebase for connected-mode timers (ms). Updated by processRetransmissions().
+    // Fallback timebase for the connected-mode timers (ms), used when no clock
+    // has been installed. Advanced by runConnectionTimers().
     uint32_t _timebaseMs;
+
+    // Monotonic clock for the connection timers; empty until setClock().
+    TClock _clock{};
 
     struct SendOperationState {
         bool active{false};
+        ConnectedTxCommit commit{};
     };
     SendOperationState _sendOperation{};
 
@@ -343,9 +386,20 @@ private:
     // Connection-oriented support
     ConnectionTable _connectionTable;
 
-    uint32_t nowMs() const { return _timebaseMs; }
+    uint32_t nowMs() const { return _clock ? _clock() : _timebaseMs; }
 
-    util::Result<void> buildNetworkTxFrame(const TDataFrame& frame, network::NDataFrame& nFrame);
+    util::Result<void> buildNetworkTxFrame(const TDataFrame& frame,
+                                           network::NDataFrame& nFrame,
+                                           ConnectedTxCommit& commit);
+
+    /// Advance SeqNoSend for a staged frame that reached the network layer.
+    void commitConnectedSeqNoSend(const ConnectedTxCommit& commit);
+
+    /// Drain whatever the network layer has queued. No connection timers.
+    void pumpNetwork();
+
+    /// Retransmit unacknowledged data and reap timed-out connections.
+    void runConnectionTimers(uint32_t currentTimeMs);
     
     // Helper to convert N_Data to T_Data
     TDataFrame convertFromNetwork(const network::NDataFrame& nFrame);

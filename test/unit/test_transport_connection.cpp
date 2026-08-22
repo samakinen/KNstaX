@@ -10,6 +10,7 @@
 
 #include "knx/transport/transport_layer.hpp"
 #include "knx/protocol/tpdu_codec.hpp"
+#include "knx/constants.hpp"
 
 #include "../mocks/mock_network_layer.hpp"
 
@@ -604,6 +605,170 @@ void test_IndividualSendStaysConnectionlessWhileConnected(void) {
     TEST_ASSERT_EQUAL_UINT8(0, hdr.tpci.seqNum());
 }
 
+// ---------------------------------------------------------------------------
+// SeqNoSend ownership
+// ---------------------------------------------------------------------------
+
+/// Bring a connection up in the client role and clear the T_Connect from the log.
+static ConnectionIndex establishConnection(const IndividualAddress& remote) {
+    auto connRes = tl->connect(remote);
+    TEST_ASSERT_TRUE(connRes.isOk());
+    const ConnectionIndex idx = connRes.value();
+
+    const auto connTpdu = knx::protocol::buildTpdu(
+        knx::protocol::TPCIField::create(knx::protocol::TPCIControl::Connect),
+        application::APCIField(0),
+        {}
+    );
+    tl->handleNetworkRx(makeNFrame(remote.raw, 0x110A, connTpdu));
+    TEST_ASSERT_TRUE(tl->isConnected(idx));
+
+    nw->clearSentFrames();
+    return idx;
+}
+
+/// Send an application answer on the connection, the way ApplicationLayer does.
+static uint8_t sendConnectedAnswer(const IndividualAddress& remote, uint8_t payload) {
+    TDataFrame frame;
+    frame.service = TDataService::Connected;
+    frame.destination = GroupAddress(remote.raw);
+    frame.destinationType = AddressType::Individual;
+    const uint8_t data[1] = {payload};
+    (void)knx::protocol::buildTpduInPlace(
+        knx::protocol::TPCIField::create(knx::protocol::TPCI::UnnumberedData),
+        application::APCIField::create(application::APCIService::DeviceDescriptorResponse, 0),
+        data,
+        frame.tpdu);
+
+    TEST_ASSERT_TRUE(tl->sendFrame(frame).isOk());
+    const auto sent = nw->getLastSentFrame();
+    const auto hdr = knx::protocol::unpackTpduHeader(sent.dlFrame.tpdu[0], sent.dlFrame.tpdu[1]);
+    TEST_ASSERT_EQUAL(knx::protocol::TPCI::NumberedData, hdr.tpci.type());
+    return hdr.tpci.seqNum();
+}
+
+/**
+ * 03/03/04 advances SeqNoSend as part of sending the frame. Tying it to the
+ * T_ACK instead meant one lost acknowledgement froze the counter for the rest
+ * of the connection, and the peer discarded every later answer as a duplicate.
+ */
+void test_SendSequenceAdvancesOnTransmitWithoutAck(void) {
+    const IndividualAddress remote(0x1114);
+    (void)establishConnection(remote);
+
+    TEST_ASSERT_EQUAL_UINT8(0, sendConnectedAnswer(remote, 0x11));
+    // No T_ACK in between: the next frame must still carry the next number.
+    TEST_ASSERT_EQUAL_UINT8(1, sendConnectedAnswer(remote, 0x22));
+    TEST_ASSERT_EQUAL_UINT8(2, sendConnectedAnswer(remote, 0x33));
+}
+
+/// ...and the T_ACK must not advance it a second time on top of that.
+void test_AckDoesNotAdvanceSendSequenceAgain(void) {
+    const IndividualAddress remote(0x1114);
+    (void)establishConnection(remote);
+
+    TEST_ASSERT_EQUAL_UINT8(0, sendConnectedAnswer(remote, 0x11));
+    tl->handleNetworkRx(buildAck(remote.raw, 0x110A, 0));
+    TEST_ASSERT_EQUAL_UINT8(1, sendConnectedAnswer(remote, 0x22));
+
+    tl->handleNetworkRx(buildAck(remote.raw, 0x110A, 1));
+    TEST_ASSERT_EQUAL_UINT8(2, sendConnectedAnswer(remote, 0x33));
+}
+
+/**
+ * An installed clock makes the owner loop's background-work pass service the
+ * connection timers. Without it nothing in the stack calls
+ * processRetransmissions(), so an unacknowledged frame was never resent.
+ */
+void test_InstalledClockRetransmitsFromBackgroundWork(void) {
+    uint32_t fakeNowMs = 1000;
+    tl->setClock([&fakeNowMs]() { return fakeNowMs; });
+
+    const IndividualAddress remote(0x1114);
+    const ConnectionIndex idx = establishConnection(remote);
+
+    TEST_ASSERT_TRUE(tl->sendConnectedData(idx, {0x55}).isOk());
+    TEST_ASSERT_EQUAL_UINT32(1, nw->getSentFrameCount());
+    const auto first = nw->getLastSentFrame();
+    const uint8_t seq =
+        knx::protocol::unpackTpduHeader(first.dlFrame.tpdu[0], first.dlFrame.tpdu[1]).tpci.seqNum();
+
+    // Nothing due yet.
+    tl->processBackgroundWork();
+    TEST_ASSERT_EQUAL_UINT32(1, nw->getSentFrameCount());
+
+    // Past the T_ACK timeout the background pass alone must resend it.
+    fakeNowMs += knx::constants::timing::ACK_TIMEOUT_MS;
+    tl->processBackgroundWork();
+    TEST_ASSERT_EQUAL_UINT32(2, nw->getSentFrameCount());
+
+    const auto resent = nw->getLastSentFrame();
+    const auto resentHdr =
+        knx::protocol::unpackTpduHeader(resent.dlFrame.tpdu[0], resent.dlFrame.tpdu[1]);
+    TEST_ASSERT_EQUAL(knx::protocol::TPCI::NumberedData, resentHdr.tpci.type());
+    TEST_ASSERT_EQUAL_UINT8(seq, resentHdr.tpci.seqNum());
+}
+
+/**
+ * A T_Data_Connected with no connection behind it must be refused out loud.
+ *
+ * Regression: the device only logged a warning and dropped the frame. When
+ * ETS's T_Connect was lost — routing multicast is neither acknowledged nor
+ * retried by 802.11, so that happens — ETS waited out its own timeout on a
+ * device that already knew there was nothing to talk to, and abandoned the
+ * download.
+ */
+void test_NumberedDataWithoutConnectionIsRefusedWithDisconnect(void) {
+    const IndividualAddress remote(0x1114);
+    TEST_ASSERT_FALSE(tl->isConnected(ConnectionIndex(0)));
+
+    const auto dataTpdu = knx::protocol::buildTpdu(
+        knx::protocol::TPCIField::create(knx::protocol::TPCI::NumberedData, 0),
+        application::APCIField(0),
+        {0x5A}
+    );
+    tl->handleNetworkRx(makeNFrame(remote.raw, 0x110A, dataTpdu));
+
+    TEST_ASSERT_EQUAL_UINT32(1, nw->getSentFrameCount());
+    const auto sent = nw->getLastSentFrame();
+    TEST_ASSERT_TRUE(sent.dlFrame.tpdu.size() >= 1);
+    const auto hdr = knx::protocol::unpackTpduHeader(
+        sent.dlFrame.tpdu[0], sent.dlFrame.tpdu.size() > 1u ? sent.dlFrame.tpdu[1] : 0u);
+    TEST_ASSERT_TRUE(hdr.tpci.isControl(knx::protocol::TPCIControl::Disconnect));
+
+    // Refusing is not the same as inventing a connection.
+    TEST_ASSERT_EQUAL_UINT32(0, rx.size());
+}
+
+/// A peer that reconnects after the refusal gets a working connection.
+void test_ConnectionRecoversAfterRefusedNumberedData(void) {
+    const IndividualAddress remote(0x1114);
+
+    const auto dataTpdu = knx::protocol::buildTpdu(
+        knx::protocol::TPCIField::create(knx::protocol::TPCI::NumberedData, 0),
+        application::APCIField(0),
+        {0x5A}
+    );
+    tl->handleNetworkRx(makeNFrame(remote.raw, 0x110A, dataTpdu));
+    nw->clearSentFrames();
+
+    const auto connTpdu = knx::protocol::buildTpdu(
+        knx::protocol::TPCIField::create(knx::protocol::TPCIControl::Connect),
+        application::APCIField(0),
+        {}
+    );
+    tl->handleNetworkRx(makeNFrame(remote.raw, 0x110A, connTpdu));
+    tl->handleNetworkRx(makeNFrame(remote.raw, 0x110A, dataTpdu));
+
+    // Now it is T_ACKed and delivered upward.
+    const auto sent = nw->getLastSentFrame();
+    const auto hdr = knx::protocol::unpackTpduHeader(
+        sent.dlFrame.tpdu[0], sent.dlFrame.tpdu.size() > 1u ? sent.dlFrame.tpdu[1] : 0u);
+    TEST_ASSERT_TRUE(hdr.tpci.isAck());
+    TEST_ASSERT_EQUAL_UINT32(1, rx.size());
+    TEST_ASSERT_EQUAL_UINT8(0x5A, rx.front().payload()[0]);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_ConnectResponseDoesNotEchoConnect);
@@ -621,5 +786,10 @@ int main(void) {
     RUN_TEST(test_NewConnectWhileConnectedResynchronisesSequenceNumbers);
     RUN_TEST(test_RepeatedConnectWhileConnectedKeepsSequenceNumbers);
     RUN_TEST(test_IndividualSendStaysConnectionlessWhileConnected);
+    RUN_TEST(test_SendSequenceAdvancesOnTransmitWithoutAck);
+    RUN_TEST(test_AckDoesNotAdvanceSendSequenceAgain);
+    RUN_TEST(test_InstalledClockRetransmitsFromBackgroundWork);
+    RUN_TEST(test_NumberedDataWithoutConnectionIsRefusedWithDisconnect);
+    RUN_TEST(test_ConnectionRecoversAfterRefusedNumberedData);
     return UNITY_END();
 }

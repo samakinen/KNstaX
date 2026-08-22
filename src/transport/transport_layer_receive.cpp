@@ -77,8 +77,22 @@ void TransportLayer::beginHandleNumberedData(const IndividualAddress& remoteAddr
                                              Priority priority) {
     ConnectionEntry* entry = _connectionTable.findConnection(remoteAddress);
     if (!entry || !entry->stateMachine) {
-        KNX_LOGW(TAG, "Received numbered data from unconnected device 0x%04X", remoteAddress.raw);
-        _receiveOperation.terminalState = ControlSendProgressState::Success;
+        KNX_LOGW(TAG, "Numbered data from unconnected device 0x%04X - refusing with T_Disconnect",
+                 remoteAddress.raw);
+        // 03/03/04 §5.4.2: a T_Data_Connected reaching the CLOSED state is
+        // answered with T_Disconnect, not dropped. Silence leaves the peer
+        // waiting out its own connection timeout — an ETS whose T_Connect was
+        // lost on the way here (routing multicast is neither acknowledged nor
+        // retried by 802.11) sits for three seconds and then abandons the
+        // download instead of learning at once that no connection exists.
+        // Same reasoning as refusing a T_Connect with no free slot below.
+        auto beginResult = beginControlResponse(
+            remoteAddress, protocol::TPCIField::create(protocol::TPCIControl::Disconnect), priority);
+        if (beginResult.isOk()) {
+            _receiveOperation.waitingResponse = true;
+            return;
+        }
+        _receiveOperation.terminalState = mapTxErrorToProgressState(beginResult.error());
         return;
     }
 
@@ -422,7 +436,16 @@ void TransportLayer::handleNumberedData(const IndividualAddress& remoteAddress, 
                                         std::span<const uint8_t> tpdu, Priority priority) {
     ConnectionEntry* entry = _connectionTable.findConnection(remoteAddress);
     if (!entry || !entry->stateMachine) {
-        KNX_LOGW(TAG, "Received numbered data from unconnected device 0x%04X", remoteAddress.raw);
+        KNX_LOGW(TAG, "Numbered data from unconnected device 0x%04X - refusing with T_Disconnect",
+                 remoteAddress.raw);
+        // 03/03/04 §5.4.2: a T_Data_Connected reaching the CLOSED state is
+        // answered with T_Disconnect, not dropped. Silence leaves the peer
+        // waiting out its own connection timeout — an ETS whose T_Connect was
+        // lost on the way here (routing multicast is neither acknowledged nor
+        // retried by 802.11) sits for three seconds and then abandons the
+        // download instead of learning at once that no connection exists.
+        // Same reasoning as refusing a T_Connect with no free slot below.
+        (void)sendDisconnect(remoteAddress, priority);
         return;
     }
 
@@ -503,9 +526,14 @@ void TransportLayer::handleAck(const IndividualAddress& remoteAddress, uint8_t s
 
     ConnectionEntry* entry = _connectionTable.findConnection(remoteAddress);
     if (entry) {
+        // A T_ACK only closes the acknowledgement window (OPEN_WAIT ->
+        // OPEN_IDLE); it does not carry SeqNoSend. Advancing the counter here
+        // instead of on transmission made a single lost T_ACK freeze it for
+        // good: every later response repeated a sequence number the peer had
+        // already consumed, the peer discarded them as duplicates, and an ETS
+        // download died on the first telegram after the loss.
         if (entry->pendingRetransmission && ((seqNum & 0x0F) == (entry->pendingSeq & 0x0F))) {
             (void)_connectionTable.resetRetransmitState(entry->index);
-            entry->sequenceNumber = (entry->sequenceNumber + 1u) & 0x0Fu;
         }
         _connectionTable.updateActivityTime(entry->index, nowMs());
     }
