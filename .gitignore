@@ -13,6 +13,9 @@ Testing/
 .vscode/
 
 # Artifacts
+# Built by the 'product_exporter' CMake target into the source tree, because
+# tools/knxprod_exporter/run_exporter.sh runs it from there.
+tools/product_exporter/product_exporter
 *.o
 *.obj
 *.a
