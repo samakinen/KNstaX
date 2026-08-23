@@ -172,7 +172,28 @@ public:
     util::Result<void> setBusMonitorMode(Toggle mode);
 
 private:
-    void drainInboundOnce(uint32_t timeoutMs);
+    /**
+     * Read what the socket already holds into the inbound queue.
+     *
+     * Waits up to `timeoutMs` for the first datagram, then keeps reading
+     * without waiting until the socket is empty or `kMaxDrainPerPoll` is
+     * reached.
+     *
+     * One datagram per call also emptied the socket, but only a whole
+     * begin/poll round trip through the layer above at a time, and only while
+     * that layer is running a receive pass. Between passes the socket buffer is
+     * the only queue holding arrivals, and it is the one queue on this device
+     * whose depth is the host's to decide — whatever overflows it is gone
+     * before any KNX layer sees it. Taking everything that has arrived in one
+     * go keeps that window as short as the medium allows.
+     */
+    void drainInbound(uint32_t timeoutMs);
+
+    /// Bound on one drain so a multicast storm cannot hold the caller inside
+    /// the socket. Comfortably above the burst a management client sends —
+    /// ETS opens a connection with T_Connect and the first request back to
+    /// back — and anything beyond it is taken by the next poll.
+    static constexpr size_t kMaxDrainPerPoll = 16;
     void enqueueFrame(std::span<const uint8_t> cemi);
 
     /// Re-join the group when nothing has arrived for a long time. See the

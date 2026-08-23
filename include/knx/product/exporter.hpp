@@ -9,6 +9,8 @@
 #pragma once
 
 #include "knx/application/device_descriptor.hpp"
+#include "knx/objects/address_table_object.hpp"
+#include "knx/objects/association_table_object.hpp"
 #include "knx/product/export_descriptor.hpp"
 #include "knx/product/product_api_types.hpp"
 
@@ -82,9 +84,17 @@ std::string exportDescriptorToJson(const DescT& d)
       << ",\"groupKeyTableEntries\":" << d.security.groupKeyTableEntries
       << ",\"p2pKeyTableEntries\":" << d.security.p2pKeyTableEntries << "}";
 
+    // The *MaxEntries pair is what the tables can hold, not what this product
+    // uses: ETS reads it as the device's ceiling and refuses the very first
+    // link ("The maximum associations of the device are been reached") when
+    // the knxprod does not say. It is a property of the stack — the tables and
+    // the memory segments the ETS download writes them into — so it comes from
+    // the domains rather than from the product definition.
     o << ",\"capacities\":{\"groupObjectCount\":" << d.capacities.datapointCount
       << ",\"addressTableEntries\":" << d.capacities.groupAddressCapacity
       << ",\"associationEntries\":" << d.capacities.datapointLinkCapacity
+      << ",\"addressTableMaxEntries\":" << objects::AddressTableDomain::kMaxEntries
+      << ",\"associationTableMaxEntries\":" << objects::AssociationTableDomain::kMaxEntries
       << ",\"autoResponseQueueCapacity\":" << d.capacities.autoResponseQueueCapacity
       << ",\"transmissionOutcomeQueueCapacity\":" << d.capacities.transmissionOutcomeQueueCapacity << "}";
 
@@ -207,6 +217,10 @@ std::string exportDescriptorToKaenxXml(const DescT& d)
   o << "      <GroupObjectCount>" << d.capacities.datapointCount << "</GroupObjectCount>\n";
   o << "      <AddressTableEntries>" << d.capacities.groupAddressCapacity << "</AddressTableEntries>\n";
   o << "      <AssociationEntries>" << d.capacities.datapointLinkCapacity << "</AssociationEntries>\n";
+  o << "      <AddressTableMaxEntries>" << objects::AddressTableDomain::kMaxEntries
+    << "</AddressTableMaxEntries>\n";
+  o << "      <AssociationTableMaxEntries>" << objects::AssociationTableDomain::kMaxEntries
+    << "</AssociationTableMaxEntries>\n";
   o << "      <AutoResponseQueueCapacity>" << d.capacities.autoResponseQueueCapacity << "</AutoResponseQueueCapacity>\n";
   o << "      <TransmissionOutcomeQueueCapacity>" << d.capacities.transmissionOutcomeQueueCapacity << "</TransmissionOutcomeQueueCapacity>\n";
   o << "    </Capacities>\n";

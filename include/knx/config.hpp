@@ -133,6 +133,29 @@ constexpr size_t MAX_DATA_SECURE_SESSIONS = CONFIG_KNX_MAX_DATA_SECURE_SESSIONS;
 constexpr size_t MAX_DATA_SECURE_SESSIONS = 32;
 #endif
 
+/**
+ * @brief Seconds a management client should wait after a master reset.
+ *
+ * Reported in the Process_Time field of A_Restart_Response (03/03/07 §3.4.2.2,
+ * 2 octets, DPT_TimePeriodSec). ETS waits this long before it touches the
+ * device again; 0 declares "back in under 5 s" (03/05/02 §3.7.1.2.2), which is
+ * the right answer for a bus-powered TP1 device that only reboots its own
+ * firmware.
+ *
+ * A device that has to bring a network link back up needs longer and must say
+ * so. A KNXnet/IP device on Wi-Fi takes seconds to associate and get an
+ * address before it can answer anything, and understating that is not a slow
+ * download but a failed one: ETS starts polling immediately, exhausts its
+ * retries while the device is still booting, and reports the download as
+ * failed. Overstating it only costs the client some patience, once per
+ * download, so err upwards.
+ */
+#ifdef CONFIG_KNX_RESTART_PROCESS_TIME_S
+constexpr uint16_t RESTART_PROCESS_TIME_S = CONFIG_KNX_RESTART_PROCESS_TIME_S;
+#else
+constexpr uint16_t RESTART_PROCESS_TIME_S = 0;
+#endif
+
 #ifdef CONFIG_KNX_RX_QUEUE_SIZE
     constexpr size_t RX_QUEUE_SIZE = CONFIG_KNX_RX_QUEUE_SIZE;
 #else

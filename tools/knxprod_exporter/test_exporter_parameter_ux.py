@@ -24,7 +24,11 @@ def _doc(parameters):
                      'medium': {'code': 0, 'name': 'TP', 'maskVersion': 0x07B0,
                                 'ipEnabled': False},
                      'applicationProgram': {'number': 1, 'version': 1}},
-        'features': {}, 'capacities': {},
+        'features': {},
+        # The table ceilings ETS reads as the device's association limit;
+        # the exporter refuses to render a product without them.
+        'capacities': {'addressTableMaxEntries': 256,
+                       'associationTableMaxEntries': 512},
         'communicationObjects': [{
             'exportNumber': 0, 'logicalId': 0, 'key': 'k', 'displayName': 'K',
             'defaultAddress': 0, 'dpt_main': 1, 'dpt_sub': 1, 'valueType': 1,

@@ -1135,11 +1135,20 @@ void ApplicationLayer::handleRestart(const ADataFrame& frame) {
         // Process time is a 2-octet second count (DPT_TimePeriodSec); 03/05/02
         // §3.7.1.2.2 allows leaving it at 0 when the restart takes under 5 s,
         // and requires 0 when the confirmation is negative.
+        //
+        // 0 is only honest for a device that restarts nothing but its own
+        // firmware. One that has to bring a network link back up first is not
+        // reachable for seconds after the reset, and a client told "under 5 s"
+        // spends its whole retry budget on a device that is still booting —
+        // ETS then reports the download as failed. config::RESTART_PROCESS_TIME_S
+        // is where a product says how long it really needs.
         const uint8_t errorCode = result.isOk() ? 0x00u : 0xFFu;
+        const uint16_t processTime =
+            result.isOk() ? config::RESTART_PROCESS_TIME_S : static_cast<uint16_t>(0u);
         ResponsePayload payload;
         if (appendPayloadByte(payload, errorCode)
-            && appendPayloadByte(payload, 0x00u)
-            && appendPayloadByte(payload, 0x00u)) {
+            && appendPayloadByte(payload, static_cast<uint8_t>(processTime >> 8))
+            && appendPayloadByte(payload, static_cast<uint8_t>(processTime & 0xFFu))) {
             const auto sendResult = sendToIndividual(IndividualAddress(frame.source.raw),
                                                      APCIService::RestartResponse,
                                                      payload,

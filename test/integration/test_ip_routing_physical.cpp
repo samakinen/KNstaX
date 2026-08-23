@@ -341,6 +341,75 @@ void test_ip_routing_physical_receive_waits_for_the_deadline(void) {
     dl.close();
 }
 
+// A client that sends two telegrams back to back — which is exactly how ETS
+// opens a connection, T_Connect and the first request a millisecond apart —
+// must not leave the second one sitting in the socket. One poll takes
+// everything that has arrived; the socket buffer is the one queue in the
+// system this device cannot size, and whatever overflows it is gone before any
+// KNX layer sees it.
+void test_ip_routing_physical_takes_a_whole_burst_in_one_poll(void) {
+    const auto group = pickGroup();
+    const auto port = pickPort();
+    const auto iface = pickIface();
+
+    knx::platform::LinuxPlatform platform;
+    auto* net = platform.network();
+    TEST_ASSERT_NOT_NULL(net);
+    TEST_ASSERT_TRUE(net->init());
+
+    IpRoutingPhysical sender;
+    sender.setNetworkInterface(net);
+    sender.setMulticast(group, NetIpPort(port), iface);
+    Tp1DataLinkConfig manualRx = Tp1DataLinkConfig::defaults();
+    manualRx.enableRxTask = false;
+    Tp1DataLinkLayer dlSender(platform, sender, manualRx);
+    TEST_ASSERT_TRUE(dlSender.init(IndividualAddress(0x1105)).isOk());
+
+    // The listener is the bare port: no data link layer above it, so the only
+    // thing that ever reads this socket is the single poll below.
+    IpRoutingPhysical listener;
+    listener.setNetworkInterface(net);
+    listener.setTimingPlatform(&platform);
+    listener.setMulticast(group, NetIpPort(port), iface);
+    TEST_ASSERT_TRUE(listener.init().isOk());
+
+    LDataFrame out;
+    out.source = IndividualAddress(0x1105);
+    out.destination = GroupAddress(0x0100);
+    out.destinationType = AddressType::Group;
+    out.hopCount = 6;
+    out.tpdu.assign(std::vector<uint8_t>{0x00, 0x81});
+
+    // Two, as ETS sends them. The gap is the sender's egress budget, not the
+    // property under test: what matters is that both datagrams are sitting in
+    // the listener's socket before it reads, which the wait below guarantees.
+    constexpr int kBurst = 2;
+    for (int i = 0; i < kBurst; ++i) {
+        TEST_ASSERT_TRUE(dlSender.sendFrame(out).isOk());
+        ::usleep(50 * 1000);
+    }
+
+    // Let the whole burst land in the socket before anything reads it, so the
+    // first read really does have the rest waiting behind it.
+    ::usleep(300 * 1000);
+
+    TEST_ASSERT_TRUE(listener.beginReceive(200).isOk());
+    const auto progress = listener.pollReceive();
+    TEST_ASSERT_TRUE(progress.isOk());
+
+    // One poll, the whole burst off the socket. The socket is what is being
+    // asserted, not what the layers above made of the frames: a datagram left
+    // in the buffer is one this device can still lose, and only this counter
+    // sees it.
+    TEST_ASSERT_EQUAL_UINT32(
+        kBurst, static_cast<uint32_t>(listener.linkStatistics().datagramsReceived));
+    TEST_ASSERT_EQUAL_UINT32(
+        0, static_cast<uint32_t>(listener.linkStatistics().datagramsDropped));
+
+    dlSender.close();
+    listener.close();
+}
+
 // The capability the data link reads to decide whether its receive task sleeps
 // in the medium or polls it. Silently losing this reverts the whole change.
 void test_ip_routing_physical_advertises_medium_wait(void) {
@@ -354,6 +423,7 @@ int main() {
     RUN_TEST(test_ip_routing_physical_counts_inbound_datagrams);
     RUN_TEST(test_ip_routing_physical_refreshes_membership_after_silence);
     RUN_TEST(test_ip_routing_physical_receive_waits_for_the_deadline);
+    RUN_TEST(test_ip_routing_physical_takes_a_whole_burst_in_one_poll);
     RUN_TEST(test_ip_routing_physical_advertises_medium_wait);
     return UNITY_END();
 }

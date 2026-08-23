@@ -217,6 +217,23 @@ void assertDescriptorExportMapping(const DescT& descriptor)
                               + std::to_string(descriptor.capacities.datapointLinkCapacity)
                               + "</AssociationEntries>")
                      != std::string::npos);
+    // The table ceilings ETS reads as the device's group address / association
+    // limit. They are stack constants, not product data: a knxprod that does
+    // not carry them makes ETS refuse the first link on the device.
+    TEST_ASSERT_TRUE(json.find("\"addressTableMaxEntries\":"
+                               + std::to_string(objects::AddressTableDomain::kMaxEntries))
+                     != std::string::npos);
+    TEST_ASSERT_TRUE(json.find("\"associationTableMaxEntries\":"
+                               + std::to_string(objects::AssociationTableDomain::kMaxEntries))
+                     != std::string::npos);
+    TEST_ASSERT_TRUE(xml.find("<AddressTableMaxEntries>"
+                              + std::to_string(objects::AddressTableDomain::kMaxEntries)
+                              + "</AddressTableMaxEntries>")
+                     != std::string::npos);
+    TEST_ASSERT_TRUE(xml.find("<AssociationTableMaxEntries>"
+                              + std::to_string(objects::AssociationTableDomain::kMaxEntries)
+                              + "</AssociationTableMaxEntries>")
+                     != std::string::npos);
     TEST_ASSERT_TRUE(json.find("\"autoResponseQueueCapacity\":"
                                + std::to_string(descriptor.capacities.autoResponseQueueCapacity))
                      != std::string::npos);

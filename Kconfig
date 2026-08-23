@@ -436,6 +436,28 @@ menu "KNX Stack Configuration"
                 Priority for frame reception task (should be high)
     endmenu
 
+    menu "Management"
+
+        config KNX_RESTART_PROCESS_TIME_S
+            int "Restart process time reported to ETS (seconds)"
+            default 0
+            range 0 65535
+            help
+                Process_Time reported in A_Restart_Response after a master
+                reset. A management client waits this long before it touches
+                the device again.
+
+                0 declares "back in under 5 s", which is right for a device
+                that only restarts its own firmware. A device that has to
+                bring a network link back up first — a KNXnet/IP device on
+                Wi-Fi needs seconds to associate and get an address — must
+                report the real figure: understating it makes ETS exhaust its
+                retries while the device is still booting and report the
+                download as failed. Overstating it only costs some patience,
+                once per download.
+
+    endmenu
+
     menu "Buffer Configuration"
         
         config KNX_RX_QUEUE_SIZE

@@ -9,6 +9,7 @@
 #include "knx/datalink/tp1_data_link_layer.hpp"
 #include "knx/datalink/frame_codec.hpp"
 #include "knx/platform/linux_platform.hpp"
+#include "knx/config.hpp"
 #include "../mocks/mock_physical_layer.hpp"
 #include "unity.h"
 #include <memory>
@@ -419,8 +420,13 @@ void test_RestartMasterResetAnswersAndInvokesHandler() {
     TEST_ASSERT_EQUAL_HEX8(0x03, tpdu[0]);
     TEST_ASSERT_EQUAL_HEX8(0xA1, tpdu[1]);
     TEST_ASSERT_EQUAL_HEX8(0x00, tpdu[2]);  // error code = success, not 0xFF
-    TEST_ASSERT_EQUAL_HEX8(0x00, tpdu[3]);
-    TEST_ASSERT_EQUAL_HEX8(0x00, tpdu[4]);
+    // The process time is what the product configured, big-endian. A device
+    // that needs a network link back before it can answer says so here, and
+    // asserting a literal 0 would hide it going missing.
+    TEST_ASSERT_EQUAL_HEX8(static_cast<uint8_t>(knx::config::RESTART_PROCESS_TIME_S >> 8),
+                           tpdu[3]);
+    TEST_ASSERT_EQUAL_HEX8(static_cast<uint8_t>(knx::config::RESTART_PROCESS_TIME_S & 0xFFu),
+                           tpdu[4]);
 
     TEST_ASSERT_TRUE(restarted);
     TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(knx::application::RestartType::MasterReset),

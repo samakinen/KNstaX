@@ -184,6 +184,75 @@ The generated file is a `.knxprod.xml`, not a zipped `.knxprod`. Import it
 through Kaenx-Creator (which produces the packed archive ETS consumes) or a
 comparable tool.
 
+The XML is self-contained: it carries a `MasterData` section naming the medium,
+mask version, manufacturer and datapoint types it uses, so it can be validated
+and read back (`knxprod2profile.py`) without ETS. A `.knxprod` archive has no
+such section — master data is ETS's own `knx_master.xml`. Strip `MasterData`
+before handing the file to a packer that signs with the ETS libraries, e.g.
+OpenKNXproducer: it splits the input into `Catalog.xml`, `Hardware.xml` and the
+application program file while removing only the elements it knows about, so
+`MasterData` is copied into all three and the ETS hasher fails on the first one
+it reads with `Naming pair for MasterData cannot be found`.
+
+### Registration
+
+ETS will not import a product it considers unregistered unless the installation
+holds a manufacturer test licence:
+
+> No valid license found to test the unregistered product(s) in this file.
+
+Registration is declared, not proved, and it has to be declared in two places —
+`Hardware/Products/Product/RegistrationInfo` and
+`Hardware2Programs/Hardware2Program/RegistrationInfo`, the latter with a
+`RegistrationNumber` of `<4 digits>/<hardware version><application version>`.
+The exporter emits both. The manufacturer id is not what gates this. `M-00FA`
+(250) is `KNX Association` in the KNX master data and the id OpenKNX-style
+community products use, but a file carrying it is still refused without the
+registration declaration — as is any other id.
+
+### Table capacities
+
+`Static/AddressTable` and `Static/AssociationTable` declare how many group
+addresses and associations the device can hold. ETS reads a missing declaration
+as zero and refuses the very first link:
+
+> The maximum associations of the device are been reached. No more associations
+> are possible.
+
+The numbers are not product data — they are what `AddressTableDomain` and
+`AssociationTableDomain` hold, and what the memory segments in
+`table_segments.hpp` the ETS download writes into can take. So the C++ exporter
+reads them from those domains and puts them in the JSON as
+`capacities.addressTableMaxEntries` / `associationTableMaxEntries`, and the
+Python exporter refuses to render a product whose JSON predates them rather
+than guessing. Do not confuse them with `addressTableEntries` /
+`associationEntries` in the same block, which count what this product's own
+communication objects need.
+
+### Identifier shapes
+
+ETS ids are structured, and both ETS and the packers parse them back apart, so
+the field widths matter:
+
+| Id | Shape | Example |
+|---|---|---|
+| Application program | `M-<mfr>_A-<number:4hex>-<version:2hex>-<hash:4hex>` | `M-00FA_A-0016-06-0000` |
+| Hardware | `M-<mfr>_H-<serial>-<version>` | `M-00FA_H-0002-1` |
+| Hardware2Program | `<hardware>_HP-<number:4hex>-<version:2hex>-<hash:4hex>` | `M-00FA_H-0002-1_HP-0016-06-0000` |
+| Code segment | `<application program>_RS-<load state machine:2>-<offset:5>` | `M-00FA_A-0016-06-0000_RS-04-00000` |
+
+The code segment id is read back apart during the download, not just matched:
+its two groups have to be the `LoadStateMachine` and `Offset` of the segment
+they name, or ETS fails Download(All) with `ID '..._RS-0000' is not a valid id
+ID` — after the product has imported and linked perfectly well.
+
+The application number is a 16-bit field: four hex digits, never more. The
+trailing `0000` is a placeholder the ETS signer replaces with the hash it
+computes over the program — that is also how a re-imported product is
+recognised as a new version rather than a corrupted old one. Everything inside
+the application program is prefixed with the application program id, so a
+change to that id renames the whole tree with it.
+
 ## The load procedure
 
 The exporter emits the standard System B application download:

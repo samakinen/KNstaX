@@ -142,35 +142,47 @@ IpRoutingPhysical::LinkStatistics IpRoutingPhysical::linkStatistics() const
     return out;
 }
 
-void IpRoutingPhysical::drainInboundOnce(uint32_t timeoutMs)
+void IpRoutingPhysical::drainInbound(uint32_t timeoutMs)
 {
     if (!initialized_.load() || !endpoint_ || !endpoint_->isOpen()) {
         return;
     }
 
-    std::array<uint8_t, netip::kMaxCemiLDataSize> cemi{};
-    auto recvRes = endpoint_->receive(cemi, timeoutMs);
-    if (!recvRes.isOk()) {
-        refreshMembershipIfDeaf();
-        return;
+    // Only the first read may wait. Once one datagram is in hand the rest of
+    // the socket's contents are already here, so they are taken now rather
+    // than a poll cycle at a time.
+    uint32_t waitMs = timeoutMs;
+
+    for (size_t drained = 0; drained < kMaxDrainPerPoll; ++drained) {
+        std::array<uint8_t, netip::kMaxCemiLDataSize> cemi{};
+        auto recvRes = endpoint_->receive(cemi, waitMs);
+        if (!recvRes.isOk()) {
+            // Nothing more to take. Only a drain that read nothing at all says
+            // anything about the group still being delivered here.
+            if (drained == 0) {
+                refreshMembershipIfDeaf();
+            }
+            return;
+        }
+        waitMs = 0u;
+
+        // Counted before the kind is examined: a datagram that turned out to be
+        // a search request, or one this device could not decode, still proves
+        // the group is being delivered here.
+        rxDatagrams_.fetch_add(1);
+        lastInboundMs_ = netip::detail::nowMs(timingPlatform_);
+        lastInboundValid_ = true;
+
+        const auto inbound = recvRes.value();
+        // Both domains carry an ordinary cEMI L_Data frame; which service type
+        // brought it only decides how it must be sent back out, and the layers
+        // above address that from the APDU rather than from the transport.
+        if (inbound.kind == netip::RoutingEndpoint::InboundKind::None) {
+            continue;
+        }
+
+        enqueueFrame(std::span<const uint8_t>(cemi).first(inbound.cemiLength));
     }
-
-    // Counted before the kind is examined: a datagram that turned out to be a
-    // search request, or one this device could not decode, still proves the
-    // group is being delivered here.
-    rxDatagrams_.fetch_add(1);
-    lastInboundMs_ = netip::detail::nowMs(timingPlatform_);
-    lastInboundValid_ = true;
-
-    const auto inbound = recvRes.value();
-    // Both domains carry an ordinary cEMI L_Data frame; which service type
-    // brought it only decides how it must be sent back out, and the layers
-    // above address that from the APDU rather than from the transport.
-    if (inbound.kind == netip::RoutingEndpoint::InboundKind::None) {
-        return;
-    }
-
-    enqueueFrame(std::span<const uint8_t>(cemi).first(inbound.cemiLength));
 }
 
 void IpRoutingPhysical::setMulticast(IpAddress multicastGroup,
@@ -489,7 +501,7 @@ util::Result<IpRoutingPhysical::ProgressState> IpRoutingPhysical::pollReceive() 
     const uint64_t now = static_cast<uint64_t>(netip::detail::nowMs(timingPlatform_));
     const uint32_t waitMs =
         (rxDeadlineMs_ > now) ? static_cast<uint32_t>(rxDeadlineMs_ - now) : 0u;
-    drainInboundOnce(waitMs);
+    drainInbound(waitMs);
 
     {
         std::lock_guard<std::mutex> lock(rxMutex_);

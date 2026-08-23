@@ -52,7 +52,9 @@ def export_product_json_to_kaenx(json_obj) -> str:
 
     caps = json_obj.get('capacities', {})
     capacities = ET.SubElement(product, 'Capacities')
-    for k in ('groupObjectCount', 'addressTableEntries', 'associationEntries', 'autoResponseQueueCapacity', 'transmissionOutcomeQueueCapacity'):
+    for k in ('groupObjectCount', 'addressTableEntries', 'associationEntries',
+              'addressTableMaxEntries', 'associationTableMaxEntries',
+              'autoResponseQueueCapacity', 'transmissionOutcomeQueueCapacity'):
         ET.SubElement(capacities, k).text = str(caps.get(k, 0))
 
     comms = ET.SubElement(product, 'CommunicationObjects')
@@ -541,7 +543,17 @@ def export_product_json_to_knxprod(json_obj) -> str:
 
     # OpenKNX/Kaenx importer expects ETS-style IDs with hex-encoded parts.
     manu_ref = f'M-{manufacturer_id:04X}'
-    app_ref = f'{manu_ref}_A-{app_number:06X}-{app_version:02X}-0000'
+    # ETS spells an application program id 'M-xxxx_A-<number:4 hex>-<version:2
+    # hex>-<hash:4 hex>'. The application number is a 16-bit field, so it is
+    # four digits, not six: tools that parse the id back out (OpenKNXproducer
+    # reads the version from fixed offsets) fall over on any other width.
+    # The trailing group is a placeholder — the ETS signer replaces it with the
+    # hash it computes over the program.
+    if not 0 <= app_number <= 0xFFFF:
+        raise SystemExit(
+            f'applicationProgram.number {app_number} does not fit the 16-bit '
+            'ETS application number field')
+    app_ref = f'{manu_ref}_A-{app_number:04X}-{app_version:02X}-0000'
     # ETS keys hardware by manufacturer + serial + version, and its ids encode
     # that. A fixed 'H-0001' made every product of one manufacturer collide:
     # importing the second one hit "the product has a different hash than the
@@ -555,7 +567,9 @@ def export_product_json_to_knxprod(json_obj) -> str:
     profile_id = _ets_id_part(identity.get('profileKey', ''))
     order_id = _ets_id_part(identity.get('orderNumber', ''), profile_id)
     product_ref = f'{hardware_ref}_P-{profile_id}'
-    hardware2prog_ref = f'{hardware_ref}_HP-0001-{app_number:04X}-{app_version:02X}'
+    # Same shape as the application program id it points at, placeholder hash
+    # included — that group is what the ETS hardware signer rewrites.
+    hardware2prog_ref = f'{hardware_ref}_HP-{app_number:04X}-{app_version:02X}-0000'
     catalog_section_ref = f'{manu_ref}_CS-{profile_id}'
     catalog_item_ref = f'{manu_ref}_CI-{order_id}'
     # The medium and its mask version come from the C++ product definition, in
@@ -689,6 +703,12 @@ def export_product_json_to_knxprod(json_obj) -> str:
     product.set('OrderNumber', identity.get('orderNumber') or identity.get('profileKey', ''))
     product.set('DefaultLanguage', 'en-US')
     product.set('IsRailMounted', 'false')
+    # ETS refuses to import a product it considers unregistered unless the
+    # installation holds a manufacturer test licence: "No valid license found to
+    # test the unregistered product(s) in this file." The registration state is
+    # not something the tool can prove, it is simply declared here, and both the
+    # product and the hardware-to-program link have to declare it.
+    ET.SubElement(product, 'RegistrationInfo').set('RegistrationStatus', 'Registered')
 
     hard2progs = ET.SubElement(hard, 'Hardware2Programs')
     hard2prog = ET.SubElement(hard2progs, 'Hardware2Program')
@@ -698,6 +718,14 @@ def export_product_json_to_knxprod(json_obj) -> str:
     # attribute. The mask linkage is carried by ApplicationProgram/@MaskVersion.
     app_ref_elem = ET.SubElement(hard2prog, 'ApplicationProgramRef')
     app_ref_elem.set('RefId', app_ref)
+    # Must follow ApplicationProgramRef: Hardware2Program_t is a sequence.
+    # RegistrationNumber is '<4 digits>/<digits>' — the ETS registration id and
+    # the hardware/application version pair it was registered for, which is what
+    # lets ETS offer an update to an already installed device rather than a
+    # second catalogue entry.
+    registration = ET.SubElement(hard2prog, 'RegistrationInfo')
+    registration.set('RegistrationStatus', 'Registered')
+    registration.set('RegistrationNumber', f'0001/{hardware_version}{app_version}')
 
     app = ET.SubElement(app_programs, 'ApplicationProgram')
     app.set('Id', app_ref)
@@ -748,10 +776,17 @@ def export_product_json_to_knxprod(json_obj) -> str:
     # <Memory> entries reference it, and the device maps it to the application
     # program load segment it decodes into ParameterState on LoadCompleted.
     code = ET.SubElement(static, 'Code')
-    rs_ref = f'{app_ref}_RS-0000'
+    # ETS parses a code segment id rather than treating it as opaque: it is
+    # '<application program id>_RS-<load state machine:2 digits>-<offset:5
+    # digits>', and a download of anything else fails with "ID '..._RS-0000' is
+    # not a valid id ID". Build it from the same values the attributes carry so
+    # the two cannot drift apart.
+    rs_load_state_machine = _LSM_APPLICATION_PROGRAM
+    rs_offset = 0
+    rs_ref = f'{app_ref}_RS-{rs_load_state_machine:02d}-{rs_offset:05d}'
     rs = ET.SubElement(code, 'RelativeSegment')
     rs.set('Id', rs_ref)
-    rs.set('Name', 'RS-0000')
+    rs.set('Name', 'Parameters')
     # Load state machine index == the interface object INDEX of the loadable
     # part that owns the segment. This is not the object *type*: the
     # Application Program object's type is 3, but in the canonical System B
@@ -760,8 +795,8 @@ def export_product_json_to_knxprod(json_obj) -> str:
     # index the load procedure below already uses for LsmIdx/ObjIdx.
     # Declaring 3 here pointed the segment at the group object table's load
     # state machine, so ETS never allocated a parameter segment.
-    rs.set('LoadStateMachine', str(_LSM_APPLICATION_PROGRAM))
-    rs.set('Offset', '0')
+    rs.set('LoadStateMachine', str(rs_load_state_machine))
+    rs.set('Offset', str(rs_offset))
     rs.set('Size', '256')
 
     # Dynamic section is created before parameter emission so the parameter
@@ -845,6 +880,22 @@ def export_product_json_to_knxprod(json_obj) -> str:
 
         crefref = ET.SubElement(dyn_root, 'ComObjectRefRef')
         crefref.set('RefId', cref_id)
+
+    # How many group addresses and associations the device's tables hold. ETS
+    # takes a missing declaration as zero and refuses the first link with "The
+    # maximum associations of the device are been reached", so these are not
+    # optional in practice. Both elements sit between ComObjectRefs and
+    # LoadProcedures in the Static sequence.
+    capacities = json_obj.get('capacities', {})
+    for element_name, capacity_key in (('AddressTable', 'addressTableMaxEntries'),
+                                       ('AssociationTable', 'associationTableMaxEntries')):
+        max_entries = capacities.get(capacity_key)
+        if max_entries is None:
+            raise SystemExit(
+                f'capacities.{capacity_key} is missing, so this export predates '
+                'the table-capacity fix and ETS would refuse to link a group '
+                'address. Regenerate the JSON with the current product exporter.')
+        ET.SubElement(static, element_name).set('MaxEntries', str(int(max_entries)))
 
     # Kaenx publish check requires a non-empty load procedure for masks
     # that are not marked as ProcedureTypes.Default. LoadProcedures comes last
