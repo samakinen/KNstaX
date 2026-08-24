@@ -286,7 +286,6 @@ public:
         }
         return _bau->link().refreshMulticastMembership();
     }
-#endif
 
     /// See bau::ManagementControl::setDomainAddressWriteCallback.
     void setDomainAddressWriteCallback(application::DomainAddressWriteCallback callback)
@@ -295,6 +294,7 @@ public:
             _bau->management().setDomainAddressWriteCallback(std::move(callback));
         }
     }
+#endif
 
     /// Counters for the port; see bau::LinkDiagnostics.
     bau::LinkDiagnostics linkDiagnostics() const

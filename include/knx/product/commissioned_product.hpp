@@ -1517,7 +1517,6 @@ public:
     {
         return _runtime.refreshMulticastMembership();
     }
-#endif
 
     /**
      * @brief Decide whether ETS may move this device to another routing group.
@@ -1534,6 +1533,7 @@ public:
     {
         _runtime.setDomainAddressWriteCallback(std::move(callback));
     }
+#endif
 
     /**
      * @brief Counters for the port this product is running on.
