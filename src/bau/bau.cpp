@@ -845,7 +845,19 @@ util::Result<void> BusAccessUnit::init(const IndividualAddress& ownAddress,
         }
     });
     _stackPort->setIndividualAddressUpdateCallback([this](const IndividualAddress& newAddress) {
-        if (_deviceObject.writeIndividualAddress(newAddress).isError()) {
+        // This fires *after* the application layer has already accepted the new
+        // address, so the programming-mode question was settled there and must
+        // not be asked a second time: A_IndividualAddress_Write is refused
+        // outside programming mode by handleIndividualAddressWrite, while
+        // A_IndividualAddressSerialNumber_Write is deliberately not — the serial
+        // number already identified the device, which is the whole reason
+        // 03/05/03 §1.5.4.3.2 uses it to re-address a device nobody can reach a
+        // button on. Routing this through writeIndividualAddress() re-applied
+        // the programming-mode gate and dropped the serial-number assignment on
+        // the floor: the stack answered from the new address, but the Device
+        // Object kept the old one and nothing was persisted, so the Confirmed
+        // Restart that ends the commissioning procedure undid the address.
+        if (_deviceObject.applyIndividualAddress(newAddress).isError()) {
             KNX_LOGW(TAG, "Failed to update BAU device object individual address for 0x%04X",
                      newAddress.raw);
         }

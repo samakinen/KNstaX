@@ -274,7 +274,9 @@ public:
     // Apply an individual address WITHOUT the programming-mode gate, for paths
     // whose authorization is enforced elsewhere: PID_SUBNET_ADDRESS /
     // PID_DEVICE_ADDRESS property writes (access-controlled by the property
-    // service) and persistence restore at boot (prog mode is always off then).
+    // service), A_IndividualAddressSerialNumber_Write (authorized by the serial
+    // number itself, and by KNX Data Security when Security Mode is on), and
+    // persistence restore at boot (prog mode is always off then).
     // Sets the value and fires the update callback so the running stack stays
     // in sync, but does not re-check programming mode.
     util::Result<void> applyIndividualAddress(const IndividualAddress& addr);

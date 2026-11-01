@@ -1539,6 +1539,197 @@ void test_bau_domain_address_read_ignores_another_serial(void) {
     TEST_ASSERT_TRUE(sent.empty());
 }
 
+
+// --- Serial-number-addressed commissioning (03/05/02 §2.4/§2.5) ------------
+//
+// The whole point of A_IndividualAddressSerialNumber_Write is that it reaches a
+// device that is *not* in programming mode: the serial number has already
+// identified it, so no one has to walk up and press a button. 03/05/03
+// §1.5.4.3.2 makes it the only way ETS re-addresses a secure device.
+
+static std::vector<uint8_t> serialNumberAddressWriteFrame(const std::array<uint8_t, 6>& serial,
+                                                          uint8_t addrHigh,
+                                                          uint8_t addrLow) {
+    auto frame = withChecksum({
+        0x30,       // ctrl: extended, not repeated, system priority, no ACK request
+        0xE0,       // ctrle: group addressed (broadcast), hop count 6, format 0000
+        0x11, 0xFE, // src 1.1.254
+        0x00, 0x00, // dest 0/0/0 broadcast
+        0x0D,       // length: 14 TPDU octets - 1
+        0x03, 0xDE, // T_Data_Broadcast + APCI 0x3DE IndividualAddressSerialNumber_Write
+        serial[0], serial[1], serial[2], serial[3], serial[4], serial[5],
+        addrHigh, addrLow,      // new_address
+        0x00, 0x00, 0x00, 0x00, // reserved (03/03/07 Figure 14)
+    });
+    return frame;
+}
+
+static std::vector<uint8_t> serialNumberAddressReadFrame(const std::array<uint8_t, 6>& serial) {
+    return withChecksum({
+        0x30,       // ctrl: extended, not repeated, system priority, no ACK request
+        0xE0,       // ctrle: group addressed (broadcast), hop count 6, format 0000
+        0x11, 0xFE, // src 1.1.254
+        0x00, 0x00, // dest 0/0/0 broadcast
+        0x07,       // length: 8 TPDU octets - 1
+        0x03, 0xDC, // T_Data_Broadcast + APCI 0x3DC IndividualAddressSerialNumber_Read
+        serial[0], serial[1], serial[2], serial[3], serial[4], serial[5],
+    });
+}
+
+static bool waitForIndividualAddress(uint16_t expected) {
+    for (int attempt = 0; attempt < 200; ++attempt) {
+        if (bauInstance->deviceObject().readIndividualAddress().raw == expected) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return false;
+}
+
+// The address has to land in the Device Object, not only in the stack's own
+// notion of its address: PID_SUBNET_ADDRESS/PID_DEVICE_ADDRESS are what ETS
+// reads back and what persistence stores. Gating that on programming mode made
+// the write a no-op for exactly the case the service exists for.
+void test_bau_serial_number_address_write_applies_without_programming_mode(void) {
+    const std::array<uint8_t, 6> serial{0x00, 0xFA, 0x11, 0x22, 0x33, 0x44};
+    bauInstance->deviceObject().setSerialNumber(serial);
+    TEST_ASSERT_FALSE(bauInstance->deviceObject().getProgMode());
+
+    physicalLayer->injectFrame(serialNumberAddressWriteFrame(serial, 0x11, 0x03));
+
+    TEST_ASSERT_TRUE(waitForIndividualAddress(0x1103));
+}
+
+// Somebody else's serial number must leave this device's address alone.
+void test_bau_serial_number_address_write_ignores_another_serial(void) {
+    const std::array<uint8_t, 6> serial{0x00, 0xFA, 0x11, 0x22, 0x33, 0x44};
+    bauInstance->deviceObject().setSerialNumber(serial);
+
+    physicalLayer->injectFrame(
+        serialNumberAddressWriteFrame({0x00, 0xFA, 0xDE, 0xAD, 0xBE, 0xEF}, 0x11, 0x03));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    TEST_ASSERT_EQUAL_HEX16(0x110A, bauInstance->deviceObject().readIndividualAddress().raw);
+}
+
+// Step 2 of NM_IndividualAddress_SerialNumber_Write: the client verifies by
+// reading back, and the answer's *source address* is the new address. ETS
+// treats "different or no answer" as a failed assignment.
+void test_bau_serial_number_address_write_is_verified_by_read_from_new_address(void) {
+    const std::array<uint8_t, 6> serial{0x00, 0xFA, 0x11, 0x22, 0x33, 0x44};
+    bauInstance->deviceObject().setSerialNumber(serial);
+
+    physicalLayer->injectFrame(serialNumberAddressWriteFrame(serial, 0x11, 0x03));
+    TEST_ASSERT_TRUE(waitForIndividualAddress(0x1103));
+
+    physicalLayer->injectFrame(serialNumberAddressReadFrame(serial));
+
+    std::vector<uint8_t> sent;
+    for (int attempt = 0; attempt < 200 && !physicalLayer->getSentFrame(sent); ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    TEST_ASSERT_FALSE(sent.empty());
+
+    TEST_ASSERT_EQUAL_HEX8(0x11, sent[1]);   // source: the freshly written 1.1.3
+    TEST_ASSERT_EQUAL_HEX8(0x03, sent[2]);
+    TEST_ASSERT_EQUAL_HEX8(0x00, sent[3]);   // destination: broadcast
+    TEST_ASSERT_EQUAL_HEX8(0x00, sent[4]);
+    TEST_ASSERT_EQUAL_HEX8(0x03, sent[6]);   // T_Data_Broadcast + APCI high
+    TEST_ASSERT_EQUAL_HEX8(0xDD, sent[7]);   // APCI low: 0x3DD ..._Response
+    for (size_t i = 0; i < serial.size(); ++i) {
+        TEST_ASSERT_EQUAL_HEX8(serial[i], sent[8 + i]);
+    }
+}
+
+// The assignment must outlive the Confirmed Restart that closes the procedure
+// (03/05/03 §1.5.4.3.1), so it has to reach persistence — which only happens
+// when the Device Object accepts the address.
+void test_bau_serial_number_address_write_survives_restart(void) {
+    const std::array<uint8_t, 6> serial{0x00, 0xFA, 0x11, 0x22, 0x33, 0x44};
+
+    bauInstance->deviceObject().setSerialNumber(serial);
+    physicalLayer->injectFrame(serialNumberAddressWriteFrame(serial, 0x11, 0x03));
+    TEST_ASSERT_TRUE(waitForIndividualAddress(0x1103));
+
+    bauInstance->close();
+    bauInstance.reset();
+
+    auto secondPlatform = std::make_unique<knx::platform::LinuxPlatform>();
+    auto secondPhysicalOwned = std::make_unique<MockPhysicalLayer>();
+    auto secondStackPort =
+        knx::test::createTp1TestStackPort(*secondPlatform, std::move(secondPhysicalOwned));
+    auto secondBau =
+        std::make_unique<knx::bau::BusAccessUnit>(*secondPlatform, std::move(secondStackPort));
+
+    TEST_ASSERT_TRUE(secondBau->init(IndividualAddress(1, 1, 10)).isOk());
+    TEST_ASSERT_EQUAL_HEX16(0x1103, secondBau->deviceObject().readIndividualAddress().raw);
+
+    secondBau->close();
+    secondBau.reset();
+}
+
+// --- NM_Read_SerialNumber_By_ProgrammingMode (03/05/02 §2.20.1.4) ----------
+//
+// This is the broadcast ETS repeats while it waits for a device: Device Object,
+// PID_SERIAL_NUMBER, test_info = operand 01h. Only a device in programming mode
+// answers, and the answer is what lets ETS match the device against a device
+// certificate before it starts the secure commissioning sequence.
+
+static std::vector<uint8_t> programmingModeSerialScanFrame() {
+    return withChecksum({
+        0x30,       // ctrl: extended, not repeated, system priority, no ACK request
+        0xE0,       // ctrle: group addressed (broadcast), hop count 6, format 0000
+        0x11, 0xFF, // src 1.1.255
+        0x00, 0x00, // dest 0/0/0 broadcast
+        0x06,       // length: 7 TPDU octets - 1
+        0x01, 0xC8, // T_Data_Broadcast + APCI 0x1C8 SystemNetworkParameter_Read
+        0x00, 0x00, // object_type = 0 (Device Object)
+        0x00, 0xB0, // PID = 11 (PID_SERIAL_NUMBER), 12 bits, then 4 reserved
+        0x01,       // test_info: operand 01h
+    });
+}
+
+void test_bau_programming_mode_serial_scan_answers_when_programming_mode_active(void) {
+    const std::array<uint8_t, 6> serial{0x00, 0xFA, 0x11, 0x22, 0x33, 0x44};
+    bauInstance->deviceObject().setSerialNumber(serial);
+    bauInstance->deviceObject().setProgMode(Toggle::Enable);
+
+    physicalLayer->injectFrame(programmingModeSerialScanFrame());
+
+    std::vector<uint8_t> sent;
+    for (int attempt = 0; attempt < 200 && !physicalLayer->getSentFrame(sent); ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    TEST_ASSERT_FALSE(sent.empty());
+
+    // Figure 8: the response echoes parameter_type and test_info, then appends
+    // the KNX Serial Number as test_result.
+    TEST_ASSERT_EQUAL_HEX8(0x01, sent[6]);   // T_Data_Broadcast + APCI high
+    TEST_ASSERT_EQUAL_HEX8(0xC9, sent[7]);   // APCI low: 0x1C9 ..._Response
+    TEST_ASSERT_EQUAL_HEX8(0x00, sent[8]);   // object_type
+    TEST_ASSERT_EQUAL_HEX8(0x00, sent[9]);
+    TEST_ASSERT_EQUAL_HEX8(0x00, sent[10]);  // PID = 11
+    TEST_ASSERT_EQUAL_HEX8(0xB0, sent[11]);
+    TEST_ASSERT_EQUAL_HEX8(0x01, sent[12]);  // test_info, echoed
+    for (size_t i = 0; i < serial.size(); ++i) {
+        TEST_ASSERT_EQUAL_HEX8(serial[i], sent[13 + i]);
+    }
+}
+
+void test_bau_programming_mode_serial_scan_is_silent_without_programming_mode(void) {
+    bauInstance->deviceObject().setSerialNumber(std::array<uint8_t, 6>{0x00, 0xFA, 0x11, 0x22, 0x33, 0x44});
+    TEST_ASSERT_FALSE(bauInstance->deviceObject().getProgMode());
+
+    physicalLayer->injectFrame(programmingModeSerialScanFrame());
+
+    std::vector<uint8_t> sent;
+    for (int attempt = 0; attempt < 30; ++attempt) {
+        if (physicalLayer->getSentFrame(sent)) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    TEST_ASSERT_TRUE(sent.empty());
+}
+
 int main(void) {
     UNITY_BEGIN();
 
@@ -1550,6 +1741,12 @@ int main(void) {
     RUN_TEST(test_bau_secured_service_families_rejects_unsecurable_family);
     RUN_TEST(test_bau_domain_address_read_answers_with_the_routing_group);
     RUN_TEST(test_bau_domain_address_read_ignores_another_serial);
+    RUN_TEST(test_bau_serial_number_address_write_applies_without_programming_mode);
+    RUN_TEST(test_bau_serial_number_address_write_ignores_another_serial);
+    RUN_TEST(test_bau_serial_number_address_write_is_verified_by_read_from_new_address);
+    RUN_TEST(test_bau_serial_number_address_write_survives_restart);
+    RUN_TEST(test_bau_programming_mode_serial_scan_answers_when_programming_mode_active);
+    RUN_TEST(test_bau_programming_mode_serial_scan_is_silent_without_programming_mode);
     RUN_TEST(test_bau_downloaded_group_key_table_becomes_usable_key);
     RUN_TEST(test_bau_go_diagnostics_send_group_value_read_puts_read_on_bus);
     RUN_TEST(test_bau_go_diagnostics_refuses_secure_read_without_group_key);

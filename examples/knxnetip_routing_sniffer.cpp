@@ -101,7 +101,7 @@ int main(int argc, char** argv) {
     uint32_t receivedCount = 0;
     for (;;) {
         std::array<uint8_t, netip::kMaxCemiLDataSize> cemi{};
-        const auto recvRes = ep.receiveRoutingIndication(cemi, timeoutMs);
+        const auto recvRes = ep.receive(cemi, timeoutMs);
         if (recvRes.isError()) {
             if (count != 0) {
                 std::cout << "[timeout] received=" << receivedCount << " expected=" << count
@@ -111,17 +111,28 @@ int main(int argc, char** argv) {
             continue;
         }
 
+        // Control-service datagrams (SEARCH_REQUEST and friends) are reported
+        // as None and carry no cEMI: a sniffer has nothing to print for them.
+        const auto inbound = recvRes.value();
+        if (inbound.kind == netip::RoutingEndpoint::InboundKind::None) {
+            continue;
+        }
+
         datalink::LDataFrame frame;
         uint8_t msgCode = 0;
-        if (!netip::decodeCemiLData(std::span<const uint8_t>(cemi).first(recvRes.value()), frame, msgCode)) {
-            std::cout << "[drop] invalid cEMI len=" << recvRes.value() << "\n";
+        if (!netip::decodeCemiLData(std::span<const uint8_t>(cemi).first(inbound.cemiLength),
+                                    frame, msgCode)) {
+            std::cout << "[drop] invalid cEMI len=" << inbound.cemiLength << "\n";
             continue;
         }
 
         const auto src = frame.source;
         const auto dst = frame.destination;
 
-        std::cout << "cEMI msg=0x" << std::hex << static_cast<unsigned>(msgCode) << std::dec
+        std::cout << (inbound.kind == netip::RoutingEndpoint::InboundKind::SystemBroadcast
+                          ? "sysbc "
+                          : "")
+                  << "cEMI msg=0x" << std::hex << static_cast<unsigned>(msgCode) << std::dec
                   << " src=" << static_cast<unsigned>(src.area()) << "." << static_cast<unsigned>(src.line())
                   << "." << static_cast<unsigned>(src.device());
 
