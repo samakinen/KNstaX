@@ -54,6 +54,10 @@ util::Result<void> TpuartPhysical::init() {
         KNX_LOGW(TAG, "Already initialized");
         return util::Result<void>::ok();
     }
+
+    // Known broken (see the warning in tpuart_physical.hpp): say so on every
+    // start, so a build that selects it is not mistaken for a working one.
+    KNX_LOGE(TAG, "TPUART backend is known to be broken and untested; use the bit-bang TP1 backend");
     
     // Configure UART for TPUART (19200 baud, 8E1)
     platform::UartConfig config;

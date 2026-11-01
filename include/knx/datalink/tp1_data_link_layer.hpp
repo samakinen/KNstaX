@@ -630,6 +630,8 @@ private:
     void releaseFrame(LDataFrame* frame);
 
     void finishTxOperation();
+    /// Whether the frame in the TX buffer has a group (or broadcast) destination.
+    bool txFrameIsGroupAddressed() const;
     /// Mark the buffered TX frame as a repetition (clears the "not repeated"
     /// control bit) and recompute the FCS over the modified frame.
     void markTxFrameAsRepeated();

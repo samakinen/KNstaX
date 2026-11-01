@@ -22,6 +22,7 @@
 
 #if KNX_SECURE_ENABLED
 #include "knx/netip/ip_secure/secure_routing_security.hpp"
+#include "knx/security/secure_memory.hpp"
 #endif
 
 namespace knx {
@@ -41,7 +42,6 @@ IpRoutingPhysical::IpRoutingPhysical()
     , endpoint_(nullptr)
     , initialized_(false)
     , rxMutex_()
-    , rxQueue_()
     , rxCb_(nullptr)
     , rxCtx_(nullptr)
     , state_(PhysicalLayerState::Idle)
@@ -50,10 +50,16 @@ IpRoutingPhysical::IpRoutingPhysical()
 
 IpRoutingPhysical::~IpRoutingPhysical() {
     close();
+#if KNX_SECURE_ENABLED
+    security::secureZero(secureRoutingGroupKey_);
+#endif
 }
 
 void IpRoutingPhysical::enqueueFrame(std::span<const uint8_t> cemi)
 {
+    static_assert(kRxSlotSize >= datalink::LDataFrame::MAX_FRAME_SIZE + 8,
+                  "an rx slot must hold the largest frame FrameCodec encodes");
+
     datalink::LDataFrame frame;
     uint8_t cemiMessageCode = 0;
     if (netip::decodeCemiLData(cemi, frame, cemiMessageCode).isError()) {
@@ -63,21 +69,28 @@ void IpRoutingPhysical::enqueueFrame(std::span<const uint8_t> cemi)
     // A TP1 standard frame tops out at 23 octets, but an L_Data_Extended one
     // carries up to 263 — and every ETS download that moves a key table or a
     // parameter block is extended. A 64-octet buffer silently dropped those.
-    std::array<uint8_t, datalink::LDataFrame::MAX_FRAME_SIZE + 8> buf{};
-    auto encodeResult = datalink::FrameCodec::encodeFrame(frame, buf);
-    if (!encodeResult.isOk()) {
-        return;
-    }
-
-    const size_t len = encodeResult.value();
     {
         std::lock_guard<std::mutex> lock(rxMutex_);
-        rxQueue_.emplace_back(buf.begin(), buf.begin() + len);
+        if (!rxRing_) {
+            return;
+        }
+        auto& ring = *rxRing_;
+        // Full: the oldest frame makes room, as the deque this replaced did.
+        // A routing receiver that falls behind should lose stale frames, not
+        // the newest state of a group.
         const size_t maxDepth = maxRxQueueDepth_.load();
-        while (rxQueue_.size() > maxDepth) {
-            rxQueue_.pop_front();
+        while (rxCount_ >= maxDepth) {
+            rxHead_ = (rxHead_ + 1) % kRxQueueCapacity;
+            --rxCount_;
             rxDropped_.fetch_add(1);
         }
+        RxSlot& slot = ring[(rxHead_ + rxCount_) % kRxQueueCapacity];
+        auto encodeResult = datalink::FrameCodec::encodeFrame(frame, slot.bytes);
+        if (!encodeResult.isOk()) {
+            return;
+        }
+        slot.length = encodeResult.value();
+        ++rxCount_;
     }
 
     if (rxCb_) {
@@ -148,6 +161,10 @@ void IpRoutingPhysical::drainInbound(uint32_t timeoutMs)
         return;
     }
 
+#if KNX_SECURE_ENABLED
+    refreshLatencySettings();
+#endif
+
     // Only the first read may wait. Once one datagram is in hand the rest of
     // the socket's contents are already here, so they are taken now rather
     // than a poll cycle at a time.
@@ -211,16 +228,48 @@ void IpRoutingPhysical::setMulticastSocketOptions(uint8_t ttl, Toggle loopback) 
 }
 
 #if KNX_SECURE_ENABLED
-void IpRoutingPhysical::setSecureRouting(const std::array<uint8_t, 16>& groupKey,
-                                         const std::array<uint8_t, 6>& serial,
-                                         const std::array<uint8_t, 2>& tag,
-                                         uint64_t initialSeq) {
-    if (initialized_.load()) return;
-    secureRoutingEnabled_ = true;
-    secureRoutingGroupKey_ = groupKey;
+void IpRoutingPhysical::setSecureRoutingSerial(const std::array<uint8_t, 6>& serial) {
+    std::lock_guard<std::mutex> lock(secureRoutingMutex_);
     secureRoutingSerial_ = serial;
-    secureRoutingTag_ = tag;
-    secureRoutingInitialSeq_ = initialSeq;
+}
+
+void IpRoutingPhysical::setMcTimerStore(netip::ip_secure::McTimerStore* store) {
+    std::lock_guard<std::mutex> lock(secureRoutingMutex_);
+    mcTimerStore_ = store;
+}
+
+void IpRoutingPhysical::setLatencySettingsSource(LatencySettingsSource source) {
+    if (initialized_.load()) return;
+    latencySettingsSource_ = std::move(source);
+}
+
+void IpRoutingPhysical::refreshLatencySettings() {
+    if (!latencySettingsSource_) {
+        return;
+    }
+    // §2.3.1.6.3 and §2.3.1.7.3: a new value must take effect within a second.
+    static constexpr uint32_t kLatencyPollIntervalMs = 1000;
+    const uint32_t now = netip::detail::nowMs(timingPlatform_);
+    if (latencyPolled_ && (now - latencyPolledMs_) < kLatencyPollIntervalMs) {
+        return;
+    }
+    latencyPolled_ = true;
+    latencyPolledMs_ = now;
+
+    const LatencySettings settings = latencySettingsSource_();
+    std::lock_guard<std::mutex> lock(secureRoutingMutex_);
+    if (settings == latencySettings_) {
+        return;
+    }
+    latencySettings_ = settings;
+    if (routingSecurity_) {
+        routingSecurity_->setLatencyTolerance(settings.latencyToleranceMs, settings.syncLatencyFraction);
+    }
+}
+
+uint64_t IpRoutingPhysical::secureRoutingTimer() const {
+    std::lock_guard<std::mutex> lock(secureRoutingMutex_);
+    return routingSecurity_ ? routingSecurity_->mcTimer() : 0u;
 }
 #endif
 
@@ -234,13 +283,43 @@ void IpRoutingPhysical::setCoreDiscovery(netip::CoreServerResponder::Description
     coreDiscoveryEnabled_ = true;
 }
 
-void IpRoutingPhysical::setRandomSource(netip::RandomUnitSource source) {
+void IpRoutingPhysical::setRandomSource(netip::RandomBytesSource source) {
+    if (initialized_.load()) return;
     randomSource_ = std::move(source);
 }
 
 #if KNX_SECURE_ENABLED
+void IpRoutingPhysical::installSecureRoutingContext(KeySource source) {
+    netip::ip_secure::SecureRoutingOptions options;
+    options.timing = timingPlatform_;
+    options.random = [this](std::span<uint8_t> out) {
+        // Captures `this` rather than a copy of the source: the source is
+        // fixed before init() and lives as long as this object.
+        if (randomSource_) {
+            randomSource_(out);
+            return;
+        }
+        for (auto& byte : out) {
+            byte = static_cast<uint8_t>(netip::detail::fallbackRandom64());
+        }
+    };
+    options.store = mcTimerStore_;
+    options.startReason = (source == KeySource::Restored)
+        ? netip::ip_secure::McTimerSync::StartReason::PowerUp
+        : netip::ip_secure::McTimerSync::StartReason::Reconfigured;
+    options.latencyToleranceMs = latencySettings_.latencyToleranceMs;
+    options.syncLatencyFraction = latencySettings_.syncLatencyFraction;
+
+    auto security = std::make_unique<netip::ip_secure::SecureRoutingSecurity>(
+        secureRoutingGroupKey_, secureRoutingSerial_, std::move(options));
+    endpoint_->setSecurity(security.get());
+    // setSecurity() has returned, so the endpoint is no longer inside the old
+    // context and it can go.
+    routingSecurity_ = std::move(security);
+}
+
 util::Result<void> IpRoutingPhysical::applySecureRouting(std::span<const uint8_t> groupKey,
-                                                         uint64_t initialSeq) {
+                                                         KeySource source) {
     using netip::ip_secure::SecureWrapper;
     // SecureWrapper names its key by type rather than by length; AES-128 makes
     // that 16 octets, and the compiler holds us to it.
@@ -259,22 +338,26 @@ util::Result<void> IpRoutingPhysical::applySecureRouting(std::span<const uint8_t
 
     if (clearing) {
         secureRoutingEnabled_ = false;
-        secureRoutingGroupKey_.fill(0);
+        security::secureZero(secureRoutingGroupKey_);
         if (endpoint_) {
             endpoint_->setSecurity(nullptr);
         }
-        if (routingSecurity_) {
-            retiredRoutingSecurity_.push_back(std::move(routingSecurity_));
-        }
+        routingSecurity_.reset();
         return util::Result<void>::ok();
     }
 
-    SecureWrapper::Key key{};
-    std::copy(groupKey.begin(), groupKey.end(), key.begin());
+    // The key in force, written again — ETS repeating a download, or the
+    // product restoring at boot what is already applied — is not E11. Building
+    // a new context would restart the multicast timer for nothing.
+    if (secureRoutingEnabled_ &&
+        security::constantTimeEqual(secureRoutingGroupKey_, groupKey) &&
+        (!endpoint_ || routingSecurity_)) {
+        return util::Result<void>::ok();
+    }
 
+    std::copy(groupKey.begin(), groupKey.end(), secureRoutingGroupKey_.begin());
     secureRoutingEnabled_ = true;
-    secureRoutingGroupKey_ = key;
-    secureRoutingInitialSeq_ = initialSeq;
+    pendingKeySource_ = source;
 
     // Before init() there is no endpoint to inform; the stored settings are
     // picked up when it opens.
@@ -282,13 +365,7 @@ util::Result<void> IpRoutingPhysical::applySecureRouting(std::span<const uint8_t
         return util::Result<void>::ok();
     }
 
-    auto security = std::make_unique<netip::ip_secure::SecureRoutingSecurity>(
-        key, secureRoutingSerial_, secureRoutingTag_, initialSeq);
-    endpoint_->setSecurity(security.get());
-    if (routingSecurity_) {
-        retiredRoutingSecurity_.push_back(std::move(routingSecurity_));
-    }
-    routingSecurity_ = std::move(security);
+    installSecureRoutingContext(source);
     return util::Result<void>::ok();
 }
 
@@ -299,8 +376,7 @@ bool IpRoutingPhysical::isSecureRoutingActive() const {
 #endif
 
 void IpRoutingPhysical::setMaxRxQueueDepth(size_t maxFrames) {
-    if (maxFrames == 0) maxFrames = 1;
-    maxRxQueueDepth_.store(maxFrames);
+    maxRxQueueDepth_.store(std::clamp<size_t>(maxFrames, 1, kRxQueueCapacity));
 }
 
 util::Result<void> IpRoutingPhysical::init() {
@@ -311,6 +387,20 @@ util::Result<void> IpRoutingPhysical::init() {
         return util::ErrorCode::NotInitialized;
     }
 
+    {
+        std::lock_guard<std::mutex> lock(rxMutex_);
+        if (!rxRing_) {
+            rxRing_ = std::make_unique<std::array<RxSlot, kRxQueueCapacity>>();
+        }
+        rxHead_ = 0;
+        rxCount_ = 0;
+    }
+
+#if KNX_SECURE_ENABLED
+    // Held across the open so a key arriving from the stack task meanwhile
+    // either lands before the context is built here or after it is installed.
+    std::lock_guard<std::mutex> secureLock(secureRoutingMutex_);
+#endif
     endpoint_ = std::make_unique<netip::RoutingEndpoint>();
     netip::RoutingEndpoint::Options opt;
     opt.multicastGroup = multicastGroup_;
@@ -319,19 +409,26 @@ util::Result<void> IpRoutingPhysical::init() {
     opt.ttl = multicastTtl_;
     opt.loopback = multicastLoopback_;
     endpoint_->setTimingPlatform(timingPlatform_);
-#if KNX_SECURE_ENABLED
-    if (secureRoutingEnabled_) {
-        routingSecurity_ = std::make_unique<netip::ip_secure::SecureRoutingSecurity>(
-            secureRoutingGroupKey_, secureRoutingSerial_, secureRoutingTag_, secureRoutingInitialSeq_);
-        opt.security = routingSecurity_.get();
-    }
-#endif
+    endpoint_->setRandomSource([this](std::span<uint8_t> out) {
+        if (randomSource_) {
+            randomSource_(out);
+            return;
+        }
+        for (auto& byte : out) {
+            byte = static_cast<uint8_t>(netip::detail::fallbackRandom64());
+        }
+    });
     auto openRes = endpoint_->open(*network_, opt);
     if (openRes.isError()) {
         state_.store(PhysicalLayerState::Error);
         endpoint_.reset();
         return openRes.error();
     }
+#if KNX_SECURE_ENABLED
+    if (secureRoutingEnabled_) {
+        installSecureRoutingContext(pendingKeySource_);
+    }
+#endif
 
     if (coreDiscoveryEnabled_) {
         // The control endpoint a search response advertises is this socket:
@@ -377,23 +474,26 @@ bool IpRoutingPhysical::multicastJoined() const {
 
 void IpRoutingPhysical::close() {
     if (!initialized_.load()) return;
-    if (endpoint_) {
-        endpoint_->close();
-        endpoint_.reset();
-    }
+    {
 #if KNX_SECURE_ENABLED
-    routingSecurity_.reset();
+        std::lock_guard<std::mutex> secureLock(secureRoutingMutex_);
 #endif
+        if (endpoint_) {
+            endpoint_->close();
+            endpoint_.reset();
+        }
+#if KNX_SECURE_ENABLED
+        routingSecurity_.reset();
+        // A reopen is a restart of the synchronisation from the stored timer.
+        pendingKeySource_ = KeySource::Restored;
+#endif
+    }
     {
         std::lock_guard<std::mutex> lock(rxMutex_);
-        rxQueue_.clear();
+        rxRing_.reset();
+        rxHead_ = 0;
+        rxCount_ = 0;
     }
-#if KNX_SECURE_ENABLED
-    {
-        std::lock_guard<std::mutex> lock(secureRoutingMutex_);
-        retiredRoutingSecurity_.clear();
-    }
-#endif
     initialized_.store(false);
     state_.store(PhysicalLayerState::Idle);
 }
@@ -505,9 +605,10 @@ util::Result<IpRoutingPhysical::ProgressState> IpRoutingPhysical::pollReceive() 
 
     {
         std::lock_guard<std::mutex> lock(rxMutex_);
-        if (!rxQueue_.empty()) {
-            lastReceivedFrame_ = std::move(rxQueue_.front());
-            rxQueue_.pop_front();
+        if (rxRing_ && rxCount_ != 0) {
+            lastReceivedFrame_ = (*rxRing_)[rxHead_];
+            rxHead_ = (rxHead_ + 1) % kRxQueueCapacity;
+            --rxCount_;
             rxActive_ = false;
             state_.store(PhysicalLayerState::Idle);
             return ProgressState::Success;
@@ -524,11 +625,11 @@ util::Result<IpRoutingPhysical::ProgressState> IpRoutingPhysical::pollReceive() 
 }
 
 util::Result<std::span<const uint8_t>> IpRoutingPhysical::receivedFrameView() {
-    if (lastReceivedFrame_.empty()) {
+    if (lastReceivedFrame_.length == 0) {
         return util::ErrorCode::OperationNotReady;
     }
 
-    return std::span<const uint8_t>(lastReceivedFrame_);
+    return std::span<const uint8_t>(lastReceivedFrame_.bytes).first(lastReceivedFrame_.length);
 }
 
 void IpRoutingPhysical::setReceiveCallback(ReceiveCallback callback, void* context) {

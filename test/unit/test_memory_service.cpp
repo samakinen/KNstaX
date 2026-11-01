@@ -9,6 +9,7 @@
 #include "knx/application/address_space.hpp"
 #include "knx/application/memory_service.hpp"
 #include <unity.h>
+#include <array>
 #include <vector>
 #include <cstring>
 #include <algorithm>
@@ -253,10 +254,14 @@ void test_MemoryService_WriteRequest(void) {
     MemoryService service(space);
     service.setWriteCallback(mockWriteCallback);
     service.setResponseCallback(mockResponseCallback);
-    
+    // With Verify Mode on the write is confirmed (03/03/07 §3.5.4). This test
+    // used to expect the answer without it, which is the bug; the Verify Mode
+    // off case is test_MemoryService_WriteWithoutVerifyModeIsNotAnswered.
+    service.setVerifyModeProvider([] { return true; });
+
     writeCallbackCalled = false;
     responseCallbackCalled = false;
-    
+
     std::vector<uint8_t> data = {0xAA, 0xBB, 0xCC, 0xDD};
     knx::IndividualAddress source(1, 2, 3);
     auto result = service.handleWriteRequest(source, 4, knx::MemoryAddress(0x0150), data);
@@ -691,8 +696,131 @@ void test_MemoryExtended_TruncatedWriteIsRejected(void) {
                       static_cast<int>(lastExtendedResponse.returnCode));
 }
 
+// ============================================================================
+// 03/03/07 §3.5.3 / §3.5.4 response rules
+// ============================================================================
+
+namespace {
+std::vector<MemoryResponse> capturedResponses;
+void captureResponse(const knx::IndividualAddress&, const MemoryResponse& response) {
+    capturedResponses.push_back(response);
+}
+
+MemoryService makeClassicService(AddressSpace& space, MemoryAccessMode mode) {
+    MemoryRegion region{knx::MemoryAddress(0x0100), 0x0100, mode, "Test"};
+    TEST_ASSERT_TRUE(space.addRegion(region).isOk());
+    MemoryService service(space);
+    service.setReadCallback(mockReadCallback);
+    service.setWriteCallback(mockWriteCallback);
+    service.setResponseCallback(captureResponse);
+    capturedResponses.clear();
+    return service;
+}
+} // namespace
+
+// A read that cannot be served is answered with number = 0 and no data.
+void test_MemoryService_FailedReadAnswersWithNumberZero(void) {
+    AddressSpace space;
+    auto service = makeClassicService(space, MemoryAccessMode::WriteOnly);
+    knx::IndividualAddress source(1, 2, 3);
+
+    // Protected area, unmapped address, and a length beyond the APDU.
+    TEST_ASSERT_FALSE(service.handleReadRequest(source, 4, knx::MemoryAddress(0x0150)).isOk());
+    TEST_ASSERT_FALSE(service.handleReadRequest(source, 4, knx::MemoryAddress(0x0400)).isOk());
+    TEST_ASSERT_FALSE(service.handleReadRequest(source, 64, knx::MemoryAddress(0x0150)).isOk());
+
+    TEST_ASSERT_EQUAL_UINT32(3u, capturedResponses.size());
+    for (const auto& response : capturedResponses) {
+        TEST_ASSERT_EQUAL_UINT8(0u, response.count);
+        TEST_ASSERT_EQUAL_UINT32(0u, response.data.size());
+    }
+    TEST_ASSERT_EQUAL_HEX16(0x0400, capturedResponses[1].address.raw);
+}
+
+// Verify Mode off: the write is carried out and nothing is sent, failure
+// included.
+void test_MemoryService_WriteWithoutVerifyModeIsNotAnswered(void) {
+    AddressSpace space;
+    auto service = makeClassicService(space, MemoryAccessMode::ReadWrite);
+    knx::IndividualAddress source(1, 2, 3);
+    const std::vector<uint8_t> data = {0x5A, 0xA5};
+
+    TEST_ASSERT_TRUE(service.handleWriteRequest(source, 2, knx::MemoryAddress(0x0160), data).isOk());
+    TEST_ASSERT_EQUAL(0x5A, mockMemory[0x0160]);
+    TEST_ASSERT_FALSE(service.handleWriteRequest(source, 2, knx::MemoryAddress(0x0400), data).isOk());
+    TEST_ASSERT_EQUAL_UINT32(0u, capturedResponses.size());
+}
+
+// Verify Mode on: the read-back on success, number = 0 on failure.
+void test_MemoryService_WriteWithVerifyModeAnswersReadBackOrZero(void) {
+    AddressSpace space;
+    auto service = makeClassicService(space, MemoryAccessMode::ReadWrite);
+    service.setVerifyModeProvider([] { return true; });
+    knx::IndividualAddress source(1, 2, 3);
+    const std::vector<uint8_t> data = {0x12, 0x34, 0x56};
+
+    TEST_ASSERT_TRUE(service.handleWriteRequest(source, 3, knx::MemoryAddress(0x0170), data).isOk());
+    TEST_ASSERT_FALSE(service.handleWriteRequest(source, 3, knx::MemoryAddress(0x0400), data).isOk());
+
+    TEST_ASSERT_EQUAL_UINT32(2u, capturedResponses.size());
+    TEST_ASSERT_EQUAL_UINT8(3u, capturedResponses[0].count);
+    TEST_ASSERT_EQUAL_UINT32(3u, capturedResponses[0].data.size());
+    TEST_ASSERT_EQUAL_HEX8(0x56, capturedResponses[0].data[2]);
+    TEST_ASSERT_EQUAL_UINT8(0u, capturedResponses[1].count);
+    TEST_ASSERT_EQUAL_UINT32(0u, capturedResponses[1].data.size());
+}
+
+// A requester below the memory write level is refused like a protected area,
+// on both the classic and the extended service.
+void test_MemoryService_WritePermissionRefusesWrite(void) {
+    AddressSpace space;
+    auto service = makeClassicService(space, MemoryAccessMode::ReadWrite);
+    service.setExtendedResponseCallback(mockExtendedResponseCallback);
+    service.setVerifyModeProvider([] { return true; });
+    service.setWritePermission([](const knx::IndividualAddress&) { return false; });
+    knx::IndividualAddress source(1, 2, 3);
+    mockMemory[0x0180] = 0x00;
+    const std::vector<uint8_t> data = {0x77};
+
+    writeCallbackCalled = false;
+    TEST_ASSERT_FALSE(service.handleWriteRequest(source, 1, knx::MemoryAddress(0x0180), data).isOk());
+    TEST_ASSERT_FALSE(writeCallbackCalled);
+    TEST_ASSERT_EQUAL_UINT32(1u, capturedResponses.size());
+    TEST_ASSERT_EQUAL_UINT8(0u, capturedResponses[0].count);
+
+    extendedResponseCalled = false;
+    TEST_ASSERT_FALSE(service.handleExtendedWriteRequest(
+        source, 1, ExtendedMemoryAddress(0x000180), data).isOk());
+    TEST_ASSERT_FALSE(writeCallbackCalled);
+    TEST_ASSERT_TRUE(extendedResponseCalled);
+    TEST_ASSERT_EQUAL(static_cast<int>(MemoryExtendedReturnCode::AccessDenied),
+                      static_cast<int>(lastExtendedResponse.returnCode));
+    TEST_ASSERT_EQUAL_HEX8(0x00, mockMemory[0x0180]);
+}
+
+// The negative response is encodable: number = 0, no data.
+void test_MemoryService_EncodeResponseAcceptsCountZero(void) {
+    std::array<uint8_t, 4> encoded{};
+    auto result = MemoryService::encodeResponse(0, knx::MemoryAddress(0x1234), {}, encoded);
+    TEST_ASSERT_TRUE(result.isOk());
+    TEST_ASSERT_EQUAL(4, result.value());
+    TEST_ASSERT_EQUAL_HEX8(0x02, encoded[0]);
+    TEST_ASSERT_EQUAL_HEX8(0x40, encoded[1]);
+    TEST_ASSERT_EQUAL_HEX8(0x12, encoded[2]);
+    TEST_ASSERT_EQUAL_HEX8(0x34, encoded[3]);
+
+    // A positive count without its data is malformed.
+    std::array<uint8_t, 8> out{};
+    TEST_ASSERT_TRUE(MemoryService::encodeResponse(4, knx::MemoryAddress(0x1234), {}, out).isError());
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(test_MemoryService_FailedReadAnswersWithNumberZero);
+    RUN_TEST(test_MemoryService_WriteWithoutVerifyModeIsNotAnswered);
+    RUN_TEST(test_MemoryService_WriteWithVerifyModeAnswersReadBackOrZero);
+    RUN_TEST(test_MemoryService_WritePermissionRefusesWrite);
+    RUN_TEST(test_MemoryService_EncodeResponseAcceptsCountZero);
     
     // AddressSpace tests
     RUN_TEST(test_AddressSpace_Init);

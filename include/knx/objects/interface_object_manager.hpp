@@ -106,6 +106,28 @@ public:
     /// paths while sharing the same key space.
     static constexpr uint16_t kToolAccessSequenceKeyId = 0x11F0u;
 
+    /// Reserved persistence key naming the bank that holds the commissioned
+    /// state (0 or 1).
+    ///
+    /// The persisted properties are written as a whole into the bank that is
+    /// *not* active, and only then is this marker switched. It is one NVS
+    /// write and one commit, so a reset during a save leaves the previous
+    /// download intact rather than half of each. Bank 0 keys are the plain
+    /// (objectType << 8) | propertyId; bank 1 sets bit 15, which no object
+    /// type below 0x80 can produce. A namespace without the marker is the
+    /// layout written before banks existed, and it is exactly bank 0, so
+    /// devices already in the field keep their download and move to bank 1
+    /// on their next save. 0xFFFE cannot collide for the same reason as
+    /// kPersistenceSchemaVersionKeyId.
+    static constexpr uint16_t kPersistenceBankMarkerKeyId = 0xFFFEu;
+
+    /// Bit that selects bank 1 in a property key.
+    static constexpr uint16_t kPersistenceBank1KeyBit = 0x8000u;
+
+    /// The bank the next load reads and saveSecuritySequenceState() writes.
+    /// Exposed for tests.
+    uint8_t activePersistenceBank() const { return _activeBank; }
+
     /**
      * @brief Load all objects from persistence
      * @return Number of objects loaded
@@ -117,6 +139,12 @@ private:
     /// the namespace when they differ.  Called from init(), before anything is
     /// loaded.
     void enforcePersistenceSchemaVersion(uint16_t schemaVersion);
+
+    /// Read kPersistenceBankMarkerKeyId; an absent marker means bank 0.
+    uint8_t readActivePersistenceBank();
+
+    /// Erase every persisted-property key of @p bank.
+    void erasePersistenceBank(uint8_t bank);
 
 public:
     
@@ -341,6 +369,7 @@ private:
     std::unique_ptr<PersistenceManager> _persistenceManager;
     bool _persistenceEnabled;
     bool _initialized;
+    uint8_t _activeBank{0};  ///< See kPersistenceBankMarkerKeyId.
 
     struct RegisteredObject {
         RegisteredObjectHandlers handlers;

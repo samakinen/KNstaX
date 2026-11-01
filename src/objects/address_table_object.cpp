@@ -118,6 +118,7 @@ util::Result<AddressTableDomain::Index> AddressTableDomain::add(const GroupAddre
     }
 
     _entries.push_back(address);
+    refreshSorted();
     return Index{static_cast<uint16_t>(_entries.size() - 1)};
 }
 
@@ -126,6 +127,7 @@ util::Result<void> AddressTableDomain::remove(Index index) {
         return util::Result<void>::err(util::ErrorCode::InvalidParameter);
     }
     _entries.erase(index.value);
+    refreshSorted();
     return util::Result<void>::ok();
 }
 
@@ -134,6 +136,7 @@ util::Result<void> AddressTableDomain::set(Index index, const GroupAddress& addr
         return util::Result<void>::err(util::ErrorCode::InvalidParameter);
     }
     _entries[index.value] = address;
+    refreshSorted();
     return util::Result<void>::ok();
 }
 
@@ -145,6 +148,7 @@ util::Result<void> AddressTableDomain::setExpand(Index index, const GroupAddress
         _entries.resize(index.value + 1, GroupAddress(GroupAddress::invalidValue()));
     }
     _entries[index.value] = address;
+    refreshSorted();
     return util::Result<void>::ok();
 }
 
@@ -155,7 +159,26 @@ GroupAddress AddressTableDomain::get(Index index) const {
     return _entries[index.value];
 }
 
+void AddressTableDomain::refreshSorted() {
+    _sorted = std::adjacent_find(_entries.begin(), _entries.end(),
+                                 [](const GroupAddress& a, const GroupAddress& b) { return a.raw >= b.raw; })
+              == _entries.end();
+}
+
 AddressTableDomain::Index AddressTableDomain::findIndex(const GroupAddress& address) const {
+    // 03_05_01 §4.16.3.1 requires the group addresses in ascending order "to
+    // allow for a fast evaluation algorithm", and an ETS download delivers them
+    // that way, so this is a binary search on every group telegram. A table
+    // built out of order by the firmware itself (addEntry() appends) or caught
+    // half-written mid-download falls back to the linear scan.
+    if (_sorted) {
+        const auto it = std::lower_bound(_entries.begin(), _entries.end(), address,
+                                         [](const GroupAddress& a, const GroupAddress& b) { return a.raw < b.raw; });
+        if (it != _entries.end() && it->raw == address.raw) {
+            return Index{static_cast<uint16_t>(it - _entries.begin())};
+        }
+        return invalidIndex();
+    }
     for (size_t i = 0; i < _entries.size(); ++i) {
         if (_entries[i].raw == address.raw) {
             return Index{static_cast<uint16_t>(i)};
@@ -171,17 +194,20 @@ util::Result<void> AddressTableDomain::load(std::span<const GroupAddress> addres
     if (!_entries.assign(addresses)) {
         return util::Result<void>::err(util::ErrorCode::InvalidParameter);
     }
+    refreshSorted();
     return util::Result<void>::ok();
 }
 
 void AddressTableDomain::truncate(uint16_t size) {
     if (size < _entries.size()) {
         _entries.resize(size);
+        refreshSorted();
     }
 }
 
 void AddressTableDomain::clear() {
     _entries.clear();
+    refreshSorted();
 }
 
 void AddressTableDomain::reserve(uint16_t capacity) {

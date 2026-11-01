@@ -9,6 +9,8 @@
 #include "knx/datalink/tp1_dl_common.hpp"
 #include "knx/physical/timer_gpio_hal_virtual.hpp"
 
+#include <vector>
+
 using namespace knx::physical;
 namespace datalink = knx::datalink;
 
@@ -90,6 +92,102 @@ void scheduleDataWaveform(TimerGpioHalVirtualBus& bus,
     const uint8_t parity = static_cast<uint8_t>(__builtin_popcount(value) & 0x1);
     emitBit(parity);
     emitBit(1);
+}
+
+// ── Whole-telegram helpers for the acknowledge tests ────────────────────────
+
+constexpr uint16_t kOwnAddressRaw = 0x110A;    // 1.1.10
+constexpr uint16_t kRemoteAddressRaw = 0x1114; // 1.1.20
+constexpr uint64_t kBitUs = 104;
+constexpr uint64_t kCharSpacingUs = 13 * kBitUs; // 11-bit character + 2-bit gap
+
+// A standard L_Data frame carrying a one-octet A_GroupValue_Write, with a
+// correct check octet (inverted XOR of everything before it, 03_02_02 §2.2.1).
+std::vector<uint8_t> makeStandardFrame(uint16_t source, uint16_t destination, bool group)
+{
+    std::vector<uint8_t> frame = {
+        0xBC,
+        static_cast<uint8_t>(source >> 8), static_cast<uint8_t>(source),
+        static_cast<uint8_t>(destination >> 8), static_cast<uint8_t>(destination),
+        static_cast<uint8_t>(group ? 0xE1 : 0x61),
+        0x00, 0x81,
+    };
+    uint8_t check = 0xFF;
+    for (uint8_t octet : frame) {
+        check ^= octet;
+    }
+    frame.push_back(check);
+    return frame;
+}
+
+void scheduleCharacterAt(TimerGpioHalVirtualBus& bus, uint8_t value, uint64_t startUs)
+{
+    uint64_t t = startUs;
+    auto emitBit = [&](uint8_t bit) {
+        if (bit == 0) {
+            (void)bus.scheduleRxLevelAtUs(t, 1);
+            (void)bus.scheduleRxLevelAtUs(t + 35, 0);
+        }
+        t += kBitUs;
+    };
+    emitBit(0);
+    for (int bit = 0; bit < 8; ++bit) {
+        emitBit(static_cast<uint8_t>((value >> bit) & 0x1));
+    }
+    emitBit(static_cast<uint8_t>(__builtin_popcount(value) & 0x1));
+    emitBit(1);
+}
+
+// Put a telegram on the bus and run time until any acknowledge is over.
+void receiveTelegram(const std::vector<uint8_t>& frame)
+{
+    const uint64_t startUs = virtualBus.nowUs() + 20;
+    // Start from a recessive line so the first start bit is a real edge.
+    (void)virtualBus.scheduleRxLevelAtUs(startUs - 1, 0);
+    for (size_t i = 0; i < frame.size(); ++i) {
+        scheduleCharacterAt(virtualBus, frame[i], startUs + i * kCharSpacingUs);
+    }
+    virtualBus.advanceTimeUs(20 + frame.size() * kCharSpacingUs + 40 * kBitUs);
+}
+
+std::vector<BitBangDriverTimerIsr::Message> drainMessages()
+{
+    std::vector<BitBangDriverTimerIsr::Message> messages;
+    BitBangDriverTimerIsr::Message message{};
+    while (driver.popMessage(message)) {
+        messages.push_back(message);
+    }
+    return messages;
+}
+
+// The DL-ACK byte the ISR put on the bus, or -1 when it sent none.
+int sentAckByte(const std::vector<BitBangDriverTimerIsr::Message>& messages)
+{
+    for (const auto& message : messages) {
+        if (message.type == BitBangDriverTimerIsr::MessageType::DlAckTxStart) {
+            return message.data;
+        }
+    }
+    return -1;
+}
+
+bool sawMessage(const std::vector<BitBangDriverTimerIsr::Message>& messages,
+                BitBangDriverTimerIsr::MessageType type)
+{
+    for (const auto& message : messages) {
+        if (message.type == type) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void advanceUntilTxState(uint8_t state, uint64_t limitUs = 40000)
+{
+    for (uint64_t t = 0; t < limitUs && driver._txState != state; t += 2) {
+        virtualBus.advanceTimeUs(2);
+    }
+    TEST_ASSERT_EQUAL_UINT8(state, driver._txState);
 }
 
 } // namespace
@@ -502,6 +600,227 @@ void test_tx_ack_window_clears_stale_rx_loopback_state()
     TEST_ASSERT_TRUE(nextDelayUs > 0u);
 }
 
+// ── B4: check octet and length (03_02_02 §2.4.2) ───────────────────────────
+
+void test_addressed_correct_frame_is_acknowledged()
+{
+    driver.setOwnAddress(kOwnAddressRaw);
+    receiveTelegram(makeStandardFrame(kRemoteAddressRaw, kOwnAddressRaw, false));
+    TEST_ASSERT_EQUAL_INT(BitBangDriverTimerIsr::ACK_BYTE_ACK, sentAckByte(drainMessages()));
+}
+
+// A frame whose check octet is wrong has no character error, so only the
+// parity/framing test was applied and it was acknowledged: the sender never
+// repeated a frame this device then discarded.
+void test_addressed_frame_with_bad_check_octet_is_nakked()
+{
+    driver.setOwnAddress(kOwnAddressRaw);
+    auto frame = makeStandardFrame(kRemoteAddressRaw, kOwnAddressRaw, false);
+    frame.back() ^= 0x01;
+    receiveTelegram(frame);
+    TEST_ASSERT_EQUAL_INT(BitBangDriverTimerIsr::ACK_BYTE_NACK, sentAckByte(drainMessages()));
+}
+
+// Seven octets is shorter than any standard L_Data frame (8–23).
+void test_addressed_frame_shorter_than_eight_octets_is_nakked()
+{
+    driver.setOwnAddress(kOwnAddressRaw);
+    std::vector<uint8_t> frame = {0xBC, 0x11, 0x14, 0x11, 0x0A, 0x60};
+    uint8_t check = 0xFF;
+    for (uint8_t octet : frame) {
+        check ^= octet;
+    }
+    frame.push_back(check);
+    receiveTelegram(frame);
+    TEST_ASSERT_EQUAL_INT(BitBangDriverTimerIsr::ACK_BYTE_NACK, sentAckByte(drainMessages()));
+}
+
+// ── B5: full group table, BUSY instead of a dropped frame ──────────────────
+
+// The ISR table held 64 group addresses while the data link allows 256; the
+// 65th and later were never acknowledged. The table is passed unsorted.
+void test_group_address_beyond_the_64th_is_acknowledged()
+{
+    std::vector<uint16_t> table;
+    for (uint16_t i = 0; i < 200; ++i) {
+        table.push_back(static_cast<uint16_t>(0x0A00u + 199u - i));
+    }
+    driver.setAckGroupAddresses(table.data(), table.size());
+
+    receiveTelegram(makeStandardFrame(kRemoteAddressRaw, table[150], true));
+    TEST_ASSERT_EQUAL_INT(BitBangDriverTimerIsr::ACK_BYTE_ACK, sentAckByte(drainMessages()));
+
+    // A group address outside the table is not ours: no acknowledge at all.
+    receiveTelegram(makeStandardFrame(kRemoteAddressRaw, 0x0900u, true));
+    TEST_ASSERT_EQUAL_INT(-1, sentAckByte(drainMessages()));
+}
+
+// While the receive queue is full the device answers BUSY, and End tells the
+// consumer not to deliver this copy: the sender repeats it.
+void test_busy_device_answers_busy_and_marks_the_frame_refused()
+{
+    driver.setOwnAddress(kOwnAddressRaw);
+    driver.setLocalBusy(true);
+    receiveTelegram(makeStandardFrame(kRemoteAddressRaw, kOwnAddressRaw, false));
+
+    const auto messages = drainMessages();
+    TEST_ASSERT_EQUAL_INT(BitBangDriverTimerIsr::ACK_BYTE_BUSY, sentAckByte(messages));
+    bool endMarkedRefused = false;
+    for (const auto& message : messages) {
+        if (message.type == BitBangDriverTimerIsr::MessageType::End) {
+            endMarkedRefused = (message.data & BitBangDriverTimerIsr::END_FLAG_ANSWERED_BUSY) != 0u;
+        }
+    }
+    TEST_ASSERT_TRUE(endMarkedRefused);
+}
+
+// ── B6: bus monitor never acknowledges ──────────────────────────────────────
+
+void test_bus_monitor_mode_sends_no_acknowledge()
+{
+    driver.setOwnAddress(kOwnAddressRaw);
+    driver.setBusMonitorMode(true);
+    receiveTelegram(makeStandardFrame(kRemoteAddressRaw, kOwnAddressRaw, false));
+
+    const auto messages = drainMessages();
+    TEST_ASSERT_EQUAL_INT(-1, sentAckByte(messages));
+    TEST_ASSERT_FALSE(sawMessage(messages, BitBangDriverTimerIsr::MessageType::EarlyAckArmed));
+    TEST_ASSERT_TRUE(sawMessage(messages, BitBangDriverTimerIsr::MessageType::End));
+}
+
+// ── B1: own group frames wait for the acknowledge ──────────────────────────
+
+void test_own_group_frame_without_a_bit_opens_the_ack_window()
+{
+    const auto frame = makeStandardFrame(kOwnAddressRaw, 0x0A01u, true);
+    TEST_ASSERT_TRUE(driver.send(frame));
+    virtualBus.advanceTimeUs(30000);
+
+    const auto messages = drainMessages();
+    TEST_ASSERT_FALSE(sawMessage(messages, BitBangDriverTimerIsr::MessageType::TxComplete));
+    bool sawAckTimeout = false;
+    for (const auto& message : messages) {
+        if (message.type == BitBangDriverTimerIsr::MessageType::TxAckResponse
+                && message.data == BitBangDriverTimerIsr::ACK_BYTE_NONE) {
+            sawAckTimeout = true;
+        }
+    }
+    TEST_ASSERT_TRUE(sawAckTimeout);
+}
+
+void test_own_frame_to_individual_broadcast_needs_no_acknowledge()
+{
+    const auto frame = makeStandardFrame(kOwnAddressRaw, 0xFFFFu, false);
+    TEST_ASSERT_TRUE(driver.send(frame));
+    virtualBus.advanceTimeUs(30000);
+
+    const auto messages = drainMessages();
+    TEST_ASSERT_TRUE(sawMessage(messages, BitBangDriverTimerIsr::MessageType::TxComplete));
+    TEST_ASSERT_FALSE(sawMessage(messages, BitBangDriverTimerIsr::MessageType::TxAckResponse));
+}
+
+// ── B2: arbitration loss is retried, not reported as BUSY ───────────────────
+
+void loseArbitrationNow()
+{
+    // Wait until a recessive '1' bit of the second octet is being sent, then
+    // let another sender pull the bus dominant.
+    for (int i = 0; i < 20000; ++i) {
+        if (driver._txState == BitBangDriverTimerIsr::TX_SENDING_ONE && driver._txBytePosition >= 1) {
+            break;
+        }
+        virtualBus.advanceTimeUs(1);
+    }
+    TEST_ASSERT_EQUAL_UINT8(BitBangDriverTimerIsr::TX_SENDING_ONE, driver._txState);
+    virtualBus.advanceTimeUs(10);
+    const uint64_t now = virtualBus.nowUs();
+    (void)virtualBus.scheduleRxLevelAtUs(now, 0);
+    (void)virtualBus.scheduleRxLevelAtUs(now + 1, 1);
+    (void)virtualBus.scheduleRxLevelAtUs(now + 36, 0);
+    virtualBus.advanceTimeUs(2);
+}
+
+void test_lost_arbitration_restarts_the_frame_without_busy()
+{
+    const auto frame = makeStandardFrame(kOwnAddressRaw, 0x0A01u, true);
+    TEST_ASSERT_TRUE(driver.send(frame));
+    loseArbitrationNow();
+
+    // Back to waiting for the bus with the whole frame still queued.
+    TEST_ASSERT_EQUAL_UINT8(BitBangDriverTimerIsr::TX_WAITING_SLOT, driver._txState);
+    TEST_ASSERT_EQUAL_UINT16(frame.size(), driver._txTelegramLength);
+
+    virtualBus.advanceTimeUs(40000);
+    const auto messages = drainMessages();
+    TEST_ASSERT_TRUE(sawMessage(messages, BitBangDriverTimerIsr::MessageType::Collision));
+    TEST_ASSERT_FALSE(sawMessage(messages, BitBangDriverTimerIsr::MessageType::TxArbitrationLost));
+    int outcomes = 0;
+    for (const auto& message : messages) {
+        if (message.type == BitBangDriverTimerIsr::MessageType::TxAckResponse) {
+            ++outcomes;
+            // The only outcome is the restarted frame's acknowledge window
+            // (nobody answers here) — never a BUSY for the lost attempt.
+            TEST_ASSERT_EQUAL_UINT8(BitBangDriverTimerIsr::ACK_BYTE_NONE, message.data);
+        }
+    }
+    TEST_ASSERT_EQUAL_INT(1, outcomes);
+}
+
+void test_frame_is_abandoned_after_ten_arbitration_losses()
+{
+    const auto frame = makeStandardFrame(kOwnAddressRaw, 0x0A01u, true);
+    TEST_ASSERT_TRUE(driver.send(frame));
+    driver._txArbitrationLosses = BitBangDriverTimerIsr::MAX_TX_ARBITRATION_ATTEMPTS - 1u;
+    loseArbitrationNow();
+
+    TEST_ASSERT_EQUAL_UINT8(BitBangDriverTimerIsr::TX_IDLE, driver._txState);
+    bool sawGiveUp = false;
+    for (const auto& message : drainMessages()) {
+        if (message.type == BitBangDriverTimerIsr::MessageType::TxArbitrationLost) {
+            sawGiveUp = true;
+            TEST_ASSERT_EQUAL_UINT8(BitBangDriverTimerIsr::MAX_TX_ARBITRATION_ATTEMPTS, message.data);
+        }
+    }
+    TEST_ASSERT_TRUE(sawGiveUp);
+}
+
+// ── B3: 150 bit times after BUSY (03_02_02 §2.4.2, A.8) ────────────────────
+
+void test_repetition_after_busy_waits_150_bit_times()
+{
+    const auto frame = makeStandardFrame(kOwnAddressRaw, 0x0A01u, true);
+    TEST_ASSERT_TRUE(driver.send(frame));
+    advanceUntilTxState(BitBangDriverTimerIsr::TX_WAITING_ACK);
+
+    const uint64_t busyStartUs = virtualBus.nowUs() + 10 * kBitUs;
+    (void)virtualBus.scheduleRxLevelAtUs(busyStartUs - 1, 0);
+    scheduleCharacterAt(virtualBus, BitBangDriverTimerIsr::ACK_BYTE_BUSY, busyStartUs);
+    virtualBus.advanceTimeUs(25 * kBitUs);
+    bool sawBusy = false;
+    for (const auto& message : drainMessages()) {
+        if (message.type == BitBangDriverTimerIsr::MessageType::TxAckResponse) {
+            sawBusy = message.data == BitBangDriverTimerIsr::ACK_BYTE_BUSY;
+        }
+    }
+    TEST_ASSERT_TRUE(sawBusy);
+
+    // The data link repeats at once; the medium must hold the frame back.
+    virtualBus.clearCapturedTxTransitions();
+    TEST_ASSERT_TRUE(driver.send(frame));
+    virtualBus.advanceTimeUs(40000);
+
+    const auto& transitions = virtualBus.capturedTxTransitions();
+    uint64_t firstDominantUs = 0;
+    for (const auto& transition : transitions) {
+        if (transition.level == 1) {
+            firstDominantUs = transition.timestampUs;
+            break;
+        }
+    }
+    TEST_ASSERT_TRUE(firstDominantUs != 0);
+    TEST_ASSERT_TRUE(firstDominantUs >= busyStartUs + (11 + 150) * kBitUs);
+}
+
 int main()
 {
     UNITY_BEGIN();
@@ -520,5 +839,16 @@ int main()
     RUN_TEST(test_tx_ack_window_clears_stale_rx_loopback_state);
     RUN_TEST(test_late_mid_byte_timer_callback_keeps_rx_sample_grid);
     RUN_TEST(test_back_to_back_unaddressed_telegrams_carry_no_ack_state_forward);
+    RUN_TEST(test_addressed_correct_frame_is_acknowledged);
+    RUN_TEST(test_addressed_frame_with_bad_check_octet_is_nakked);
+    RUN_TEST(test_addressed_frame_shorter_than_eight_octets_is_nakked);
+    RUN_TEST(test_group_address_beyond_the_64th_is_acknowledged);
+    RUN_TEST(test_busy_device_answers_busy_and_marks_the_frame_refused);
+    RUN_TEST(test_bus_monitor_mode_sends_no_acknowledge);
+    RUN_TEST(test_own_group_frame_without_a_bit_opens_the_ack_window);
+    RUN_TEST(test_own_frame_to_individual_broadcast_needs_no_acknowledge);
+    RUN_TEST(test_lost_arbitration_restarts_the_frame_without_busy);
+    RUN_TEST(test_frame_is_abandoned_after_ten_arbitration_losses);
+    RUN_TEST(test_repetition_after_busy_waits_150_bit_times);
     return UNITY_END();
 }

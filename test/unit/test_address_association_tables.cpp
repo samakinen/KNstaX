@@ -492,11 +492,85 @@ void test_Integration_AddressAndAssociation() {
     TEST_ASSERT_EQUAL_UINT16(20, objects2[0].value());
 }
 
+// === Lookup indices (binary search, GA → group object index) ===
+
+void test_AddressTable_SortedTableFindsEveryEntryAndRejectsGaps(void) {
+    AddressTableObject table;
+    std::vector<GroupAddress> addresses;
+    for (uint16_t raw = 0x0100; raw < 0x0100 + 2 * AddressTableDomain::kMaxEntries; raw += 2) {
+        addresses.push_back(GroupAddress(raw));
+    }
+    TEST_ASSERT_TRUE(table.loadTable(addresses).isOk());
+
+    for (size_t i = 0; i < addresses.size(); ++i) {
+        TEST_ASSERT_EQUAL_UINT16(i + 1, table.findIndex(addresses[i]).raw);
+        TEST_ASSERT_FALSE(table.findIndex(GroupAddress(addresses[i].raw + 1)).isValid());
+    }
+    TEST_ASSERT_FALSE(table.findIndex(GroupAddress(0x00FF)).isValid());
+}
+
+void test_AddressTable_UnsortedTableStillFindsEntries(void) {
+    // The firmware may build a table out of order with addEntry(); a half-
+    // written download also leaves placeholders. Lookups must not depend on order.
+    AddressTableObject table;
+    TEST_ASSERT_TRUE(table.addEntry(GroupAddress(0x0905)).isValid());
+    TEST_ASSERT_TRUE(table.addEntry(GroupAddress(0x0102)).isValid());
+    TEST_ASSERT_TRUE(table.addEntry(GroupAddress(0x0500)).isValid());
+    TEST_ASSERT_EQUAL_UINT16(2, table.findIndex(GroupAddress(0x0102)).raw);
+    TEST_ASSERT_EQUAL_UINT16(3, table.findIndex(GroupAddress(0x0500)).raw);
+    TEST_ASSERT_EQUAL_UINT16(1, table.findIndex(GroupAddress(0x0905)).raw);
+
+    // Rewriting it into order switches to the binary search, and it still works.
+    TEST_ASSERT_TRUE(table.setEntry(AddressTableIndex(1), GroupAddress(0x0001)).isOk());
+    TEST_ASSERT_TRUE(table.setEntry(AddressTableIndex(2), GroupAddress(0x0102)).isOk());
+    TEST_ASSERT_EQUAL_UINT16(3, table.findIndex(GroupAddress(0x0500)).raw);
+    TEST_ASSERT_EQUAL_UINT16(1, table.findIndex(GroupAddress(0x0001)).raw);
+    TEST_ASSERT_FALSE(table.findIndex(GroupAddress(0x0905)).isValid());
+}
+
+void test_AssociationTable_IndexFollowsEveryMutationAndHasNoPerAddressLimit(void) {
+    AssociationTableObject table;
+    // 40 objects on ASAP 3, interleaved with others, deliberately unsorted.
+    for (uint16_t go = 0; go < 40; ++go) {
+        TEST_ASSERT_TRUE(table.addEntry(AssociationEntry(AddressTableIndex(3), GroupObjectIndex(go))).isOk());
+        TEST_ASSERT_TRUE(table.addEntry(AssociationEntry(AddressTableIndex(static_cast<uint16_t>(go % 2 ? 1 : 7)),
+                                                         GroupObjectIndex(static_cast<uint16_t>(100 + go)))).isOk());
+    }
+
+    std::vector<uint16_t> seen;
+    table.forEachGroupObject(AddressTableIndex(3), [&](GroupObjectIndex go) { seen.push_back(go.value()); });
+    TEST_ASSERT_EQUAL_UINT32(40, seen.size());
+    for (uint16_t go = 0; go < 40; ++go) {
+        TEST_ASSERT_EQUAL_UINT16(go, seen[go]);  // table order is kept
+    }
+    TEST_ASSERT_TRUE(table.hasGroupObjects(AddressTableIndex(7)));
+    TEST_ASSERT_FALSE(table.hasGroupObjects(AddressTableIndex(4)));
+
+    // Removing entries shifts positions; the index must follow.
+    TEST_ASSERT_EQUAL_UINT16(20, table.removeEntriesForAddress(AddressTableIndex(1)));
+    seen.clear();
+    table.forEachGroupObject(AddressTableIndex(3), [&](GroupObjectIndex go) { seen.push_back(go.value()); });
+    TEST_ASSERT_EQUAL_UINT32(40, seen.size());
+    TEST_ASSERT_FALSE(table.hasGroupObjects(AddressTableIndex(1)));
+
+    std::vector<GroupObjectIndex> buffer(40);
+    auto found = table.findGroupObjects(AddressTableIndex(3), buffer);
+    TEST_ASSERT_TRUE(found.isOk());
+    TEST_ASSERT_EQUAL_UINT32(40, found.value());
+
+    table.clearEntries();
+    TEST_ASSERT_FALSE(table.hasGroupObjects(AddressTableIndex(3)));
+}
+
 // === Main Test Runner ===
 
 int main(int argc, char** argv) {
     UNITY_BEGIN();
-    
+
+    RUN_TEST(test_AddressTable_SortedTableFindsEveryEntryAndRejectsGaps);
+    RUN_TEST(test_AddressTable_UnsortedTableStillFindsEntries);
+    RUN_TEST(test_AssociationTable_IndexFollowsEveryMutationAndHasNoPerAddressLimit);
+
     // Address Table tests
     RUN_TEST(test_AddressTable_DefaultConstruction);
     RUN_TEST(test_AddressTable_AddEntry);

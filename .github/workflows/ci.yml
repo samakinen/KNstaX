@@ -1,0 +1,137 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2025-2026 Sami Mäkinen
+#
+# Host build and test suite, the same suite under ASan/UBSan, the media gates
+# (including the configuration the Habinari knxip image ships), and the
+# KNXnet/IP interop harness. Everything here runs on a stock Ubuntu runner: no
+# ESP-IDF and no hardware. The ESP-IDF build of the stack is exercised by the
+# firmware job of the Habinari project, which builds every image that ships.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  host:
+    name: Host build and CTest (secure ${{ matrix.secure }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        secure: ["ON", "OFF"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build libmbedtls-dev zlib1g-dev python3-xmlschema
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+          -DKNX_SECURE_ENABLED=${{ matrix.secure }} -DBUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure -j"$(nproc)"
+
+  sanitizers:
+    name: CTest under ASan and UBSan
+    runs-on: ubuntu-24.04
+    env:
+      ASAN_OPTIONS: detect_leaks=1:strict_string_checks=1:abort_on_error=1
+      UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build libmbedtls-dev zlib1g-dev python3-xmlschema
+
+      - name: Configure
+        run: >
+          cmake -S . -B build_san -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTS=ON
+          "-DCMAKE_C_FLAGS=-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
+          "-DCMAKE_CXX_FLAGS=-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
+          "-DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address,undefined"
+
+      - name: Build
+        run: cmake --build build_san -j"$(nproc)"
+
+      - name: Test
+        run: ctest --test-dir build_san --output-on-failure -j"$(nproc)"
+
+  # Proves the media gates are real: each shape must build, warnings as
+  # errors, with nothing from a gated-out medium in it. knxip is the
+  # configuration the Habinari KNXnet/IP image ships: no TP1, routing with
+  # Secure Routing, no tunnelling client.
+  media-gating:
+    name: Library only (${{ matrix.name }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: tp1-only
+            flags: -DKNX_FEATURE_NETIP=OFF -DKNX_FEATURE_TP1=ON -DKNX_SECURE_ENABLED=ON
+          - name: netip-only
+            flags: -DKNX_FEATURE_NETIP=ON -DKNX_FEATURE_TP1=OFF -DKNX_SECURE_ENABLED=ON
+          - name: knxip
+            flags: >-
+              -DKNX_FEATURE_TP1=OFF -DKNX_FEATURE_NETIP=ON -DKNX_SECURE_ENABLED=ON
+              -DKNX_FEATURE_TUNNELING=OFF -DKNX_FEATURE_VIRTUAL_BUS=OFF
+              -DKNX_FEATURE_ETS_TOOLING=OFF -DKNX_ENABLE_TEST_HOOKS=OFF
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build libmbedtls-dev
+
+      - name: Configure and build
+        run: |
+          cmake -S . -B build_${{ matrix.name }} -G Ninja -DBUILD_TESTS=OFF \
+            -DKNX_WARNINGS_AS_ERRORS=ON ${{ matrix.flags }}
+          cmake --build build_${{ matrix.name }} -j"$(nproc)"
+
+  interop:
+    name: KNXnet/IP interop (xknx)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build libmbedtls-dev zlib1g-dev python3-venv
+
+      - name: Python environment
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install -r interop/python/requirements.txt
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Configure
+        run: >
+          cmake -S . -B build_interop -G Ninja -DCMAKE_BUILD_TYPE=Debug
+          -DBUILD_TESTS=ON -DENABLE_INTEROP_TESTS=ON
+          -DPython3_EXECUTABLE="$PWD/.venv/bin/python"
+
+      - name: Build
+        run: cmake --build build_interop -j"$(nproc)" --target knstax_tunnel_peer knstax_routing_peer
+
+      - name: Interop suite
+        run: ctest --test-dir build_interop -R interop_pytest --output-on-failure

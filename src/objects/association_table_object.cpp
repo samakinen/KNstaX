@@ -138,6 +138,7 @@ util::Result<void> AssociationTableDomain::add(const AssociationEntry& entry) {
         return util::Result<void>::ok();
     }
     _entries.push_back(entry);
+    rebuildIndex();
     return util::Result<void>::ok();
 }
 
@@ -146,6 +147,7 @@ util::Result<void> AssociationTableDomain::remove(Index index) {
         return util::Result<void>::err(util::ErrorCode::InvalidParameter);
     }
     _entries.erase(index.value);
+    rebuildIndex();
     return util::Result<void>::ok();
 }
 
@@ -154,6 +156,7 @@ util::Result<void> AssociationTableDomain::set(Index index, const AssociationEnt
         return util::Result<void>::err(util::ErrorCode::InvalidParameter);
     }
     _entries[index.value] = entry;
+    rebuildIndex();
     return util::Result<void>::ok();
 }
 
@@ -165,6 +168,7 @@ util::Result<void> AssociationTableDomain::setExpand(Index index, const Associat
         _entries.resize(index.value + 1);
     }
     _entries[index.value] = entry;
+    rebuildIndex();
     return util::Result<void>::ok();
 }
 
@@ -192,6 +196,7 @@ uint16_t AssociationTableDomain::removeEntriesForAddress(AddressTableIndex addre
         }
         ++i;
     }
+    rebuildIndex();
     return static_cast<uint16_t>(removed);
 }
 
@@ -205,31 +210,50 @@ uint16_t AssociationTableDomain::removeEntriesForGroupObject(GroupObjectIndex gr
         }
         ++i;
     }
+    rebuildIndex();
     return static_cast<uint16_t>(removed);
+}
+
+void AssociationTableDomain::rebuildIndex() {
+    // Sorting on (address index, position) keeps table order among the group
+    // objects of one address and needs no scratch memory. At most 512 entries,
+    // so even an element-by-element download rebuilding after every write
+    // stays in the low milliseconds.
+    _byAddress.clear();
+    for (uint16_t position = 0; position < _entries.size(); ++position) {
+        (void)_byAddress.push_back(position);
+    }
+    const auto key = [this](uint16_t position) {
+        return (static_cast<uint32_t>(_entries[position].addressIndex.raw) << 16) | position;
+    };
+    std::sort(_byAddress.begin(), _byAddress.end(),
+              [&key](uint16_t a, uint16_t b) { return key(a) < key(b); });
+}
+
+std::span<const uint16_t> AssociationTableDomain::positionsFor(AddressTableIndex addressIndex) const {
+    const auto byAddress = [this](uint16_t position, uint16_t raw) {
+        return _entries[position].addressIndex.raw < raw;
+    };
+    const auto first = std::lower_bound(_byAddress.begin(), _byAddress.end(), addressIndex.raw, byAddress);
+    auto last = first;
+    while (last != _byAddress.end() && _entries[*last].addressIndex.raw == addressIndex.raw) {
+        ++last;
+    }
+    return std::span<const uint16_t>(first, last);
 }
 
 util::Result<size_t> AssociationTableDomain::findGroupObjects(AddressTableIndex addressIndex,
                                                               std::span<GroupObjectIndex> out) const {
-    size_t required = 0;
-    for (const auto& entry : _entries) {
-        if (entry.addressIndex == addressIndex) {
-            ++required;
-        }
-    }
-
+    const auto positions = positionsFor(addressIndex);
     if (out.empty()) {
-        return required;
+        return positions.size();
     }
-
-    if (out.size() < required) {
+    if (out.size() < positions.size()) {
         return util::ErrorCode::BufferTooSmall;
     }
-
     size_t written = 0;
-    for (const auto& entry : _entries) {
-        if (entry.addressIndex == addressIndex) {
-            out[written++] = entry.groupObjectNumber;
-        }
+    for (const uint16_t position : positions) {
+        out[written++] = _entries[position].groupObjectNumber;
     }
     return written;
 }
@@ -279,17 +303,20 @@ util::Result<void> AssociationTableDomain::load(std::span<const AssociationEntry
     if (!_entries.assign(entries)) {
         return util::Result<void>::err(util::ErrorCode::InvalidParameter);
     }
+    rebuildIndex();
     return util::Result<void>::ok();
 }
 
 void AssociationTableDomain::truncate(uint16_t size) {
     if (size < _entries.size()) {
         _entries.resize(size);
+        rebuildIndex();
     }
 }
 
 void AssociationTableDomain::clear() {
     _entries.clear();
+    rebuildIndex();
 }
 
 void AssociationTableDomain::reserve(uint16_t capacity) {

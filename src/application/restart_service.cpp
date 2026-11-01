@@ -48,31 +48,102 @@ util::Result<void> RestartService::handleRequest(const IndividualAddress& source
     // Mark restart as pending
     _restartPending = true;
     _pendingRestartType = type;
-    
+    _pendingEraseCode = EraseCode::ConfirmedRestart;
+
     KNX_LOGI(TAG, "Restart requested by %d.%d.%d, type=%s",
              source.area(), source.line(), source.device(),
              type == RestartType::Basic ? "Basic" : "MasterReset");
-    
+
     return util::Result<void>::ok();
+}
+
+bool RestartService::isEraseCodeSupported(uint8_t eraseCode) const {
+    if (eraseCode == static_cast<uint8_t>(EraseCode::ConfirmedRestart)) {
+        return true;
+    }
+    return _masterResetCallback
+        && eraseCode >= static_cast<uint8_t>(EraseCode::FactoryReset)
+        && eraseCode <= static_cast<uint8_t>(EraseCode::FactoryResetWithoutIndividualAddress);
+}
+
+RestartErrorCode RestartService::handleMasterResetRequest(const IndividualAddress& source,
+                                                          uint8_t eraseCode,
+                                                          uint8_t channel) {
+    // Table 5 recommends Access Denied only where level-2-or-higher Resources
+    // are involved; the authorisation hook decides that, not this service.
+    if (_authorizationCallback && _authorizationCallback(source).isError()) {
+        KNX_LOGW(TAG, "Master reset denied for %d.%d.%d - not authorized",
+                 source.area(), source.line(), source.device());
+        return RestartErrorCode::AccessDenied;
+    }
+
+    // 03/05/02 Table 4: a reserved or unimplemented Erase Code is answered
+    // "Unsupported Erase Code" and neither a Basic Restart nor any Master
+    // Reset is executed. Its Channel Number is "not defined", so this check
+    // comes first.
+    if (!isEraseCodeSupported(eraseCode)) {
+        KNX_LOGW(TAG, "Master reset from %d.%d.%d with unsupported erase code 0x%02X",
+                 source.area(), source.line(), source.device(), eraseCode);
+        return RestartErrorCode::UnsupportedEraseCode;
+    }
+
+    // 03/03/07 §3.4.2.2 cases 1 and 2: a non-zero Channel Number is invalid
+    // both for the codes fixed at 00h and on a device without application
+    // channels, which covers every code on this one.
+    if (channel != 0u) {
+        KNX_LOGW(TAG, "Master reset from %d.%d.%d with channel %u: device has no channels",
+                 source.area(), source.line(), source.device(), channel);
+        return RestartErrorCode::InvalidChannelNumber;
+    }
+
+    if (!_restartCallback) {
+        KNX_LOGE(TAG, "No restart callback registered");
+        return RestartErrorCode::NotReady;
+    }
+
+    _restartPending = true;
+    _pendingRestartType = RestartType::MasterReset;
+    _pendingEraseCode = static_cast<EraseCode>(eraseCode);
+
+    KNX_LOGI(TAG, "Master reset requested by %d.%d.%d, erase code 0x%02X",
+             source.area(), source.line(), source.device(), eraseCode);
+    return RestartErrorCode::NoError;
 }
 
 void RestartService::executePendingRestart() {
     if (!_restartPending) {
         return;
     }
-    
-    KNX_LOGI(TAG, "Executing restart, type=%s",
-             _pendingRestartType == RestartType::Basic ? "Basic" : "MasterReset");
-    
+
+    KNX_LOGI(TAG, "Executing restart, type=%s, erase code 0x%02X",
+             _pendingRestartType == RestartType::Basic ? "Basic" : "MasterReset",
+             static_cast<unsigned>(_pendingEraseCode));
+
     // Execute cleanup callback if set
     if (_cleanupCallback) {
         KNX_LOGD(TAG, "Executing cleanup callback");
         _cleanupCallback();
     }
-    
+
     // Clear restart pending flag
     _restartPending = false;
-    
+    const EraseCode eraseCode = _pendingEraseCode;
+    _pendingEraseCode = EraseCode::ConfirmedRestart;
+
+    // The Resources go before the restart, so that the device comes back up
+    // already in the state the client asked for. A failed reset still
+    // restarts: the response promised a restart, and the client is now
+    // waiting for the device to come back.
+    if (_pendingRestartType == RestartType::MasterReset
+        && eraseCode != EraseCode::ConfirmedRestart
+        && _masterResetCallback) {
+        auto resetRes = _masterResetCallback(eraseCode);
+        if (resetRes.isError()) {
+            KNX_LOGE(TAG, "Master reset with erase code 0x%02X failed: %s",
+                     static_cast<unsigned>(eraseCode), util::errorCodeToString(resetRes.error()));
+        }
+    }
+
     // Execute restart
     if (_restartCallback) {
         auto restartRes = _restartCallback(_pendingRestartType);

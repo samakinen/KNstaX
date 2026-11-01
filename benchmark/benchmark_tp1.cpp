@@ -149,7 +149,9 @@ BenchmarkResult benchmarkQueueOverflowRetention() {
             throw std::runtime_error("TP1 overflow benchmark failed to drain bounded queue");
         }
 
-        const uint8_t expectedDiscriminator = static_cast<uint8_t>((extraFrames + i) & 0xFFu);
+        // The queue keeps the frames that arrived first: every frame in it
+        // was acknowledged on the bus, and the overflow drops the newest.
+        const uint8_t expectedDiscriminator = static_cast<uint8_t>(i & 0xFFu);
         if (received.value().size() < 6 || received.value()[5] != expectedDiscriminator) {
             throw std::runtime_error("TP1 overflow benchmark retained incorrect frames");
         }
@@ -163,6 +165,8 @@ BenchmarkResult benchmarkQueueOverflowRetention() {
 
     physical.close();
 
+    // The label is matched by scripts/ci/tp1_benchmark_gate.sh; it predates
+    // the switch to keeping the earliest frames.
     return {"TP1 MAC overflow retain-latest", totalFrames,
             std::chrono::duration<double, std::micro>(end - start).count()};
 }

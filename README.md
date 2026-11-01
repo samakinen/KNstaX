@@ -228,9 +228,10 @@ For the service-by-service inventory, including what is missing and why, see
 
 ## Footprint and capacity
 
-- CI enforces a **300 KB flash budget** on the shipping ESP-IDF configuration
-  (TP1-only switch example), and fails if a gated-out KNXnet/IP symbol reaches
-  the link at all.
+- `scripts/ci/knstax_size_budget.py` checks a linker map against a flash
+  budget (300 KB for the TP1-only switch example) and fails if a gated-out
+  KNXnet/IP symbol reaches the link at all. CI does not run it at present: the
+  ESP-IDF build is exercised by the firmware that embeds the stack, not here.
 - Each communication object costs about **288 bytes**, dominated by two payload
   buffers of `MAX_GROUP_OBJECT_PAYLOAD_BYTES` (16 by default — current value,
   and last transmitted value for send-on-change). RAM is what actually bounds a
@@ -291,9 +292,14 @@ runtime and commissioning flows. On top of it:
 - a **wire-level interop harness** drives the stack with real KNXnet/IP frames
   using `xknx` as an independent spec-following peer
   ([interop/README.md](interop/README.md));
-- **CI builds the shipping ESP-IDF configuration** for both an xtensa and a
-  RISC-V target, because the two SoC families declare the GPIO registers the
-  bit-bang backend writes differently.
+- **CI** (`.github/workflows/ci.yml`) runs the host suite with KNX Secure on
+  and off, runs it again under AddressSanitizer and UndefinedBehaviorSanitizer,
+  builds the library alone in the TP1-only, KNXnet/IP-only and knxip
+  (routing + Secure, no tunnelling client) shapes with warnings as errors, and
+  runs the interop suite. It does not build for ESP-IDF; the examples under
+  `examples/esp_idf_*` are built by hand, so check both an xtensa and a RISC-V
+  target after touching the bit-bang backend (the two SoC families declare
+  its GPIO registers differently).
 
 Virtual and host results do not substitute for HIL electrical and timing
 validation on real transceivers.

@@ -11,7 +11,7 @@
 #include "knx/physical/tp1_physical_layer.hpp"
 #include "knx/netip/core_discovery_codec.hpp"
 #include "knx/netip/core_server_responder.hpp"
-#include "knx/netip/netip_security.hpp"
+#include "knx/netip/random_source.hpp"
 #include "knx/netip/routing_flow_control.hpp"
 #include "knx/platform/network_interface.hpp"
 #include "knx/platform/platform.hpp"
@@ -19,18 +19,23 @@
 
 #include <atomic>
 #include <cstdint>
-#include <deque>
 #include <array>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <span>
 #include <vector>
 
+#include "knx/util/inplace_function.hpp"
 #include "knx/util/result.hpp"
 
 namespace knx {
 namespace netip {
 class RoutingEndpoint;
+namespace ip_secure {
+class McTimerStore;
+class SecureRoutingSecurity;
+}
 }
 namespace physical {
 
@@ -71,18 +76,57 @@ public:
     void setCoreDiscovery(netip::CoreServerResponder::DescriptionProvider provider,
                           std::span<const netip::ServiceFamilySupport> serviceFamilies);
 
-    /// Source of randomness for the ROUTING_BUSY back-off (03/08/05 §4.3). With
-    /// none, the wait is the deterministic tw and several devices resuming
-    /// together can re-congest the receiver that asked them to stop.
-    void setRandomSource(netip::RandomUnitSource source);
+    /**
+     * Source of randomness for the ROUTING_BUSY back-off (03_08_05 §2.3.5) and,
+     * under Secure Routing, for message tags and TIMER_NOTIFY delays.
+     *
+     * The product passes the platform RNG. Without it a clock-seeded fallback
+     * is used (see random_source.hpp), so the back-off is never the fixed tw
+     * that resumes every device on the group in the same millisecond.
+     * Must be called before init().
+     */
+    void setRandomSource(netip::RandomBytesSource source);
 
 #if KNX_SECURE_ENABLED
-    // Optional: enable KNX/IP Secure routing (SecureWrapper over multicast).
-    // Must be called before init().
-    void setSecureRouting(const std::array<uint8_t, 16>& groupKey,
-                          const std::array<uint8_t, 6>& serial,
-                          const std::array<uint8_t, 2>& tag,
-                          uint64_t initialSeq = 1);
+    /// How a backbone key reached applySecureRouting(); decides when the first
+    /// TIMER_NOTIFY goes out (03_08_09 §2.2.2.3.2.8).
+    enum class KeySource : uint8_t {
+        /// Downloaded now, by ETS: a new domain (E11), notify at once.
+        Download,
+        /// Restored from storage at start-up: a power-up, notify after
+        /// random(0, 10 s) so a site's worth of devices do not all notify at once.
+        Restored,
+    };
+
+    /// The device's KNX serial number, which goes into every SECURE_WRAPPER and
+    /// own TIMER_NOTIFY. Set before the first key is applied: a context built
+    /// without it shares its nonce space with every device that also left it
+    /// at zero.
+    void setSecureRoutingSerial(const std::array<uint8_t, 6>& serial);
+
+    /// Where the multicast timer is persisted (03_08_09 §2.2.4.2). The store
+    /// must outlive this object. Set before the first key is applied.
+    void setMcTimerStore(netip::ip_secure::McTimerStore* store);
+
+    /// PID_MULTICAST_LATENCY_TOLERANCE (ms) and PID_SYNC_LATENCY_FRACTION
+    /// (PDT_SCALING), as the product reads them from the KNXnet/IP Parameter
+    /// Object.
+    struct LatencySettings {
+        uint16_t latencyToleranceMs{2000};
+        uint8_t syncLatencyFraction{0x1A};
+        bool operator==(const LatencySettings&) const = default;
+    };
+    using LatencySettingsSource = util::InplaceFunction<LatencySettings(), 32>;
+
+    /**
+     * Ask `source` for the latency settings once a second on the receive path.
+     *
+     * ETS writes them as plain properties, and §2.3.1.6.3 gives the device one
+     * second to act on a new value — so asking once a second meets the
+     * contract without a write hook in the property layer for two rarely
+     * written values. Must be called before init().
+     */
+    void setLatencySettingsSource(LatencySettingsSource source);
 
     /**
      * Turn Secure Routing on, off, or over to a different key while running.
@@ -94,16 +138,29 @@ public:
      * encrypted.
      *
      * An all-zero key means "no secure routing", which is how ETS turns it off.
-     * Rekeying rebuilds the security context, so the sequence number restarts
-     * from `initialSeq`; that is safe only because the key changed with it.
+     * A different key is a new domain: the multicast timer restarts from 0
+     * (03_08_09 §2.2.2.2.2, E11). The key already in use, written again, is not
+     * an event and changes nothing — which is what keeps a reboot, or ETS
+     * repeating a download, from resetting the timer.
      */
     util::Result<void> applySecureRouting(std::span<const uint8_t> groupKey,
-                                          uint64_t initialSeq = 1);
+                                          KeySource source = KeySource::Download);
 
     bool isSecureRoutingActive() const;
+
+    /// Current mc_timer, or 0 without Secure Routing. Diagnostic.
+    uint64_t secureRoutingTimer() const;
 #endif
 
-    // Bounds to avoid unbounded memory usage under multicast storms.
+    /// Inbound frames held between the socket and the data link layer. A fixed
+    /// ring, so the depth is bounded by this; 03_08_05 §2.3.5 recommends room
+    /// for at least 30.
+    static constexpr size_t kRxQueueCapacity = 32;
+    /// Largest encoded TP1 frame a slot holds: an L_Data_Extended frame with a
+    /// full APDU, as FrameCodec produces it.
+    static constexpr size_t kRxSlotSize = 264;
+
+    // Bounds memory under multicast storms. Clamped to [1, kRxQueueCapacity].
     void setMaxRxQueueDepth(size_t maxFrames);
 
     util::Result<void> init();
@@ -195,6 +252,13 @@ private:
     /// back — and anything beyond it is taken by the next poll.
     static constexpr size_t kMaxDrainPerPoll = 16;
     void enqueueFrame(std::span<const uint8_t> cemi);
+#if KNX_SECURE_ENABLED
+    /// Pull the latency settings from the product at most once a second.
+    void refreshLatencySettings();
+    /// Build the context for the stored key and install it on the endpoint.
+    /// Called with secureRoutingMutex_ held and an open endpoint.
+    void installSecureRoutingContext(KeySource source);
+#endif
 
     /// Re-join the group when nothing has arrived for a long time. See the
     /// definition for why silence, and not a plain interval, is the trigger.
@@ -213,8 +277,14 @@ private:
     bool secureRoutingEnabled_{false};
     std::array<uint8_t, 16> secureRoutingGroupKey_{};
     std::array<uint8_t, 6> secureRoutingSerial_{};
-    std::array<uint8_t, 2> secureRoutingTag_{};
-    uint64_t secureRoutingInitialSeq_{1};
+    /// How the stored key arrived, for the context init() builds from it.
+    KeySource pendingKeySource_{KeySource::Restored};
+    netip::ip_secure::McTimerStore* mcTimerStore_{nullptr};
+    LatencySettings latencySettings_{};
+    LatencySettingsSource latencySettingsSource_{};
+    /// Touched only on the receive path.
+    uint32_t latencyPolledMs_{0};
+    bool latencyPolled_{false};
 #endif
 
     std::atomic<size_t> maxRxQueueDepth_;
@@ -229,22 +299,28 @@ private:
     std::unique_ptr<netip::RoutingEndpoint> endpoint_;
 
 #if KNX_SECURE_ENABLED
-    std::unique_ptr<netip::NetIpSecurity> routingSecurity_;
-    /// Superseded security contexts, held until close().
-    ///
-    /// A rekey can land while the receive task is midway through a datagram
-    /// that still points at the old context. Retiring rather than destroying it
-    /// removes that window; rekeying happens once per commissioning, so the
-    /// list never grows to anything worth reclaiming.
-    std::vector<std::unique_ptr<netip::NetIpSecurity>> retiredRoutingSecurity_;
+    /// The context for the key in force. A superseded one is destroyed as soon
+    /// as RoutingEndpoint::setSecurity() has returned: the endpoint uses its
+    /// context under the lock that call takes, so no datagram still in flight
+    /// can be pointing at it. Nothing is retired, so nothing accumulates.
+    std::unique_ptr<netip::ip_secure::SecureRoutingSecurity> routingSecurity_;
     mutable std::mutex secureRoutingMutex_;
 #endif
 
     std::atomic<bool> initialized_;
 
+    struct RxSlot {
+        std::array<uint8_t, kRxSlotSize> bytes{};
+        size_t length{0};
+    };
+
     mutable std::mutex rxMutex_;
-    std::deque<std::vector<uint8_t>> rxQueue_;
-    std::vector<uint8_t> lastReceivedFrame_;
+    /// Fixed ring, allocated once at init(): an inbound datagram costs a copy
+    /// into a slot rather than a heap allocation.
+    std::unique_ptr<std::array<RxSlot, kRxQueueCapacity>> rxRing_;
+    size_t rxHead_{0};
+    size_t rxCount_{0};
+    RxSlot lastReceivedFrame_{};
     std::vector<uint8_t> pendingTxFrame_;
     bool txActive_{false};
     uint32_t txSequence_{0};
@@ -258,7 +334,7 @@ private:
 
     netip::CoreServerResponder coreResponder_;
     bool coreDiscoveryEnabled_{false};
-    netip::RandomUnitSource randomSource_{};
+    netip::RandomBytesSource randomSource_{};
 
     std::atomic<PhysicalLayerState> state_;
 };

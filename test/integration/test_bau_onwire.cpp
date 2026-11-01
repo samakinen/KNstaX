@@ -40,6 +40,7 @@ static bool gotWrite{false};
 static bool gotRead{false};
 static knx::GroupObjectIndex lastIdx;
 static std::vector<uint8_t> lastData;
+static std::vector<uint16_t> writtenObjects;  // every write callback, in order
 
 static void clearPersistenceStore() {
     std::error_code ec;
@@ -60,6 +61,7 @@ void setUp(void) {
         gotWrite = false;
         gotRead = false;
         lastIdx = knx::GroupObjectIndex::invalid();
+        writtenObjects.clear();
         lastData.clear();
     }
 
@@ -68,6 +70,7 @@ void setUp(void) {
             std::lock_guard<std::mutex> lk(gCbMutex);
             lastIdx = idx;
             lastData.assign(data.begin(), data.end());
+            writtenObjects.push_back(idx.value());
             gotWrite = true;
         }
     });
@@ -425,6 +428,39 @@ void test_bau_incoming_group_value_write_decodes_to_service_and_payload(void) {
     TEST_ASSERT_EQUAL_UINT8(writeIdx.value(), lastIdx.value());
     TEST_ASSERT_EQUAL_UINT32(1, lastData.size());
     TEST_ASSERT_EQUAL_HEX8(0x02, lastData[0]);
+}
+
+// More than 16 group objects on one group address all receive the write. The
+// inbound path used to copy the associations into a 16-entry buffer; the 17th
+// made the lookup fail and the whole telegram was dropped, for every object.
+void test_bau_incoming_group_value_write_reaches_seventeen_objects_on_one_address(void) {
+    constexpr size_t kObjects = 17;
+    std::vector<uint16_t> expected;
+    for (size_t i = 0; i < kObjects; ++i) {
+        const knx::GroupObjectIndex idx = bauInstance->addGroupObject(GroupAddress(0, 1, 0),
+                                                                       application::dptids::Bool,
+                                                                       false, true, false, true);
+        TEST_ASSERT_TRUE(idx.isValid());
+        expected.push_back(idx.value());
+    }
+
+    physicalLayer->injectFrame(withChecksum({
+        0x88,       // ctrl: standard + Normal priority, no ACK
+        0x11, 0x0B, // src 1.1.11
+        0x01, 0x00, // dest group 0/1/0
+        0xE1,       // group + hop=6 + (tpduLen-1)=1
+        0x00, 0x81  // TPDU: GroupValueWrite (data6=1)
+    }));
+    waitFlag(gotWrite);
+    for (int i = 0; i < 5; ++i) {
+        bauInstance->loop();
+    }
+
+    std::lock_guard<std::mutex> lk(gCbMutex);
+    TEST_ASSERT_EQUAL_UINT32(kObjects, writtenObjects.size());
+    for (size_t i = 0; i < kObjects; ++i) {
+        TEST_ASSERT_EQUAL_UINT16(expected[i], writtenObjects[i]);
+    }
 }
 
 // A communication object the project left unlinked (no association entry) has
@@ -939,6 +975,52 @@ void test_bau_secure_sync_request_is_answered_onwire_without_ack_request(void) {
     const uint8_t checksum = knx::datalink::FrameCodec::calculateChecksum(
         std::vector<uint8_t>(sent.begin(), sent.end() - 1));
     TEST_ASSERT_EQUAL_HEX8(checksum, sent.back());
+}
+
+// Same exchange, in the state a device is actually in when ETS first meets it:
+// Security Mode OFF, only the factory Tool Key (FDSK) installed. 03/05/03
+// §1.5.4.3.1 has ETS sync with the FDSK *before* it enables Security Mode, and
+// §1.5.4.1 says the mode is disabled ex-factory — so this, not the secured
+// steady state, is the configuration the first S-A_Sync_Request arrives in.
+// securityUsable() is "mode on OR a key present" precisely so that this works.
+void test_bau_secure_sync_request_is_answered_with_factory_key_and_mode_off(void) {
+    const std::array<uint8_t, 6> serial{0x00, 0xFA, 0x00, 0x00, 0x00, 0x01};
+    bauInstance->deviceObject().setSerialNumber(serial);
+
+    std::array<uint8_t, 16> toolKey{};
+    for (size_t i = 0; i < toolKey.size(); ++i) {
+        toolKey[i] = static_cast<uint8_t>(i);
+    }
+    bauInstance->securityObject().setToolKey(toolKey);
+    // Deliberately NOT setSecurityMode(Enabled): that is ETS's property and it
+    // is still off at this point in the commissioning sequence.
+    TEST_ASSERT_FALSE(bauInstance->securityObject().isSecurityEnabled());
+
+    const std::vector<uint8_t> request = withChecksum({
+        0x30,             // ctrl: extended, not repeated, system priority, no ACK request
+        0xE0,             // ctrle: group addressed, hop count 6, format 0000
+        0x11, 0xFE,       // src 1.1.254
+        0x00, 0x00,       // dest: broadcast
+        0x18,             // length: 25 TPDU octets - 1
+        0x03, 0xF1, 0x92, // Secure APCI, SCF: tool access, CCM A+C, SyncRequest
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x07,  // SeqNrlocal
+        0x00, 0xFA, 0x00, 0x00, 0x00, 0x01,  // KNX Serial Number
+        0xEC, 0x1B, 0xDC, 0xD7, 0x48, 0x4E,  // encrypted challenge
+        0xFD, 0xE8, 0x19, 0x52               // MAC
+    });
+
+    physicalLayer->injectFrame(request);
+
+    std::vector<uint8_t> sent;
+    for (int attempt = 0; attempt < 200 && !physicalLayer->getSentFrame(sent); ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    TEST_ASSERT_FALSE(sent.empty());  // silence here is ETS's "unknown key" error
+
+    TEST_ASSERT_EQUAL_UINT32(33u, static_cast<uint32_t>(sent.size()));
+    TEST_ASSERT_EQUAL_HEX8(0x03, sent[7]);   // Secure APCI
+    TEST_ASSERT_EQUAL_HEX8(0xF1, sent[8]);
+    TEST_ASSERT_EQUAL_HEX8(0x93, sent[9]);   // SCF: tool access, SyncResponse
 }
 
 // ETS installs its own Tool Key with A_PropertyExtValue_WriteCon, but it does so
@@ -1752,6 +1834,7 @@ int main(void) {
     RUN_TEST(test_bau_go_diagnostics_refuses_secure_read_without_group_key);
     RUN_TEST(test_bau_property_ext_write_tool_key_refused_when_unsecured);
     RUN_TEST(test_bau_secure_sync_request_is_answered_onwire_without_ack_request);
+    RUN_TEST(test_bau_secure_sync_request_is_answered_with_factory_key_and_mode_off);
     RUN_TEST(test_bau_send_group_value_read_encodes_exact_tp1_bytes);
     RUN_TEST(test_bau_send_group_value_write_encodes_exact_tp1_bytes_short_apdu);
     RUN_TEST(test_bau_backend_construction_path_encodes_exact_tp1_bytes);
@@ -1762,6 +1845,7 @@ int main(void) {
     RUN_TEST(test_bau_group_key_table_survives_restart);
     RUN_TEST(test_bau_security_sequence_numbers_survive_restart);
     RUN_TEST(test_bau_incoming_group_value_write_decodes_to_service_and_payload);
+    RUN_TEST(test_bau_incoming_group_value_write_reaches_seventeen_objects_on_one_address);
     RUN_TEST(test_bau_send_for_unlinked_object_is_silent_no_op);
     RUN_TEST(test_bau_incoming_group_value_read_triggers_group_value_response_onwire);
     RUN_TEST(test_bau_auto_group_value_response_queues_retry_aware_outcome);

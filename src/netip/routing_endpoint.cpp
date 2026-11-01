@@ -41,8 +41,14 @@ util::Result<void> RoutingEndpoint::open(platform::NetworkInterface& network, co
 {
     close();
     options_ = options;
-    flowControl_ = RoutingFlowControl(options_.flowControl);
-    security_.store(options_.security, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(flowMutex_);
+        flowControl_ = RoutingFlowControl(options_.flowControl);
+    }
+    {
+        std::lock_guard<std::mutex> lock(securityMutex_);
+        security_ = options_.security;
+    }
 
     multicastAddr_ = options_.multicastGroup;
     interfaceAddr_ = options_.interfaceAddress;
@@ -137,8 +143,14 @@ void RoutingEndpoint::close()
     multicastAddr_ = IpAddress(0);
     interfaceAddr_ = IpAddress(0);
     localAddr_ = IpAddress(0);
-    security_.store(nullptr, std::memory_order_relaxed);
-    flowControl_.reset();
+    {
+        std::lock_guard<std::mutex> lock(securityMutex_);
+        security_ = nullptr;
+    }
+    {
+        std::lock_guard<std::mutex> lock(flowMutex_);
+        flowControl_.reset();
+    }
 }
 
 bool RoutingEndpoint::isOpen() const
@@ -146,14 +158,32 @@ bool RoutingEndpoint::isOpen() const
     return sock_ && sock_->isOpen();
 }
 
-void RoutingEndpoint::setSecurity(NetIpSecurity* security) noexcept
+void RoutingEndpoint::setSecurity(RoutingSecurity* security)
 {
-    security_.store(security, std::memory_order_release);
+    std::lock_guard<std::mutex> lock(securityMutex_);
+    security_ = security;
 }
 
-bool RoutingEndpoint::hasSecurity() const noexcept
+bool RoutingEndpoint::hasSecurity() const
 {
-    return security_.load(std::memory_order_acquire) != nullptr;
+    std::lock_guard<std::mutex> lock(securityMutex_);
+    return security_ != nullptr;
+}
+
+void RoutingEndpoint::sendDueTimerNotify(RoutingSecurity& security)
+{
+    std::array<uint8_t, ip_secure::SecureWrapper::kTimerNotifyLen> notify{};
+    auto due = security.takeDueTimerNotify(notify);
+    if (due.isError() || due.value() == 0) {
+        return;
+    }
+    // Sent in the clear to the routing group (03_08_09 §2.2.2.4.1): the frame
+    // is its own authentication. It is not a ROUTING_INDICATION, so it is not
+    // charged to the routing egress budget either.
+    const auto frame = std::span<const uint8_t>(notify).first(due.value());
+    if (sock_->send(multicastAddr_, options_.port.value(), frame) == static_cast<int>(frame.size())) {
+        timerNotifiesSent_.fetch_add(1);
+    }
 }
 
 IpAddress RoutingEndpoint::localAddress() const
@@ -163,11 +193,13 @@ IpAddress RoutingEndpoint::localAddress() const
 
 bool RoutingEndpoint::isSendBlocked() const
 {
+    std::lock_guard<std::mutex> lock(flowMutex_);
     return !flowControl_.canSend(nowMs());
 }
 
 uint32_t RoutingEndpoint::millisecondsUntilSendable() const
 {
+    std::lock_guard<std::mutex> lock(flowMutex_);
     return flowControl_.millisecondsUntilSendable(nowMs());
 }
 
@@ -176,12 +208,18 @@ util::Result<void> RoutingEndpoint::sendToGroup(std::span<const uint8_t> datagra
     if (!sock_ || !sock_->isOpen()) return util::ErrorCode::NotInitialized;
 
     const uint32_t now = nowMs();
-    if (!flowControl_.canSend(now)) {
+    bool sendable = false;
+    {
+        std::lock_guard<std::mutex> lock(flowMutex_);
+        sendable = flowControl_.canSend(now);
+    }
+    if (!sendable) {
         txDeferred_.fetch_add(1);
         return util::ErrorCode::Busy;
     }
 
-    NetIpSecurity* const security = security_.load(std::memory_order_acquire);
+    std::lock_guard<std::mutex> lock(securityMutex_);
+    RoutingSecurity* const security = security_;
 
     util::Result<void> result = util::Result<void>::ok();
     if (allowSecure && security) {
@@ -198,6 +236,7 @@ util::Result<void> RoutingEndpoint::sendToGroup(std::span<const uint8_t> datagra
     }
 
     if (result.isOk()) {
+        std::lock_guard<std::mutex> flowLock(flowMutex_);
         flowControl_.noteSent(now);
     }
     return result;
@@ -266,11 +305,26 @@ util::Result<RoutingEndpoint::Inbound> RoutingEndpoint::receive(std::span<uint8_
         return util::ErrorCode::NotInitialized;
     }
 
+    // A TIMER_NOTIFY that falls due while this task sleeps in the socket would
+    // go out late by up to the caller's whole timeout, so the wait is cut to
+    // the notify deadline and a due notify is sent on either side of it.
+    {
+        std::lock_guard<std::mutex> lock(securityMutex_);
+        if (security_ != nullptr) {
+            sendDueTimerNotify(*security_);
+            timeoutMs = std::min(timeoutMs, security_->millisecondsUntilTimerNotify());
+        }
+    }
+
     auto waitResult = detail::waitUntilReadable(timingPlatform_, static_cast<int>(timeoutMs), *sock_);
     if (waitResult.isError()) {
         return waitResult.error();
     }
     if (!waitResult.value()) {
+        std::lock_guard<std::mutex> lock(securityMutex_);
+        if (security_ != nullptr) {
+            sendDueTimerNotify(*security_);
+        }
         return util::ErrorCode::Timeout;
     }
 
@@ -291,7 +345,28 @@ util::Result<RoutingEndpoint::Inbound> RoutingEndpoint::receive(std::span<uint8_
     // Decrypt only what was actually encrypted. Classifying first is what lets
     // discovery and the system-broadcast domain keep working on a secured
     // group: both are specified to travel in the clear there.
-    NetIpSecurity* const security = security_.load(std::memory_order_acquire);
+    // Held until the datagram is plaintext, so a rekey cannot destroy the
+    // context in the middle of an unwrap.
+    std::unique_lock<std::mutex> securityLock(securityMutex_);
+    RoutingSecurity* const security = security_;
+
+    if (hdr.serviceType == ip_secure::SecureWrapper::kServiceTypeTimerNotify) {
+        // "If the KNXnet/IP Routing Service Family is set to not require
+        // secure communication ... no TimerNotify frames may be sent or
+        // received" (03_08_09 §2.2.1.4.5).
+        if (security == nullptr) {
+            return Inbound{};
+        }
+        auto handled = security->handleTimerNotify(inData.first(inLen));
+        if (handled.isError()) {
+            return handled.error();
+        }
+        timerNotifiesAccepted_.fetch_add(1);
+        // E04 schedules an answer at least 100 ms out, so nothing is due yet;
+        // asking costs nothing and keeps the send path in one place.
+        sendDueTimerNotify(*security);
+        return Inbound{};
+    }
 
     if (hdr.serviceType == ip_secure::SecureWrapper::kServiceTypeSecureWrapper) {
         if (!security) {
@@ -323,12 +398,21 @@ util::Result<RoutingEndpoint::Inbound> RoutingEndpoint::receive(std::span<uint8_
         if (RoutingCodec::decodeHeader(inData.first(inLen), hdr).isError()) {
             return util::ErrorCode::DecodeFailed;
         }
-    } else if (security && hdr.serviceType == RoutingCodec::ST_ROUTING_INDICATION) {
+    } else if (security && (hdr.serviceType == RoutingCodec::ST_ROUTING_INDICATION ||
+                            hdr.serviceType == RoutingCodec::ST_ROUTING_BUSY ||
+                            hdr.serviceType == RoutingCodec::ST_ROUTING_LOST_MESSAGE)) {
         // A secured installation does not accept plain process data; taking it
-        // would make the encryption advisory.
-        KNX_LOGD(TAG, "Dropping unsecured ROUTING_INDICATION on a secured group");
+        // would make the encryption advisory (03_08_09 §2.2.1.4.5). The same
+        // goes for the flow-control messages: an unauthenticated ROUTING_BUSY
+        // silences every sender on the group for as long as anyone keeps
+        // sending it. Only the system-broadcast domain and discovery travel in
+        // the clear on a secured group.
+        plainOnSecuredDropped_.fetch_add(1);
+        KNX_LOGD(TAG, "Dropping unsecured routing service 0x%04X on a secured group",
+                 static_cast<unsigned>(hdr.serviceType.value()));
         return util::ErrorCode::AccessDenied;
     }
+    securityLock.unlock();
 
     const auto frame = inData.first(inLen);
 
@@ -367,10 +451,14 @@ util::Result<RoutingEndpoint::Inbound> RoutingEndpoint::receive(std::span<uint8_
         RoutingBusyInfo info{};
         if (RoutingCodec::decodeRoutingBusy(frame, info).isOk()) {
             busySeen_.fetch_add(1);
-            // The random component needs a source of randomness the endpoint
-            // does not own; the deterministic wait is the part the spec makes
-            // mandatory, and IpRoutingPhysical supplies the rest.
-            flowControl_.noteBusyReceived(info, nowMs());
+            // trandom draws from the injected source, or the fallback: a fixed
+            // draw would resume every device on the group in the same
+            // millisecond, which is the re-congestion trandom exists to avoid.
+            const float draw = randomUnit(random_);
+            {
+                std::lock_guard<std::mutex> lock(flowMutex_);
+                flowControl_.noteBusyReceived(info, nowMs(), draw);
+            }
             KNX_LOGD(TAG, "ROUTING_BUSY: wait=%u ms control=0x%04X",
                      static_cast<unsigned>(info.waitTimeMs),
                      static_cast<unsigned>(info.controlField));

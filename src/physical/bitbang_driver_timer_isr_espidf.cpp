@@ -10,6 +10,7 @@
 
 #if defined(ESP_PLATFORM)
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
 #endif
 
 #include <algorithm>
@@ -19,6 +20,14 @@ static const char* TAG = "KNX.BitBang";
 
 namespace knx {
 namespace physical {
+
+#if defined(ESP_PLATFORM)
+namespace {
+// Guards the notify pair this wrapper keeps for the link-signal edge
+// interrupt, which reads it independently of the ISR core.
+portMUX_TYPE s_notifyMux = portMUX_INITIALIZER_UNLOCKED;
+} // namespace
+#endif
 
 #ifdef CONFIG_KNX_TP1_BITBANG_TIMING_STATS
 // Human-readable name for an L2 acknowledgement byte, for the bus-monitor trace.
@@ -173,8 +182,18 @@ void BitBangDriverTimerIsrEspIdf::setRxCallback(RxCallback callback, void* conte
 }
 
 void BitBangDriverTimerIsrEspIdf::setQueueNotifyCallback(QueueNotifyCallback callback, void* context) {
+    // Both interrupts that wake the consumer — the core's and the link-signal
+    // edge — see the new pair before this returns, so a caller may clear it
+    // and then tear down whatever the context pointed at (see
+    // Tp1DataLinkLayer::close()).
+#if defined(ESP_PLATFORM)
+    portENTER_CRITICAL(&s_notifyMux);
+#endif
     _queueNotifyCallback = callback;
     _queueNotifyContext = context;
+#if defined(ESP_PLATFORM)
+    portEXIT_CRITICAL(&s_notifyMux);
+#endif
     _core.setQueueNotifyCallback(callback, context);
 }
 
@@ -216,12 +235,14 @@ util::Result<void> BitBangDriverTimerIsrEspIdf::setOwnAddress(uint16_t addressRa
 
 util::Result<void> BitBangDriverTimerIsrEspIdf::setBusMonitorMode(bool enabled) {
     _busMonitorMode = enabled;
+    // Refusing send() is not enough: the ISR acknowledges addressed frames on
+    // its own, and a monitor must stay silent.
+    _core.setBusMonitorMode(enabled);
     return util::Result<void>::ok();
 }
 
 void BitBangDriverTimerIsrEspIdf::setAckGroupAddresses(std::span<const uint16_t> addresses) {
-    _core.setAckGroupAddresses(addresses.data(),
-                               static_cast<uint8_t>(std::min<size_t>(addresses.size(), 0xFFu)));
+    _core.setAckGroupAddresses(addresses.data(), addresses.size());
 }
 
 void BitBangDriverTimerIsrEspIdf::setLocalBusy(bool busy) {
@@ -268,11 +289,8 @@ void BitBangDriverTimerIsrEspIdf::process() {
                     KNX_LOGE(TAG, "RX telegram exceeds %zu octets — frame truncated",
                              _activeFrame.size());
                 }
-
-                Tp1RxEvent event;
-                event.type = Tp1RxEventType::DataByte;
-                event.dataByte = message.data;
-                (void)enqueueTp1Event(event);
+                // No per-octet event: nothing consumes one, and at up to 263
+                // octets a telegram it was most of what filled the event queue.
                 break;
             }
 
@@ -317,10 +335,15 @@ void BitBangDriverTimerIsrEspIdf::process() {
 
                 flushRxPartialErrorSummary();
 
-                if (message.data != 0) {
+                const uint8_t rxErrorFlags = static_cast<uint8_t>(
+                    message.data & ~BitBangDriverTimerIsr::END_FLAG_ANSWERED_BUSY);
+                const bool answeredBusy =
+                    (message.data & BitBangDriverTimerIsr::END_FLAG_ANSWERED_BUSY) != 0u;
+
+                if (rxErrorFlags != 0) {
                     Tp1RxEvent errorEvent;
                     errorEvent.type = Tp1RxEventType::ReceiveError;
-                    errorEvent.errorFlags = message.data;
+                    errorEvent.errorFlags = rxErrorFlags;
                     (void)enqueueTp1Event(errorEvent);
                 }
 
@@ -377,7 +400,10 @@ void BitBangDriverTimerIsrEspIdf::process() {
                 }
 #endif
 
-                if (_rxCallback && _activeFrameStarted && _activeFrameLength > 0) {
+                // A frame the ISR refused with BUSY is not delivered: the
+                // sender repeats it once this device has room again, and
+                // that repetition is the copy that counts (03_02_02 §2.4.2).
+                if (_rxCallback && _activeFrameStarted && _activeFrameLength > 0 && !answeredBusy) {
                     _rxCallback(std::span<const uint8_t>(_activeFrame.data(), _activeFrameLength), _rxContext);
                 }
 
@@ -464,6 +490,20 @@ void BitBangDriverTimerIsrEspIdf::process() {
                 break;
             }
 
+            case BitBangDriverTimerIsr::MessageType::TxArbitrationLost: {
+                // Every try lost arbitration (the ISR restarts single losses
+                // itself). Reported as an unusable acknowledgement, which the
+                // MAC turns into TransmissionFailed: the frame did not get
+                // through, and nothing the peer said was BUSY.
+                KNX_LOGW(TAG, "TX abandoned after %u arbitration losses", static_cast<unsigned>(message.data));
+                Tp1RxEvent event;
+                event.type = Tp1RxEventType::TxAckResponse;
+                event.ackClass = Tp1AckClass::None;
+                (void)enqueueTp1Event(event);
+                setState(DriverState::Idle);
+                break;
+            }
+
             case BitBangDriverTimerIsr::MessageType::Collision: {
                 _collisionDetected = true;
                 ++_collisionEventCount;
@@ -475,8 +515,8 @@ void BitBangDriverTimerIsrEspIdf::process() {
             }
 
             case BitBangDriverTimerIsr::MessageType::EarlyAckArmed: {
-                // Fires for every individually-addressed frame we intend to
-                // ACK; the outcome is reported by DlAckDone below instead.
+                // Fires for every addressed frame we intend to acknowledge;
+                // the outcome is reported by DlAckDone below instead.
                 break;
             }
 

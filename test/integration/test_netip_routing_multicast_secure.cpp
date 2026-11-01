@@ -106,10 +106,10 @@ void test_routing_multicast_send_receive_secure(void)
     }
 
     const std::array<uint8_t, SecureWrapper::kSerialLen> serial{0x00, 0x01, 0x02, 0x03, 0x04, 0x05};
-    const std::array<uint8_t, SecureWrapper::kTagLen> tag{0x12, 0x34};
+    const std::array<uint8_t, 6> receiverSerial{0x00, 0x01, 0x02, 0x03, 0x04, 0x06};
 
-    SecureRoutingSecurity secSender(groupKey, serial, tag, /*initialSeq=*/1);
-    SecureRoutingSecurity secReceiver(groupKey, serial, tag, /*initialSeq=*/0);
+    SecureRoutingSecurity secSender(groupKey, serial);
+    SecureRoutingSecurity secReceiver(groupKey, receiverSerial);
 
     RoutingEndpoint a;
     RoutingEndpoint b;

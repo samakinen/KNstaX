@@ -160,6 +160,10 @@ public:
         _sendError = error;
     }
 
+    bool localBusy() const {
+        return _localBusy;
+    }
+
     void setTxAckResponse(Tp1AckClass ackClass) {
         _txAckResponse = ackClass;
     }
@@ -265,7 +269,7 @@ std::vector<uint8_t> buildValidFrame() {
     return std::vector<uint8_t>(buffer, buffer + encoded.value());
 }
 
-std::vector<uint8_t> buildValidFrameWithoutAckRequest() {
+std::vector<uint8_t> buildValidFrameWithoutAckRequest(bool toUnconfiguredAddress = false) {
     datalink::LDataFrame frame;
     frame.standardFrame = true;
     frame.repeated = false;
@@ -273,8 +277,12 @@ std::vector<uint8_t> buildValidFrameWithoutAckRequest() {
     frame.ackRequested = false;
     frame.confirmation = false;
     frame.source = IndividualAddress(1, 1, 1);
-    frame.destination = GroupAddress(2, 2, 4);
-    frame.destinationType = AddressType::Group;
+    if (toUnconfiguredAddress) {
+        frame.setDestination(IndividualAddress(0xFFFFu));
+    } else {
+        frame.destination = GroupAddress(2, 2, 4);
+        frame.destinationType = AddressType::Group;
+    }
     frame.hopCount = 6;
     frame.setTpdu(protocol::TPCI::UnnumberedData,
                   application::APCIService::GroupValueWrite,
@@ -335,24 +343,64 @@ void test_send_requires_init() {
     TEST_ASSERT_EQUAL(static_cast<int>(util::ErrorCode::NotInitialized), static_cast<int>(send.error()));
 }
 
-void test_receive_queue_is_bounded_and_keeps_latest_frames() {
+// The queue used to drop its OLDEST frame when full. Every frame in it had
+// already been acknowledged on the bus, so that lost data the sender believed
+// delivered. Now the device answers BUSY before the queue fills (the sender
+// repeats later), and the rare overflow drops the newest arrival, keeping the
+// queue in arrival order.
+void test_receive_queue_signals_busy_before_full_and_keeps_arrival_order() {
     TEST_ASSERT_TRUE(macPhysical->init().isOk());
 
+    const size_t busyThreshold = Tp1MacPhysical::RX_QUEUE_CAPACITY - Tp1MacPhysical::RX_BUSY_RESERVE;
     for (size_t i = 0; i < Tp1MacPhysical::RX_QUEUE_CAPACITY + 2; ++i) {
         auto frame = buildValidFrame();
         frame[1] = static_cast<uint8_t>(0x11 + i);
         mockDriver->simulateReceive(frame);
+        // BUSY is asserted exactly when the reserve is reached.
+        TEST_ASSERT_EQUAL((i + 1u) >= busyThreshold, mockDriver->localBusy());
     }
 
     for (size_t i = 0; i < Tp1MacPhysical::RX_QUEUE_CAPACITY; ++i) {
         auto rx = macPhysical->receiveFrame(0);
         TEST_ASSERT_TRUE(rx.isOk());
-        TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(0x11 + i + 2), rx.value()[1]);
+        TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(0x11 + i), rx.value()[1]);
     }
 
     auto none = macPhysical->receiveFrame(0);
     TEST_ASSERT_TRUE(none.isError());
     TEST_ASSERT_EQUAL(static_cast<int>(util::ErrorCode::Timeout), static_cast<int>(none.error()));
+    // Drained: the ISR acknowledges normally again.
+    TEST_ASSERT_FALSE(mockDriver->localBusy());
+}
+
+// receivedFrameView() lends out the queue slot instead of a copy; the slot
+// must not be reused by a frame arriving while the caller still reads it.
+void test_received_frame_view_is_not_overwritten_by_later_arrivals() {
+    TEST_ASSERT_TRUE(macPhysical->init().isOk());
+
+    auto first = buildValidFrame();
+    first[1] = 0x21u;
+    mockDriver->simulateReceive(first);
+
+    TEST_ASSERT_TRUE(macPhysical->beginReceive(0).isOk());
+    auto progress = macPhysical->pollReceive();
+    TEST_ASSERT_TRUE(progress.isOk());
+    TEST_ASSERT_TRUE(progress.value() == Tp1MacPhysical::ProgressState::Complete);
+    auto view = macPhysical->receivedFrameView();
+    TEST_ASSERT_TRUE(view.isOk());
+
+    for (size_t i = 0; i < Tp1MacPhysical::RX_QUEUE_CAPACITY + 2; ++i) {
+        auto later = buildValidFrame();
+        later[1] = static_cast<uint8_t>(0x40u + i);
+        mockDriver->simulateReceive(later);
+    }
+
+    TEST_ASSERT_EQUAL_UINT8(0x21u, view.value()[1]);
+
+    // The next receive releases the slot and returns the following frame.
+    auto next = macPhysical->receiveFrame(0);
+    TEST_ASSERT_TRUE(next.isOk());
+    TEST_ASSERT_EQUAL_UINT8(0x40u, next.value()[1]);
 }
 
 void test_receive_timeout_can_follow_virtual_time() {
@@ -523,15 +571,36 @@ void test_send_timeout_uses_configured_tx_outcome_timeout() {
     TEST_ASSERT_EQUAL(static_cast<int>(util::ErrorCode::Timeout), static_cast<int>(result.error()));
 }
 
-void test_send_frame_without_ack_request_completes_without_tx_ack_response() {
+// Individual address 0xFFFF (shared by every unconfigured device) is the one
+// destination nobody acknowledges, so it completes when the bits are out. (This
+// test used a group frame without the A bit; group frames are acknowledged on
+// TP1, see the next test.)
+void test_send_frame_to_address_0xffff_completes_without_tx_ack_response() {
     TEST_ASSERT_TRUE(macPhysical->init().isOk());
     mockDriver->clearTxAckResponse();
 
-    const auto frame = buildValidFrameWithoutAckRequest();
+    const auto frame = buildValidFrameWithoutAckRequest(true);
 
     auto result = macPhysical->sendFrame(frame);
     TEST_ASSERT_TRUE(result.isOk());
     TEST_ASSERT_EQUAL(frame.size(), result.value());
+}
+
+// 03_02_02 §2.4.2: L_Data is acknowledged for group destinations too. A group
+// frame without the A bit used to be reported sent as soon as its bits were
+// out, so a NAK was never seen and the frame never repeated.
+void test_group_frame_without_ack_request_reports_the_acknowledge() {
+    TEST_ASSERT_TRUE(macPhysical->init().isOk());
+    const auto frame = buildValidFrameWithoutAckRequest(false);
+
+    mockDriver->setTxAckResponse(Tp1AckClass::Nack);
+    auto nak = macPhysical->sendFrame(frame);
+    TEST_ASSERT_TRUE(nak.isError());
+    TEST_ASSERT_EQUAL(static_cast<int>(util::ErrorCode::TransmissionFailed), static_cast<int>(nak.error()));
+
+    mockDriver->setTxAckResponse(Tp1AckClass::Ack);
+    auto ack = macPhysical->sendFrame(frame);
+    TEST_ASSERT_TRUE(ack.isOk());
 }
 
 int main(void) {
@@ -539,13 +608,15 @@ int main(void) {
 
     RUN_TEST(test_init_send_receive_and_monitor_mode);
     RUN_TEST(test_send_requires_init);
-    RUN_TEST(test_receive_queue_is_bounded_and_keeps_latest_frames);
+    RUN_TEST(test_receive_queue_signals_busy_before_full_and_keeps_arrival_order);
+    RUN_TEST(test_received_frame_view_is_not_overwritten_by_later_arrivals);
     RUN_TEST(test_receive_timeout_can_follow_virtual_time);
     RUN_TEST(test_receive_success_can_follow_virtual_time_without_wall_clock_sleep);
     RUN_TEST(test_raw_ack_byte_is_not_buffered_as_received_frame);
     RUN_TEST(test_send_timeout_can_follow_virtual_time_without_wall_clock_sleep);
     RUN_TEST(test_send_timeout_uses_configured_tx_outcome_timeout);
-    RUN_TEST(test_send_frame_without_ack_request_completes_without_tx_ack_response);
+    RUN_TEST(test_send_frame_to_address_0xffff_completes_without_tx_ack_response);
+    RUN_TEST(test_group_frame_without_ack_request_reports_the_acknowledge);
 
     return UNITY_END();
 }

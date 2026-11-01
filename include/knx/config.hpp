@@ -27,20 +27,13 @@ namespace config {
 #if defined(CONFIG_KNX_MEDIUM_TP1)
     constexpr bool MEDIUM_TP1 = true;
     constexpr bool MEDIUM_IP = false;
-    constexpr bool MEDIUM_RF = false;
 #elif defined(CONFIG_KNX_MEDIUM_IP)
     constexpr bool MEDIUM_TP1 = false;
     constexpr bool MEDIUM_IP = true;
-    constexpr bool MEDIUM_RF = false;
-#elif defined(CONFIG_KNX_MEDIUM_RF)
-    constexpr bool MEDIUM_TP1 = false;
-    constexpr bool MEDIUM_IP = false;
-    constexpr bool MEDIUM_RF = true;
 #else
     // Default to TP1 if not specified
     constexpr bool MEDIUM_TP1 = true;
     constexpr bool MEDIUM_IP = false;
-    constexpr bool MEDIUM_RF = false;
 #endif
 
 // ============================================================================

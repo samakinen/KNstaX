@@ -271,6 +271,22 @@ util::Result<void> PropertyServices::handleValueWrite(
         return util::Result<void>::err(util::ErrorCode::AccessDenied);
     }
 
+    // The write level is the one this property's description advertises, so
+    // a client can learn in advance what it needs to authorise for.
+    if (_accessLevel) {
+        const auto* object = _storeManager.getObject(request.objectIndex);
+        const auto descriptor = object != nullptr ? object->getDescriptor(request.propertyId)
+                                                  : std::nullopt;
+        if (descriptor.has_value() && _accessLevel(source) > descriptor->writeLevel) {
+            KNX_LOGW(TAG, "Property write refused: src=0x%04X obj=%d prop=%d needs level %u",
+                     source.raw, request.objectIndex.value(),
+                     static_cast<uint8_t>(request.propertyId),
+                     static_cast<unsigned>(descriptor->writeLevel));
+            sendNegativeResponse();
+            return util::Result<void>::err(util::ErrorCode::AccessDenied);
+        }
+    }
+
     // Full backend override (live object dispatch)
     if (_writeProvider) {
         auto providerRes = _writeProvider(source, request);

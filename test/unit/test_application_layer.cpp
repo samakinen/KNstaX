@@ -10,6 +10,9 @@
 #include "knx/datalink/frame_codec.hpp"
 #include "knx/platform/linux_platform.hpp"
 #include "knx/config.hpp"
+#include "knx/constants.hpp"
+#include "knx/application/communication_mode.hpp"
+#include "knx/protocol/tpdu_codec.hpp"
 #include "../mocks/mock_physical_layer.hpp"
 #include "unity.h"
 #include <memory>
@@ -1182,7 +1185,10 @@ namespace {
 
 /// A_ADC_Read as it arrives from a management client: channel_nr in the APCI's
 /// 6-bit data field, read_count as the single payload octet (03/03/07 Fig. 72).
-knx::network::NDataFrame makeAdcReadFrame(uint8_t channel, uint8_t readCount) {
+/// On a transport connection, the only mode Table 1 defines it on
+/// (DMP_PeiTypeVerify_RCo_ADC is connection-oriented too). These tests used
+/// to send it connectionless, which the communication-mode check now ignores.
+knx::network::NDataFrame makeAdcReadFrame(uint8_t channel, uint8_t readCount, uint8_t seq) {
     knx::network::NDataFrame frame;
     frame.dlFrame.source = kManagementClient;
     frame.dlFrame.destination = GroupAddress(IndividualAddress(1, 1, 1).raw);
@@ -1190,7 +1196,7 @@ knx::network::NDataFrame makeAdcReadFrame(uint8_t channel, uint8_t readCount) {
     frame.dlFrame.hopCount = 6;
     frame.dlFrame.priority = knx::Priority::System;
     const uint8_t payload[] = {readCount};
-    frame.dlFrame.setTpdu(knx::protocol::TPCIField::create(knx::protocol::TPCI::UnnumberedData),
+    frame.dlFrame.setTpdu(knx::protocol::TPCIField::create(knx::protocol::TPCI::NumberedData, seq),
                           knx::application::APCIField::create(APCIService::ADCRead, channel),
                           std::span<const uint8_t>(payload, sizeof(payload)));
     return frame;
@@ -1204,14 +1210,13 @@ knx::network::NDataFrame makeAdcReadFrame(uint8_t channel, uint8_t readCount) {
 // answering with read_count = 0, not by silence. Silence costs the client its
 // full connection timeout (observed: ETS stalling ~10 s mid-commissioning).
 void test_AdcReadWithoutProviderIsAnsweredWithReadCountZero(void) {
-    tpLayer->handleNetworkRx(makeAdcReadFrame(0x01, 4));
+    openManagementConnection();
+    tpLayer->handleNetworkRx(makeAdcReadFrame(0x01, 4, 0));
 
-    std::vector<uint8_t> sentFrame;
-    TEST_ASSERT_TRUE(physicalLayer->getSentFrame(sentFrame));
-    const auto tpdu = extractTpduFromTp1Frame(sentFrame);
+    const auto tpdu = takeResponseTpduAfterAck();
 
     TEST_ASSERT_EQUAL_UINT32(5u, static_cast<uint32_t>(tpdu.size()));
-    TEST_ASSERT_EQUAL_HEX8(0x01, tpdu[0]);  // T_Data_Individual + APCI high bits
+    TEST_ASSERT_EQUAL_HEX8(0x41, tpdu[0]);  // T_Data_Connected seq 0 + APCI high bits
     TEST_ASSERT_EQUAL_HEX8(0xC1, tpdu[1]);  // A_ADC_Response, channel_nr = 1
     TEST_ASSERT_EQUAL_HEX8(0x00, tpdu[2]);  // read_count = 0: channel not available
     TEST_ASSERT_EQUAL_HEX8(0x00, tpdu[3]);
@@ -1229,11 +1234,10 @@ void test_AdcReadAnswersInstalledProviderValue(void) {
         return channel == 0x05 ? std::optional<uint16_t>(0x1234) : std::nullopt;
     });
 
-    tpLayer->handleNetworkRx(makeAdcReadFrame(0x05, 8));
+    openManagementConnection();
+    tpLayer->handleNetworkRx(makeAdcReadFrame(0x05, 8, 0));
 
-    std::vector<uint8_t> sentFrame;
-    TEST_ASSERT_TRUE(physicalLayer->getSentFrame(sentFrame));
-    const auto tpdu = extractTpduFromTp1Frame(sentFrame);
+    const auto tpdu = takeResponseTpduAfterAck();
 
     TEST_ASSERT_EQUAL_UINT8(0x05, seenChannel);
     TEST_ASSERT_EQUAL_UINT8(8, seenCount);
@@ -1244,15 +1248,262 @@ void test_AdcReadAnswersInstalledProviderValue(void) {
     TEST_ASSERT_EQUAL_HEX8(0x34, tpdu[4]);  // sum low
 
     // A channel the provider does not serve is still answered, with count 0.
-    tpLayer->handleNetworkRx(makeAdcReadFrame(0x06, 8));
-    TEST_ASSERT_TRUE(physicalLayer->getSentFrame(sentFrame));
-    const auto refused = extractTpduFromTp1Frame(sentFrame);
+    injectAck(0);
+    tpLayer->handleNetworkRx(makeAdcReadFrame(0x06, 8, 1));
+    const auto refused = takeResponseTpduAfterAck();
     TEST_ASSERT_EQUAL_HEX8(0xC6, refused[1]);
     TEST_ASSERT_EQUAL_HEX8(0x00, refused[2]);
 }
 
+// ============================================================================
+// Communication modes (03/03/07 Table 1)
+// ============================================================================
+
+namespace {
+
+using knx::application::CommunicationMode;
+using knx::application::definedCommunicationModes;
+using knx::application::isCommunicationModeAllowed;
+using knx::application::modes;
+
+constexpr auto kP2p = CommunicationMode::Connectionless | CommunicationMode::Connected;
+
+// Spot checks of the table against the columns of Table 1.
+static_assert(*definedCommunicationModes(APCIService::GroupValueWrite) == modes(CommunicationMode::Multicast));
+static_assert(*definedCommunicationModes(APCIService::IndividualAddressWrite) == modes(CommunicationMode::Broadcast));
+static_assert(*definedCommunicationModes(APCIService::IndividualAddressSerialNumberWrite) == modes(CommunicationMode::Broadcast));
+static_assert(*definedCommunicationModes(APCIService::SystemNetworkParameterRead) == modes(CommunicationMode::SystemBroadcast));
+static_assert(*definedCommunicationModes(APCIService::DomainAddressSerialNumberRead)
+              == (CommunicationMode::Broadcast | CommunicationMode::SystemBroadcast));
+static_assert(*definedCommunicationModes(APCIService::NetworkParameterWrite) == (kP2p | CommunicationMode::Broadcast));
+static_assert(*definedCommunicationModes(APCIService::MemoryWrite) == kP2p);
+static_assert(*definedCommunicationModes(APCIService::PropertyValueWrite) == kP2p);
+static_assert(*definedCommunicationModes(APCIService::PropertyExtValueWriteCon) == kP2p);
+static_assert(*definedCommunicationModes(APCIService::MemoryExtendedWrite) == kP2p);
+static_assert(*definedCommunicationModes(APCIService::Restart) == kP2p);
+static_assert(*definedCommunicationModes(APCIService::DeviceDescriptorRead) == kP2p);
+static_assert(*definedCommunicationModes(APCIService::ADCRead) == modes(CommunicationMode::Connected));
+static_assert(*definedCommunicationModes(APCIService::AuthorizeRequest) == modes(CommunicationMode::Connected));
+static_assert(*definedCommunicationModes(APCIService::KeyWrite) == modes(CommunicationMode::Connected));
+static_assert(!definedCommunicationModes(APCIService::Escape).has_value());
+// A broadcast arrives as "broadcast or system broadcast"; either suffices.
+static_assert(isCommunicationModeAllowed(APCIService::SystemNetworkParameterRead,
+                                         CommunicationMode::Broadcast | CommunicationMode::SystemBroadcast));
+static_assert(!isCommunicationModeAllowed(APCIService::MemoryWrite,
+                                          CommunicationMode::Broadcast | CommunicationMode::SystemBroadcast));
+
+// 03/05/01 §4.2: PID_PROGRAM_VERSION is 13, PID_DEVICE_CONTROL 14.
+static_assert(knx::constants::ets::PID_DEVICE_CONTROL == 14u);
+static_assert(knx::constants::ets::PID_ORDER_INFO == 15u);
+
+std::array<uint8_t, 16> gMemory{};
+
+void registerTestMemory() {
+    gMemory.fill(0);
+    const knx::application::MemoryRegion region{knx::MemoryAddress(0x4000), static_cast<uint32_t>(gMemory.size()),
+                                                knx::application::MemoryAccessMode::ReadWrite, "Test"};
+    TEST_ASSERT_TRUE(appLayer->registerMemoryRegion(region, gMemory).isOk());
+}
+
+knx::network::NDataFrame makeRequest(uint16_t destination,
+                                     knx::AddressType destinationType,
+                                     APCIService service,
+                                     uint8_t data6,
+                                     std::span<const uint8_t> payload) {
+    knx::network::NDataFrame frame;
+    frame.dlFrame.source = IndividualAddress(1, 1, 254);
+    frame.dlFrame.destination = GroupAddress(destination);
+    frame.dlFrame.destinationType = destinationType;
+    frame.dlFrame.hopCount = 6;
+    frame.dlFrame.priority = knx::Priority::System;
+    frame.dlFrame.setTpdu(knx::protocol::TPCIField::create(knx::protocol::TPCI::UnnumberedData),
+                          knx::application::APCIField::create(service, data6),
+                          payload);
+    return frame;
+}
+
+constexpr uint16_t kOwn = 0x1101;  // 1.1.1
+
+bool anythingSent() {
+    bool any = false;
+    std::vector<uint8_t> frame;
+    while (physicalLayer->getSentFrame(frame)) {
+        any = true;
+    }
+    return any;
+}
+
+} // namespace
+
+// A_Memory_Write and A_Memory_Read are point-to-point services. Sent to a
+// group address or as a broadcast they are not executed and not answered.
+void test_MemoryServicesOnGroupOrBroadcastAreIgnored() {
+    registerTestMemory();
+    const std::array<uint8_t, 4> write = {0x40, 0x00, 0xAB, 0xCD};
+    const std::array<uint8_t, 2> read = {0x40, 0x00};
+
+    for (const uint16_t destination : {uint16_t{0x0A03}, uint16_t{0x0000}}) {
+        auto w = makeRequest(destination, knx::AddressType::Group, APCIService::MemoryWrite, 2, write);
+        tpLayer->handleNetworkRx(w);
+        auto r = makeRequest(destination, knx::AddressType::Group, APCIService::MemoryRead, 2, read);
+        tpLayer->handleNetworkRx(r);
+    }
+    TEST_ASSERT_EQUAL_HEX8(0x00, gMemory[0]);
+    TEST_ASSERT_FALSE(anythingSent());
+
+    // Control: the same read point-to-point is answered.
+    auto r = makeRequest(kOwn, knx::AddressType::Individual, APCIService::MemoryRead, 2, read);
+    tpLayer->handleNetworkRx(r);
+    TEST_ASSERT_TRUE(anythingSent());
+}
+
+// A_PropertyValue_Write by broadcast is not executed: it never reaches the
+// property services, so not even the negative response goes out.
+void test_PropertyWriteByBroadcastIsIgnored() {
+    const std::array<uint8_t, 5> write = {0x00, 0x0E, 0x10, 0x01, 0x04};
+    auto frame = makeRequest(0x0000, knx::AddressType::Group, APCIService::PropertyValueWrite, 0, write);
+    tpLayer->handleNetworkRx(frame);
+    TEST_ASSERT_FALSE(anythingSent());
+
+    auto p2p = makeRequest(kOwn, knx::AddressType::Individual, APCIService::PropertyValueWrite, 0, write);
+    tpLayer->handleNetworkRx(p2p);
+    TEST_ASSERT_TRUE(anythingSent());
+}
+
+// A_IndividualAddress_Write is broadcast-only: point-to-point, even in
+// programming mode, it does not change the address.
+void test_IndividualAddressWritePointToPointIsIgnored() {
+    appLayer->setProgrammingModeEnabled(true);
+    bool changed = false;
+    appLayer->setIndividualAddressUpdateCallback([&](const IndividualAddress&) { changed = true; });
+
+    const std::array<uint8_t, 2> newAddress = {0x11, 0x2A};
+    auto frame = makeRequest(kOwn, knx::AddressType::Individual, APCIService::IndividualAddressWrite, 0, newAddress);
+    tpLayer->handleNetworkRx(frame);
+    TEST_ASSERT_FALSE(changed);
+
+    auto broadcast = makeRequest(0x0000, knx::AddressType::Group, APCIService::IndividualAddressWrite, 0, newAddress);
+    tpLayer->handleNetworkRx(broadcast);
+    TEST_ASSERT_TRUE(changed);
+}
+
+// A_Authorize_Request is connection-oriented only.
+void test_AuthorizeConnectionlessIsIgnored() {
+    const std::array<uint8_t, 5> key = {0x00, 0xFF, 0xFF, 0xFF, 0xFF};
+    auto frame = makeRequest(kOwn, knx::AddressType::Individual, APCIService::AuthorizeRequest, 0, key);
+    tpLayer->handleNetworkRx(frame);
+    TEST_ASSERT_FALSE(anythingSent());
+}
+
+// An unsupported descriptor type is answered with 3Fh and no data.
+void test_DeviceDescriptorReadUnsupportedTypeAnswers3F() {
+    auto frame = makeRequest(kOwn, knx::AddressType::Individual, APCIService::DeviceDescriptorRead, 0x01, {});
+    tpLayer->handleNetworkRx(frame);
+
+    std::vector<uint8_t> sentFrame;
+    TEST_ASSERT_TRUE(physicalLayer->getSentFrame(sentFrame));
+    const auto tpdu = extractTpduFromTp1Frame(sentFrame);
+    TEST_ASSERT_EQUAL_UINT32(2u, static_cast<uint32_t>(tpdu.size()));
+    TEST_ASSERT_EQUAL_HEX8(0x03, tpdu[0]);
+    TEST_ASSERT_EQUAL_HEX8(0x40 | 0x3F, tpdu[1]);
+}
+
+// A failed A_Memory_Read is answered with number = 0 and no data.
+void test_MemoryReadOfUnmappedAddressAnswersNumberZero() {
+    const std::array<uint8_t, 2> read = {0x70, 0x00};
+    auto frame = makeRequest(kOwn, knx::AddressType::Individual, APCIService::MemoryRead, 4, read);
+    tpLayer->handleNetworkRx(frame);
+
+    std::vector<uint8_t> sentFrame;
+    TEST_ASSERT_TRUE(physicalLayer->getSentFrame(sentFrame));
+    const auto tpdu = extractTpduFromTp1Frame(sentFrame);
+    TEST_ASSERT_EQUAL_UINT32(4u, static_cast<uint32_t>(tpdu.size()));
+    TEST_ASSERT_EQUAL_HEX8(0x02, tpdu[0]);
+    TEST_ASSERT_EQUAL_HEX8(0x40, tpdu[1]);  // A_Memory_Response, number = 0
+    TEST_ASSERT_EQUAL_HEX8(0x70, tpdu[2]);
+    TEST_ASSERT_EQUAL_HEX8(0x00, tpdu[3]);
+}
+
+// A_Memory_Write is answered only in Verify Mode, which the hooks supply.
+void test_MemoryWriteAnsweredOnlyInVerifyMode() {
+    registerTestMemory();
+    bool verify = false;
+    ApplicationLayer::ManagementServerHooks hooks;
+    hooks.verifyMode = [&verify] { return verify; };
+    appLayer->setManagementServerHooks(std::move(hooks));
+
+    const std::array<uint8_t, 3> write = {0x40, 0x02, 0x5A};
+    auto frame = makeRequest(kOwn, knx::AddressType::Individual, APCIService::MemoryWrite, 1, write);
+    tpLayer->handleNetworkRx(frame);
+    TEST_ASSERT_EQUAL_HEX8(0x5A, gMemory[2]);
+    TEST_ASSERT_FALSE(anythingSent());
+
+    verify = true;
+    tpLayer->handleNetworkRx(frame);
+    std::vector<uint8_t> sentFrame;
+    TEST_ASSERT_TRUE(physicalLayer->getSentFrame(sentFrame));
+    const auto tpdu = extractTpduFromTp1Frame(sentFrame);
+    TEST_ASSERT_EQUAL_UINT32(5u, static_cast<uint32_t>(tpdu.size()));
+    TEST_ASSERT_EQUAL_HEX8(0x41, tpdu[1]);  // A_Memory_Response, number = 1
+    TEST_ASSERT_EQUAL_HEX8(0x5A, tpdu[4]);  // the read-back
+}
+
+// With keys set, an unauthorised partner cannot write memory; an unkeyed
+// device keeps accepting everybody (covered by the test above).
+void test_MemoryWriteNeedsAccessLevelOnKeyedDevice() {
+    registerTestMemory();
+    appLayer->authorizationService().setKeys({0, 0, 0, 2}, {0, 0, 0, 1}, {0, 0, 0, 0});
+
+    const std::array<uint8_t, 3> write = {0x40, 0x03, 0x77};
+    auto frame = makeRequest(kOwn, knx::AddressType::Individual, APCIService::MemoryWrite, 1, write);
+    tpLayer->handleNetworkRx(frame);
+    TEST_ASSERT_EQUAL_HEX8(0x00, gMemory[3]);
+
+    // Allowing level 15 lets the same partner through.
+    appLayer->setMemoryWriteAccessLevel(15);
+    tpLayer->handleNetworkRx(frame);
+    TEST_ASSERT_EQUAL_HEX8(0x77, gMemory[3]);
+    (void)anythingSent();
+}
+
+// 03/03/07 §3.5.7: an access level lasts until the connection is released.
+// The next connection from the same partner starts unauthorised again.
+void test_AccessLevelEndsWithTheConnection() {
+    auto& auth = appLayer->authorizationService();
+    auth.setKeys({0, 0, 0, 2}, {0, 0, 0, 1}, {0, 0, 0, 0});
+    const uint8_t unauthorised = auth.currentAccessLevel(kManagementClient);
+
+    openManagementConnection();
+    TEST_ASSERT_TRUE(auth.handleRequest(kManagementClient, {0, 0, 0, 0}).isOk());
+    TEST_ASSERT_EQUAL_UINT8(0, auth.currentAccessLevel(kManagementClient));
+
+    knx::network::NDataFrame disconnect;
+    disconnect.dlFrame.source = kManagementClient;
+    disconnect.dlFrame.destination = GroupAddress(IndividualAddress(1, 1, 1).raw);
+    disconnect.dlFrame.destinationType = knx::AddressType::Individual;
+    disconnect.dlFrame.hopCount = 6;
+    disconnect.dlFrame.priority = knx::Priority::System;
+    disconnect.dlFrame.setTpdu(knx::protocol::TPCIField::create(knx::protocol::TPCIControl::Disconnect),
+                               knx::application::APCIField(0),
+                               std::span<const uint8_t>{});
+    tpLayer->handleNetworkRx(disconnect);
+
+    TEST_ASSERT_EQUAL_UINT8(unauthorised, auth.currentAccessLevel(kManagementClient));
+    TEST_ASSERT_NOT_EQUAL(0, unauthorised);
+    (void)anythingSent();
+}
+
 int main() {
     UNITY_BEGIN();
+    RUN_TEST(test_AccessLevelEndsWithTheConnection);
+    RUN_TEST(test_MemoryServicesOnGroupOrBroadcastAreIgnored);
+    RUN_TEST(test_PropertyWriteByBroadcastIsIgnored);
+    RUN_TEST(test_IndividualAddressWritePointToPointIsIgnored);
+    RUN_TEST(test_AuthorizeConnectionlessIsIgnored);
+    RUN_TEST(test_DeviceDescriptorReadUnsupportedTypeAnswers3F);
+    RUN_TEST(test_MemoryReadOfUnmappedAddressAnswersNumberZero);
+    RUN_TEST(test_MemoryWriteAnsweredOnlyInVerifyMode);
+    RUN_TEST(test_MemoryWriteNeedsAccessLevelOnKeyedDevice);
     RUN_TEST(test_ApplicationLayer_CompileCheck);
     RUN_TEST(test_APCIServices);
     RUN_TEST(test_DeviceDescriptorType0);

@@ -18,6 +18,7 @@
 #include "knx/platform/linux_platform.hpp"
 #include "../mocks/mock_physical_layer.hpp"
 #include "unity.h"
+#include <array>
 #include <memory>
 #include <span>
 
@@ -162,9 +163,19 @@ void test_FullStack_AuthorizationService() {
     rx.destination = GroupAddress(ownAddress.raw);
     rx.destinationType = AddressType::Individual;
     rx.ackRequested = false;
-        rx.setTpdu(knx::protocol::TPCI::UnnumberedData,
-                   application::APCIField::create(APCIService::AuthorizeRequest),
-                   {0x12, 0x34, 0x56, 0x78});
+
+    // A_Authorize_Request is defined on a transport connection only
+    // (03/03/07 Table 1); this test used to send it connectionless, which the
+    // communication-mode check now ignores. Open the connection first.
+    const std::array<uint8_t, 1> connectTpdu = {0x80};  // T_Connect
+    rx.tpdu.assign(std::span<const uint8_t>(connectTpdu));
+    physLayer->injectFrame(encodeTp1(rx));
+
+    // Figure 86: a reserved zero octet, then the key.
+    const std::array<uint8_t, 5> request = {0x00, 0x12, 0x34, 0x56, 0x78};
+    rx.setTpdu(protocol::TPCIField::create(protocol::TPCI::NumberedData, 0),
+               application::APCIField::create(APCIService::AuthorizeRequest),
+               std::span<const uint8_t>(request));
 
     physLayer->injectFrame(encodeTp1(rx));
 
@@ -172,10 +183,16 @@ void test_FullStack_AuthorizationService() {
     TEST_ASSERT_EQUAL(static_cast<uint8_t>(AuthorizationLevel::Maximum),
                       static_cast<uint8_t>(appLayer->authorizationService().getCurrentLevel(rx.source)));
 
-    TEST_ASSERT_TRUE(physLayer->sentFrameCount() >= 1);
+    // The T_ACK for the request goes first; the answer is the frame after it.
     std::vector<uint8_t> wire;
-    TEST_ASSERT_TRUE(physLayer->getSentFrame(wire));
-    auto tx = decodeTp1(wire);
+    datalink::LDataFrame tx;
+    bool found = false;
+    while (!found && physLayer->getSentFrame(wire)) {
+        tx = decodeTp1(wire);
+        found = tx.tpdu.size() >= 2
+             && tx.apci().service() == APCIService::AuthorizeResponse;
+    }
+    TEST_ASSERT_TRUE(found);
 
     TEST_ASSERT_TRUE(tx.destinationType == AddressType::Individual);
     TEST_ASSERT_EQUAL(rx.source.raw, tx.destination.raw);

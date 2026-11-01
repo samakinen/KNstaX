@@ -7,9 +7,18 @@ include("${CMAKE_CURRENT_LIST_DIR}/cmake/knx_sources.cmake")
 
 option(KNX_WARNINGS_AS_ERRORS "Treat KNstaX compiler warnings as errors" OFF)
 
-# Single source of truth for the stack version.  Keep in sync with
-# idf_component.yml and include/knx/knx.hpp.
-set(KNX_VERSION_STRING "0.2.0-alpha")
+# The stack version has one source: the `version` field of idf_component.yml,
+# which the ESP-IDF component manager publishes. KNX_VERSION_STRING is the full
+# string (KNX_STACK_VERSION in code); the numeric part is the CMake project
+# version.
+file(STRINGS "${CMAKE_CURRENT_LIST_DIR}/idf_component.yml" _knx_version_line
+     REGEX "^version:" LIMIT_COUNT 1)
+string(REGEX REPLACE "^version:[ \t]*\"?([^\" \t]+)\"?.*$" "\\1"
+       KNX_VERSION_STRING "${_knx_version_line}")
+string(REGEX MATCH "^[0-9]+\\.[0-9]+\\.[0-9]+" KNX_VERSION_NUMERIC "${KNX_VERSION_STRING}")
+if(NOT KNX_VERSION_NUMERIC)
+    message(FATAL_ERROR "KNstaX: no usable version in idf_component.yml ('${_knx_version_line}')")
+endif()
 
 # ============================================================================
 # Dual-Mode CMakeLists: Works with ESP-IDF or as standalone CMake project
@@ -48,13 +57,15 @@ if(DEFINED IDF_PATH OR COMMAND idf_component_register)
     endif()
     if(KNX_FEATURE_NETIP)
         list(APPEND KNX_COMPONENT_SOURCES ${KNX_SOURCES_NETIP})
+        if(CONFIG_KNX_ENABLE_TUNNELING)
+            list(APPEND KNX_COMPONENT_SOURCES ${KNX_SOURCES_NETIP_CLIENT})
+        endif()
     endif()
     if(KNX_FEATURE_TP1 AND KNX_FEATURE_NETIP)
         list(APPEND KNX_COMPONENT_SOURCES ${KNX_SOURCES_TP1_NETIP_BRIDGE})
     endif()
-    if(CONFIG_KNX_VIRTUAL_BUS)
-        list(APPEND KNX_COMPONENT_SOURCES ${KNX_SOURCES_VIRTUAL})
-    endif()
+    # The virtual TP1 bus (KNX_SOURCES_VIRTUAL) is a host-test facility and is
+    # never part of a component build.
 
     # KNX Secure on ESP-IDF.  The crypto primitives call into mbedTLS from the
     # IDF, but they are still translation units of their own: without them the
@@ -132,6 +143,9 @@ if(DEFINED IDF_PATH OR COMMAND idf_component_register)
     )
     target_compile_definitions(${COMPONENT_LIB} PRIVATE
         KNX_STACK_VERSION="${KNX_VERSION_STRING}"
+        # The mock TP1 physical and the stack-port constructor that takes it
+        # exist for host tests only.
+        KNX_ENABLE_TEST_HOOKS=0
     )
 
     # TRUE: this component includes ESP-IDF headers, which are not -Wpedantic clean.
@@ -160,7 +174,7 @@ else()
     # ========================================================================
     
     cmake_minimum_required(VERSION 3.21)
-    project(KNstaX VERSION 1.0.0 LANGUAGES C CXX)
+    project(KNstaX VERSION ${KNX_VERSION_NUMERIC} LANGUAGES C CXX)
     option(KNX_SECURE_ENABLED "Enable KNX Secure features (mbedTLS AES + PBKDF2 required)" ON)
     option(KNX_BUILD_EXAMPLES "Build standalone examples" OFF)
     option(KNX_ZLIB_ENABLED "Enable optional zlib/DEFLATE support for the KNXprog importer" ON)
@@ -223,19 +237,6 @@ else()
     message(STATUS "  mbedcrypto library: ${MBEDCRYPTO_LIBRARY}")
     message(STATUS "  KNX Secure enabled: ${KNX_SECURE_ENABLED}")
 
-    # Production build safety option
-    option(KNX_PRODUCTION_BUILD "Production build mode (project-level flag for stricter settings)" OFF)
-    
-    if(KNX_PRODUCTION_BUILD)
-        message(STATUS "KNX Production Build: ENABLED (stubs will cause build errors)")
-        add_compile_definitions(KNX_PRODUCTION_BUILD=1)
-    else()
-        message(STATUS "KNX Production Build: DISABLED (stubs allowed for testing)")
-    endif()
-
-    # Optional feature toggles
-    # Note: This repository intentionally avoids shipping stub implementations in `src/`.
-
     # ========================================================================
     # Source Files - Common
     # ========================================================================
@@ -247,11 +248,18 @@ else()
     # TP1, KNXnet/IP and the couplers between them.  A host build can still
     # opt out (-DKNX_FEATURE_NETIP=OFF) to reproduce a target-shaped link and
     # verify that the TP1-only configuration really is self-contained.
+    #
+    # The shape the Habinari knxip image ships (TP1 off, KNXnet/IP and Secure
+    # on, no tunnelling client) is:
+    #   -DKNX_FEATURE_TP1=OFF -DKNX_FEATURE_TUNNELING=OFF
+    #   -DKNX_FEATURE_VIRTUAL_BUS=OFF -DKNX_ENABLE_TEST_HOOKS=OFF -DBUILD_TESTS=OFF
     # ------------------------------------------------------------------
     option(KNX_FEATURE_TP1 "Build the TP1 medium" ON)
     option(KNX_FEATURE_NETIP "Build the KNXnet/IP medium" ON)
+    option(KNX_FEATURE_TUNNELING "Build the KNXnet/IP client role (tunnelling, secure sessions); CONFIG_KNX_ENABLE_TUNNELING on ESP-IDF" ON)
     option(KNX_FEATURE_VIRTUAL_BUS "Build the virtual TP1 bus simulator" ON)
     option(KNX_FEATURE_ETS_TOOLING "Build the ETS import/migration tooling" ON)
+    option(KNX_ENABLE_TEST_HOOKS "Build the mock TP1 physical entry points the host tests use" ON)
 
     set(COMMON_SOURCES ${KNX_SOURCES_CORE})
 
@@ -260,6 +268,9 @@ else()
     endif()
     if(KNX_FEATURE_NETIP)
         list(APPEND COMMON_SOURCES ${KNX_SOURCES_NETIP})
+        if(KNX_FEATURE_TUNNELING)
+            list(APPEND COMMON_SOURCES ${KNX_SOURCES_NETIP_CLIENT})
+        endif()
     endif()
     if(KNX_FEATURE_TP1 AND KNX_FEATURE_NETIP)
         list(APPEND COMMON_SOURCES ${KNX_SOURCES_TP1_NETIP_BRIDGE})
@@ -275,7 +286,10 @@ else()
     if(KNX_SECURE_ENABLED)
         list(APPEND COMMON_SOURCES ${KNX_SOURCES_SECURE})
         if(KNX_FEATURE_NETIP)
-            list(APPEND COMMON_SOURCES ${KNX_SOURCES_SECURE_NETIP})
+            list(APPEND COMMON_SOURCES ${KNX_SOURCES_SECURE_ROUTING})
+            if(KNX_FEATURE_TUNNELING)
+                list(APPEND COMMON_SOURCES ${KNX_SOURCES_SECURE_TUNNELING})
+            endif()
         endif()
     endif()
 
@@ -348,12 +362,13 @@ else()
     target_compile_definitions(knx_core PUBLIC
         KNX_STACK_VERSION="${KNX_VERSION_STRING}"
         KNX_SECURE_ENABLED=$<IF:$<BOOL:${KNX_SECURE_ENABLED}>,1,0>
-        # The standalone build has full mbedTLS available, so it keeps both
-        # halves of IP Secure; only the ESP-IDF branch has a reason to split.
-        KNX_SECURE_IP_TUNNELING=$<IF:$<AND:$<BOOL:${KNX_SECURE_ENABLED}>,$<BOOL:${KNX_FEATURE_NETIP}>>,1,0>
+        # Secure tunnelling follows the tunnelling switch, as on ESP-IDF, so a
+        # host build can reproduce a routing-only (knxip-shaped) device.
+        KNX_SECURE_IP_TUNNELING=$<IF:$<AND:$<BOOL:${KNX_SECURE_ENABLED}>,$<BOOL:${KNX_FEATURE_NETIP}>,$<BOOL:${KNX_FEATURE_TUNNELING}>>,1,0>
         KNX_HAS_ZLIB=$<IF:$<BOOL:${KNX_HAS_ZLIB}>,1,0>
         KNX_FEATURE_NETIP=$<IF:$<BOOL:${KNX_FEATURE_NETIP}>,1,0>
         KNX_FEATURE_TP1=$<IF:$<BOOL:${KNX_FEATURE_TP1}>,1,0>
+        KNX_ENABLE_TEST_HOOKS=$<IF:$<BOOL:${KNX_ENABLE_TEST_HOOKS}>,1,0>
     )
 
     knx_apply_warning_flags(knx_core)
@@ -410,9 +425,21 @@ else()
 
     # Create a minimal Unity implementation from source
     add_library(unity INTERFACE)
-    target_include_directories(unity INTERFACE 
+    target_include_directories(unity INTERFACE
         ${CMAKE_CURRENT_SOURCE_DIR}/test/unity_mock
     )
+
+    # The product export module (knx_commissioned_product()) is used by the
+    # examples as well as the tests, so it is loaded whether or not tests are.
+    include(${CMAKE_CURRENT_LIST_DIR}/cmake/knx_product.cmake)
+
+    # Everything from here to the examples is test-only: test executables,
+    # the exporter and interop peers they drive. BUILD_TESTS=OFF skips it all.
+    # (Not re-indented, to keep the diff readable.)
+    if(BUILD_TESTS)
+
+    # The exporter and interop tests are Python scripts.
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
     # Test executable: test_types
     add_executable(test_types
@@ -584,15 +611,15 @@ else()
     add_executable(product_exporter tools/product_exporter/main.cpp)
     target_link_libraries(product_exporter PRIVATE knx_core)
     set_target_properties(product_exporter PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/tools/product_exporter)
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/tools/product_exporter)
 
     # Test: knxprod exporter validation (runs wrapper + basic XML checks)
-    add_test(NAME test_knxprod_exporter COMMAND python3 ${CMAKE_SOURCE_DIR}/tools/knxprod_exporter/test_validate_knxprod.py)
+    add_test(NAME test_knxprod_exporter COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/knxprod_exporter/test_validate_knxprod.py)
     # Test: knxprod XSD validation (runs wrapper + XSD validation via xmlschema)
-    add_test(NAME test_knxprod_xsd_validation COMMAND python3 ${CMAKE_SOURCE_DIR}/tools/knxprod_exporter/test_validate_knxprod_xsd.py)
+    add_test(NAME test_knxprod_xsd_validation COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/knxprod_exporter/test_validate_knxprod_xsd.py)
     # Test: exporter parameter UX and load procedure (pure-python, no wrapper)
     add_test(NAME test_exporter_parameter_ux
-             COMMAND python3 ${CMAKE_SOURCE_DIR}/tools/knxprod_exporter/test_exporter_parameter_ux.py)
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/knxprod_exporter/test_exporter_parameter_ux.py)
     set_tests_properties(test_exporter_parameter_ux PROPERTIES LABELS "script")
     # Serialize exporter tests and route generated files to the build tree.
     set_tests_properties(
@@ -600,7 +627,7 @@ else()
         test_knxprod_xsd_validation
         PROPERTIES
             RUN_SERIAL TRUE
-            ENVIRONMENT "KNXPROD_EXPORTER_OUT_DIR=${CMAKE_BINARY_DIR}/knxprod_exporter_artifacts"
+            ENVIRONMENT "KNXPROD_EXPORTER_OUT_DIR=${CMAKE_CURRENT_BINARY_DIR}/knxprod_exporter_artifacts"
     )
     
     # Test executable: test_frame_codec_errors
@@ -636,16 +663,11 @@ else()
 
 # PoC: generate product profile header from a .knxprod file
 add_custom_command(
-    OUTPUT ${CMAKE_BINARY_DIR}/generated_product_profile.hpp
-    COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/knxprod2profile.py ${CMAKE_SOURCE_DIR}/tools/examples/sample.knxprod.xml --output ${CMAKE_BINARY_DIR}/generated_product_profile.hpp
-    DEPENDS ${CMAKE_SOURCE_DIR}/tools/knxprod2profile.py ${CMAKE_SOURCE_DIR}/templates/profile_header.tpl ${CMAKE_SOURCE_DIR}/tools/examples/sample.knxprod.xml
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/generated_product_profile.hpp
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/knxprod2profile.py ${CMAKE_CURRENT_SOURCE_DIR}/tools/examples/sample.knxprod.xml --output ${CMAKE_CURRENT_BINARY_DIR}/generated_product_profile.hpp
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tools/knxprod2profile.py ${CMAKE_CURRENT_SOURCE_DIR}/templates/profile_header.tpl ${CMAKE_CURRENT_SOURCE_DIR}/tools/examples/sample.knxprod.xml
 )
-add_custom_target(generate_product_profile DEPENDS ${CMAKE_BINARY_DIR}/generated_product_profile.hpp)
-
-# Single-source-of-truth product export module.
-# Provides knx_commissioned_product() which generates .knxprod.xml from a
-# constexpr C++ product definition at build time.
-include(${CMAKE_CURRENT_LIST_DIR}/cmake/knx_product.cmake)
+add_custom_target(generate_product_profile DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/generated_product_profile.hpp)
 
     # Test executable: test_result
     add_executable(test_result
@@ -1152,6 +1174,26 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/knx_product.cmake)
         set_tests_properties(test_netip_secure_wrapper_vectors PROPERTIES
             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
         )
+
+        # Secure Routing multicast timer state machine (03_08_09 §2.2.2.3)
+        add_executable(test_netip_mc_timer_sync
+            test/unit/test_netip_mc_timer_sync.cpp
+        )
+        target_link_libraries(test_netip_mc_timer_sync PRIVATE
+            knx_core
+            unity
+        )
+        add_test(NAME test_netip_mc_timer_sync COMMAND test_netip_mc_timer_sync)
+
+        # Secure Routing context: nonces, replay, TIMER_NOTIFY, persistence
+        add_executable(test_netip_secure_routing
+            test/unit/test_netip_secure_routing.cpp
+        )
+        target_link_libraries(test_netip_secure_routing PRIVATE
+            knx_core
+            unity
+        )
+        add_test(NAME test_netip_secure_routing COMMAND test_netip_secure_routing)
 
         # Test executable: test_key_derivation
         add_executable(test_key_derivation
@@ -1712,7 +1754,7 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/knx_product.cmake)
 
     option(ENABLE_INTEROP_TESTS "Build and register the interop Python harness tests" OFF)
     if(ENABLE_INTEROP_TESTS)
-        set(INTEROP_BIN_DIR ${CMAKE_BINARY_DIR}/interop/bin)
+        set(INTEROP_BIN_DIR ${CMAKE_CURRENT_BINARY_DIR}/interop/bin)
         file(MAKE_DIRECTORY ${INTEROP_BIN_DIR})
 
         # Place interop peer binaries in a stable location so tests can be
@@ -1730,7 +1772,7 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/knx_product.cmake)
                         OUTPUT_QUIET ERROR_QUIET)
         if(PYTEST_EXIT_CODE EQUAL 0)
             add_test(NAME interop_pytest
-                COMMAND ${Python3_EXECUTABLE} -m pytest -q ${CMAKE_SOURCE_DIR}/interop/python/tests ${CMAKE_SOURCE_DIR}/tools/test_knxprod2profile_param_test.py)
+                COMMAND ${Python3_EXECUTABLE} -m pytest -q ${CMAKE_CURRENT_SOURCE_DIR}/interop/python/tests ${CMAKE_CURRENT_SOURCE_DIR}/tools/test_knxprod2profile_param_test.py)
 
             set_tests_properties(interop_pytest PROPERTIES
                 ENVIRONMENT "KNSTAX_TUNNEL_PEER_BIN=${INTEROP_BIN_DIR}/knstax_tunnel_peer;KNSTAX_ROUTING_PEER_BIN=${INTEROP_BIN_DIR}/knstax_routing_peer"
@@ -1925,6 +1967,17 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/knx_product.cmake)
     )
     add_test(NAME test_inplace_function COMMAND test_inplace_function)
     set_tests_properties(test_inplace_function PROPERTIES LABELS "unit")
+
+    # Test executable: test_fixed_vector
+    add_executable(test_fixed_vector
+        test/unit/test_fixed_vector.cpp
+    )
+    target_link_libraries(test_fixed_vector PRIVATE
+        knx_core
+        unity
+    )
+    add_test(NAME test_fixed_vector COMMAND test_fixed_vector)
+    set_tests_properties(test_fixed_vector PROPERTIES LABELS "unit")
 
     # Test executable: test_application_program_object (Phase 1C.2)
     add_executable(test_application_program_object
@@ -2187,12 +2240,14 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/knx_product.cmake)
         )
 
         add_custom_target(knx_sdk_virtual_flake_lane
-            COMMAND ${CMAKE_CTEST_COMMAND} --test-dir ${CMAKE_BINARY_DIR} --output-on-failure --repeat until-fail:3 -L sdk-flake-candidate
+            COMMAND ${CMAKE_CTEST_COMMAND} --test-dir ${CMAKE_CURRENT_BINARY_DIR} --output-on-failure --repeat until-fail:3 -L sdk-flake-candidate
             USES_TERMINAL
             COMMENT "Running KNstaX virtual-platform flake lane"
         )
         add_dependencies(knx_sdk_virtual_flake_lane ${KNX_SDK_FLAKE_TEST_TARGETS})
     endif()
+
+    endif()  # BUILD_TESTS: end of the test-only section
 
     if(KNX_BUILD_EXAMPLES)
 
@@ -2244,6 +2299,7 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/knx_product.cmake)
             knx_core
         )
 
+        if(BUILD_TESTS)
         add_executable(test_knxnetip_routing_sniffer_e2e
             test/integration/test_knxnetip_routing_sniffer_e2e.cpp
         )
@@ -2254,6 +2310,7 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/knx_product.cmake)
         add_test(NAME test_knxnetip_routing_sniffer_e2e
             COMMAND test_knxnetip_routing_sniffer_e2e $<TARGET_FILE:knxnetip_routing_sniffer>
         )
+        endif()
 
         add_custom_target(knx_sdk_example_contracts
             DEPENDS
@@ -2271,14 +2328,14 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/knx_product.cmake)
         # that matters — the same header compiles for target firmware and for
         # the host exporter.
         knx_commissioned_product(tp1_switch_ets
-            DEFINITION  ${CMAKE_SOURCE_DIR}/examples/esp_idf_switch/main/product.hpp
+            DEFINITION  ${CMAKE_CURRENT_SOURCE_DIR}/examples/esp_idf_switch/main/product.hpp
             SYMBOL      tp1_switch::kProduct
         )
 
         if(BUILD_TESTS)
             add_custom_target(knx_sdk_release_gate
-                COMMAND ${CMAKE_CTEST_COMMAND} --test-dir ${CMAKE_BINARY_DIR} --output-on-failure -L sdk-public-surface
-                COMMAND ${CMAKE_CTEST_COMMAND} --test-dir ${CMAKE_BINARY_DIR} --output-on-failure --repeat until-fail:3 -L sdk-flake-candidate
+                COMMAND ${CMAKE_CTEST_COMMAND} --test-dir ${CMAKE_CURRENT_BINARY_DIR} --output-on-failure -L sdk-public-surface
+                COMMAND ${CMAKE_CTEST_COMMAND} --test-dir ${CMAKE_CURRENT_BINARY_DIR} --output-on-failure --repeat until-fail:3 -L sdk-flake-candidate
                 USES_TERMINAL
                 COMMENT "Running KNstaX SDK release gate"
             )
@@ -2306,12 +2363,14 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/knx_product.cmake)
         )
     endif()
 
-    add_executable(benchmark_tp1
-        benchmark/benchmark_tp1.cpp
-    )
-    target_link_libraries(benchmark_tp1 PRIVATE
-        knx_core
-    )
+    if(KNX_FEATURE_TP1)
+        add_executable(benchmark_tp1
+            benchmark/benchmark_tp1.cpp
+        )
+        target_link_libraries(benchmark_tp1 PRIVATE
+            knx_core
+        )
+    endif()
 
     # ========================================================================
     # Summary

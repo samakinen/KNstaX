@@ -397,9 +397,45 @@ void test_AuthorizationService_EvictsOldestAuthorization(void) {
 // Test Runner
 // ============================================================================
 
+// ============================================================================
+// Current access level (03/03/07 §3.5.7), what the access checks compare
+// ============================================================================
+
+void test_AuthorizationService_UnkeyedDeviceGrantsLevelZeroToEveryone(void) {
+    AuthorizationService service;
+    // Nobody authorised, and nobody needs to: the gate must not change
+    // anything on a device that was never keyed.
+    TEST_ASSERT_EQUAL_UINT8(0u, service.currentAccessLevel(knx::IndividualAddress(1, 1, 5)));
+}
+
+void test_AuthorizationService_KeyedDeviceUsesGrantedOrUnprotectedLevel(void) {
+    AuthorizationService service;
+    const AuthorizationKey management = {0x00, 0x00, 0x00, 0x02};
+    const AuthorizationKey configuration = {0x00, 0x00, 0x00, 0x01};
+    const AuthorizationKey maximum = {0x00, 0x00, 0x00, 0x00};
+    service.setKeys(management, configuration, maximum);
+
+    const knx::IndividualAddress stranger(1, 1, 5);
+    const knx::IndividualAddress tool(1, 1, 254);
+    // Every level protected: an unauthorised partner has minimal access.
+    TEST_ASSERT_EQUAL_UINT8(15u, service.currentAccessLevel(stranger));
+
+    TEST_ASSERT_TRUE(service.handleRequest(tool, configuration).isOk());
+    TEST_ASSERT_EQUAL_UINT8(1u, service.currentAccessLevel(tool));
+    TEST_ASSERT_EQUAL_UINT8(15u, service.currentAccessLevel(stranger));
+
+    // "The maximum access level protected with FFFFFFFFh" is what an
+    // unauthorised partner gets.
+    AuthorizationService partlyKeyed;
+    partlyKeyed.setKeys({0xFF, 0xFF, 0xFF, 0xFF}, configuration, maximum);
+    TEST_ASSERT_EQUAL_UINT8(2u, partlyKeyed.currentAccessLevel(stranger));
+}
+
 int main(void) {
     UNITY_BEGIN();
-    
+    RUN_TEST(test_AuthorizationService_UnkeyedDeviceGrantsLevelZeroToEveryone);
+    RUN_TEST(test_AuthorizationService_KeyedDeviceUsesGrantedOrUnprotectedLevel);
+
     RUN_TEST(test_AuthorizationService_Init);
     RUN_TEST(test_AuthorizationService_SetKeys);
     RUN_TEST(test_AuthorizationService_ValidateManagementKey);

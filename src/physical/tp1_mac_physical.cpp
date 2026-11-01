@@ -81,13 +81,18 @@ void Tp1MacPhysical::close() {
     }
 
     _controller.setEventObserver(nullptr, nullptr);
+    // The ISR keeps its busy input across a close; a later init() must not
+    // start out refusing every frame with BUSY.
+    _controller.setLocalBusy(false);
     _controller.close();
 
     {
         std::lock_guard<std::mutex> lock(_rxMutex);
         _rxHead = 0;
         _rxCount = 0;
+        _rxHeld = false;
         _rxOverflowDrops = 0;
+        _localBusyAsserted = false;
     }
 
     _initialized = false;
@@ -133,16 +138,22 @@ util::Result<uint32_t> Tp1MacPhysical::beginTransmit(std::span<const uint8_t> fr
         return validateResult.error();
     }
 
-    // TP1 acknowledges every individually addressed frame, whether or not the
-    // sender set the A bit — the same rule the RX path already follows when it
-    // decides to emit an L_ACK.  Keying the outcome off the A bit alone made
-    // every response fire-and-forget: the MAC reported Success as soon as the
-    // bits were out, so a frame the peer NAK'd or never decoded was never
-    // repeated, and the loss only surfaced as the management client giving up.
-    const bool individuallyAddressed =
+    // On TP1 every L_Data frame is acknowledged, group and broadcast frames
+    // included (03_02_02 §2.4.2), whether or not the sender set the A bit.
+    // Keying the outcome off the A bit, and later off "individually
+    // addressed", made the rest fire-and-forget: the MAC reported Success as
+    // soon as the bits were out, so a frame that was NAK'd, refused with BUSY
+    // or never decoded was never repeated.
+    //
+    // The one exception must be exactly the ISR's (txFrameExpectsAck): it
+    // opens no window for individual address 0xFFFF, the address every
+    // unconfigured device shares, which therefore never acknowledges. This
+    // used to test isIndividualBroadcastAddress() (0x0000) instead, so a frame
+    // to 0xFFFF waited here for an outcome the ISR never reported.
+    const bool toUnconfiguredAddress =
         outgoing.destinationType == AddressType::Individual
-        && !isIndividualBroadcastAddress(IndividualAddress(outgoing.destination.raw));
-    _txAckRequested = (frame[0] & datalink::CTRL_ACK_REQ) != 0u || individuallyAddressed;
+        && isInitialIndividualAddress(IndividualAddress(outgoing.destination.raw));
+    _txAckRequested = (frame[0] & datalink::CTRL_ACK_REQ) != 0u || !toUnconfiguredAddress;
 
     const uint32_t initialTxOutcomeSequence = _controller.getTxOutcomeSequence();
 
@@ -211,6 +222,12 @@ util::Result<void> Tp1MacPhysical::beginReceive(uint32_t timeoutMs) {
         return util::ErrorCode::NotInitialized;
     }
 
+    {
+        // The caller is done with the frame the previous receive handed out.
+        std::lock_guard<std::mutex> lock(_rxMutex);
+        releaseHeldFrameLocked();
+    }
+
     _receiveActive = true;
     _lastReceivedFrameLength = 0;
     const uint64_t startMs = util::nowMs(_timingPlatform);
@@ -230,12 +247,14 @@ util::Result<Tp1MacPhysical::ProgressState> Tp1MacPhysical::pollReceive() {
 
     {
         std::lock_guard<std::mutex> lock(_rxMutex);
+        releaseHeldFrameLocked();
         if (_rxCount > 0) {
-            const auto& buffered = _rxFrames[_rxHead];
-            std::memcpy(_lastReceivedFrame.data(), buffered.data.data(), buffered.length);
-            _lastReceivedFrameLength = buffered.length;
-            _rxHead = (_rxHead + 1u) % RX_QUEUE_CAPACITY;
-            --_rxCount;
+            // Hand the queue slot itself to the caller instead of copying it
+            // out: receivedFrameView() points into it, and it stays reserved
+            // (still counted, so the producer cannot reuse it) until the next
+            // beginReceive()/pollReceive() releases it.
+            _rxHeld = true;
+            _lastReceivedFrameLength = _rxFrames[_rxHead].length;
             _receiveActive = false;
             return ProgressState::Complete;
         }
@@ -250,10 +269,35 @@ util::Result<Tp1MacPhysical::ProgressState> Tp1MacPhysical::pollReceive() {
 }
 
 util::Result<std::span<const uint8_t>> Tp1MacPhysical::receivedFrameView() {
-    if (_lastReceivedFrameLength == 0) {
+    // Only the consumer moves _rxHead, and the producer never writes the held
+    // slot, so the view is stable without the lock.
+    if (_lastReceivedFrameLength == 0 || !_rxHeld) {
         return util::ErrorCode::OperationNotReady;
     }
-    return std::span<const uint8_t>(_lastReceivedFrame).first(_lastReceivedFrameLength);
+    return std::span<const uint8_t>(_rxFrames[_rxHead].data).first(_lastReceivedFrameLength);
+}
+
+void Tp1MacPhysical::releaseHeldFrameLocked() {
+    if (_rxHeld) {
+        _rxHead = (_rxHead + 1u) % RX_QUEUE_CAPACITY;
+        --_rxCount;
+        _rxHeld = false;
+    }
+    updateLocalBusyLocked();
+}
+
+void Tp1MacPhysical::updateLocalBusyLocked() {
+    // 03_02_02 §2.4.2: a device without the resources to process a correct
+    // frame may answer BUSY, provided it can take frames again within 100 ms —
+    // which a draining queue can. The decision has to reach the ISR before
+    // the frame's header does, so it is made ahead of time from the queue
+    // depth, with RX_BUSY_RESERVE slots left for frames that were already
+    // acknowledged while this task was not running.
+    const bool busy = _rxCount >= (RX_QUEUE_CAPACITY - RX_BUSY_RESERVE);
+    if (busy != _localBusyAsserted) {
+        _localBusyAsserted = busy;
+        _controller.setLocalBusy(busy);
+    }
 }
 
 util::Result<size_t> Tp1MacPhysical::sendFrame(std::span<const uint8_t> frame) {
@@ -409,21 +453,25 @@ void Tp1MacPhysical::handleTp1Event(const Tp1RxEvent& event) {
     {
         std::lock_guard<std::mutex> lock(_rxMutex);
         if (_rxCount >= RX_QUEUE_CAPACITY) {
+            // Only reachable when more than RX_BUSY_RESERVE frames were
+            // acknowledged before the busy state reached the ISR. The newest
+            // is dropped and the queue stays in arrival order. Dropping the
+            // oldest, as this used to, threw away frames that had been
+            // acknowledged and had waited longest.
             ++_rxOverflowDrops;
             if (_rxOverflowDrops == 1u || (_rxOverflowDrops % 64u) == 0u) {
-                KNX_LOGW(TAG, "RX queue full, dropping oldest TP1 frame (%zu drops)", _rxOverflowDrops);
+                KNX_LOGW(TAG, "RX queue full, dropping acknowledged TP1 frame (%zu drops)", _rxOverflowDrops);
             }
-            _rxHead = (_rxHead + 1u) % RX_QUEUE_CAPACITY;
-            --_rxCount;
-        } else {
-            _rxOverflowDrops = 0;
+            return;
         }
+        _rxOverflowDrops = 0;
 
         const size_t insertIndex = (_rxHead + _rxCount) % RX_QUEUE_CAPACITY;
         auto& buffered = _rxFrames[insertIndex];
         buffered.length = event.frame.size();
         std::memcpy(buffered.data.data(), event.frame.data(), buffered.length);
         ++_rxCount;
+        updateLocalBusyLocked();
     }
 
     if (_rxCallback) {

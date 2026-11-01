@@ -25,14 +25,25 @@ namespace platform {
 
 namespace detail {
 
-inline TickType_t millisecondsToDelayTicks(uint32_t ms)
+/// Milliseconds to ticks, rounded up. pdMS_TO_TICKS truncates, so with
+/// CONFIG_FREERTOS_HZ=100 a 5 ms timeout became 0 ticks: a poll that fails at
+/// once instead of a wait. Rounding up keeps every non-zero duration at least
+/// one tick, and a finite one never saturates into portMAX_DELAY (forever).
+inline TickType_t millisecondsToTicks(uint32_t ms)
 {
     if (ms == 0u) {
         return 0;
     }
 
-    const TickType_t ticks = pdMS_TO_TICKS(ms);
-    return ticks == 0 ? 1 : ticks;
+    const uint64_t ticks = (static_cast<uint64_t>(ms) * configTICK_RATE_HZ + 999u) / 1000u;
+    constexpr uint64_t kMaxFinite = static_cast<uint64_t>(portMAX_DELAY) - 1u;
+    return static_cast<TickType_t>(ticks > kMaxFinite ? kMaxFinite : ticks);
+}
+
+/// A Platform timeout: UINT32_MAX waits forever, anything else as above.
+inline TickType_t timeoutToTicks(uint32_t timeout_ms)
+{
+    return (timeout_ms == UINT32_MAX) ? portMAX_DELAY : millisecondsToTicks(timeout_ms);
 }
 
 } // namespace detail
@@ -54,7 +65,11 @@ public:
     // ========================================================================
     
     uint32_t millis() const override {
-        return xTaskGetTickCount() * portTICK_PERIOD_MS;
+        // From esp_timer, not the tick count: 1 ms resolution instead of one
+        // tick (10 ms at CONFIG_FREERTOS_HZ=100), and it wraps at 2^32 ms like
+        // every other millisecond clock instead of jumping when ticks * period
+        // overflows.
+        return static_cast<uint32_t>(esp_timer_get_time() / 1000);
     }
     
     uint64_t micros() const override {
@@ -62,7 +77,7 @@ public:
     }
     
     void delay(uint32_t ms) override {
-        vTaskDelay(detail::millisecondsToDelayTicks(ms));
+        vTaskDelay(detail::millisecondsToTicks(ms));
     }
     
     void delayMicroseconds(uint32_t us) override {
@@ -102,7 +117,7 @@ public:
     }
     
     void taskDelay(uint32_t ms) override {
-        vTaskDelay(detail::millisecondsToDelayTicks(ms));
+        vTaskDelay(detail::millisecondsToTicks(ms));
     }
     
     void taskYield() override {
@@ -126,7 +141,7 @@ public:
     util::Result<void> lockMutex(MutexHandle mutex, uint32_t timeout_ms) override {
         if (!mutex) return util::ErrorCode::InvalidParameter;
         
-        TickType_t ticks = (timeout_ms == UINT32_MAX) ? portMAX_DELAY : pdMS_TO_TICKS(timeout_ms);
+        const TickType_t ticks = detail::timeoutToTicks(timeout_ms);
         return xSemaphoreTake(static_cast<SemaphoreHandle_t>(mutex), ticks) == pdTRUE
             ? util::Result<void>::ok()
             : util::Result<void>::err(util::ErrorCode::Timeout);
@@ -151,7 +166,7 @@ public:
     util::Result<void> queueSend(QueueHandle queue, const void* item, uint32_t timeout_ms) override {
         if (!queue || !item) return util::ErrorCode::InvalidParameter;
         
-        TickType_t ticks = (timeout_ms == UINT32_MAX) ? portMAX_DELAY : pdMS_TO_TICKS(timeout_ms);
+        const TickType_t ticks = detail::timeoutToTicks(timeout_ms);
         return xQueueSend(static_cast<QueueHandle_t>(queue), item, ticks) == pdTRUE
             ? util::Result<void>::ok()
             : util::Result<void>::err(util::ErrorCode::Timeout);
@@ -160,7 +175,7 @@ public:
     util::Result<void> queueReceive(QueueHandle queue, void* item, uint32_t timeout_ms) override {
         if (!queue || !item) return util::ErrorCode::InvalidParameter;
         
-        TickType_t ticks = (timeout_ms == UINT32_MAX) ? portMAX_DELAY : pdMS_TO_TICKS(timeout_ms);
+        const TickType_t ticks = detail::timeoutToTicks(timeout_ms);
         return xQueueReceive(static_cast<QueueHandle_t>(queue), item, ticks) == pdTRUE
             ? util::Result<void>::ok()
             : util::Result<void>::err(util::ErrorCode::Timeout);
@@ -198,7 +213,7 @@ public:
                                 uint32_t timeout_ms) override {
         if (!group) return 0;
         
-        TickType_t ticks = (timeout_ms == UINT32_MAX) ? portMAX_DELAY : pdMS_TO_TICKS(timeout_ms);
+        const TickType_t ticks = detail::timeoutToTicks(timeout_ms);
         return xEventGroupWaitBits(
             static_cast<EventGroupHandle_t>(group),
             bitsToWaitFor,
@@ -228,7 +243,7 @@ public:
     util::Result<void> semaphoreTake(SemaphoreHandle sem, uint32_t timeout_ms) override {
         if (!sem) return util::ErrorCode::InvalidParameter;
         
-        TickType_t ticks = (timeout_ms == UINT32_MAX) ? portMAX_DELAY : pdMS_TO_TICKS(timeout_ms);
+        const TickType_t ticks = detail::timeoutToTicks(timeout_ms);
         return xSemaphoreTake(static_cast<SemaphoreHandle_t>(sem), ticks) == pdTRUE
             ? util::Result<void>::ok()
             : util::Result<void>::err(util::ErrorCode::Timeout);
@@ -260,7 +275,7 @@ public:
     }
     
     uint32_t taskNotifyTake(TaskNotifyClearMode clearMode, uint32_t timeout_ms) override {
-        TickType_t ticks = (timeout_ms == UINT32_MAX) ? portMAX_DELAY : pdMS_TO_TICKS(timeout_ms);
+        const TickType_t ticks = detail::timeoutToTicks(timeout_ms);
         const BaseType_t clearOnExit = (clearMode == TaskNotifyClearMode::Clear) ? pdTRUE : pdFALSE;
         return ulTaskNotifyTake(clearOnExit, ticks);
     }

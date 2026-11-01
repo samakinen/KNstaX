@@ -205,15 +205,23 @@ void test_device_descriptor_invalid_type(void) {
     DeviceDescriptorService service(desc);
     
     bool callbackCalled = false;
+    uint8_t answeredType = 0;
+    size_t answeredLength = 1;
     service.setResponseCallback([&](const IndividualAddress& dest, uint8_t type, std::span<const uint8_t> data) {
         callbackCalled = true;
+        answeredType = type;
+        answeredLength = data.size();
     });
-    
+
     IndividualAddress source(1, 1, 1);
     auto result = service.handleReadRequest(source, 255);  // Invalid type
-    
+
     TEST_ASSERT_FALSE(result.isOk());  // Should reject invalid type
-    TEST_ASSERT_FALSE(callbackCalled);  // No response should be sent
+    // 03/03/07 §3.4.2.1: answered with descriptor_type 3Fh and no data. This
+    // test used to require silence, which leaves the client to time out.
+    TEST_ASSERT_TRUE(callbackCalled);
+    TEST_ASSERT_EQUAL_HEX8(0x3F, answeredType);
+    TEST_ASSERT_EQUAL_UINT32(0u, answeredLength);
 }
 
 // ============================

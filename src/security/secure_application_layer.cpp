@@ -5,6 +5,7 @@
 
 #include "knx/security/aes128_cbc_mac.hpp"
 #include "knx/security/aes128_ctr.hpp"
+#include "knx/security/secure_memory.hpp"
 #include "knx/util/log.hpp"
 
 #include <algorithm>
@@ -174,12 +175,17 @@ util::Result<void> SecureApplicationLayer::ccmDecrypt(const Key& key,
                                            computed);
     if (macResult.isError()) return macResult.error();
 
-    if (std::memcmp(computed.data(), combinedOut.data(), kMacSize) != 0) {
-        return util::ErrorCode::DecodeFailed;
-    }
-
-    if (!plainView.empty()) {
+    // Constant time: an early-exit compare tells a forger how many leading
+    // MAC octets were right. The decrypted payload is wiped either way, and on
+    // failure it never reaches the caller.
+    const bool macOk = constantTimeEqual(std::span<const uint8_t>(computed).first(kMacSize),
+                                         std::span<const uint8_t>(combinedOut).first(kMacSize));
+    if (macOk && !plainView.empty()) {
         std::memcpy(plainOut.data(), plainView.data(), plainView.size());
+    }
+    secureZero(combinedOut);
+    if (!macOk) {
+        return util::ErrorCode::DecodeFailed;
     }
     return util::Result<void>::ok();
 }

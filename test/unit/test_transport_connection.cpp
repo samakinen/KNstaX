@@ -197,7 +197,9 @@ void test_SeqMismatchSendsNakAndDoesNotDeliver(void) {
     );
     tl->handleNetworkRx(makeNFrame(remote.raw, 0x110A, dataTpdu));
 
-    // Should send NAK indicating expected seq (0) and not deliver.
+    // Should send a T_NAK carrying the received sequence number (03_03_04
+    // A4) and not deliver. This test used to expect the sequence number the
+    // device was waiting for (0), which the partner cannot match to anything.
     // Control TPDUs (T_ACK/T_NAK) are exactly 1 byte on the wire.
     TEST_ASSERT_EQUAL_UINT32(1, nw->getSentFrameCount());
     const auto sent = nw->getLastSentFrame();
@@ -205,7 +207,7 @@ void test_SeqMismatchSendsNakAndDoesNotDeliver(void) {
     const auto hdr = knx::protocol::unpackTpduHeader(sent.dlFrame.tpdu[0],
                                                      sent.dlFrame.tpdu.size() > 1u ? sent.dlFrame.tpdu[1] : 0u);
     TEST_ASSERT_EQUAL(knx::protocol::TPCI::NumberedControl, hdr.tpci.type());
-    TEST_ASSERT_EQUAL_UINT8(0, hdr.tpci.seqNum());
+    TEST_ASSERT_EQUAL_UINT8(wrongSeq, hdr.tpci.seqNum());
     TEST_ASSERT_TRUE(hdr.tpci.isNak());
     TEST_ASSERT_EQUAL_UINT32(0, rx.size());
 }
@@ -456,7 +458,10 @@ void test_AckClearsRetransmissionSoLaterTimeoutDoesNotResend(void) {
     const uint8_t seq = firstHdr.tpci.seqNum();
 
     tl->handleNetworkRx(buildAck(remote.raw, 0x110A, seq));
-    tl->processRetransmissions(10000);
+    // Past the acknowledge timeout but inside the 6 s connection timeout: an
+    // idle connection now times out with T_Disconnect (E16), which is not
+    // what this test is about.
+    tl->processRetransmissions(1000 + knx::constants::timing::ACK_TIMEOUT_MS + 1000);
 
     TEST_ASSERT_EQUAL_UINT32(1, nw->getSentFrameCount());
 }
@@ -768,8 +773,184 @@ void test_ConnectionWorksAfterDroppedNumberedData(void) {
     TEST_ASSERT_EQUAL_UINT8(0x5A, rx.front().payload()[0]);
 }
 
+// ---------------------------------------------------------------------------
+// 03_03_04 §5 error handling: E06 (A4), E09/E16/E18 (A6), E11 (A0)
+// ---------------------------------------------------------------------------
+
+static knx::protocol::TPCIField lastSentTpci() {
+    const auto sent = nw->getLastSentFrame();
+    TEST_ASSERT_TRUE(sent.dlFrame.tpdu.size() >= 1u);
+    return knx::protocol::unpackTpduHeader(sent.dlFrame.tpdu[0],
+                                           sent.dlFrame.tpdu.size() > 1u ? sent.dlFrame.tpdu[1] : 0u)
+        .tpci;
+}
+
+static bool lastSentIsDisconnectTo(const IndividualAddress& remote) {
+    const auto sent = nw->getLastSentFrame();
+    return sent.dlFrame.destination.raw == remote.raw
+        && lastSentTpci().isControl(knx::protocol::TPCIControl::Disconnect);
+}
+
+static network::NDataFrame buildData(uint16_t src, uint8_t seq, uint8_t payload) {
+    return makeNFrame(src, 0x110A,
+                      knx::protocol::buildTpdu(
+                          knx::protocol::TPCIField::create(knx::protocol::TPCI::NumberedData, seq),
+                          application::APCIField(0), {payload}));
+}
+
+/// E16: the 6 s connection timeout closes with T_Disconnect (A6), not silently.
+void test_ConnectionTimeoutSendsDisconnect(void) {
+    tl->processRetransmissions(1000);
+    const IndividualAddress remote(0x1114);
+    const ConnectionIndex idx = establishConnection(remote);
+
+    tl->processRetransmissions(1000 + knx::constants::timing::CONNECTION_TIMEOUT_MS - 1);
+    TEST_ASSERT_TRUE(tl->isConnected(idx));
+    TEST_ASSERT_EQUAL_UINT32(0, nw->getSentFrameCount());
+
+    tl->processRetransmissions(1000 + knx::constants::timing::CONNECTION_TIMEOUT_MS);
+    TEST_ASSERT_FALSE(tl->isConnected(idx));
+    TEST_ASSERT_EQUAL_UINT32(1, nw->getSentFrameCount());
+    TEST_ASSERT_TRUE(lastSentIsDisconnectTo(remote));
+}
+
+/// E17 three times at a fixed 3 s, then E18 closes with T_Disconnect (A6).
+void test_RepetitionsExhaustedSendsDisconnect(void) {
+    uint32_t now = 1000;
+    tl->processRetransmissions(now);
+    const IndividualAddress remote(0x1114);
+    const ConnectionIndex idx = establishConnection(remote);
+
+    TEST_ASSERT_TRUE(tl->sendConnectedData(idx, {0x55}).isOk());
+    TEST_ASSERT_EQUAL_UINT32(1, nw->getSentFrameCount());
+
+    for (uint32_t rep = 1; rep <= knx::constants::timing::CONNECTION_MAX_REPETITIONS; ++rep) {
+        now += knx::constants::timing::ACK_TIMEOUT_MS;
+        tl->processRetransmissions(now);
+        TEST_ASSERT_EQUAL_UINT32(1 + rep, nw->getSentFrameCount());
+        TEST_ASSERT_EQUAL(knx::protocol::TPCI::NumberedData, lastSentTpci().type());
+        TEST_ASSERT_TRUE(tl->isConnected(idx));
+    }
+
+    now += knx::constants::timing::ACK_TIMEOUT_MS;
+    tl->processRetransmissions(now);
+    TEST_ASSERT_FALSE(tl->isConnected(idx));
+    TEST_ASSERT_TRUE(lastSentIsDisconnectTo(remote));
+}
+
+/// Every way a connection ends is reported to the closed-connection callback.
+void test_ClosedCallbackSeesTimeoutAndPartnerDisconnect(void) {
+    std::vector<uint16_t> closed;
+    tl->setConnectionClosedCallback([&closed](const IndividualAddress& partner) {
+        closed.push_back(partner.raw);
+    });
+
+    tl->processRetransmissions(1000);
+    const IndividualAddress remote(0x1114);
+    (void)establishConnection(remote);
+    tl->processRetransmissions(1000 + knx::constants::timing::CONNECTION_TIMEOUT_MS);
+    TEST_ASSERT_EQUAL_UINT32(1, closed.size());
+    TEST_ASSERT_EQUAL_HEX16(remote.raw, closed[0]);
+
+    const IndividualAddress other(0x1115);
+    const ConnectionIndex idx = establishConnection(other);
+    const auto disconnectTpdu = knx::protocol::buildTpdu(
+        knx::protocol::TPCIField::create(knx::protocol::TPCIControl::Disconnect),
+        application::APCIField(0),
+        {});
+    tl->handleNetworkRx(makeNFrame(other.raw, 0x110A, disconnectTpdu));
+    TEST_ASSERT_FALSE(tl->isConnected(idx));
+    TEST_ASSERT_EQUAL_UINT32(2, closed.size());
+    TEST_ASSERT_EQUAL_HEX16(other.raw, closed[1]);
+
+    tl->setConnectionClosedCallback(nullptr);
+}
+
+/// E09 in OPEN_WAIT: a T_ACK for a frame we are not waiting for → A6.
+void test_WrongSequenceAckWhileWaitingDisconnects(void) {
+    tl->processRetransmissions(1000);
+    const IndividualAddress remote(0x1114);
+    const ConnectionIndex idx = establishConnection(remote);
+    TEST_ASSERT_TRUE(tl->sendConnectedData(idx, {0x55}).isOk());  // seq 0 outstanding
+    nw->clearSentFrames();
+
+    tl->handleNetworkRx(buildAck(remote.raw, 0x110A, 7));
+    TEST_ASSERT_FALSE(tl->isConnected(idx));
+    TEST_ASSERT_EQUAL_UINT32(1, nw->getSentFrameCount());
+    TEST_ASSERT_TRUE(lastSentIsDisconnectTo(remote));
+}
+
+/// A data-link repetition of a stale T_ACK is not E09: our L2 ACK was lost.
+void test_RepeatedStaleAckWhileWaitingIsIgnored(void) {
+    tl->processRetransmissions(1000);
+    const IndividualAddress remote(0x1114);
+    const ConnectionIndex idx = establishConnection(remote);
+    TEST_ASSERT_TRUE(tl->sendConnectedData(idx, {0x55}).isOk());
+    tl->handleNetworkRx(buildAck(remote.raw, 0x110A, 0));
+    TEST_ASSERT_TRUE(tl->sendConnectedData(idx, {0x56}).isOk());  // seq 1 outstanding
+    nw->clearSentFrames();
+
+    auto repeated = buildAck(remote.raw, 0x110A, 0);
+    repeated.dlFrame.repeated = true;
+    tl->handleNetworkRx(repeated);
+    TEST_ASSERT_TRUE(tl->isConnected(idx));
+    TEST_ASSERT_EQUAL_UINT32(0, nw->getSentFrameCount());
+
+    // The real T_ACK still completes the exchange.
+    tl->handleNetworkRx(buildAck(remote.raw, 0x110A, 1));
+    tl->processRetransmissions(1000 + knx::constants::timing::ACK_TIMEOUT_MS);
+    TEST_ASSERT_EQUAL_UINT32(0, nw->getSentFrameCount());
+}
+
+/// E11: a T_NAK with a sequence number other than the outstanding one is
+/// ignored (A0, as Style 2); the frame keeps its normal acknowledge timeout.
+void test_WrongSequenceNakIsIgnored(void) {
+    tl->processRetransmissions(1000);
+    const IndividualAddress remote(0x1114);
+    const ConnectionIndex idx = establishConnection(remote);
+    TEST_ASSERT_TRUE(tl->sendConnectedData(idx, {0x55}).isOk());
+    nw->clearSentFrames();
+
+    tl->handleNetworkRx(buildNak(remote.raw, 0x110A, 9));
+    tl->processRetransmissions(1001);
+    TEST_ASSERT_TRUE(tl->isConnected(idx));
+    TEST_ASSERT_EQUAL_UINT32(0, nw->getSentFrameCount());
+}
+
+/// A frame T_NAK'd for being out of order and then repeated in order must be
+/// delivered. The repeat used to match "last sequence number seen" and was
+/// T_ACKed as a duplicate without ever reaching the application.
+void test_RepeatOfNakdFrameIsDeliveredNotTreatedAsDuplicate(void) {
+    tl->processRetransmissions(1000);
+    const IndividualAddress remote(0x1114);
+    (void)establishConnection(remote);
+
+    tl->handleNetworkRx(buildData(remote.raw, 0, 0x10));  // accepted
+    tl->handleNetworkRx(buildData(remote.raw, 2, 0x12));  // out of order → T_NAK(2)
+    TEST_ASSERT_TRUE(lastSentTpci().isNak());
+    TEST_ASSERT_EQUAL_UINT8(2, lastSentTpci().seqNum());
+    tl->handleNetworkRx(buildData(remote.raw, 1, 0x11));  // in order
+    tl->handleNetworkRx(buildData(remote.raw, 2, 0x12));  // the NAK'd frame, now in order
+
+    TEST_ASSERT_EQUAL_UINT32(3, rx.size());
+    TEST_ASSERT_EQUAL_UINT8(0x12, rx.back().payload()[0]);
+
+    // And a genuine repeat of the last accepted frame is E05: T_ACK, no delivery.
+    tl->handleNetworkRx(buildData(remote.raw, 2, 0x12));
+    TEST_ASSERT_TRUE(lastSentTpci().isAck());
+    TEST_ASSERT_EQUAL_UINT8(2, lastSentTpci().seqNum());
+    TEST_ASSERT_EQUAL_UINT32(3, rx.size());
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(test_ConnectionTimeoutSendsDisconnect);
+    RUN_TEST(test_ClosedCallbackSeesTimeoutAndPartnerDisconnect);
+    RUN_TEST(test_RepetitionsExhaustedSendsDisconnect);
+    RUN_TEST(test_WrongSequenceAckWhileWaitingDisconnects);
+    RUN_TEST(test_RepeatedStaleAckWhileWaitingIsIgnored);
+    RUN_TEST(test_WrongSequenceNakIsIgnored);
+    RUN_TEST(test_RepeatOfNakdFrameIsDeliveredNotTreatedAsDuplicate);
     RUN_TEST(test_ConnectResponseDoesNotEchoConnect);
     RUN_TEST(test_SingleByteInboundConnectCreatesConnectionAndSendsResponse);
     RUN_TEST(test_DisconnectResponseDoesNotEchoDisconnect);

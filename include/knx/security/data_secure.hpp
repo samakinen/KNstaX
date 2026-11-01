@@ -81,6 +81,9 @@ public:
     static constexpr size_t kMaxSecureTpduSize = kSecureOverhead + kMaxPlainApduSize;
 
     explicit DataSecureSession(const Key& key);
+    ~DataSecureSession();
+    DataSecureSession(const DataSecureSession&) = default;
+    DataSecureSession& operator=(const DataSecureSession&) = default;
 
     [[nodiscard]] static constexpr size_t protectedTpduSize(size_t plainApduSize) noexcept
     {

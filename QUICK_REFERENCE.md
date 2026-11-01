@@ -85,7 +85,7 @@ Medium and TP1 backend are compile-time choices:
 
 ```
 KNX_MEDIUM_TP1 / KNX_MEDIUM_IP        # medium (mutually exclusive)
-KNX_TP1_TPUART / KNX_TP1_BITBANG      # TP1 backend family
+KNX_TP1_BITBANG / KNX_TP1_TPUART      # TP1 backend (bit-bang default; TPUART broken)
 ```
 
 Most-adjusted values, with defaults:
@@ -96,8 +96,8 @@ Most-adjusted values, with defaults:
 | `KNX_TASK_STACK_SIZE` / `_PRIORITY` | 4096 / 5 | Main processing task |
 | `KNX_RX_TASK_STACK_SIZE` / `_PRIORITY` | 3072 / 10 | Frame reception; keep it high |
 | `KNX_ENABLE_SECURITY` | n | KNX Secure components |
-| `KNX_USE_NVS` | y | ESP32 NVS instead of raw flash |
-| `KNX_DEBUG_ENABLED` + `KNX_LOG_LEVEL` | n / 3 | 0=None … 5=Verbose |
+| `KNX_DEBUG_ENABLED` | n | Verbose frame-level logging switch |
+| `KNX_LOG_LEVEL` | 3 | Compile-time ceiling, 0=None … 5=Verbose; independent of debug |
 
 `KNX_MAX_GROUP_OBJECTS`, `KNX_MAX_ASSOCIATIONS` and
 `KNX_MAX_ADDRESS_TABLE_ENTRIES` appear in menuconfig but **are not read by any

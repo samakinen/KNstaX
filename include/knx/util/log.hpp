@@ -137,33 +137,44 @@ inline std::string formatAddress(const IndividualAddress& address) {
         }                                                                       \
     } while (0)
 
+// A level compiled out still names its arguments, in code that never runs.
+// Variables computed only for a log line would otherwise draw "unused"
+// warnings in the builds that drop it, and the format string is still checked.
+// The optimiser removes the call together with its string literals.
+#define KNX_LOG_DISCARD(TAG, fmt, ...)                                          \
+    do {                                                                        \
+        if (false) {                                                            \
+            ::knx::log::write(::knx::log::Level::Error, TAG, fmt, ##__VA_ARGS__); \
+        }                                                                       \
+    } while (0)
+
 #if KNX_LOG_LEVEL_COMPILE >= KNX_LOG_LEVEL_ERROR
     #define KNX_LOGE(TAG, fmt, ...) KNX_LOG_WRITE_IF_ENABLED(::knx::log::Level::Error, TAG, fmt, ##__VA_ARGS__)
 #else
-    #define KNX_LOGE(TAG, fmt, ...) ((void)0)
+    #define KNX_LOGE(TAG, fmt, ...) KNX_LOG_DISCARD(TAG, fmt, ##__VA_ARGS__)
 #endif
 
 #if KNX_LOG_LEVEL_COMPILE >= KNX_LOG_LEVEL_WARN
     #define KNX_LOGW(TAG, fmt, ...) KNX_LOG_WRITE_IF_ENABLED(::knx::log::Level::Warn, TAG, fmt, ##__VA_ARGS__)
 #else
-    #define KNX_LOGW(TAG, fmt, ...) ((void)0)
+    #define KNX_LOGW(TAG, fmt, ...) KNX_LOG_DISCARD(TAG, fmt, ##__VA_ARGS__)
 #endif
 
 #if KNX_LOG_LEVEL_COMPILE >= KNX_LOG_LEVEL_INFO
     #define KNX_LOGI(TAG, fmt, ...) KNX_LOG_WRITE_IF_ENABLED(::knx::log::Level::Info, TAG, fmt, ##__VA_ARGS__)
 #else
-    #define KNX_LOGI(TAG, fmt, ...) ((void)0)
+    #define KNX_LOGI(TAG, fmt, ...) KNX_LOG_DISCARD(TAG, fmt, ##__VA_ARGS__)
 #endif
 
 #if KNX_LOG_LEVEL_COMPILE >= KNX_LOG_LEVEL_DEBUG
     #define KNX_LOGD(TAG, fmt, ...) KNX_LOG_WRITE_IF_ENABLED(::knx::log::Level::Debug, TAG, fmt, ##__VA_ARGS__)
 #else
-    #define KNX_LOGD(TAG, fmt, ...) ((void)0)
+    #define KNX_LOGD(TAG, fmt, ...) KNX_LOG_DISCARD(TAG, fmt, ##__VA_ARGS__)
 #endif
 
 #if KNX_LOG_LEVEL_COMPILE >= KNX_LOG_LEVEL_VERBOSE
     #define KNX_LOGV(TAG, fmt, ...) KNX_LOG_WRITE_IF_ENABLED(::knx::log::Level::Verbose, TAG, fmt, ##__VA_ARGS__)
 #else
-    #define KNX_LOGV(TAG, fmt, ...) ((void)0)
+    #define KNX_LOGV(TAG, fmt, ...) KNX_LOG_DISCARD(TAG, fmt, ##__VA_ARGS__)
 #endif
 

@@ -196,6 +196,14 @@ public:
     void setReceiveCallback(TDataCallback callback);
 
     /**
+     * @brief Be told whenever a connection closes, by whatever path
+     * @thread_safety NOT thread-safe - should be called during initialization
+     */
+    void setConnectionClosedCallback(ConnectionTable::ClosedObserver callback) {
+        _connectionTable.setClosedObserver(std::move(callback));
+    }
+
+    /**
      * @brief Set optional TX transform (applied before sending)
      * @thread_safety NOT thread-safe - should be called during initialization
      * @note Transform is called while holding internal locks - avoid blocking operations
@@ -400,6 +408,14 @@ private:
 
     /// Retransmit unacknowledged data and reap timed-out connections.
     void runConnectionTimers(uint32_t currentTimeMs);
+
+    /// Action A6 for connections the table has already removed: tell each
+    /// partner with a T_Disconnect.
+    void disconnectClosedConnections(
+        const util::FixedVector<ClosedConnection, ConnectionTable::MAX_CONNECTIONS>& closed);
+
+    /// Action A6 for a connection still in the table: send T_Disconnect and remove it.
+    void closeConnectionWithDisconnect(ConnectionEntry& entry);
     
     // Helper to convert N_Data to T_Data
     TDataFrame convertFromNetwork(const network::NDataFrame& nFrame);
@@ -413,7 +429,7 @@ private:
     void handleDisconnectResponse(const IndividualAddress& remoteAddress);
     void handleNumberedData(const IndividualAddress& remoteAddress, uint8_t seqNum,
                             std::span<const uint8_t> tpdu, Priority priority);
-    void handleAck(const IndividualAddress& remoteAddress, uint8_t seqNum);
+    void handleAck(const IndividualAddress& remoteAddress, uint8_t seqNum, bool repeatedFrame = false);
     void handleNak(const IndividualAddress& remoteAddress, uint8_t seqNum);
 
     // Send control frames

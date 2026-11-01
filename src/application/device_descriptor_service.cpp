@@ -39,7 +39,12 @@ util::Result<void> DeviceDescriptorService::handleReadRequest(
     }
 
     if (!isDescriptorTypeSupported(descriptorType)) {
+        // 03/03/07 §3.4.2.1: "if the descriptor_type ≠ 0 and this Descriptor
+        // Type is not supported by the Management Server, then the Management
+        // Server shall respond with the Descriptor Type 3Fh (error) without any
+        // data." Type 0 is always supported here, so this is always that case.
         KNX_LOGW(TAG, "Unsupported descriptor type requested: %d (supported: 0, 2)", descriptorType);
+        _responseCallback(source, kUnsupportedDescriptorType, std::span<const uint8_t>{});
         return util::Result<void>::err(util::ErrorCode::InvalidParameter);
     }
     

@@ -10,6 +10,8 @@
 #pragma once
 
 #include "knx/config.hpp"
+#include "knx/netip/ip_secure/mc_timer_store.hpp"
+#include "knx/objects/object_persistence.hpp"
 #include "knx/physical/ip_routing_physical.hpp"
 #include "knx/physical/ip_tunneling_physical.hpp"
 #include "knx/physical/tp1_mac_physical.hpp"
@@ -20,6 +22,7 @@
 #include "knx/network/two_port_coupler.hpp"
 #include "knx/util/result.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstring>
@@ -264,6 +267,73 @@ struct ResolvedKnxPersistenceIdentity {
 };
 
 namespace detail {
+
+#if KNX_FEATURE_NETIP && KNX_SECURE_ENABLED
+/**
+ * @brief The Secure Routing multicast timer, kept beside the commissioned state.
+ *
+ * One record under its own key in the storage namespace the stack's interface
+ * objects use, opened through the same platform persistence. A second handle
+ * on that namespace rather than a hook into the object manager: the record is
+ * not a property, is written on its own schedule (at most once per hour of
+ * timer time, 03_08_09 §2.2.4.2), and must not be rewritten with every
+ * property download.
+ *
+ * Opened on first use, which is when the first backbone key is applied.
+ */
+class PersistentMcTimerStore final : public netip::ip_secure::McTimerStore {
+public:
+    explicit PersistentMcTimerStore(std::string storageNamespace)
+        : _namespace(std::move(storageNamespace))
+    {
+    }
+
+    std::optional<Record> load() override
+    {
+        if (!open()) {
+            return std::nullopt;
+        }
+        std::vector<uint8_t> data;
+        if (_persistence->load(kRecordKey, data) != objects::PersistenceResult::Success) {
+            return std::nullopt;
+        }
+        return decode(data);
+    }
+
+    util::Result<void> save(const Record& record) override
+    {
+        if (!open()) {
+            return util::ErrorCode::NotInitialized;
+        }
+        const auto encoded = encode(record);
+        if (_persistence->save(kRecordKey, encoded) != objects::PersistenceResult::Success) {
+            return util::ErrorCode::OperationFailed;
+        }
+        return util::Result<void>::ok();
+    }
+
+private:
+    /// Short enough for an NVS key (15 characters), and not of the dXXXX
+    /// form the interface-object records use.
+    static constexpr const char* kRecordKey = "mc_timer";
+
+    bool open()
+    {
+        if (_persistence) {
+            return true;
+        }
+        auto persistence = objects::createPersistence();
+        if (!persistence || persistence->init(_namespace).isError()) {
+            return false;
+        }
+        _persistence = std::move(persistence);
+        return true;
+    }
+
+    std::string _namespace;
+    std::unique_ptr<objects::ObjectPersistence> _persistence;
+};
+#endif
 
 template <auto... Ids>
 consteval bool parameterIdsUnique()
@@ -750,14 +820,13 @@ struct IpRoutingSecureOptions {
 #if KNX_SECURE_ENABLED
     /// Enable KNX/IP Secure Routing.  When false (default) plain multicast is used.
     bool enabled{false};
-    /// 16-byte AES-128 group key for multicast encryption.
+    /// 16-byte AES-128 group key for multicast encryption. Used only while
+    /// ETS has not downloaded a backbone key of its own, which takes precedence.
+    ///
+    /// Nothing else is configured: the serial is the device's KNX serial number,
+    /// the tag is random per frame and the sequence information is the
+    /// multicast timer, which the product persists (03_08_09 §2.2.2).
     std::array<uint8_t, 16> groupKey{};
-    /// 6-byte device serial for KNX/IP Secure.
-    std::array<uint8_t, 6> serial{};
-    /// 2-byte message authentication tag prefix.
-    std::array<uint8_t, 2> tag{};
-    /// Initial sending sequence number (must be strictly greater than last stored value).
-    uint64_t initialSeq{1};
 #endif
 };
 
@@ -1146,6 +1215,9 @@ public:
         , _startInProgrammingMode(other._startInProgrammingMode)
         , _transportPath(other._transportPath)
         , _secureOptions(other._secureOptions)
+#if KNX_FEATURE_NETIP && KNX_SECURE_ENABLED
+        , _mcTimerStore(std::move(other._mcTimerStore))
+#endif
     {
         // Update the APO callback to point at this object's _parametersState.
         // Use the no-reapply variant so existing data (already carried over via
@@ -1431,14 +1503,14 @@ public:
             configureCoreDiscovery(*physical, *network, options);
         }
 
+        // The platform RNG for the ROUTING_BUSY back-off and, under Secure
+        // Routing, for message tags and TIMER_NOTIFY delays.
+        physical->setRandomSource([&platform](std::span<uint8_t> out) { platform.randomBytes(out); });
+
 #if KNX_SECURE_ENABLED
-        if (options.secureRouting.enabled) {
-            physical->setSecureRouting(
-                options.secureRouting.groupKey,
-                options.secureRouting.serial,
-                options.secureRouting.tag,
-                options.secureRouting.initialSeq);
-        }
+        _mcTimerStore = std::make_unique<detail::PersistentMcTimerStore>(_knxPersistenceIdentity.storageNamespace);
+        physical->setMcTimerStore(_mcTimerStore.get());
+        physical->setLatencySettingsSource([this]() { return secureRoutingLatencySettings(); });
 #endif
 
         // Kept across the move: the stack port owns the physical for as long
@@ -1463,8 +1535,34 @@ public:
         // and keeps multicasting in the clear looks secured in the project and
         // is not on the wire.
         _runtime.setBackboneKeyCallback([routing](std::span<const uint8_t> key) {
-            (void)routing->applySecureRouting(key);
+            (void)routing->applySecureRouting(key, physical::IpRoutingPhysical::KeySource::Download);
         });
+
+        // The nonce carries the KNX serial number. It is known once the runtime
+        // has started, and has to be in place before any key is applied.
+        {
+            std::array<uint8_t, 6> serial{};
+            const auto deviceSerial = _runtime.deviceObject().getSerialNumber();
+            std::copy_n(deviceSerial.begin(), std::min(serial.size(), deviceSerial.size()), serial.begin());
+            routing->setSecureRoutingSerial(serial);
+        }
+        seedSecureRoutingLatencyDefaults();
+
+        // A backbone key ETS downloaded before the last restart came back with
+        // the KNXnet/IP Parameter Object while the runtime started, but through
+        // the object store rather than a property write, so the callback above
+        // never saw it. Without this a secured device reboots into plain
+        // multicast and stays there until ETS downloads again.
+        const auto storedKey = _runtime.referenceObjectPropertyValue(
+            InterfaceObjectType::knxNetIpParameter(), kPidBackboneKey);
+        const bool storedKeySet = std::any_of(storedKey.begin(), storedKey.end(),
+                                              [](uint8_t b) { return b != 0; });
+        if (storedKeySet) {
+            (void)routing->applySecureRouting(storedKey, physical::IpRoutingPhysical::KeySource::Restored);
+        } else if (options.secureRouting.enabled) {
+            (void)routing->applySecureRouting(options.secureRouting.groupKey,
+                                              physical::IpRoutingPhysical::KeySource::Restored);
+        }
 #else
         (void)routing;
 #endif
@@ -1873,6 +1971,16 @@ public:
         return _runtime.hasToolKey();
     }
 
+    /// Returns true if the Tool Key in force is @p key.
+    ///
+    /// Use this, not hasEtsToolKey(), to decide whether a device certificate
+    /// built from @p key is still worth printing: hasEtsToolKey() is true for
+    /// any key at all, including one ETS installed over the factory key.
+    bool toolKeyInForceIs(const std::array<uint8_t, 16>& key) const
+    {
+        return _runtime.toolKeyMatches(key);
+    }
+
     const auto& knxPersistenceIdentity() const
     {
         return _knxPersistenceIdentity;
@@ -1958,6 +2066,57 @@ private:
     bool _startInProgrammingMode{false};
     CommissionedTransportPath _transportPath{CommissionedTransportPath::NotStarted};
     SecureCommissioningOptions _secureOptions{};
+#if KNX_FEATURE_NETIP && KNX_SECURE_ENABLED
+    /// Held by pointer in the routing physical, hence on the heap.
+    std::unique_ptr<detail::PersistentMcTimerStore> _mcTimerStore;
+
+    // KNXnet/IP Parameter Object, 03_08_09 §2.3.1.
+    static constexpr application::PropertyID kPidBackboneKey = static_cast<application::PropertyID>(91);
+    static constexpr application::PropertyID kPidMulticastLatencyTolerance = static_cast<application::PropertyID>(95);
+    static constexpr application::PropertyID kPidSyncLatencyFraction = static_cast<application::PropertyID>(96);
+
+    /// The ex-factory values (§2.3.1.6.3, §2.3.1.7.3) where nothing is stored,
+    /// so that what ETS reads is what the device uses.
+    void seedSecureRoutingLatencyDefaults()
+    {
+        const physical::IpRoutingPhysical::LatencySettings defaults{};
+        if (_runtime.referenceObjectPropertyValue(InterfaceObjectType::knxNetIpParameter(),
+                                                  kPidMulticastLatencyTolerance).empty()) {
+            const std::array<uint8_t, 2> value{static_cast<uint8_t>(defaults.latencyToleranceMs >> 8),
+                                               static_cast<uint8_t>(defaults.latencyToleranceMs & 0xFFu)};
+            (void)_runtime.setReferenceObjectProperty(InterfaceObjectType::knxNetIpParameter(),
+                                                      kPidMulticastLatencyTolerance, value);
+        }
+        if (_runtime.referenceObjectPropertyValue(InterfaceObjectType::knxNetIpParameter(),
+                                                  kPidSyncLatencyFraction).empty()) {
+            const std::array<uint8_t, 1> value{defaults.syncLatencyFraction};
+            (void)_runtime.setReferenceObjectProperty(InterfaceObjectType::knxNetIpParameter(),
+                                                      kPidSyncLatencyFraction, value);
+        }
+    }
+
+    /// Read on the routing receive task once a second; see
+    /// IpRoutingPhysical::setLatencySettingsSource.
+    physical::IpRoutingPhysical::LatencySettings secureRoutingLatencySettings() const
+    {
+        physical::IpRoutingPhysical::LatencySettings settings{};
+        const auto tolerance = _runtime.referenceObjectPropertyValue(InterfaceObjectType::knxNetIpParameter(),
+                                                                     kPidMulticastLatencyTolerance);
+        if (tolerance.size() == 2) {
+            const uint16_t value = static_cast<uint16_t>((tolerance[0] << 8) | tolerance[1]);
+            // Zero would discard every frame not from the future; read it as unset.
+            if (value != 0) {
+                settings.latencyToleranceMs = value;
+            }
+        }
+        const auto fraction = _runtime.referenceObjectPropertyValue(InterfaceObjectType::knxNetIpParameter(),
+                                                                    kPidSyncLatencyFraction);
+        if (fraction.size() == 1) {
+            settings.syncLatencyFraction = fraction[0];
+        }
+        return settings;
+    }
+#endif
 
     void applySecureOptions()
     {

@@ -2,6 +2,7 @@
 // Copyright (C) 2025-2026 Sami Mäkinen
 
 #include "knx/security/data_secure.hpp"
+#include "knx/security/secure_memory.hpp"
 
 #include <cstring>
 
@@ -88,6 +89,8 @@ util::Result<void> buildSecureCounter0(const SecureBlockContext& ctx,
 }
 
 DataSecureSession::DataSecureSession(const Key& key) : key_(key) {}
+
+DataSecureSession::~DataSecureSession() { secureZero(key_); }
 
 void DataSecureSession::setSendSeq(uint64_t seq48) {
     sendSeq48_ = mask48(seq48);
@@ -267,12 +270,14 @@ util::Result<size_t> DataSecureSession::unprotect(const DataSecureContext& frame
         return macResult.error();
     }
 
-    if (std::memcmp(macFull.data(), macTr.data(), kMacSize) != 0) {
-        return util::ErrorCode::DecodeFailed;
-    }
-
-    if (encPayloadLen != 0) {
+    const bool macOk = constantTimeEqual(std::span<const uint8_t>(macFull).first(kMacSize), macTr);
+    if (macOk && encPayloadLen != 0) {
         std::memcpy(plainApdu.data(), plainView.data(), encPayloadLen);
+    }
+    // Unauthenticated plaintext does not outlive the check.
+    secureZero(combinedPlain);
+    if (!macOk) {
+        return util::ErrorCode::DecodeFailed;
     }
 
     replay_.accept(seq48);

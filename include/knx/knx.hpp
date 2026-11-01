@@ -25,15 +25,15 @@
 #pragma once
 
 // Version information.
-// Keep in sync with KNX_VERSION_STRING in CMakeLists.txt and the `version`
-// field of idf_component.yml.  The build system also passes KNX_STACK_VERSION
-// as a compile definition; the guard keeps the two from colliding.
+// The source is the `version` field of idf_component.yml, which CMakeLists.txt
+// reads and passes as KNX_STACK_VERSION; keep these numbers in step with it.
+// The guard keeps the fallback below from colliding with that definition.
 #define KNX_STACK_VERSION_MAJOR 0
-#define KNX_STACK_VERSION_MINOR 2
+#define KNX_STACK_VERSION_MINOR 3
 #define KNX_STACK_VERSION_PATCH 0
 #define KNX_STACK_VERSION_SUFFIX "alpha"
 #ifndef KNX_STACK_VERSION
-#define KNX_STACK_VERSION "0.2.0-alpha"
+#define KNX_STACK_VERSION "0.3.0-alpha"
 #endif
 
 // Core types and configuration

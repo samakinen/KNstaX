@@ -83,31 +83,42 @@ set(KNX_SOURCES_TP1
     "src/physical/bitbang_medium_backend_adapter.cpp"
     "src/physical/tpuart_medium_backend_adapter.cpp"
     "src/physical/timer_gpio_hal_espidf.cpp"
-    "src/physical/timer_gpio_hal_virtual.cpp"
     "src/physical/physical_factory.cpp"
 )
 
 # --- KNXnet/IP medium ----------------------------------------------------
 # Gated by KNX_FEATURE_NETIP.  A TP1-only device links none of this.
+#
+# ip_tunneling_physical and tunneling_session_client are the client role too,
+# but the BAU stack port, the physical factory and the product runtime
+# construct IpTunnelingPhysical whenever KNXnet/IP is built, so they stay here
+# until those call sites are gated as well.
 set(KNX_SOURCES_NETIP
     "src/physical/ip_physical_layer.cpp"
     "src/physical/ip_tunneling_physical.cpp"
     "src/physical/ip_routing_physical.cpp"
     "src/netip/cemi.cpp"
     "src/netip/header_codec.cpp"
-    "src/netip/gateway_discovery_client.cpp"
     "src/netip/tunneling_session_client.cpp"
     "src/netip/tunneling_server_endpoint.cpp"
-    "src/netip/tcp_frame_channel.cpp"
     "src/netip/udp_datagram_channel.cpp"
-    "src/netip/device_management.cpp"
-    "src/netip/device_management_codec.cpp"
     "src/netip/routing.cpp"
     "src/netip/routing_endpoint.cpp"
     "src/netip/routing_flow_control.cpp"
     "src/netip/system_broadcast.cpp"
     "src/netip/core_discovery_codec.cpp"
     "src/netip/core_server_responder.cpp"
+)
+
+# The KNXnet/IP client role: discovering a gateway and opening a tunnelling or
+# device-management connection to it. A KNX IP device (03/02/06) is never a
+# client, so this is built only with tunnelling enabled
+# (CONFIG_KNX_ENABLE_TUNNELING / KNX_FEATURE_TUNNELING).
+set(KNX_SOURCES_NETIP_CLIENT
+    "src/netip/gateway_discovery_client.cpp"
+    "src/netip/tcp_frame_channel.cpp"
+    "src/netip/device_management.cpp"
+    "src/netip/device_management_codec.cpp"
 )
 
 # Coupler/bridge code needs both media present.
@@ -144,6 +155,7 @@ set(KNX_SOURCES_SECURE
 set(KNX_SOURCES_SECURE_ROUTING
     "src/netip/secure_wrapper.cpp"
     "src/netip/secure_routing_security.cpp"
+    "src/netip/mc_timer_sync.cpp"
 )
 
 # Secure Tunnelling: the session half of IP Secure — ECDH key agreement, the
@@ -170,8 +182,9 @@ set(KNX_SOURCES_ETS
     "src/ets/knxprog_importer.cpp"
 )
 
-# --- Virtual TP1 bus simulator (host tests; also usable on target) -------
+# --- Virtual TP1 bus simulator (host builds only) ------------------------
 set(KNX_SOURCES_VIRTUAL
+    "src/physical/timer_gpio_hal_virtual.cpp"
     "src/physical/virtual_time_engine.cpp"
     "src/physical/virtual_tp1_bus_peer.cpp"
     "src/physical/virtual_tp1_trace.cpp"

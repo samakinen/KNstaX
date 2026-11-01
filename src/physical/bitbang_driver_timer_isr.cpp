@@ -49,10 +49,16 @@ bool BitBangDriverTimerIsrT<IsrPolicy>::init(const knx_timer_gpio_hal_t& hal,
     _rxErrors = 0;
     _txWaitTime = 0;
     _rxByteCount = 0;
+    _rxCheckXor = 0;
     _rxDstHi = 0;
     _rxDstLo = 0;
     _dlAckEchoSeen = false;
-    _dlAckRxErrors = 0;
+    _txArbitrationLosses = 0;
+    _txHoldoffUntilUs = 0;
+    // Both are re-applied by the owner after init (MAC queue depth, monitor
+    // mode); a stale value must not survive a close/init cycle.
+    _localBusy = false;
+    _busMonitor = false;
     _ackStartEdgeSeen = false;
     _ackStartValidated = false;
     _linkCounters.reset();
@@ -133,6 +139,7 @@ bool BitBangDriverTimerIsrT<IsrPolicy>::send(std::span<const uint8_t> frame)
     _txTelegramLength = static_cast<uint16_t>(frame.size());
     _txBytePosition = 0;
     _txBitPosition = -1;
+    _txArbitrationLosses = 0;
 
     // KNX TP1 bus access (03.02.02): a transmitter may start only after the bus
     // has been idle for t_idle (spec floor 50 bit-times, 53 for normal/low; the
@@ -561,24 +568,31 @@ KNX_TIMER_GPIO_HAL_ISR_ATTR uint64_t BitBangDriverTimerIsrT<IsrPolicy>::rxHandle
         const uint8_t ackByte = finishReceivedAck();
         _txState = TX_IDLE;
         _txAlarmUs = 0;
+        if (ackByte == ACK_BYTE_BUSY || ackByte == ACK_BYTE_NACK_BUSY) {
+            // 03_02_02 §2.4.2 / A.8: after BUSY the repetition waits at least
+            // 150 bit times, counted here from the end of the BUSY character
+            // (its start bit + 11). txHandleWaitingSlot() enforces it on top
+            // of the usual bus-idle wait, which A.8 also still requires.
+            _txHoldoffUntilUs = _lastCharStartUs + bitTimeUs() * (11u + 150u);
+        }
         (void)queueMessage(MessageType::TxAckResponse, ackByte, diagNowUs());
         return 0;
     }
 
     if (bit == 1) {
         (void)queueMessage(MessageType::Data, _rxByte);
+        _rxCheckXor ^= _rxByte;
 
         // ISR early DL-ACK: the ACK decision is made HERE, byte-synchronously,
         // as the header streams in — the only place that can reliably meet the
-        // 15-bit-time t_ack deadline. _pendingAckByte holds the intent; the
-        // DL-ACK slot alarm fires the final byte (downgrading to NACK on RX
-        // errors). KNX TP1 acknowledgement rules:
+        // 15-bit-time t_ack deadline. _pendingAckByte holds the intent;
+        // rxHandleTelegramComplete() turns it into the final byte (NAK for an
+        // incorrect frame). KNX TP1 acknowledgement rules (03_02_02 §2.4.2):
         //   - individually-addressed frames matching our address: always L_ACK
         //     (regardless of the CTRL A bit); individual broadcast (0xFFFF) is
         //     never acknowledged.
-        //   - group-addressed frames: L_ACK when the sender requests it (CTRL
-        //     A bit) and the group address is in our subscription table;
-        //     group broadcast (0x0000) is never acknowledged.
+        //   - group-addressed frames: L_ACK when the group address is in our
+        //     group address table, and always for the broadcast 0/0/0.
         // Standard frames carry the address type in the length octet (pos 5);
         // L_Data_Extended frames carry it in CTRLE (pos 1) and shift the
         // destination by one octet.
@@ -624,11 +638,12 @@ KNX_TIMER_GPIO_HAL_ISR_ATTR uint64_t BitBangDriverTimerIsrT<IsrPolicy>::rxHandle
 // Queue the End message and reset all per-telegram RX state. Shared by the
 // normal telegram-complete timeout and the lost-timeout recovery in onRxEdge.
 template<typename IsrPolicy>
-KNX_TIMER_GPIO_HAL_ISR_ATTR uint8_t BitBangDriverTimerIsrT<IsrPolicy>::finishRxTelegram()
+KNX_TIMER_GPIO_HAL_ISR_ATTR uint8_t BitBangDriverTimerIsrT<IsrPolicy>::finishRxTelegram(uint8_t endFlags)
 {
     const uint8_t rxErrors = _rxErrors;
     _rxErrors = 0;
     _rxByteCount = 0;
+    _rxCheckXor = 0;
     _rxDstHi = 0;
     _rxDstLo = 0;
     _rxExtendedFrame = false;
@@ -636,7 +651,8 @@ KNX_TIMER_GPIO_HAL_ISR_ATTR uint8_t BitBangDriverTimerIsrT<IsrPolicy>::finishRxT
     // t0/t1 travel with the event: the consumer formats this telegram's own
     // start and end, not whatever the ISR happens to be doing when it gets
     // around to logging.
-    (void)queueMessage(MessageType::End, rxErrors, diagRxFrameStartUs(), diagNowUs());
+    (void)queueMessage(MessageType::End, static_cast<uint8_t>(rxErrors | endFlags),
+                       diagRxFrameStartUs(), diagNowUs());
     _rxState = RX_IDLE;
     return rxErrors;
 }
@@ -644,16 +660,39 @@ KNX_TIMER_GPIO_HAL_ISR_ATTR uint8_t BitBangDriverTimerIsrT<IsrPolicy>::finishRxT
 template<typename IsrPolicy>
 KNX_TIMER_GPIO_HAL_ISR_ATTR uint64_t BitBangDriverTimerIsrT<IsrPolicy>::rxHandleTelegramComplete()
 {
-    const uint8_t rxErrors = finishRxTelegram();
-
     // The ACK decision was made byte-synchronously during reception (see
     // armEarlyAckIfAddressed); no decision by now means the frame is not ours
     // to acknowledge — don't burn a timer alarm on an empty ACK slot.
-    if (_pendingAckByte == 0) {
+    uint8_t ackByte = _pendingAckByte;
+    const bool slotAvailable = _txState == TX_IDLE || _txState == TX_WAITING_SLOT;
+
+    if (ackByte != 0 && slotAvailable) {
+        // 03_02_02 §2.4.2: an addressed device answers a frame that is not
+        // correct with NAK. Parity and framing errors were the only test this
+        // used to apply, so a frame with a bad check octet or an impossible
+        // length was acknowledged, and the sender — told all was well —
+        // never repeated it while this device's data link threw it away.
+        // Plain NAK even when busy: the spec answers an incorrect frame with
+        // NAK, and NAK+BUSY (0x00) would also be indistinguishable here from
+        // "no acknowledge armed".
+        if (_rxErrors != 0u || !rxFrameIsCorrect()) {
+            ackByte = ACK_BYTE_NACK;
+        }
+    }
+
+    // Decided before End is queued, so End can say whether this copy was
+    // refused: the sender repeats a frame answered with BUSY, and the consumer
+    // must not deliver this one as well.
+    const uint8_t endFlags = (slotAvailable && ackByte == ACK_BYTE_BUSY)
+                                 ? END_FLAG_ANSWERED_BUSY
+                                 : uint8_t{0};
+    (void)finishRxTelegram(endFlags);
+
+    if (ackByte == 0) {
         return 0;
     }
 
-    if (_txState != TX_IDLE && _txState != TX_WAITING_SLOT) {
+    if (!slotAvailable) {
         (void)queueMessage(MessageType::DlAckSuppressed, _txState);
         _pendingAckByte = 0;
         return 0;
@@ -666,7 +705,7 @@ KNX_TIMER_GPIO_HAL_ISR_ATTR uint64_t BitBangDriverTimerIsrT<IsrPolicy>::rxHandle
     // DL-ACK lands on the 15-BT t_ack window without folding in ISR-entry latency.
     // Writing _txAlarmUs here directly (from timerNow) was what jittered the ACK
     // a few bit-times, so certified couplers intermittently missed it (9–12 BT).
-    _dlAckRxErrors = rxErrors;
+    _pendingAckByte = ackByte;
     _flags |= FLAG_SENDING_ACK;
     _txState = TX_WAITING_SLOT;
     return telegramCompleteToAckStartDelayUs();
@@ -795,14 +834,9 @@ KNX_TIMER_GPIO_HAL_ISR_ATTR uint64_t BitBangDriverTimerIsrT<IsrPolicy>::txHandle
         _pendingAckByte = 0;
 
         if (pending != 0) {
-            // On reception errors, downgrade the pending ACK decision:
-            //   ACK  (0xCC) → NACK      (0x0C): frame had bit errors, sender must retransmit
-            //   BUSY (0xC0) → NACK+BUSY (0x00): frame had errors AND device was busy
-            // The "reception quality OK" signal lives in the upper nibble (ACK_BYTE_BUSY = 0xC0).
-            // Clearing it on errors converts ACK→NACK and BUSY→NACK+BUSY correctly.
-            _txCurrentByte = (_dlAckRxErrors != 0)
-                                 ? static_cast<uint8_t>(pending & (~ACK_BYTE_BUSY))
-                                 : pending;
+            // Already final: rxHandleTelegramComplete() applied the NAK
+            // downgrade for an incorrect frame when it armed this slot.
+            _txCurrentByte = pending;
             _dlAckEchoSeen = false;
             _txBitPosition = -1;
             _txBytePosition = 0;
@@ -834,6 +868,12 @@ KNX_TIMER_GPIO_HAL_ISR_ATTR uint64_t BitBangDriverTimerIsrT<IsrPolicy>::txHandle
     // the just-received frame so the priority wait runs from its end.
     if (_rxState != RX_IDLE) {
         return bitTimeUs();
+    }
+
+    // The 150-bit-time wait after a BUSY acknowledge (see _txHoldoffUntilUs).
+    // Zero, and so free, on every other path.
+    if (nowUs < _txHoldoffUntilUs) {
+        return _txHoldoffUntilUs - nowUs;
     }
 
     const uint64_t waitTimeUs = bitTimeUs() * _txWaitTime;
@@ -929,24 +969,39 @@ KNX_TIMER_GPIO_HAL_ISR_ATTR bool BitBangDriverTimerIsrT<IsrPolicy>::detectCollis
         return false;
     }
 
+    // Release the bus at once: the other sender's dominant bit has won, and
+    // driving on would corrupt its frame (03_02_02 §2.3 bus access).
+    setTxRecessiveFast();
     (void)queueMessage(MessageType::Collision, 0);
 
-    // Abort this TX attempt on collision and report BUSY to upper layers.
-    // Retrying indefinitely at ISR level can flood the bus when collision
-    // detection is triggered repeatedly.
+    // Losing arbitration is how TP1 shares the bus, not an error, so the
+    // frame is not "failed": it simply goes back to waiting for the bus. The
+    // CSMA gate in txHandleWaitingSlot() holds it until the winner's frame
+    // (and its acknowledge) is over and the bus has been idle for the
+    // priority wait — the same wait a fresh frame gets — and the repeat flag
+    // is left alone because nothing complete went out.
     //
-    // BUSY is not literally what happened — this is arbitration loss, not a
-    // peer reporting itself busy — but it is the outcome the data-link layer
-    // needs: back off and retry, which is exactly right for a frame that lost
-    // the bus. The distinct Collision message above carries the honest signal
-    // for diagnostics. Reporting the two differently would require a TX outcome
-    // that the MAC layer does not have, and pollTransmit() only advances on an
-    // ack-response or deadline-miss event, so dropping this would hang the
-    // transmit state machine.
-    setTxRecessiveFast();
+    // This used to report BUSY upwards. That spent the data link's BUSY
+    // budget on ordinary bus contention, and for a frame with no ACK window
+    // the MAC never looked at the outcome at all: the frame was dropped and
+    // the send reported success.
+    ++_txArbitrationLosses;
+    if (_txTelegramLength != 0u && _txArbitrationLosses < MAX_TX_ARBITRATION_ATTEMPTS) {
+        _txBytePosition = 0;
+        _txBitPosition = -1;
+        // The alarm armed for the end of the lost bit stays: it lands in
+        // txHandleWaitingSlot(), which polls once per bit time until the
+        // receiver is idle again.
+        _txState = TX_WAITING_SLOT;
+        return true;
+    }
+
+    // A bus that wins every time is jammed or shorted. Give up so the data
+    // link can report the failure instead of looping on it forever.
+    const uint8_t losses = _txArbitrationLosses;
     clearTxAttemptState();
     _txState = TX_IDLE;
-    (void)queueMessage(MessageType::TxAckResponse, ACK_BYTE_BUSY);
+    (void)queueMessage(MessageType::TxArbitrationLost, losses);
     return true;
 }
 

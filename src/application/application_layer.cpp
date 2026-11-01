@@ -12,6 +12,7 @@
 #include "knx/application/device_descriptor.hpp"
 #include "knx/application/property_store.hpp"
 #include "knx/application/address_space.hpp"
+#include "knx/application/communication_mode.hpp"
 #include "knx/application/security_access_policy.hpp"
 #include "knx/config.hpp"
 #include "knx/util/log.hpp"
@@ -67,6 +68,31 @@ bool usesApciData6(APCIService service) {
         default:
             return false;
     }
+}
+
+/// The communication modes a received frame may have travelled on.
+///
+/// A set rather than one mode because T_Data_Broadcast and
+/// T_Data_SystemBroadcast both arrive addressed to 0000h, and what tells them
+/// apart (the TP1 control field, or ROUTING_SYSTEM_BROADCAST on IP) is
+/// consumed below the transport layer. Accepting either keeps every
+/// broadcast-mode service working whichever of the two a tool chose; what
+/// matters for P3 is that point-to-point and group frames are told apart from
+/// broadcasts, and that is preserved.
+CommunicationModes receivedCommunicationModes(const transport::TDataFrame& frame)
+{
+    switch (frame.service) {
+        case transport::TDataService::Connected:
+            return modes(CommunicationMode::Connected);
+        case transport::TDataService::Individual:
+            return modes(CommunicationMode::Connectionless);
+        case transport::TDataService::Group:
+            break;
+    }
+    if (frame.destination.raw == 0u) {
+        return CommunicationMode::Broadcast | CommunicationMode::SystemBroadcast;
+    }
+    return modes(CommunicationMode::Multicast);
 }
 
 using ResponsePayload = util::FixedVector<uint8_t, config::MAX_APDU_LENGTH>;
@@ -366,6 +392,7 @@ void ApplicationLayer::close() {
     if (_initialized) {
         // Prevent transport from calling back into a destroyed ApplicationLayer.
         _transport.setReceiveCallback(nullptr);
+        _transport.setConnectionClosedCallback(nullptr);
         _rxQueueHead = 0u;
         _rxQueueCount = 0u;
         _droppedReceiveFrames = 0u;
@@ -713,13 +740,7 @@ void ApplicationLayer::wireServiceCallbacks() {
         [this](const IndividualAddress& destination, AuthorizationLevel level) {
             // KNX access levels are inverted relative to privilege on the
             // wire: 0 = maximum access … 15 = no access.
-            uint8_t wireLevel = 15u;
-            switch (level) {
-                case AuthorizationLevel::Maximum:       wireLevel = 0u;  break;
-                case AuthorizationLevel::Configuration: wireLevel = 1u;  break;
-                case AuthorizationLevel::Management:    wireLevel = 2u;  break;
-                case AuthorizationLevel::None:          wireLevel = 15u; break;
-            }
+            const uint8_t wireLevel = AuthorizationService::toWireLevel(level);
             ResponsePayload payload;
             if (!appendPayloadByte(payload, wireLevel)) {
                 logOversizedServiceResponse("Authorize", 1u);
@@ -803,11 +824,32 @@ void ApplicationLayer::wireAccessPolicy() {
         [this](uint16_t objectType, uint16_t propertyId, bool write) {
             return isPropertyAccessPermitted(objectType, propertyId, write, _requestSecurity);
         });
+
+    // A_Authorize levels (03/03/07 §3.5.7). The authorisation service holds
+    // the current level of each partner; the services compare it with what
+    // the addressed Resource requires. With no keys set every partner is at
+    // level 0, so a device nobody has keyed behaves exactly as before.
+    _propertyServices->setAccessLevelQuery([this](const IndividualAddress& source) {
+        return _authorizationService->currentAccessLevel(source);
+    });
+    _propertyExtServices->setAccessLevelQuery([this](const IndividualAddress& source) {
+        return _authorizationService->currentAccessLevel(source);
+    });
+    _memoryService->setWritePermission([this](const IndividualAddress& source) {
+        return _authorizationService->currentAccessLevel(source) <= _memoryWriteAccessLevel;
+    });
 }
 
 void ApplicationLayer::wireTransportReceiveCallback() {
     _transport.setReceiveCallback([this](const transport::TDataFrame& frame) {
         handleTransportRx(frame);
+    });
+
+    // 03/03/07 §3.5.7: "A current access level shall be valid until the
+    // connection is released". Without this a partner that authorised once
+    // kept its level on every later connection from the same address.
+    _transport.setConnectionClosedCallback([this](const IndividualAddress& partner) {
+        _authorizationService->clearAuthorization(partner);
     });
 }
 
@@ -1094,11 +1136,18 @@ void ApplicationLayer::handleFunctionPropertyExt(const ADataFrame& frame,
 }
 
 void ApplicationLayer::handleAuthorizeRequest(const ADataFrame& frame) {
-    if (frame.data.size() < 4) {
+    // 03/03/07 §3.5.7 Figure 86: one reserved octet ("must be 0"), then the
+    // four-octet key. A four-octet body without the reserved octet is still
+    // read as the bare key, as this layer always did, so a tool that sends
+    // that form keeps getting the same answer.
+    AuthorizationKey key;
+    if (frame.data.size() >= 5) {
+        std::copy(frame.data.begin() + 1, frame.data.begin() + 5, key.begin());
+    } else if (frame.data.size() == 4) {
+        std::copy(frame.data.begin(), frame.data.begin() + 4, key.begin());
+    } else {
         return;
     }
-    AuthorizationKey key;
-    std::copy(frame.data.begin(), frame.data.begin() + 4, key.begin());
     (void)_authorizationService->handleRequest(frame.source, key);
 }
 
@@ -1115,8 +1164,17 @@ void ApplicationLayer::handleRestart(const ADataFrame& frame) {
         return;
     }
 
+    // Bits 4..1 of octet 7 are reserved. "The Management Server (device) shall
+    // check these fields to be 0; if these fields differ from 0 then it shall
+    // ignore the service totally. (No negative response shall be sent.)"
+    constexpr uint8_t kRestartReservedBits = 0x1Eu;
+    if ((frame.apciData & kRestartReservedBits) != 0u) {
+        KNX_LOGW(TAG, "A_Restart from 0x%04X with reserved bits 0x%02X set — ignored",
+                 frame.source.raw, static_cast<unsigned>(frame.apciData & kRestartReservedBits));
+        return;
+    }
+
     const bool masterReset = (frame.apciData & 0x01u) != 0u;
-    const RestartType type = masterReset ? RestartType::MasterReset : RestartType::Basic;
 
     if (masterReset && frame.data.size() < 2) {
         // Erase code + channel number are mandatory for a master reset.
@@ -1125,9 +1183,21 @@ void ApplicationLayer::handleRestart(const ADataFrame& frame) {
         return;
     }
 
-    const auto result = _restartService->handleRequest(frame.source, type);
+    if (!masterReset) {
+        // A Basic Restart is not confirmed (§3.4.2.2).
+        if (_restartService->handleRequest(frame.source, RestartType::Basic).isOk()) {
+            _restartService->executePendingRestart();
+        }
+        return;
+    }
 
-    if (masterReset) {
+    const uint8_t eraseCode = frame.data[0];
+    const uint8_t channel = frame.data[1];
+    const RestartErrorCode errorCode =
+        _restartService->handleMasterResetRequest(frame.source, eraseCode, channel);
+    const bool accepted = (errorCode == RestartErrorCode::NoError);
+
+    {
         // A master reset MUST be answered before the device goes down
         // (§3.4.2.2), otherwise the management client only sees a timeout —
         // ETS reports exactly "The device does not respond".
@@ -1142,11 +1212,10 @@ void ApplicationLayer::handleRestart(const ADataFrame& frame) {
         // spends its whole retry budget on a device that is still booting —
         // ETS then reports the download as failed. config::RESTART_PROCESS_TIME_S
         // is where a product says how long it really needs.
-        const uint8_t errorCode = result.isOk() ? 0x00u : 0xFFu;
         const uint16_t processTime =
-            result.isOk() ? config::RESTART_PROCESS_TIME_S : static_cast<uint16_t>(0u);
+            accepted ? config::RESTART_PROCESS_TIME_S : static_cast<uint16_t>(0u);
         ResponsePayload payload;
-        if (appendPayloadByte(payload, errorCode)
+        if (appendPayloadByte(payload, static_cast<uint8_t>(errorCode))
             && appendPayloadByte(payload, static_cast<uint8_t>(processTime >> 8))
             && appendPayloadByte(payload, static_cast<uint8_t>(processTime & 0xFFu))) {
             const auto sendResult = sendToIndividual(IndividualAddress(frame.source.raw),
@@ -1155,14 +1224,14 @@ void ApplicationLayer::handleRestart(const ADataFrame& frame) {
                                                      _serviceResponseSendOptions);
             KNX_LOGD(TAG,
                      "Master reset from 0x%04X (erase=0x%02X channel=%u) -> response err=0x%02X (%s)",
-                     frame.source.raw, frame.data[0], frame.data[1], errorCode,
+                     frame.source.raw, eraseCode, channel, static_cast<unsigned>(errorCode),
                      sendResult.isOk() ? "ok" : util::errorCodeToString(sendResult.error()));
         } else {
             logOversizedServiceResponse("RestartResponse", 3u);
         }
     }
 
-    if (result.isOk()) {
+    if (accepted) {
         _restartService->executePendingRestart();
     }
 }
@@ -1515,8 +1584,26 @@ void ApplicationLayer::handleTransportRx(const transport::TDataFrame& frame) {
     application::APCIField apciValue = header.apci;
     APCIService service = apciValue.service();
 
-
-
+    // 03/03/07 Table 1: a service that arrives on a communication mode it is
+    // not defined for is ignored, before any handler sees it. Without this an
+    // A_Memory_Write or A_PropertyValue_Write sent to a group address, or as a
+    // broadcast, reached the same handlers as one sent on a connection.
+    //
+    // For a KNX Data Secure frame this checks the inner, decrypted service
+    // against the mode the outer S-A_Data frame arrived on: the RX transform
+    // replaces the TPDU in place and leaves the transport service and the
+    // destination alone, which is the mapping §5 prescribes — the S-AL sits
+    // inside the Application Layer and does not change the communication mode.
+    const CommunicationModes receivedModes = receivedCommunicationModes(frame);
+    if (!isCommunicationModeAllowed(service, receivedModes)) {
+        KNX_LOGW(TAG,
+                 "Service 0x%03X from 0x%04X to 0x%04X ignored: not defined on this communication "
+                 "mode (03/03/07 Table 1)",
+                 static_cast<uint16_t>(service),
+                 frame.source.raw,
+                 frame.destination.raw);
+        return;
+    }
 
     // Service data is APDU payload bytes (after 2-byte header).
     // For services where data6 belongs to the service payload, prepend it first

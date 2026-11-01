@@ -343,6 +343,35 @@ public:
     }
 
     /**
+     * @brief Device Resources some management services act on but this layer
+     *        does not own; the BAU, which holds the interface objects, fills
+     *        them in.
+     */
+    struct ManagementServerHooks {
+        /// Performs Erase Codes 02h…07h of a Master Reset (see RestartService).
+        RestartService::MasterResetCallback masterReset;
+        /// PID_DEVICE_CONTROL bit 2, which makes A_Memory_Write confirmed.
+        MemoryService::VerifyModeProvider verifyMode;
+    };
+
+    void setManagementServerHooks(ManagementServerHooks hooks) {
+        if (_restartService) {
+            _restartService->setMasterResetCallback(std::move(hooks.masterReset));
+        }
+        if (_memoryService) {
+            _memoryService->setVerifyModeProvider(std::move(hooks.verifyMode));
+        }
+    }
+
+    /**
+     * @brief Access level (wire numbering, 0 = maximum) a requester needs for
+     *        A_Memory_Write and A_MemoryExtended_Write. Default 2, the write
+     *        level 03/05/01 gives the configuration Resources. Only bites once
+     *        authorizationService().setKeys() has protected a level.
+     */
+    void setMemoryWriteAccessLevel(uint8_t level) { _memoryWriteAccessLevel = level; }
+
+    /**
      * @brief Install the AD converter read-out behind A_ADC_Read.
      */
     void setAdcReadProvider(AdcReadProvider provider) {
@@ -453,6 +482,7 @@ private:
     RequestSecurity _requestSecurity{};
     SecurityModeProvider _securityModeProvider{};
     AdcReadProvider _adcReadProvider{};
+    uint8_t _memoryWriteAccessLevel{2};
 
     SendOptions _defaultSendOptions{};
     SendOptions _serviceResponseSendOptions{};

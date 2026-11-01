@@ -22,6 +22,7 @@
 #include "knx/product/impl/compiler/endpoint_compiler.hpp"
 #include "knx/util/result.hpp"
 
+#include <algorithm>
 #include <array>
 #include <concepts>
 #include <cstddef>
@@ -504,6 +505,30 @@ public:
             _bau->management().setBackboneKeyCallback(std::move(callback));
         }
     }
+
+    /// Current value of a property of the KNXnet/IP Parameter Object (or any
+    /// reference object); empty before start() or when never written. The
+    /// copy is taken under the object's value lock, so this is safe from the
+    /// routing receive task.
+    std::vector<uint8_t> referenceObjectPropertyValue(InterfaceObjectType objectType,
+                                                      application::PropertyID propertyId) const
+    {
+        if (!_bau) {
+            return {};
+        }
+        return _bau->management().referenceObjectPropertyValue(objectType, propertyId);
+    }
+
+    /// Seed a reference object property, through the path ETS writes it.
+    util::Result<void> setReferenceObjectProperty(InterfaceObjectType objectType,
+                                                  application::PropertyID propertyId,
+                                                  std::span<const uint8_t> value)
+    {
+        if (!_bau) {
+            return util::ErrorCode::OperationNotReady;
+        }
+        return _bau->management().setReferenceObjectProperty(objectType, propertyId, value);
+    }
 #endif
 
     /// The coupler, or nullptr when this is an ordinary single-port device.
@@ -686,6 +711,23 @@ public:
     bool hasToolKey() const
     {
         return _bau && _bau->securityObject().hasToolKey();
+    }
+
+    /// Returns true if the Tool Key currently in force is @p key.
+    ///
+    /// Exists so firmware can tell whether the factory key it holds is the one
+    /// the device would actually accept, without a getter that hands the key
+    /// itself back out. hasToolKey() only says "some key is set", which cannot
+    /// distinguish the factory key from one ETS installed -- and a device
+    /// certificate printed for the wrong one sends an installer chasing an
+    /// "unknown key" error that no amount of re-entering will fix.
+    bool toolKeyMatches(const std::array<uint8_t, 16>& key) const
+    {
+        if (!_bau) {
+            return false;
+        }
+        const auto& inForce = _bau->securityObject().getToolKey();
+        return std::equal(inForce.begin(), inForce.end(), key.begin());
     }
 
     /// Returns true if KNX Data Secure mode is currently enabled.

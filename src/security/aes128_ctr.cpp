@@ -23,6 +23,16 @@ util::Result<void> Aes128Ctr::crypt(const Key& key,
     if (keyResult.isError()) {
         return keyResult.error();
     }
+    return crypt(aes, counter0, in, out);
+}
+
+util::Result<void> Aes128Ctr::crypt(Aes128BlockCipher& aes,
+                                    const Counter& counter0,
+                                    std::span<const uint8_t> in,
+                                    std::span<uint8_t> out) {
+    if (out.size() != in.size()) {
+        return util::ErrorCode::BufferTooSmall;
+    }
 
     // CTR built from block encryption rather than a backend CTR helper: the
     // counter is incremented over the whole 16 octets (Ctrj = Ctrj-1 + 1,

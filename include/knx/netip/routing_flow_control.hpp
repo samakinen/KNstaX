@@ -57,6 +57,11 @@ public:
 
     static constexpr uint32_t kBusyCounterHoldoffMs = 10;   ///< §4.3 note 3
     static constexpr uint32_t kBusyCounterDecayStepMs = 5;  ///< §4.3 tbd
+    /// Largest tw honoured from one ROUTING_BUSY: the most a sender may ask for
+    /// (03_08_05 §2.3.5).
+    static constexpr uint32_t kMaxBusyWaitMs = 100;
+    /// Largest tw + trandom from one ROUTING_BUSY, however large N has grown.
+    static constexpr uint32_t kMaxTotalBusyWaitMs = 1000;
 
     RoutingFlowControl() noexcept = default;
     explicit RoutingFlowControl(Config config) noexcept : config_(config) {}

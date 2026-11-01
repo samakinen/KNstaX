@@ -879,6 +879,19 @@ void BusAccessUnit::wireManagementServices()
             return util::Result<void>::ok();
         });
 
+    // Master Reset erase codes and Verify Mode both act on interface objects,
+    // which live here rather than in the application layer.
+    application::ApplicationLayer::ManagementServerHooks hooks;
+    hooks.masterReset = [this](application::EraseCode eraseCode) {
+        return applyMasterReset(eraseCode);
+    };
+    // 03/05/01 §4.2.14: Verify Mode is bit 2 of PID_DEVICE_CONTROL.
+    hooks.verifyMode = [this]() {
+        constexpr uint8_t kVerifyModeBit = 0x04u;
+        return (_deviceObject.getDeviceControl() & kVerifyModeBit) != 0u;
+    };
+    _stackPort->setManagementServerHooks(std::move(hooks));
+
     // --- Serial-number-addressed commissioning ----------------------------
     // PID_SERIAL_NUMBER already carries the device's KNX serial number (this
     // stack derives it from the MAC), so the commissioning service can simply

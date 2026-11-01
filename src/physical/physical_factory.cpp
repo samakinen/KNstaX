@@ -172,10 +172,8 @@ std::unique_ptr<IpRoutingPhysical> createConfiguredIpRoutingPhysical(platform::N
     phys->setMulticast(multicastGroup, port, interfaceAddress);
 #if KNX_SECURE_ENABLED
     if (secureConfig.enabled) {
-        phys->setSecureRouting(secureConfig.groupKey,
-                               secureConfig.serial,
-                               secureConfig.tag,
-                               secureConfig.initialSeq);
+        phys->setSecureRoutingSerial(secureConfig.serial);
+        (void)phys->applySecureRouting(secureConfig.groupKey, IpRoutingPhysical::KeySource::Restored);
     }
 #else
     (void)secureConfig;

@@ -95,6 +95,30 @@ AuthorizationLevel AuthorizationService::getCurrentLevel(const IndividualAddress
     return device->level;
 }
 
+uint8_t AuthorizationService::currentAccessLevel(const IndividualAddress& address) const {
+    if (!_keysConfigured) {
+        return toWireLevel(AuthorizationLevel::Maximum);
+    }
+
+    const auto* device = findAuthorizedDevice(address);
+    if (device != nullptr && !isExpired_(*device, currentTime_())) {
+        return toWireLevel(device->level);
+    }
+
+    // Not authorised: the most privileged level still on the default key.
+    static constexpr AuthorizationKey kUnprotected = {0xFF, 0xFF, 0xFF, 0xFF};
+    if (_maximumKey == kUnprotected) {
+        return toWireLevel(AuthorizationLevel::Maximum);
+    }
+    if (_configurationKey == kUnprotected) {
+        return toWireLevel(AuthorizationLevel::Configuration);
+    }
+    if (_managementKey == kUnprotected) {
+        return toWireLevel(AuthorizationLevel::Management);
+    }
+    return toWireLevel(AuthorizationLevel::None);
+}
+
 void AuthorizationService::clearAuthorization(const IndividualAddress& address) {
     auto* device = findAuthorizedDevice(address);
     if (device == nullptr) {

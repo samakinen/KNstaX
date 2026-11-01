@@ -38,6 +38,10 @@ public:
     using QueueNotifyCallback = Tp1MediumBackend::QueueNotifyCallback;
 
     static constexpr size_t RX_QUEUE_CAPACITY = 32;
+    /// Free slots kept back when the queue fills: once fewer remain, the ISR
+    /// answers new frames with BUSY instead of ACK. They absorb frames that
+    /// were acknowledged before the busy state reached the ISR.
+    static constexpr size_t RX_BUSY_RESERVE = 4;
     static constexpr size_t MAX_RX_FRAME_SIZE = 256;
     static constexpr uint32_t DEFAULT_TX_OUTCOME_TIMEOUT_MS = 20u;
 
@@ -59,6 +63,9 @@ public:
     util::Result<std::vector<uint8_t>> receiveFrame(uint32_t timeoutMs);
     util::Result<void> beginReceive(uint32_t timeoutMs);
     util::Result<ProgressState> pollReceive();
+    /// The frame the last Complete pollReceive() handed out. The span points
+    /// into the receive queue and stays valid until the next beginReceive()
+    /// or pollReceive(); call those from the same consumer task only.
     util::Result<std::span<const uint8_t>> receivedFrameView();
 
     void setReceiveCallback(ReceiveCallback callback, void* context);
@@ -105,6 +112,10 @@ private:
     static void onTp1Event(const Tp1RxEvent& event, void* context);
     void handleTp1Event(const Tp1RxEvent& event);
     void handleLinkStateEvent(const LinkStatus& status);
+    /// Free the slot receivedFrameView() points into, then re-evaluate busy.
+    void releaseHeldFrameLocked();
+    /// Tell the ISR to answer BUSY while the queue is nearly full.
+    void updateLocalBusyLocked();
 
     static PhysicalLayerState mapState(Tp1MediumState state);
     /// @param decoded Optional out-parameter receiving the decoded frame, so
@@ -132,10 +143,13 @@ private:
     std::array<BufferedFrame, RX_QUEUE_CAPACITY> _rxFrames;
     size_t _rxHead;
     size_t _rxCount;
+    // The slot at _rxHead is lent out through receivedFrameView(); it is
+    // still counted in _rxCount so the producer cannot overwrite it.
+    bool _rxHeld{false};
     size_t _rxOverflowDrops{0};
+    bool _localBusyAsserted{false};
     bool _receiveActive{false};
     uint64_t _receiveDeadlineMs{0};
-    std::array<uint8_t, MAX_RX_FRAME_SIZE> _lastReceivedFrame{};
     size_t _lastReceivedFrameLength{0};
 };
 

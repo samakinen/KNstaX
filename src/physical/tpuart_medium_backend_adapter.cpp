@@ -4,6 +4,9 @@
 /**
  * @file tpuart_medium_backend_adapter.cpp
  * @brief TP1 medium backend adapter for TPUART-class physical implementations
+ *
+ * @warning The only TPUART physical behind this adapter (TpuartPhysical) is
+ * known to be broken; see tpuart_physical.hpp. Use the bit-bang backend.
  */
 
 #include "knx/physical/tpuart_medium_backend_adapter.hpp"

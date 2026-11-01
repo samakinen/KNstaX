@@ -158,6 +158,7 @@ util::Result<void> ConnectionTable::removeConnection(ConnectionIndex index) {
     if (it != _connections.end()) {
         uint16_t addr = (*it)->remoteAddress.raw;
         _connections.erase(it);
+        notifyClosed(IndividualAddress(addr));
         KNX_LOGD(TAG, "Removed connection %d (address 0x%04X)", index.value(), addr);
         return util::Result<void>::ok();
     }
@@ -174,8 +175,11 @@ util::Result<void> ConnectionTable::removeConnectionByAddress(const IndividualAd
     
     if (it != _connections.end()) {
         ConnectionIndex index = (*it)->index;
+        // A copy: the caller may have passed the entry's own field.
+        const IndividualAddress remote = remoteAddress;
         _connections.erase(it);
-        KNX_LOGD(TAG, "Removed connection %d (address 0x%04X)", index.value(), remoteAddress.raw);
+        notifyClosed(remote);
+        KNX_LOGD(TAG, "Removed connection %d (address 0x%04X)", index.value(), remote.raw);
         return util::Result<void>::ok();
     }
     
@@ -200,8 +204,9 @@ size_t ConnectionTable::checkTimeouts(uint32_t currentTimeMs, uint32_t timeoutMs
             KNX_LOGW(TAG, "Connection %d to 0x%04X timed out (%lu ms)",
                      entry->index.value(), entry->remoteAddress.raw,
                      static_cast<unsigned long>(elapsed));
-            
+            const IndividualAddress remote = entry->remoteAddress;
             _connections.erase(_connections.begin() + i);
+            notifyClosed(remote);
             timedOut++;
         }
     }
@@ -267,53 +272,72 @@ uint8_t ConnectionTable::getRetransmitCount(ConnectionIndex index) const {
     return (it != _connections.end()) ? (*it)->retransmitCount : 0;
 }
 
-util::FixedVector<ConnectionIndex, ConnectionTable::MAX_CONNECTIONS> ConnectionTable::processRetransmissions(uint32_t currentTimeMs) {
+util::FixedVector<ConnectionIndex, ConnectionTable::MAX_CONNECTIONS> ConnectionTable::processRetransmissions(
+    uint32_t currentTimeMs,
+    util::FixedVector<ClosedConnection, MAX_CONNECTIONS>* closed) {
     util::FixedVector<ConnectionIndex, ConnectionTable::MAX_CONNECTIONS> needsRetransmit;
-    
-    for (auto& entry : _connections) {
+
+    auto it = _connections.begin();
+    while (it != _connections.end()) {
+        auto& entry = *it;
         if (!entry || !entry->pendingRetransmission) {
+            ++it;
             continue;
         }
-        
-        // Check if retransmit timeout has elapsed
-        uint32_t timeSinceTx = currentTimeMs - entry->lastTxTimeMs;
-        if (timeSinceTx >= entry->retransmitTimeoutMs) {
-            // Check if we can retry
-            if (entry->retransmitCount < entry->maxRetries) {
-                (void)needsRetransmit.push_back(entry->index);
-                // Double timeout for exponential backoff (capped)
-                entry->retransmitTimeoutMs =
-                    (entry->retransmitTimeoutMs * 2 <= constants::timing::CONNECTION_TIMEOUT_MS)
-                        ? (entry->retransmitTimeoutMs * 2)
-                        : constants::timing::CONNECTION_TIMEOUT_MS;
-            } else {
-                // Max retries exceeded - clear pending
-                (void)resetRetransmitState(entry->index);
-                KNX_LOGW(TAG, "Max retransmits exceeded for connection %d", entry->index.value());
-            }
+
+        // The acknowledge timeout is fixed (03_03_04 §5, A7/A9 "start the
+        // acknowledge timeout timer"); each repetition waits the same 3 s.
+        const uint32_t timeSinceTx = currentTimeMs - entry->lastTxTimeMs;
+        if (timeSinceTx < entry->retransmitTimeoutMs) {
+            ++it;
+            continue;
         }
+
+        if (entry->retransmitCount < entry->maxRetries) {
+            // E17 → A9: repeat the stored frame.
+            (void)needsRetransmit.push_back(entry->index);
+            ++it;
+            continue;
+        }
+
+        // E18 (acknowledge timeout with rep_count >= max_rep_count) → A6:
+        // CLOSED, with a T_Disconnect to the partner. Clearing the pending
+        // frame but keeping the connection, as this used to do, left OPEN_IDLE
+        // with a sequence number the partner never saw acknowledged, so every
+        // later frame on the connection was out of step.
+        KNX_LOGW(TAG, "Connection %d to 0x%04X: no T_ACK after %u repetitions, closing",
+                 entry->index.value(), entry->remoteAddress.raw,
+                 static_cast<unsigned>(entry->retransmitCount));
+        if (closed) {
+            (void)closed->push_back(ClosedConnection{entry->index, entry->remoteAddress, entry->priority});
+        }
+        const IndividualAddress remote = entry->remoteAddress;
+        it = _connections.erase(it);
+        notifyClosed(remote);
     }
-    
+
     return needsRetransmit;
 }
 
-util::FixedVector<ConnectionIndex, ConnectionTable::MAX_CONNECTIONS> ConnectionTable::processTimeouts(uint32_t currentTimeMs, uint32_t timeoutMs) {
-    util::FixedVector<ConnectionIndex, ConnectionTable::MAX_CONNECTIONS> timedOut;
+util::FixedVector<ClosedConnection, ConnectionTable::MAX_CONNECTIONS> ConnectionTable::processTimeouts(uint32_t currentTimeMs, uint32_t timeoutMs) {
+    util::FixedVector<ClosedConnection, ConnectionTable::MAX_CONNECTIONS> timedOut;
     auto it = _connections.begin();
-    
+
     while (it != _connections.end()) {
         auto& entry = *it;
         if (!entry) {
             ++it;
             continue;
         }
-        
+
         uint32_t idleTime = currentTimeMs - entry->lastActivityTimeMs;
         if (idleTime >= timeoutMs) {
-            (void)timedOut.push_back(entry->index);
+            (void)timedOut.push_back(ClosedConnection{entry->index, entry->remoteAddress, entry->priority});
             KNX_LOGW(TAG, "Connection %d timed out after %lums idle",
                      entry->index.value(), static_cast<unsigned long>(idleTime));
+            const IndividualAddress remote = entry->remoteAddress;
             it = _connections.erase(it);
+            notifyClosed(remote);
         } else {
             ++it;
         }

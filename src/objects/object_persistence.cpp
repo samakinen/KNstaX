@@ -116,16 +116,15 @@ public:
             return util::Result<void>::ok();
         }
         
-        // Initialize NVS
+        // NVS belongs to the application, which initialises it first and alone
+        // decides whether an unreadable partition may be erased: it holds Wi-Fi
+        // credentials and the application's own settings as well as this
+        // stack's state. Calling init again here is harmless when that has
+        // happened; when it fails, the error goes back rather than an erase.
         esp_err_t err = nvs_flash_init();
-        if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-            // NVS partition was truncated, erase and re-init
-            ESP_ERROR_CHECK(nvs_flash_erase());
-            err = nvs_flash_init();
-        }
-        
         if (err != ESP_OK) {
-            KNX_LOGE(TAG, "Failed to init NVS: %d", err);
+            KNX_LOGE(TAG, "NVS not usable (%s); the application must initialise or repair it",
+                     esp_err_to_name(err));
             return util::Result<void>::err(util::ErrorCode::OperationFailed);
         }
         

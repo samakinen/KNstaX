@@ -189,6 +189,16 @@ util::Result<void> X25519::sharedSecret(const Scalar& priv, const PublicKey& pee
     if (!ok) {
         return util::ErrorCode::OperationFailed;
     }
+    // A low-order peer point gives an all-zero secret whatever our private
+    // key, so a session keyed from it is known to anyone (RFC 7748 §6.1:
+    // implementations MAY check for it and abort).
+    uint8_t any = 0;
+    for (const uint8_t octet : secret) {
+        any = static_cast<uint8_t>(any | octet);
+    }
+    if (any == 0) {
+        return util::ErrorCode::InvalidParameter;
+    }
     return util::Result<void>::ok();
 }
 

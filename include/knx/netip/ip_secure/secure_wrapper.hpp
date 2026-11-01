@@ -14,6 +14,9 @@
 #include <span>
 
 namespace knx {
+namespace security {
+class Aes128BlockCipher;
+}
 namespace netip {
 namespace ip_secure {
 
@@ -29,6 +32,7 @@ public:
     static constexpr uint8_t kHeaderLen = 0x06;
     static constexpr uint8_t kVersion = 0x10;
     static constexpr NetIpServiceType kServiceTypeSecureWrapper = NetIpServiceType(0x0950);
+    static constexpr NetIpServiceType kServiceTypeTimerNotify = NetIpServiceType(0x0955);
 
     static constexpr size_t kSeqLen = 6;
     static constexpr size_t kSerialLen = 6;
@@ -38,6 +42,21 @@ public:
     // Total overhead excluding encrypted payload.
     // header(6) + sid(2) + seq(6) + serial(6) + tag(2) + mac(16)
     static constexpr size_t kOverhead = 38;
+
+    /// The header's total-length field is 16 bits wide.
+    static constexpr size_t kMaxTotalLen = 0xFFFF;
+
+    /// TIMER_NOTIFY is fixed-length: header(6) + timer(6) + serial(6) + tag(2)
+    /// + MAC(16) (03_08_09 §2.2.2.4.2).
+    static constexpr size_t kTimerNotifyLen = 36;
+
+    /// The security information of a TIMER_NOTIFY, all of which is sent in
+    /// the clear and covered by the MAC.
+    struct TimerNotify {
+        std::array<uint8_t, kSeqLen> timer{};
+        std::array<uint8_t, kSerialLen> serial{};
+        std::array<uint8_t, kTagLen> tag{};
+    };
 
     struct Parsed {
         SessionId sessionId{SessionId::invalid()};
@@ -65,6 +84,18 @@ public:
                                      std::span<const uint8_t> inner,
                                      std::span<uint8_t> outWrapper);
 
+    /// As above, with a cipher the caller has already keyed. A security
+    /// context that lives as long as its key uses this so the key schedule is
+    /// built once per key rather than two or three times per datagram.
+    static util::Result<size_t> wrap(knx::security::Aes128BlockCipher& keyedCipher,
+                                     SessionId sessionId,
+                                     const std::array<uint8_t, kSeqLen>& seq,
+                                     const std::array<uint8_t, kSerialLen>& serial,
+                                     const std::array<uint8_t, kTagLen>& tag,
+                                     const std::array<uint8_t, 4>& counterSuffix,
+                                     std::span<const uint8_t> inner,
+                                     std::span<uint8_t> outWrapper);
+
     // Unwrap and authenticate a SecureWrapper. Returns false on parse, decrypt, or MAC failure.
     //
     // For routing, set expectedSessionId=0.
@@ -73,6 +104,26 @@ public:
                                                 SessionId expectedSessionId,
                                                 std::span<const uint8_t> wrapper,
                                                 std::span<uint8_t> outPlaintext);
+
+    /// As above, with a pre-keyed cipher, and handing back the security
+    /// information of a frame that verified. `parsedOut` is written only on
+    /// success. On any failure after decryption started, the plaintext span is
+    /// zeroed: it holds unauthenticated data at that point.
+    static util::Result<size_t> unwrapAndVerify(knx::security::Aes128BlockCipher& keyedCipher,
+                                                SessionId expectedSessionId,
+                                                std::span<const uint8_t> wrapper,
+                                                std::span<uint8_t> outPlaintext,
+                                                Parsed* parsedOut);
+
+    /// Build a TIMER_NOTIFY (0955h) into `out`; returns kTimerNotifyLen.
+    static util::Result<size_t> encodeTimerNotify(knx::security::Aes128BlockCipher& keyedCipher,
+                                                  const TimerNotify& notify,
+                                                  std::span<uint8_t> out);
+
+    /// Parse and authenticate a TIMER_NOTIFY. Anything but exactly 36 octets,
+    /// or a MAC that does not verify, is an error (03_08_09 §2.2.2.4.4).
+    static util::Result<TimerNotify> decodeTimerNotify(knx::security::Aes128BlockCipher& keyedCipher,
+                                                       std::span<const uint8_t> datagram);
 
 private:
     static util::Result<void> decodeHeader_(std::span<const uint8_t> in, NetIpServiceType& serviceType, uint16_t& totalLen);

@@ -518,8 +518,7 @@ private:
                                 AddressType destinationType);
     bool enqueueInboundGroupEvent(MessageKind kind,
                                   const GroupAddress& destination,
-                                  std::span<const uint8_t> data,
-                                  std::span<const GroupObjectIndex> associatedObjects);
+                                  std::span<const uint8_t> data);
     void processInboundGroupEvents();
     void clearInboundGroupEvents();
     util::Result<void> sendAutomaticResponseImmediate(const GroupAddress& destination,
@@ -540,6 +539,12 @@ private:
     WorkAvailableCallback _workAvailableCallback{};
     bool _hadImmediateWork{false};
     bool _restoringPersistentState{false};
+    /// The address init() was given: the medium's default IA that Erase
+    /// Codes 02h and 03h restore (03/05/02 Table 4).
+    IndividualAddress _defaultIndividualAddress{0xFFFFu};
+    /// Reset the Resources @p eraseCode names and persist the result; the
+    /// restart that follows boots into it. See bau_management.cpp.
+    util::Result<void> applyMasterReset(application::EraseCode eraseCode);
     std::unique_ptr<platform::Queue> _inboundGroupEventQueue;
     std::unique_ptr<BusAccessStackPort> _stackPort;
     std::unique_ptr<PropertyAccessBridge> _propertyAccessBridge;
@@ -995,6 +1000,9 @@ public:
     /// refuses every request and the device answers a master reset with an
     /// error code instead of restarting.
     virtual void setRestartHandler(application::RestartService::RestartCallback handler) = 0;
+    /// Install the device-side Resources behind Master Reset erase codes and
+    /// Verify Mode (see ApplicationLayer::ManagementServerHooks).
+    virtual void setManagementServerHooks(application::ApplicationLayer::ManagementServerHooks hooks) = 0;
     virtual void processBackgroundWork() = 0;
     virtual util::Result<void> sendDataLinkFrame(const datalink::LDataFrame& frame) = 0;
     virtual void setDataLinkPromiscuousMode(datalink::PromiscuousMode mode) = 0;

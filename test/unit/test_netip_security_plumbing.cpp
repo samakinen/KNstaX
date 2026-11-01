@@ -3,7 +3,7 @@
 
 #include "unity.h"
 
-#include "knx/netip/netip_security.hpp"
+#include "knx/netip/routing_security.hpp"
 #include "knx/netip/routing.hpp"
 #include "knx/netip/routing_endpoint.hpp"
 #include "knx/netip/netip_config.hpp"
@@ -35,9 +35,29 @@ namespace {
 /// that is what lets discovery and system broadcasts stay readable on a secured
 /// group — so a stub that emitted arbitrary bytes would be testing a transport
 /// that cannot exist.
-class PrefixSecurity final : public NetIpSecurity {
+class PrefixSecurity final : public RoutingSecurity {
 public:
     static constexpr size_t kHeaderLen = KnxNetIpCodec::kHeaderLen;
+
+    // TIMER_NOTIFY plumbing: what the endpoint handed in, and a canned frame
+    // to hand out when `notifyDue` is set.
+    util::Result<void> handleTimerNotify(std::span<const uint8_t> datagram) override {
+        timerNotifiesHandled.emplace_back(datagram.begin(), datagram.end());
+        return util::Result<void>::ok();
+    }
+
+    util::Result<size_t> takeDueTimerNotify(std::span<uint8_t> out) override {
+        if (!notifyDue) return size_t{0};
+        notifyDue = false;
+        std::copy(cannedNotify.begin(), cannedNotify.end(), out.begin());
+        return cannedNotify.size();
+    }
+
+    uint32_t millisecondsUntilTimerNotify() override { return notifyDue ? 0u : 60000u; }
+
+    std::vector<std::vector<uint8_t>> timerNotifiesHandled;
+    bool notifyDue{false};
+    std::array<uint8_t, 36> cannedNotify{0x06, 0x10, 0x09, 0x55, 0x00, 0x24};
 
     util::Result<size_t> protect(std::span<const uint8_t> in, std::span<uint8_t> out) override {
         if (out.size() < kHeaderLen + in.size()) return util::ErrorCode::BufferTooSmall;
@@ -217,9 +237,160 @@ void test_routing_endpoint_calls_security_wrapper_on_send_and_receive(void)
     ep.close();
 }
 
+namespace {
+
+struct OpenEndpoint {
+    TestNetwork net;
+    RoutingEndpoint ep;
+
+    explicit OpenEndpoint(RoutingSecurity* security)
+    {
+        RoutingEndpoint::Options opt;
+        opt.multicastGroup = knx::IpAddress::fromOctets(239, 255, 250, 1);
+        opt.port = NetIpPort(knx::netip::config::kDefaultPort);
+        opt.interfaceAddress = knx::IpAddress::fromOctets(127, 0, 0, 1);
+        opt.security = security;
+        TEST_ASSERT_TRUE(ep.open(net, opt).isOk());
+    }
+};
+
+std::array<uint8_t, RoutingCodec::ROUTING_BUSY_FRAME_LEN> busyFrame(uint16_t waitMs)
+{
+    std::array<uint8_t, RoutingCodec::ROUTING_BUSY_FRAME_LEN> pkt{};
+    const RoutingBusyInfo info{.deviceState = 0, .waitTimeMs = waitMs, .controlField = 0};
+    TEST_ASSERT_TRUE(RoutingCodec::encodeRoutingBusy(info, pkt).isOk());
+    return pkt;
+}
+
+} // namespace
+
+// A5: 03_08_09 §2.2.1.4.5 — a secured group takes its routing service family
+// wrapped. A plain ROUTING_BUSY used to be honoured, so anyone on the LAN could
+// stop every secured sender for up to 65 s per frame.
+void test_plain_routing_busy_is_ignored_on_a_secured_group(void)
+{
+    PrefixSecurity sec;
+    OpenEndpoint o(&sec);
+
+    o.net.sock->pushRx(busyFrame(100));
+    std::array<uint8_t, kMaxCemiLDataSize> cemi{};
+    const auto res = o.ep.receive(cemi, 10);
+    TEST_ASSERT_TRUE(res.isError());
+    TEST_ASSERT_EQUAL_UINT32(0, static_cast<uint32_t>(o.ep.routingBusySeen()));
+    TEST_ASSERT_FALSE(o.ep.isSendBlocked());
+    TEST_ASSERT_EQUAL_UINT32(1, static_cast<uint32_t>(o.ep.plainOnSecuredGroupDropped()));
+}
+
+void test_plain_routing_lost_message_is_ignored_on_a_secured_group(void)
+{
+    PrefixSecurity sec;
+    OpenEndpoint o(&sec);
+
+    std::array<uint8_t, RoutingCodec::ROUTING_LOST_MESSAGE_FRAME_LEN> pkt{};
+    TEST_ASSERT_TRUE(RoutingCodec::encodeRoutingLostMessage(RoutingLostMessageInfo{0, 5}, pkt).isOk());
+    o.net.sock->pushRx(pkt);
+    std::array<uint8_t, kMaxCemiLDataSize> cemi{};
+    TEST_ASSERT_TRUE(o.ep.receive(cemi, 10).isError());
+    TEST_ASSERT_EQUAL_UINT32(0, static_cast<uint32_t>(o.ep.routingLostMessagesSeen()));
+}
+
+void test_wrapped_routing_busy_is_honoured_on_a_secured_group(void)
+{
+    PrefixSecurity sec;
+    OpenEndpoint o(&sec);
+
+    const auto plain = busyFrame(100);
+    std::vector<uint8_t> wrapped(plain.size() + PrefixSecurity::kHeaderLen);
+    TEST_ASSERT_TRUE(sec.protect(plain, wrapped).isOk());
+    o.net.sock->pushRx(wrapped);
+
+    std::array<uint8_t, kMaxCemiLDataSize> cemi{};
+    TEST_ASSERT_TRUE(o.ep.receive(cemi, 10).isOk());
+    TEST_ASSERT_EQUAL_UINT32(1, static_cast<uint32_t>(o.ep.routingBusySeen()));
+    TEST_ASSERT_TRUE(o.ep.isSendBlocked());
+}
+
+// A5: tw "SHALL not exceed 100 ms" (03_08_05 §2.3.5). 65 535 ms as sent was
+// obeyed before.
+void test_routing_busy_wait_is_capped(void)
+{
+    OpenEndpoint o(nullptr);
+    o.net.sock->pushRx(busyFrame(0xFFFF));
+    std::array<uint8_t, kMaxCemiLDataSize> cemi{};
+    TEST_ASSERT_TRUE(o.ep.receive(cemi, 10).isOk());
+    TEST_ASSERT_TRUE(o.ep.isSendBlocked());
+    TEST_ASSERT_TRUE(o.ep.millisecondsUntilSendable() <= RoutingFlowControl::kMaxTotalBusyWaitMs);
+}
+
+// A6: the random back-off draws from the injected source. A source that
+// always answers "maximum" must lengthen the wait beyond tw; before, the
+// source was stored and never read, and the wait was always exactly tw.
+void test_routing_busy_backoff_uses_the_random_source(void)
+{
+    OpenEndpoint o(nullptr);
+    o.ep.setRandomSource([](std::span<uint8_t> out) { std::fill(out.begin(), out.end(), 0xFF); });
+    o.net.sock->pushRx(busyFrame(20));
+    std::array<uint8_t, kMaxCemiLDataSize> cemi{};
+    TEST_ASSERT_TRUE(o.ep.receive(cemi, 10).isOk());
+    // tw = 20 ms, trandom ~ 1 * N(=1) * 50 ms.
+    TEST_ASSERT_TRUE(o.ep.millisecondsUntilSendable() > 40u);
+}
+
+// A2: TIMER_NOTIFY reaches the security context; without one it is ignored
+// (03_08_09 §2.2.1.4.5: "no TimerNotify frames may be sent or received").
+void test_timer_notify_is_handed_to_the_security_context(void)
+{
+    PrefixSecurity sec;
+    OpenEndpoint o(&sec);
+
+    o.net.sock->pushRx(sec.cannedNotify);
+    std::array<uint8_t, kMaxCemiLDataSize> cemi{};
+    const auto res = o.ep.receive(cemi, 10);
+    TEST_ASSERT_TRUE(res.isOk());
+    TEST_ASSERT_TRUE(res.value().kind == RoutingEndpoint::InboundKind::None);
+    TEST_ASSERT_EQUAL_UINT32(1, static_cast<uint32_t>(sec.timerNotifiesHandled.size()));
+    TEST_ASSERT_EQUAL_UINT32(1, static_cast<uint32_t>(o.ep.timerNotifiesAccepted()));
+}
+
+void test_timer_notify_is_ignored_without_secure_routing(void)
+{
+    OpenEndpoint o(nullptr);
+    const std::array<uint8_t, 36> notify{0x06, 0x10, 0x09, 0x55, 0x00, 0x24};
+    o.net.sock->pushRx(notify);
+    std::array<uint8_t, kMaxCemiLDataSize> cemi{};
+    const auto res = o.ep.receive(cemi, 10);
+    TEST_ASSERT_TRUE(res.isOk());
+    TEST_ASSERT_EQUAL_UINT32(0, static_cast<uint32_t>(o.ep.timerNotifiesAccepted()));
+}
+
+// A2: a notify that falls due while the receive loop waits is sent from it,
+// in the clear (it authenticates itself).
+void test_due_timer_notify_is_sent_from_the_receive_loop(void)
+{
+    PrefixSecurity sec;
+    OpenEndpoint o(&sec);
+    sec.notifyDue = true;
+    sec.cannedNotify[35] = 0xA5;
+
+    std::array<uint8_t, kMaxCemiLDataSize> cemi{};
+    (void)o.ep.receive(cemi, 1);
+    TEST_ASSERT_EQUAL_UINT32(36, static_cast<uint32_t>(o.net.sock->lastSent.size()));
+    TEST_ASSERT_EQUAL_UINT8(0x55, o.net.sock->lastSent[3]);
+    TEST_ASSERT_EQUAL_UINT8(0xA5, o.net.sock->lastSent[35]);
+    TEST_ASSERT_EQUAL_UINT32(1, static_cast<uint32_t>(o.ep.timerNotifiesSent()));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_routing_endpoint_calls_security_wrapper_on_send_and_receive);
+    RUN_TEST(test_plain_routing_busy_is_ignored_on_a_secured_group);
+    RUN_TEST(test_plain_routing_lost_message_is_ignored_on_a_secured_group);
+    RUN_TEST(test_wrapped_routing_busy_is_honoured_on_a_secured_group);
+    RUN_TEST(test_routing_busy_wait_is_capped);
+    RUN_TEST(test_routing_busy_backoff_uses_the_random_source);
+    RUN_TEST(test_timer_notify_is_handed_to_the_security_context);
+    RUN_TEST(test_timer_notify_is_ignored_without_secure_routing);
+    RUN_TEST(test_due_timer_notify_is_sent_from_the_receive_loop);
     return UNITY_END();
 }

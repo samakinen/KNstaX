@@ -68,8 +68,14 @@ function(knx_apply_warning_flags target)
         -Wno-unused-parameter
     )
 
+    # -Wundef: the media and security gates are `#if KNX_FEATURE_*` /
+    # `#if KNX_SECURE_*` across dozens of files, and a misspelt or missing macro
+    # silently evaluates to 0 and compiles a feature out. Host builds only, like
+    # -Wpedantic: ESP-IDF's own headers test undefined CONFIG_* macros by
+    # design, and IDF's -Werror=all turns that into a build failure. The host
+    # build compiles the same gates, so it still catches ours.
     if(NOT vendor_headers)
-        target_compile_options(${target} PRIVATE -Wpedantic)
+        target_compile_options(${target} PRIVATE -Wpedantic -Wundef)
     endif()
 
     if(KNX_WARNINGS_AS_ERRORS)

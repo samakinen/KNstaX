@@ -16,6 +16,7 @@
 #include "esp_mac.h"
 #include "esp_log.h"
 #include "knx/util/log.hpp"
+#include <cstdlib>
 #include <cstring>
 
 static const char* TAG = "KNX.Platform";
@@ -49,10 +50,12 @@ void Esp32Platform::restart() {
 }
 
 void Esp32Platform::fatalError() {
-    KNX_LOGE(TAG, "FATAL ERROR - System halted");
-    while (1) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
+    // abort() goes through the ESP-IDF panic handler, which prints a backtrace,
+    // writes a core dump if one is configured, and restarts. Parking the task
+    // in a delay loop instead left the rest of the firmware running against a
+    // stack that had declared itself unusable, with nothing to show why.
+    KNX_LOGE(TAG, "FATAL ERROR - aborting");
+    std::abort();
 }
 
 uint32_t Esp32Platform::uniqueSerialNumber() const {

@@ -144,6 +144,18 @@ void Tp1DataLinkLayer::setOwnAddress(const IndividualAddress& ownAddress) {
 
 void Tp1DataLinkLayer::close() {
     if (_initialized) {
+        // Disconnect the physical layer's wake-ups FIRST. The queue-notify
+        // callback runs in the bit-bang interrupt and notifies _rxTask; with
+        // the task deleted first, an edge arriving in between handed a freed
+        // TCB to vTaskNotifyGiveFromISR. The physical installs the cleared
+        // callback under its interrupt lock, so once this returns no
+        // interrupt can still reach this object.
+        if (_physicalPort.setQueueNotifyCallback) {
+            _physicalPort.setQueueNotifyCallback(_physicalPort.context,
+                physical::Tp1MediumBackend::QueueNotifyCallback(), nullptr);
+        }
+        _physicalPort.setReceiveCallback(_physicalPort.context, physical::ReceiveCallback(), nullptr);
+
         _rxTaskStopRequested.store(true);
         if (_rxTask) {
             // Wake the RX worker out of its notify wait so it observes the stop
@@ -156,14 +168,6 @@ void Tp1DataLinkLayer::close() {
 
         // Ensure no further upper-layer callbacks will be invoked while tearing down.
         _rxCallback.store(nullptr, std::memory_order_release);
-
-        // Clear the physical layer's receive and queue callbacks to avoid callbacks into this
-        // object after we've stopped the RX task.
-        _physicalPort.setReceiveCallback(_physicalPort.context, physical::ReceiveCallback(), nullptr);
-        if (_physicalPort.setQueueNotifyCallback) {
-            _physicalPort.setQueueNotifyCallback(_physicalPort.context,
-                physical::Tp1MediumBackend::QueueNotifyCallback(), nullptr);
-        }
 
         _physicalPort.close(_physicalPort.context);
         _initialized = false;
@@ -232,6 +236,18 @@ util::Result<void> Tp1DataLinkLayer::beginTransmit(const LDataFrame& frame) {
     return util::Result<void>::ok();
 }
 
+bool Tp1DataLinkLayer::txFrameIsGroupAddressed() const {
+    // Standard frame: address type in the length octet. Extended: in CTRLE
+    // (03_02_02 §2.2.5.3). Only the individual/group decision is needed, so
+    // the frame is not decoded again.
+    if (_txOperation.length <= LENGTH_POS) {
+        return false;
+    }
+    const bool standardFrame = (_txOperation.buffer[CTRL_FIELD_POS] & CTRL_FRAME_TYPE) != 0u;
+    const size_t addressTypePos = standardFrame ? LENGTH_POS : size_t{1};
+    return (_txOperation.buffer[addressTypePos] & DEST_ADDR_TYPE) != 0u;
+}
+
 // Clear the "not repeated" flag on the buffered TX frame and fix up the FCS.
 // The control octet is covered by the checksum, so flipping the bit without
 // recomputing it would put a frame on the wire that every receiver discards.
@@ -281,7 +297,15 @@ util::Result<Tp1DataLinkLayer::TxProgressState> Tp1DataLinkLayer::pollTransmit()
                 _txOperation.waitingPhysicalOutcome = false;
                 if (_txOperation.busyAttempt < MAX_BUSY_RETRIES) {
                     ++_txOperation.busyAttempt;
+                    // The 150-bit-time wait 03_02_02 A.8 requires after BUSY
+                    // is enforced by the medium, which owns the bus timeline
+                    // (the bit-bang ISR holds the repetition back); this
+                    // layer has no clock on the production path. The frame
+                    // goes out again as a repetition (A.8, p_class
+                    // "repetition"): receivers that did accept the first copy
+                    // (a group frame has several) must be able to tell.
                     _txOperation.retryNotBeforeMs = _timingPlatform ? (nowMs + 4u) : 0u;
+                    markTxFrameAsRepeated();
                     KNX_LOGD(TAG, "TX busy, retry %u/%u", _txOperation.busyAttempt, MAX_BUSY_RETRIES);
                     return TxProgressState::Pending;
                 }
@@ -307,6 +331,22 @@ util::Result<Tp1DataLinkLayer::TxProgressState> Tp1DataLinkLayer::pollTransmit()
                              timedOut ? "no L_ACK" : "NAK",
                              _txOperation.repeatAttempt, MAX_ACK_RETRIES);
                     return TxProgressState::Pending;
+                }
+                if (timedOut && txFrameIsGroupAddressed()) {
+                    // Nobody acknowledged a group frame even after the
+                    // repetitions. 03_02_02 §2.4.2 would confirm this with
+                    // l_status = not_ok, but a group address without a
+                    // listener on this line is a legitimate configuration
+                    // (an unlinked datapoint, a receiver behind a coupler
+                    // that filters it), and failing every such send would
+                    // turn routine traffic into errors. A NAK is different:
+                    // somebody is there and could not read it, so that still
+                    // fails below.
+                    KNX_LOGD(TAG, "TX group frame unacknowledged after %u repetitions, treated as sent",
+                             _txOperation.repeatAttempt);
+                    _stats.txFrames.fetch_add(1, std::memory_order_relaxed);
+                    finishTxOperation();
+                    return TxProgressState::Success;
                 }
                 KNX_LOGE(TAG, "Physical send failed after %u repetitions: %s",
                          _txOperation.repeatAttempt,
@@ -586,9 +626,8 @@ void Tp1DataLinkLayer::publishAckGroupAddresses() {
     }
 
     // Snapshot the raw group addresses for the physical layer's ISR-side
-    // L_ACK matcher. The ISR table is smaller than ours (it scans per frame,
-    // inside the interrupt); addresses beyond its capacity simply don't get
-    // the early ACK — the sender's link-layer repeat covers the gap.
+    // L_ACK matcher, which holds the whole table (the bit-bang ISR sizes it to
+    // MAX_GROUP_ADDRESSES and sorts it for a binary search).
     std::array<uint16_t, MAX_GROUP_ADDRESSES> raw{};
     size_t count = 0;
     for (const auto& ga : _groupAddresses) {

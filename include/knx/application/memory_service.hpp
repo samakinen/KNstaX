@@ -80,6 +80,22 @@ public:
     using ExtendedResponseCallback =
         std::function<void(const IndividualAddress& dest, const MemoryExtendedResponse& response)>;
 
+    /**
+     * @brief Whether Verify Mode is on (PID_DEVICE_CONTROL bit 2, 03/05/01 §4.2.14.7)
+     *
+     * Decides whether A_Memory_Write is answered at all (03/03/07 §3.5.4).
+     * Left unset, Verify Mode is off, which is its default in the spec.
+     */
+    using VerifyModeProvider = std::function<bool()>;
+
+    /**
+     * @brief Whether @p source holds the access level memory writes require
+     *
+     * Asked for A_Memory_Write and A_MemoryExtended_Write alike. Left unset,
+     * every write is permitted.
+     */
+    using WritePermission = std::function<bool(const IndividualAddress& source)>;
+
     /// Largest payload an extended memory operation may carry.
     ///
     /// 03/03/07 §3.4.9.1 and §3.4.9.2 both cap the services at 250 octets.  The
@@ -117,6 +133,9 @@ public:
     void setExtendedResponseCallback(ExtendedResponseCallback callback) {
         _extendedResponseCallback = std::move(callback);
     }
+
+    void setVerifyModeProvider(VerifyModeProvider provider) { _verifyModeProvider = std::move(provider); }
+    void setWritePermission(WritePermission permission) { _writePermission = std::move(permission); }
 
     /**
      * @brief Handle A_MemoryExtended_Read request
@@ -250,6 +269,16 @@ private:
     WriteCallback _writeCallback;
     ResponseCallback _responseCallback;
     ExtendedResponseCallback _extendedResponseCallback;
+    VerifyModeProvider _verifyModeProvider;
+    WritePermission _writePermission;
+
+    bool verifyModeActive() const { return _verifyModeProvider && _verifyModeProvider(); }
+    bool writePermitted(const IndividualAddress& source) const {
+        return !_writePermission || _writePermission(source);
+    }
+    /// A_Memory_Response with number = 0 and no data: the "there was a
+    /// problem" answer of 03/03/07 §3.5.3 and §3.5.4.
+    void sendNegativeResponse(const IndividualAddress& dest, MemoryAddress address);
 
     void sendResponse(const IndividualAddress& dest, const MemoryResponse& response);
     void sendExtendedResponse(const IndividualAddress& dest, const MemoryExtendedResponse& response);

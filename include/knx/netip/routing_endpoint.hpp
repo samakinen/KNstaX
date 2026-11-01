@@ -6,7 +6,8 @@
 #include "knx/netip/datagram_scratch.hpp"
 #include "knx/netip/ip_secure/secure_wrapper.hpp"
 #include "knx/netip/netip_config.hpp"
-#include "knx/netip/netip_security.hpp"
+#include "knx/netip/random_source.hpp"
+#include "knx/netip/routing_security.hpp"
 #include "knx/netip/routing.hpp"
 #include "knx/netip/routing_flow_control.hpp"
 #include "knx/platform/network_interface.hpp"
@@ -19,6 +20,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <span>
 
 namespace knx {
@@ -47,7 +49,7 @@ public:
         IpAddress interfaceAddress{IpAddress(0)};
         uint8_t ttl{1};
         bool loopback{true};
-        NetIpSecurity* security{nullptr};
+        RoutingSecurity* security{nullptr};
         /// Egress budget and ROUTING_BUSY back-off; see RoutingFlowControl.
         RoutingFlowControl::Config flowControl{};
     };
@@ -99,13 +101,17 @@ public:
      * to apply without a restart. `nullptr` returns the group to plain
      * multicast, which is how it turns it back off.
      *
-     * The pointer is read once per datagram from whichever task is sending or
-     * receiving, so it is stored atomically; the caller owns the object and
-     * must keep any previously installed one alive for as long as this endpoint
-     * is open.
+     * The context is used under a lock by whichever task is sending or
+     * receiving, and this takes the same lock: once it returns, no datagram is
+     * still being processed with the previous context, and the caller may
+     * destroy it. The caller owns the object.
      */
-    void setSecurity(NetIpSecurity* security) noexcept;
-    [[nodiscard]] bool hasSecurity() const noexcept;
+    void setSecurity(RoutingSecurity* security);
+    [[nodiscard]] bool hasSecurity() const;
+
+    /// Randomness for the ROUTING_BUSY back-off (03_08_05 §2.3.5). Without one
+    /// the fallback in random_source.hpp is used, never a fixed value.
+    void setRandomSource(RandomBytesSource source) { random_ = std::move(source); }
 
     util::Result<void> sendRoutingIndication(std::span<const uint8_t> cemi);
 
@@ -120,6 +126,11 @@ public:
     /// Receive and classify one datagram. Control-service datagrams are
     /// dispatched to the handler and reported as `InboundKind::None`, so a
     /// caller draining frames does not have to know they exist.
+    ///
+    /// Under Secure Routing this is also where the multicast timer is kept in
+    /// step: the wait is cut short when a TIMER_NOTIFY falls due, a due one is
+    /// sent before returning, and a received one is handed to the context.
+    /// A caller that keeps receiving therefore keeps the timer synchronised.
     util::Result<Inbound> receive(std::span<uint8_t> cemiOut, uint32_t timeoutMs);
 
     /// True while an outbound datagram would breach the egress budget or a
@@ -158,11 +169,19 @@ public:
     /// SECURE_WRAPPER datagrams discarded because no backbone key is loaded.
     /// Non-zero means a secured installation is talking to an unsecured device.
     uint64_t secureWrappersUnreadable() const { return secureWrappersUnreadable_.load(); }
+    /// Datagrams of the routing family that a secured group only accepts
+    /// wrapped (ROUTING_INDICATION, _BUSY, _LOST_MESSAGE), dropped because
+    /// they arrived in the clear.
+    uint64_t plainOnSecuredGroupDropped() const { return plainOnSecuredDropped_.load(); }
+    uint64_t timerNotifiesSent() const { return timerNotifiesSent_.load(); }
+    uint64_t timerNotifiesAccepted() const { return timerNotifiesAccepted_.load(); }
 
 private:
     util::Result<void> sendCemiCarrier(NetIpServiceType serviceType, std::span<const uint8_t> cemi, bool allowSecure);
     util::Result<void> sendToGroup(std::span<const uint8_t> datagram, bool allowSecure);
     uint32_t nowMs() const;
+    /// Send a TIMER_NOTIFY if one has fallen due. Called with securityMutex_ held.
+    void sendDueTimerNotify(RoutingSecurity& security);
 
     std::unique_ptr<platform::UdpSocket> sock_;
     Options options_;
@@ -181,8 +200,14 @@ private:
     platform::TimingPlatform* timingPlatform_{nullptr};
 
     ControlDatagramHandler controlHandler_{};
-    /// Read on both the send and receive paths, which are different tasks.
-    std::atomic<NetIpSecurity*> security_{nullptr};
+    /// Read on both the send and receive paths, which are different tasks;
+    /// held for as long as a datagram is processed with the context it points to.
+    mutable std::mutex securityMutex_;
+    RoutingSecurity* security_{nullptr};
+    RandomBytesSource random_{};
+    /// The send path (stack task) checks and records sends; the receive task
+    /// records ROUTING_BUSY. Both go through flowMutex_.
+    mutable std::mutex flowMutex_;
     RoutingFlowControl flowControl_{};
 
     std::atomic<uint64_t> lostMessagesSeen_{0};
@@ -190,6 +215,9 @@ private:
     std::atomic<uint64_t> busySeen_{0};
     std::atomic<uint64_t> txDeferred_{0};
     std::atomic<uint64_t> secureWrappersUnreadable_{0};
+    std::atomic<uint64_t> plainOnSecuredDropped_{0};
+    std::atomic<uint64_t> timerNotifiesSent_{0};
+    std::atomic<uint64_t> timerNotifiesAccepted_{0};
     /// Throttle for the warning above. Touched only on the receive task.
     uint32_t secureDropLoggedMs_{0};
     bool secureDropEverLogged_{false};

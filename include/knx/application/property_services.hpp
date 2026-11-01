@@ -100,6 +100,16 @@ using PropertyAccessCheck = util::InplaceFunction<bool(
 ), 32>;
 
 /**
+ * @brief The current access level of a requester, in wire numbering
+ *
+ * 0 is maximum access. A property write is refused when the requester's level
+ * is numerically above the write level in the property's description
+ * (03/03/07 §3.5.7: the current access level decides which writes a partner
+ * may make). Left unset, no level is enforced.
+ */
+using AccessLevelQuery = util::InplaceFunction<uint8_t(const IndividualAddress& source), 32>;
+
+/**
  * @brief Property description info
  */
 struct PropertyDescriptionInfo {
@@ -178,7 +188,12 @@ public:
      * @brief Set the Access Policy gate applied before every property access
      */
     void setAccessCheck(PropertyAccessCheck check);
-    
+
+    /**
+     * @brief Set the source of the requester's access level for writes
+     */
+    void setAccessLevelQuery(AccessLevelQuery query) { _accessLevel = std::move(query); }
+
     /**
      * @brief Handle property value read request
      * 
@@ -301,6 +316,7 @@ private:
     PropertyWriteProvider _writeProvider;
     PropertyDescriptionProvider _descriptionProvider;
     PropertyAccessCheck _accessCheck;
+    AccessLevelQuery _accessLevel;
 };
 
 } // namespace application

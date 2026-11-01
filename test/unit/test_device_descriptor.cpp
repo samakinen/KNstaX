@@ -154,12 +154,25 @@ void test_DeviceDescriptorService_InvalidType(void) {
     auto desc = DeviceDescriptor::createDefault();
     DeviceDescriptorService service(desc);
 
-    service.setResponseCallback([](const knx::IndividualAddress&, uint8_t, std::span<const uint8_t>) {
-        TEST_FAIL_MESSAGE("Should not send response for invalid type");
-    });
+    // 03/03/07 §3.4.2.1: an unsupported descriptor type is answered with type
+    // 3Fh and no data. This test used to require silence, which left the
+    // client waiting out its timeout instead.
+    for (const uint8_t requested : {uint8_t{1}, uint8_t{3}, uint8_t{0x3E}}) {
+        int responses = 0;
+        uint8_t answeredType = 0;
+        size_t answeredLength = 1;
+        service.setResponseCallback([&](const knx::IndividualAddress&, uint8_t type, std::span<const uint8_t> data) {
+            ++responses;
+            answeredType = type;
+            answeredLength = data.size();
+        });
 
-    knx::IndividualAddress source(1, 2, 3);
-    TEST_ASSERT_FALSE(service.handleReadRequest(source, 99).isOk());
+        knx::IndividualAddress source(1, 2, 3);
+        TEST_ASSERT_FALSE(service.handleReadRequest(source, requested).isOk());
+        TEST_ASSERT_EQUAL_INT(1, responses);
+        TEST_ASSERT_EQUAL_HEX8(0x3F, answeredType);
+        TEST_ASSERT_EQUAL_UINT32(0u, answeredLength);
+    }
 }
 
 void test_DeviceDescriptorService_SupportMatrix(void) {

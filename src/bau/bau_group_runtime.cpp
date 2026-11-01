@@ -28,7 +28,6 @@
 #include "knx/datalink/tp1_data_link_layer.hpp"
 #include "knx/platform/raii_resources.hpp"
 #include "knx/physical/tp1_mac_physical.hpp"
-#include "knx/testing/mock_tp1_physical.hpp"
 #include "knx/security/data_secure.hpp"
 
 #include <algorithm>
@@ -45,7 +44,6 @@ namespace bau {
 
 using StackPort = BusAccessStackPort;
 
-using detail::kMaxInboundAssociatedGroupObjects;
 using detail::kMaxInboundGroupEventsPerLoop;
 using detail::PendingInboundGroupEvent;
 
@@ -543,14 +541,12 @@ bool BusAccessUnit::popAutomaticResponse(PendingAutoResponse& response) {
 
 bool BusAccessUnit::enqueueInboundGroupEvent(MessageKind kind,
                                              const GroupAddress& destination,
-                                             std::span<const uint8_t> data,
-                                             std::span<const GroupObjectIndex> associatedObjects)
+                                             std::span<const uint8_t> data)
 {
     if (!_inboundGroupEventQueue) {
         return false;
     }
-    if (associatedObjects.size() > kMaxInboundAssociatedGroupObjects ||
-        data.size() > config::MAX_APDU_LENGTH) {
+    if (data.size() > config::MAX_APDU_LENGTH) {
         ++_droppedInboundGroupEvents;
         KNX_LOGW(TAG, "Dropping inbound group event for %d/%d/%d: invalid event shape",
                  destination.main(), destination.middle(), destination.sub());
@@ -560,10 +556,6 @@ bool BusAccessUnit::enqueueInboundGroupEvent(MessageKind kind,
     PendingInboundGroupEvent event{};
     event.kind = static_cast<uint8_t>(kind);
     event.destinationRaw = destination.raw;
-    event.associatedObjectCount = static_cast<uint8_t>(associatedObjects.size());
-    for (size_t index = 0; index < associatedObjects.size(); ++index) {
-        event.associatedObjectIndices[index] = associatedObjects[index].value();
-    }
     event.dataLength = static_cast<uint16_t>(data.size());
     std::copy(data.begin(), data.end(), event.data.begin());
 
@@ -612,23 +604,30 @@ void BusAccessUnit::processInboundGroupEvents()
         const GroupAddress destination(event.destinationRaw);
         const auto data = std::span<const uint8_t>(event.data.data(), event.dataLength);
 
+        // Resolve GA → ASAP → group objects against the tables as they are
+        // now, iterating the association table in place: any number of group
+        // objects may share an address.
+        const AddressTableIndex addressIdx = _addressTable.findIndex(destination);
+        if (!addressIdx.isValid()) {
+            continue;
+        }
+
         if (kind == MessageKind::GroupValueWrite ||
             kind == MessageKind::GroupValueResponse) {
             const auto source = (kind == MessageKind::GroupValueWrite)
                                     ? application::GroupObject::ValueSource::Write
                                     : application::GroupObject::ValueSource::Response;
-            for (size_t index = 0; index < event.associatedObjectCount; ++index) {
-                const GroupObjectIndex objectIndex(event.associatedObjectIndices[index]);
+            _associationTable.forEachGroupObject(addressIdx, [&](GroupObjectIndex objectIndex) {
                 auto* obj = _groupObjectTable.getGroupObject(objectIndex);
                 if (obj == nullptr) {
-                    continue;
+                    return;
                 }
                 // The object's communication flags decide whether this service
                 // may touch it.  A rejected telegram must not reach the
                 // firmware callback either, otherwise disabling an object in
                 // ETS would still fire application logic.
                 if (obj->receiveValue(data, source).isError()) {
-                    continue;
+                    return;
                 }
                 KNX_LOGD(TAG, "Group value %s: %d/%d/%d -> obj %u",
                          kind == MessageKind::GroupValueWrite ? "write" : "response",
@@ -637,7 +636,7 @@ void BusAccessUnit::processInboundGroupEvents()
                 if (kind == MessageKind::GroupValueWrite && _groupObjectWriteCallback) {
                     _groupObjectWriteCallback(objectIndex, data);
                 }
-            }
+            });
             continue;
         }
 
@@ -651,25 +650,29 @@ void BusAccessUnit::processInboundGroupEvents()
         // Read enable (R) decides whether this device answers at all.  Objects
         // without it stay silent, which is what lets several devices share a
         // group address with exactly one of them designated as the responder.
-        for (size_t index = 0; index < event.associatedObjectCount; ++index) {
-            const GroupObjectIndex objectIndex(event.associatedObjectIndices[index]);
+        _associationTable.forEachGroupObject(addressIdx, [&](GroupObjectIndex objectIndex) {
             const auto* obj = _groupObjectTable.getGroupObject(objectIndex);
             if (obj && obj->readable() && _groupObjectReadCallback) {
                 _groupObjectReadCallback(objectIndex);
             }
-        }
+        });
 
-        for (size_t index = 0; index < event.associatedObjectCount; ++index) {
-            auto* obj = _groupObjectTable.getGroupObject(GroupObjectIndex(event.associatedObjectIndices[index]));
+        // Only the first readable, valid object answers: one response per read.
+        bool responded = false;
+        _associationTable.forEachGroupObject(addressIdx, [&](GroupObjectIndex objectIndex) {
+            if (responded) {
+                return;
+            }
+            auto* obj = _groupObjectTable.getGroupObject(objectIndex);
             if (obj && obj->readable() && obj->isValid() && _stackPort) {
                 if (_autoResponseMode == AutoResponseMode::Deferred) {
                     enqueueAutomaticResponse(destination, obj->getRawValue());
                 } else {
                     (void)sendAutomaticResponseImmediate(destination, obj->getRawValue());
                 }
-                break;
+                responded = true;
             }
-        }
+        });
     }
 }
 
@@ -701,35 +704,25 @@ void BusAccessUnit::handleApplicationFrame(const IndividualAddress& /*source*/,
     //   GroupAddress  →  AddressTableIndex (ASAP)
     //   AddressTableIndex  →  GroupObjectIndex[]  (via AssociationTable)
     //   GroupObjectIndex  →  GroupObject
+    //
+    // Here we only decide whether the telegram concerns this device at all;
+    // the owner context resolves the group objects when it processes the
+    // event (processInboundGroupEvents). Copying them into a 16-entry buffer
+    // here made findGroupObjects() fail with BufferTooSmall for the 17th
+    // object on an address, and the whole telegram was dropped.
     const AddressTableIndex addressIdx = _addressTable.findIndex(destination);
-    const bool hasTableEntry = addressIdx.isValid();
-
-    // Gather associated group object indices (up to 16 per GA is generous).
-    std::array<GroupObjectIndex, 16> assocBuf{};
-    std::span<GroupObjectIndex> assocSpan = assocBuf;
-    size_t assocCount = 0;
-
-    if (hasTableEntry) {
-        const auto findRes = _associationTable.findGroupObjects(addressIdx, assocSpan);
-        if (findRes.isOk()) {
-            assocCount = findRes.value();
-        }
+    if (!addressIdx.isValid() || !_associationTable.hasGroupObjects(addressIdx)) {
+        return;
     }
-
-    const auto associatedObjects = std::span<const GroupObjectIndex>(assocBuf.data(), assocCount);
 
     if (kind == MessageKind::GroupValueWrite ||
         kind == MessageKind::GroupValueResponse) {
-        if (assocCount > 0u) {
-            (void)enqueueInboundGroupEvent(kind, destination, data, associatedObjects);
-        }
+        (void)enqueueInboundGroupEvent(kind, destination, data);
         return;
     }
 
     if (kind == MessageKind::GroupValueRead) {
-        if (assocCount > 0u) {
-            (void)enqueueInboundGroupEvent(kind, destination, {}, associatedObjects);
-        }
+        (void)enqueueInboundGroupEvent(kind, destination, {});
         return;
     }
 }

@@ -171,9 +171,9 @@ struct IpRoutingSecureConfiguration {
 #if KNX_SECURE_ENABLED
 	bool enabled{false};
 	std::array<uint8_t, 16> groupKey{};
+	/// The device's KNX serial number. The tag is random per frame and the
+	/// sequence information is the multicast timer, so neither is configured.
 	std::array<uint8_t, 6> serial{};
-	std::array<uint8_t, 2> tag{};
-	uint64_t initialSeq{1};
 #endif
 };
 

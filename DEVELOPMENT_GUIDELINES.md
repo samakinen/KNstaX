@@ -403,7 +403,8 @@ transceivers.
 - Profile before optimising, and document performance-critical sections.
 - Always bound-check. Prefer `std::span` or range-checked accessors.
 - Initialise every variable; release every resource in a destructor.
-- AddressSanitizer and MemorySanitizer run in CI — keep them clean.
+- AddressSanitizer and UndefinedBehaviorSanitizer run over the whole host
+  suite in CI (the `sanitizers` job) — keep them clean.
 
 ---
 

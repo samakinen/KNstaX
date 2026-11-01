@@ -316,8 +316,10 @@ namespace ets {
     constexpr uint16_t PID_RUN_STATE_CONTROL = 6;
     constexpr uint16_t PID_SERIAL_NUMBER = 11;
     constexpr uint16_t PID_MANUFACTURER_ID = 12;
-    constexpr uint16_t PID_DEVICE_CONTROL = 13;
-    constexpr uint16_t PID_ORDER_INFO = 14;
+    // 03/05/01 §4.2: 13 is PID_PROGRAM_VERSION; Device Control and Order
+    // Info follow it.
+    constexpr uint16_t PID_DEVICE_CONTROL = 14;
+    constexpr uint16_t PID_ORDER_INFO = 15;
     constexpr uint16_t PID_PROGMODE = 54;
 }
 

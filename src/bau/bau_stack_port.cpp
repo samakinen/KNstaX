@@ -24,7 +24,9 @@
 #include "knx/datalink/tp1_data_link_layer.hpp"
 #include "knx/platform/raii_resources.hpp"
 #include "knx/physical/tp1_mac_physical.hpp"
+#if KNX_ENABLE_TEST_HOOKS
 #include "knx/testing/mock_tp1_physical.hpp"
+#endif
 #include "knx/security/data_secure.hpp"
 #include "knx/security/secure_application_layer.hpp"
 #include "knx/network/two_port_coupler.hpp"
@@ -125,6 +127,7 @@ public:
     virtual void close() = 0;
     virtual void executePendingRestart() = 0;
     virtual void setRestartHandler(application::RestartService::RestartCallback handler) = 0;
+    virtual void setManagementServerHooks(application::ApplicationLayer::ManagementServerHooks hooks) = 0;
     virtual util::Result<void> setOwnAddress(const IndividualAddress& ownAddress) = 0;
     virtual void setIndividualAddressUpdateCallback(application::ApplicationLayer::IndividualAddressUpdateCallback callback) = 0;
 };
@@ -243,8 +246,10 @@ public:
             } else if (_ipRoutingPhysical) {
                 _dataLink = std::make_unique<datalink::Tp1DataLinkLayer>(_platform, *_ipRoutingPhysical);
 #endif  // KNX_FEATURE_NETIP
+#if KNX_ENABLE_TEST_HOOKS
             } else if (_testPhysical) {
                 _dataLink = std::make_unique<datalink::Tp1DataLinkLayer>(_platform, *_testPhysical);
+#endif
             } else {
                 return util::Result<void>::err(util::ErrorCode::InvalidParameter);
             }
@@ -326,8 +331,10 @@ private:
         } else if constexpr (std::is_same_v<ConcretePhysical, physical::IpRoutingPhysical>) {
             _ipRoutingPhysical = std::move(physicalLayer);
 #endif  // KNX_FEATURE_NETIP
+#if KNX_ENABLE_TEST_HOOKS
         } else if constexpr (std::is_same_v<ConcretePhysical, testing::MockTp1Physical>) {
             _testPhysical = std::move(physicalLayer);
+#endif
         } else {
             static_assert(!sizeof(ConcretePhysical*), "Unsupported TP1 stack physical type");
         }
@@ -344,7 +351,9 @@ private:
 #endif
     std::unique_ptr<physical::IpRoutingPhysical> _ipRoutingPhysical;
 #endif
+#if KNX_ENABLE_TEST_HOOKS
     std::unique_ptr<testing::MockTp1Physical> _testPhysical;
+#endif
     std::unique_ptr<datalink::Tp1DataLinkLayer> _dataLink;
 };
 
@@ -410,6 +419,12 @@ public:
     void setRestartHandler(application::RestartService::RestartCallback handler) {
         if (_application) {
             _application->restartService().setRestartCallback(std::move(handler));
+        }
+    }
+
+    void setManagementServerHooks(application::ApplicationLayer::ManagementServerHooks hooks) {
+        if (_application) {
+            _application->setManagementServerHooks(std::move(hooks));
         }
     }
 
@@ -988,6 +1003,10 @@ public:
         _context->application.setRestartHandler(std::move(handler));
     }
 
+    void setManagementServerHooks(application::ApplicationLayer::ManagementServerHooks hooks) override {
+        _context->application.setManagementServerHooks(std::move(hooks));
+    }
+
     util::Result<void> setOwnAddress(const IndividualAddress& ownAddress) override {
         auto* dataLink = _context->medium.dataLinkLayer();
         if (!dataLink) {
@@ -1376,11 +1395,13 @@ public:
     }
 #endif  // KNX_FEATURE_NETIP
 
+#if KNX_ENABLE_TEST_HOOKS
     Tp1StackPort(platform::Platform& platform,
                  std::unique_ptr<testing::MockTp1Physical> physicalLayer)
         : _lowerStack(createTp1LowerStackRoles(platform, std::move(physicalLayer)))
     {
     }
+#endif
 
 #if KNX_FEATURE_TP1
     Tp1StackPort(platform::Platform& platform,
@@ -1404,6 +1425,10 @@ public:
 
     void setRestartHandler(application::RestartService::RestartCallback handler) override {
         _lowerStack.lifecycle->setRestartHandler(std::move(handler));
+    }
+
+    void setManagementServerHooks(application::ApplicationLayer::ManagementServerHooks hooks) override {
+        _lowerStack.lifecycle->setManagementServerHooks(std::move(hooks));
     }
 
     void processBackgroundWork() override {
@@ -1691,11 +1716,13 @@ std::unique_ptr<BusAccessStackPort> createTp1StackPort(platform::Platform& platf
 }
 #endif
 
+#if KNX_ENABLE_TEST_HOOKS
 std::unique_ptr<BusAccessStackPort> detail::createTp1MockTestStackPort(
     platform::Platform& platform,
     std::unique_ptr<testing::MockTp1Physical> physicalLayer)
 {
     return std::make_unique<Tp1StackPort>(platform, std::move(physicalLayer));
 }
+#endif
 } // namespace bau
 } // namespace knx

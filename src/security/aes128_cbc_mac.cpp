@@ -21,7 +21,14 @@ util::Result<void> Aes128CbcMac::compute(const Key& key,
     if (keyResult.isError()) {
         return keyResult.error();
     }
+    return compute(aes, block0, additionalData, payload, macOut);
+}
 
+util::Result<void> Aes128CbcMac::compute(Aes128BlockCipher& aes,
+                                         const Block& block0,
+                                         std::span<const uint8_t> additionalData,
+                                         std::span<const uint8_t> payload,
+                                         Block& macOut) {
     Block chain{};
     Block block{};
 

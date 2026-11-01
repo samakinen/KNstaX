@@ -69,8 +69,16 @@ public:
     void setLoadState(uint8_t state) { _loadState = state; }
     void loadControlReset() { clear(); }
 
+    /// True when the entries are in strictly ascending order, so findIndex()
+    /// can binary-search. Exposed for tests.
+    bool isSorted() const { return _sorted; }
+
 private:
+    /// Recompute _sorted. Every mutator calls it, so lookups never have to.
+    void refreshSorted();
+
     util::FixedVector<GroupAddress, kMaxEntries> _entries;
+    bool _sorted{true};
     uint8_t _loadState{1};  // loadstate::kLoaded — firmware boots with usable tables
 };
 

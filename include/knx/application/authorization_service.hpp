@@ -153,6 +153,34 @@ public:
      * @return Current authorization level
      */
     AuthorizationLevel getCurrentLevel(const IndividualAddress& address) const;
+
+    /// @p level as it travels in A_Authorize_Response and in the property
+    /// descriptions: 0 is maximum access, a larger number is less access.
+    static constexpr uint8_t toWireLevel(AuthorizationLevel level) noexcept {
+        switch (level) {
+            case AuthorizationLevel::Maximum:       return 0u;
+            case AuthorizationLevel::Configuration: return 1u;
+            case AuthorizationLevel::Management:    return 2u;
+            case AuthorizationLevel::None:          break;
+        }
+        return 15u;
+    }
+
+    /**
+     * @brief The access level, in wire numbering, that @p address currently holds
+     *
+     * This is what access checks compare against a required level. 03/03/07
+     * §3.5.7 "Error and exception handling":
+     * - a partner that authorised keeps the level it was granted;
+     * - a partner that did not authorise gets "the maximum access level
+     *   protected with FFFFFFFFh", i.e. the most privileged level whose key is
+     *   still the default.
+     *
+     * Without setKeys() every level is unprotected, so every partner holds
+     * level 0 whether or not it authorised: nothing is gated on a device that
+     * nobody has keyed.
+     */
+    uint8_t currentAccessLevel(const IndividualAddress& address) const;
     
     /**
      * @brief Clear authorization for a device

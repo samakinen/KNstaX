@@ -12,9 +12,14 @@
  * Constraints:
  *  - The stored callable must fit within Capacity bytes when aligned to Align.
  *  - Attempting to assign a callable that is too large is a compile-time error.
- *  - Move-only callables are supported (move-constructible, not required to be
- *    copy-constructible); the wrapper itself is move-constructible but also
- *    copy-constructible when the stored callable is.
+ *  - Copyability is a property of the wrapper type, not of whatever it happens
+ *    to hold. With `Copyable = true` (the default) the wrapper is copyable and
+ *    accepts only copy-constructible callables. With `Copyable = false`
+ *    (`MoveOnlyInplaceFunction`) it accepts move-only callables and its own
+ *    copy operations are deleted. The stored type is erased by the time a copy
+ *    happens, so checking at construction is the only way to make copying a
+ *    move-only callable a compile-time error rather than a copy that silently
+ *    leaves the target unconstructed.
  *
  * Differences from std::function:
  *  - No heap allocation, ever.
@@ -83,11 +88,16 @@ constexpr InplaceFunctionVTable<ReturnT, ArgsT...> makeVTable() noexcept
 // ---------------------------------------------------------------------------
 // Primary template — specialised below for function signatures
 // ---------------------------------------------------------------------------
-template <typename Signature, size_t Capacity = 32, size_t Align = alignof(std::max_align_t)>
+template <typename Signature, size_t Capacity = 32, size_t Align = alignof(std::max_align_t),
+          bool Copyable = true>
 class InplaceFunction;
 
-template <typename ReturnT, typename... ArgsT, size_t Capacity, size_t Align>
-class InplaceFunction<ReturnT(ArgsT...), Capacity, Align> {
+/// InplaceFunction that accepts move-only callables and cannot itself be copied.
+template <typename Signature, size_t Capacity = 32, size_t Align = alignof(std::max_align_t)>
+using MoveOnlyInplaceFunction = InplaceFunction<Signature, Capacity, Align, false>;
+
+template <typename ReturnT, typename... ArgsT, size_t Capacity, size_t Align, bool Copyable>
+class InplaceFunction<ReturnT(ArgsT...), Capacity, Align, Copyable> {
 public:
     using result_type = ReturnT;
 
@@ -103,6 +113,8 @@ public:
               typename Decayed = std::decay_t<CallableT>,
               // Prevent hijacking copy/move constructors
               typename = std::enable_if_t<!std::is_same_v<Decayed, InplaceFunction>>>
+        requires(std::is_invocable_r_v<ReturnT, Decayed&, ArgsT...>
+                 && (!Copyable || std::is_copy_constructible_v<Decayed>))
     explicit(false) InplaceFunction(CallableT&& callable)  // NOLINT(*-explicit-*)
     {
         static_assert(sizeof(Decayed) <= Capacity,
@@ -118,6 +130,7 @@ public:
     }
 
     InplaceFunction(const InplaceFunction& other)
+        requires Copyable
     {
         if (other._vtable) {
             other._vtable->copy(storage(), other.storage());
@@ -144,6 +157,7 @@ public:
     // ------------------------------------------------------------------
 
     InplaceFunction& operator=(const InplaceFunction& other)
+        requires Copyable
     {
         if (this != &other) {
             reset();
@@ -177,6 +191,8 @@ public:
     template <typename CallableT,
               typename Decayed = std::decay_t<CallableT>,
               typename = std::enable_if_t<!std::is_same_v<Decayed, InplaceFunction>>>
+        requires(std::is_invocable_r_v<ReturnT, Decayed&, ArgsT...>
+                 && (!Copyable || std::is_copy_constructible_v<Decayed>))
     InplaceFunction& operator=(CallableT&& callable)
     {
         reset();

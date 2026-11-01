@@ -22,6 +22,7 @@
 #include "knx/util/fixed_vector.hpp"
 #include "knx/util/result.hpp"
 #include <cstdint>
+#include <functional>
 #include <vector>
 #include <memory>
 #include <optional>
@@ -84,8 +85,21 @@ struct ConnectionEntry {
     /// Time of last transmission (for retransmit timeout)
     uint32_t lastTxTimeMs;
     
-    /// Retransmit timeout in milliseconds (starts at 3000, may double)
+    /// Acknowledge timeout in milliseconds. 03_03_04 §5 has one fixed
+    /// acknowledge timeout (3 s) for every repetition; it does not back off.
     uint32_t retransmitTimeoutMs;
+};
+
+/**
+ * @brief A connection the table has closed on its own (A6 still to be sent)
+ *
+ * The table cannot transmit, so it hands back what the transport layer needs
+ * to send the T_Disconnect that 03_03_04 action A6 requires.
+ */
+struct ClosedConnection {
+    ConnectionIndex index;
+    IndividualAddress remoteAddress;
+    Priority priority;
 };
 
 /**
@@ -146,27 +160,34 @@ public:
     util::Result<void> canCreateConnection(const IndividualAddress& remoteAddress) const;
     
     /**
-     * @brief Check and handle retransmission timeouts
-     * 
+     * @brief Check and handle acknowledge timeouts
+     *
      * Should be called periodically (e.g., 100ms intervals).
-     * Returns list of connection indices needing retransmission.
-     * 
+     * Returns list of connection indices needing retransmission (E17 → A9).
+     * A connection whose repetitions are used up (E18) is removed from the
+     * table and reported in @p closed, so the caller can send the T_Disconnect
+     * that action A6 requires.
+     *
      * @param currentTimeMs Current system time in milliseconds
+     * @param closed Receives the connections closed by E18 (may be null)
      * @return Vector of connection indices that need retransmission
      */
-    util::FixedVector<ConnectionIndex, MAX_CONNECTIONS> processRetransmissions(uint32_t currentTimeMs);
-    
+    util::FixedVector<ConnectionIndex, MAX_CONNECTIONS> processRetransmissions(
+        uint32_t currentTimeMs,
+        util::FixedVector<ClosedConnection, MAX_CONNECTIONS>* closed = nullptr);
+
     /**
      * @brief Check for connection timeouts
-     * 
-     * Removes connections that have exceeded maximum idle time.
-     * Default timeout is 6000ms per KNX spec.
-     * 
+     *
+     * Removes connections that have exceeded maximum idle time (E16).
+     * Default timeout is 6000ms per KNX spec. The caller sends the
+     * T_Disconnect of action A6 for each connection returned.
+     *
      * @param currentTimeMs Current system time in milliseconds
      * @param timeoutMs Maximum idle time (default 6000ms)
-     * @return Vector of connection indices that timed out
+     * @return The connections that timed out and were removed
      */
-    util::FixedVector<ConnectionIndex, MAX_CONNECTIONS> processTimeouts(uint32_t currentTimeMs,
+    util::FixedVector<ClosedConnection, MAX_CONNECTIONS> processTimeouts(uint32_t currentTimeMs,
                     uint32_t timeoutMs = constants::timing::CONNECTION_TIMEOUT_MS);
     
     /**
@@ -298,11 +319,29 @@ public:
      * @brief Clear all connections
      */
     void clear() {
+        for (const auto& entry : _connections) {
+            notifyClosed(entry->remoteAddress);
+        }
         _connections.clear();
     }
 
+    /// Called with the partner's address whenever a connection leaves the
+    /// table, whichever path closed it: T_Disconnect from either side, the
+    /// connection timeout, or repetitions used up. 03/03/07 §3.5.7: the access
+    /// level a partner authorised for "shall be valid until the connection is
+    /// released".
+    using ClosedObserver = std::function<void(const IndividualAddress&)>;
+    void setClosedObserver(ClosedObserver observer) { _closedObserver = std::move(observer); }
+
 private:
     std::vector<std::unique_ptr<ConnectionEntry>> _connections;
+    ClosedObserver _closedObserver;
+
+    void notifyClosed(const IndividualAddress& remote) const {
+        if (_closedObserver) {
+            _closedObserver(remote);
+        }
+    }
     size_t _maxConnections;
     uint8_t _nextIndex;
     

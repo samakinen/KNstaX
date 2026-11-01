@@ -67,7 +67,11 @@ protected:
     const char* getVersion() const override;
 
 private:
-    static constexpr size_t TP1_EVENT_QUEUE_CAPACITY = 128;
+    // A telegram now queues a handful of events (start, state changes, end) —
+    // there is no per-octet event any more — and the receive callback drains
+    // the queue at every telegram end. 32 entries is a quarter of the old 128,
+    // which mostly held per-octet events nothing read.
+    static constexpr size_t TP1_EVENT_QUEUE_CAPACITY = 32;
 
     void setState(DriverState newState);
     bool enqueueTp1Event(const Tp1RxEvent& event);

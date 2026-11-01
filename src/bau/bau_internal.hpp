@@ -26,9 +26,6 @@ namespace knx {
 namespace bau {
 namespace detail {
 
-/// Upper bound on group objects one inbound telegram can be associated with.
-inline constexpr size_t kMaxInboundAssociatedGroupObjects = 16u;
-
 /// Inbound group events drained per loop() call, so a burst cannot starve the
 /// rest of the owner context.
 inline constexpr size_t kMaxInboundGroupEventsPerLoop = 32u;
@@ -39,12 +36,15 @@ inline constexpr size_t kMaxInboundGroupEventsPerLoop = 32u;
  *
  * Trivially copyable on purpose: it travels through a `platform::Queue`, which
  * moves raw bytes.
+ *
+ * It carries the group address only. The owner context resolves the
+ * associated group objects from the tables when it processes the event, so
+ * there is no cap on how many objects one address reaches (a fixed array of
+ * 16 here used to drop the whole telegram for the 17th).
  */
 struct PendingInboundGroupEvent {
     uint8_t kind{static_cast<uint8_t>(BusAccessUnit::MessageKind::Unknown)};
     uint16_t destinationRaw{0u};
-    uint8_t associatedObjectCount{0u};
-    std::array<uint16_t, kMaxInboundAssociatedGroupObjects> associatedObjectIndices{};
     uint16_t dataLength{0u};
     std::array<uint8_t, config::MAX_APDU_LENGTH> data{};
 };

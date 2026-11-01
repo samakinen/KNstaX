@@ -39,19 +39,29 @@ static util::ErrorCode toErrorCode(MemoryAccessResult result) {
     }
 }
 
+void MemoryService::sendNegativeResponse(const IndividualAddress& dest, MemoryAddress address) {
+    MemoryResponse response;
+    response.count = 0;
+    response.address = address;
+    sendResponse(dest, response);
+}
+
 util::Result<void> MemoryService::handleReadRequest(const IndividualAddress& source, 
                                       uint8_t count, MemoryAddress address) {
-    // Validate access
-        auto result = validateAccess(address, count, AccessType::Read);
+    // 03/03/07 §3.5.3: a read from a protected or non-existent area, or one
+    // longer than the APDU allows, is answered with number = 0 and no data.
+    // Staying silent instead left the client waiting out its full timeout.
+    auto result = validateAccess(address, count, AccessType::Read);
     if (result != MemoryAccessResult::Success) {
         KNX_LOGW(TAG, "Read denied at 0x%04X (%d bytes): result=%d", 
              address.raw, count, static_cast<int>(result));
+        sendNegativeResponse(source, address);
         return util::Result<void>::err(toErrorCode(result));
     }
     
-    // Execute read callback
     if (!_readCallback) {
         KNX_LOGE(TAG, "No read callback registered");
+        sendNegativeResponse(source, address);
         return util::Result<void>::err(util::ErrorCode::OperationNotReady);
     }
     
@@ -60,10 +70,10 @@ util::Result<void> MemoryService::handleReadRequest(const IndividualAddress& sou
     auto readRes = _readCallback(address, count, data.span());
     if (readRes.isError()) {
         KNX_LOGE(TAG, "Read callback failed at 0x%04X", address.raw);
+        sendNegativeResponse(source, address);
         return readRes.error();
     }
     
-    // Send response
     MemoryResponse response;
     response.count = count;
     response.address = address;
@@ -77,52 +87,75 @@ util::Result<void> MemoryService::handleReadRequest(const IndividualAddress& sou
 util::Result<void> MemoryService::handleWriteRequest(const IndividualAddress& source, 
                                        uint8_t count, MemoryAddress address, 
                                        std::span<const uint8_t> data) {
-    // Validate access
-        auto result = validateAccess(address, count, AccessType::Write);
+    // 03/03/07 §3.5.4: A_Memory_Write is confirmed only while Verify Mode is
+    // active. Then the answer carries the area read back after the write, or
+    // number = 0 if the write failed. With Verify Mode off the service is
+    // merely acknowledged by the transport layer and the device sends nothing,
+    // failure included ("the service indication shall be ignored").
+    const bool verify = verifyModeActive();
+    const auto fail = [&](util::ErrorCode error) {
+        if (verify) {
+            sendNegativeResponse(source, address);
+        }
+        return util::Result<void>::err(error);
+    };
+
+    auto result = validateAccess(address, count, AccessType::Write);
     if (result != MemoryAccessResult::Success) {
-            KNX_LOGW(TAG, "Write denied at 0x%04X (%d bytes): result=%d", 
-                     address.raw, count, static_cast<int>(result));
-        return util::Result<void>::err(toErrorCode(result));
+        KNX_LOGW(TAG, "Write denied at 0x%04X (%d bytes): result=%d", 
+                 address.raw, count, static_cast<int>(result));
+        return fail(toErrorCode(result));
     }
-    
-    // Validate data size
+
+    // §3.5.4: "the remote Application Layer shall ignore the A_Memory_Write.ind
+    // if the value of the parameter number ... is not equal to the number of
+    // received data octets."
     if (data.size() != count) {
         KNX_LOGE(TAG, "Data size mismatch: expected %d, got %zu", count, data.size());
-        return util::Result<void>::err(util::ErrorCode::InvalidParameter);
+        return fail(util::ErrorCode::InvalidParameter);
+    }
+
+    // 03/03/07 §3.5.7: the current access level decides which writes a
+    // client may make. Refused like a protected area, which is what it is.
+    if (!writePermitted(source)) {
+        KNX_LOGW(TAG, "Write at 0x%04X refused: access level of 0x%04X too low",
+                 address.raw, source.raw);
+        return fail(util::ErrorCode::AccessDenied);
     }
     
-    // Execute write callback
     if (!_writeCallback) {
         KNX_LOGE(TAG, "No write callback registered");
-        return util::Result<void>::err(util::ErrorCode::OperationNotReady);
+        return fail(util::ErrorCode::OperationNotReady);
     }
     
     auto writeRes = _writeCallback(address, data);
     if (writeRes.isError()) {
         KNX_LOGE(TAG, "Write callback failed at 0x%04X", address.raw);
-        return writeRes.error();
+        return fail(writeRes.error());
     }
 
-    // Verify response (KNX 03.03.07): A_Memory_Response after a write carries
-    // the memory content read back — the count is encoded in the APCI, so a
-    // response without the data octets is a malformed frame that ETS rejects.
-    MemoryResponse response;
-    response.count = count;
-    response.address = address;
-    response.data.resize(count);
-    if (_readCallback) {
-        auto verifyRes = _readCallback(address, count, response.data.span());
-        if (verifyRes.isError()) {
-            KNX_LOGE(TAG, "Verify read-back failed at 0x%04X", address.raw);
-            return verifyRes.error();
+    if (verify) {
+        // "The value of the associated memory area shall be explicitly read
+        // back after writing to it." The count is in the APCI, so a response
+        // without the data octets would be malformed.
+        MemoryResponse response;
+        response.count = count;
+        response.address = address;
+        response.data.resize(count);
+        if (_readCallback) {
+            auto verifyRes = _readCallback(address, count, response.data.span());
+            if (verifyRes.isError()) {
+                KNX_LOGE(TAG, "Verify read-back failed at 0x%04X", address.raw);
+                return fail(verifyRes.error());
+            }
+        } else {
+            // No independent read path: echo the data that was just written.
+            std::copy(data.begin(), data.end(), response.data.begin());
         }
-    } else {
-        // No independent read path: echo the data that was just written.
-        std::copy(data.begin(), data.end(), response.data.begin());
+        sendResponse(source, response);
     }
-    sendResponse(source, response);
     
-    KNX_LOGD(TAG, "Wrote %d bytes to 0x%04X", count, address.raw);
+    KNX_LOGD(TAG, "Wrote %d bytes to 0x%04X%s", count, address.raw, verify ? " (verified)" : "");
     return util::Result<void>::ok();
 }
 
@@ -186,12 +219,15 @@ util::Result<size_t> MemoryService::encodeResponse(uint8_t count,
                                                    MemoryAddress address,
                                                    std::span<const uint8_t> data,
                                                    std::span<uint8_t> out) {
-    if (count == 0 || count > MAX_MEMORY_BYTES) {
+    // number = 0 with no data is the negative response of §3.5.3/§3.5.4, so
+    // zero is a valid count here even though it is not one for a request.
+    if (count > MAX_MEMORY_BYTES) {
         return util::ErrorCode::InvalidParameter;
     }
-    
-    // Data size must match count for read responses (0 for write responses)
-    if (data.size() != count && !data.empty()) {
+
+    // The count travels in the APCI, so it has to describe the data exactly:
+    // a positive response without its octets is a malformed frame.
+    if (data.size() != count) {
         return util::ErrorCode::InvalidParameter;
     }
     
@@ -404,6 +440,10 @@ util::Result<void> MemoryService::handleExtendedWriteRequest(const IndividualAdd
     if (response.returnCode == MemoryExtendedReturnCode::Success && data.size() < count) {
         // Truncated APDU: the declared count outruns the octets actually sent.
         response.returnCode = MemoryExtendedReturnCode::ExceedsMaxApduLength;
+    }
+    if (response.returnCode == MemoryExtendedReturnCode::Success && !writePermitted(source)) {
+        // E_ACCESS_DENIED is the code Table 3 keeps for A_Authorize refusals.
+        response.returnCode = MemoryExtendedReturnCode::AccessDenied;
     }
 
     if (response.returnCode != MemoryExtendedReturnCode::Success) {

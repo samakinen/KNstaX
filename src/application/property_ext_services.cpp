@@ -282,6 +282,15 @@ util::Result<void> PropertyExtServices::handleValueWrite(const IndividualAddress
                     util::ErrorCode::OperationNotSupported);
     }
 
+    // 03/03/07 §3.5.7: refused when the current access level is below the
+    // description's write level. E_ACCESS_DENIED is the A_Authorize refusal.
+    if (_accessLevel && _accessLevel(source) > descriptor->writeLevel) {
+        KNX_LOGW(TAG, "Ext property write refused: src=0x%04X ot=%u pid=%u needs level %u",
+                 source.raw, request.header.objectType, request.header.propertyId,
+                 static_cast<unsigned>(descriptor->writeLevel));
+        return fail(KnxReturnCode::AccessDenied, util::ErrorCode::AccessDenied);
+    }
+
     if (request.elementCount == 0) {
         return fail(KnxReturnCode::DataVoid, util::ErrorCode::InvalidParameter);
     }

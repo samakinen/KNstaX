@@ -17,6 +17,7 @@
 #include "knx/util/fixed_vector.hpp"
 #include <cstdint>
 #include <span>
+#include <utility>
 
 namespace knx {
 namespace objects {
@@ -80,6 +81,22 @@ public:
     util::Result<size_t> findAddressIndices(GroupObjectIndex groupObjectNumber, std::span<AddressTableIndex> out) const;
     bool hasAssociation(AddressTableIndex addressIndex, GroupObjectIndex groupObjectNumber) const;
 
+    /**
+     * @brief Call @p visit for every group object associated with @p addressIndex
+     *
+     * No buffer and no limit on how many objects share an address. Objects
+     * are visited in table order. O(log n + matches) through the address index.
+     */
+    template <typename Visitor>
+    void forEachGroupObject(AddressTableIndex addressIndex, Visitor&& visit) const {
+        for (const uint16_t position : positionsFor(addressIndex)) {
+            visit(_entries[position].groupObjectNumber);
+        }
+    }
+
+    /// True if at least one group object is associated with @p addressIndex.
+    bool hasGroupObjects(AddressTableIndex addressIndex) const { return !positionsFor(addressIndex).empty(); }
+
     util::Result<void> load(std::span<const AssociationEntry> entries);
     void truncate(uint16_t size);
     void clear();
@@ -96,7 +113,16 @@ public:
     void loadControlReset() { clear(); }
 
 private:
+    /// Positions in _entries whose address index is @p addressIndex, in table order.
+    std::span<const uint16_t> positionsFor(AddressTableIndex addressIndex) const;
+
+    /// Rebuild _byAddress. Every mutator calls it, so lookups never have to.
+    void rebuildIndex();
+
     util::FixedVector<AssociationEntry, kMaxEntries> _entries;
+    /// Positions of _entries ordered by (address index, position): the
+    /// group address → group object index used on every group telegram.
+    util::FixedVector<uint16_t, kMaxEntries> _byAddress;
     uint8_t _loadState{1};  // loadstate::kLoaded — firmware boots with usable tables
 };
 
@@ -186,6 +212,16 @@ public:
      * @return Vector of group object numbers
      */
     util::Result<size_t> findGroupObjects(AddressTableIndex addressIndex, std::span<GroupObjectIndex> out) const;
+
+    /// Visit every group object associated with @p addressIndex, with no
+    /// limit on how many there are. See AssociationTableDomain::forEachGroupObject.
+    template <typename Visitor>
+    void forEachGroupObject(AddressTableIndex addressIndex, Visitor&& visit) const {
+        _table.forEachGroupObject(addressIndex, std::forward<Visitor>(visit));
+    }
+
+    /// True if at least one group object is associated with @p addressIndex.
+    bool hasGroupObjects(AddressTableIndex addressIndex) const { return _table.hasGroupObjects(addressIndex); }
 
     /**
      * @brief Find address table indices for a group object

@@ -38,7 +38,9 @@
 #include "knx/datalink/tp1_data_link_layer.hpp"
 #include "knx/platform/raii_resources.hpp"
 #include "knx/physical/tp1_mac_physical.hpp"
+#if KNX_ENABLE_TEST_HOOKS
 #include "knx/testing/mock_tp1_physical.hpp"
+#endif
 #include <array>
 #include <algorithm>
 #include <span>
@@ -793,6 +795,7 @@ util::Result<void> BusAccessUnit::init(const IndividualAddress& ownAddress,
 
     // Set device address
     _deviceObject.setIndividualAddress(ownAddress);
+    _defaultIndividualAddress = ownAddress;
 
     auto stackInit = _stackPort->init(ownAddress);
     if (!stackInit) {
@@ -937,6 +940,12 @@ util::Result<void> BusAccessUnit::init(const IndividualAddress& ownAddress,
         }
     }
 
+    // 03/05/01 §4.2.14.4: "The device shall set the value of this Property
+    // to 00h on start-up." PID_DEVICE_CONTROL is persisted with the rest of
+    // the Device Object, so without this a Verify Mode that ETS switched on
+    // once would outlive the connection and every reboot after it.
+    _deviceObject.setDeviceControl(0u);
+
     (void)_deviceObject.processLoadEvent(objects::LoadEvent::StartLoad);
     (void)_deviceObject.processLoadEvent(objects::LoadEvent::LoadComplete);
     (void)_deviceObject.processLoadEvent(objects::LoadEvent::LoadComplete);
@@ -1024,6 +1033,84 @@ void BusAccessUnit::flushPendingPersistence() {
     if (_propertyAccessBridge) {
         _propertyAccessBridge->flushPersistenceIfDirty();
     }
+}
+
+util::Result<void> BusAccessUnit::applyMasterReset(application::EraseCode eraseCode) {
+    using application::EraseCode;
+
+    // 03/05/02 Table 4. Which Resources a factory reset covers is
+    // implementation dependent beyond Table 6 and §3.7.1.2.3.2.2; here it is
+    // everything ETS downloads, i.e. everything persisted except the
+    // Sequence Number Sending, which §5 of 03/03/07 ("Sequence Number Sending
+    // and Master Reset") says a Master Reset shall not influence.
+    const bool factoryReset = eraseCode == EraseCode::FactoryReset
+                           || eraseCode == EraseCode::FactoryResetWithoutIndividualAddress;
+    const bool resetAddress = eraseCode == EraseCode::FactoryReset
+                           || eraseCode == EraseCode::ResetIndividualAddress;
+    const bool resetLinks = factoryReset || eraseCode == EraseCode::ResetLinks;
+    // The application program of this stack is firmware; what ETS downloads
+    // into it is the parameter block (PID_PROGRAM_DATA). Resetting the
+    // program to "the default application" and resetting its parameters
+    // therefore come to the same thing.
+    const bool resetParameters = factoryReset
+                              || eraseCode == EraseCode::ResetApplicationProgram
+                              || eraseCode == EraseCode::ResetParameters;
+
+    if (!_propertyAccessBridge) {
+        return util::ErrorCode::NotInitialized;
+    }
+
+    if (resetLinks) {
+        _addressTable.clearEntries();
+        _associationTable.clearEntries();
+    }
+
+    if (resetParameters) {
+        // An empty block is not applied: the next boot finds nothing stored
+        // and keeps the firmware defaults, the same as a device that has
+        // never been downloaded.
+        _applicationProgram.setProgramData(std::span<const uint8_t>{});
+    }
+
+    if (factoryReset) {
+        // Ex-factory, a Data Secure device has Security Mode off and only its
+        // FDSK as Tool Key (03/05/03 §1.5.4.1). A cleared Tool Key is what a
+        // product's boot path reads as "no key yet" and replaces with the FDSK
+        // (Habinari: installFactoryToolKey). The key tables are dropped whole,
+        // which §3.7.1.2.3.2.2 requires so that the FDSK cannot be used to
+        // read back what a previous owner downloaded.
+        _securityObject.loadControlReset();
+        _securityObject.clearAllKeys();
+        _securityObject.setSecurityMode(objects::SecurityMode::Disabled);
+#if KNX_FEATURE_NETIP
+        // Table 6 resets the IP Resources with Erase Code 02h and keeps them
+        // with 07h; the backbone key is the KNX IP Secure credential and goes
+        // with the other keys either way.
+        const std::array<uint8_t, 16> noBackboneKey{};
+        (void)setReferenceObjectProperty(InterfaceObjectType::knxNetIpParameter(),
+                                         static_cast<application::PropertyID>(91u),
+                                         noBackboneKey);
+        _securedServiceFamilyVersions.fill(0u);
+#endif
+    }
+
+    if (resetAddress) {
+        // The response has already gone out from the old address (03/05/02
+        // §3.7.1.2.2 NOTE 11). Applying it now persists it; the stack itself
+        // picks it up when the device comes back from the restart.
+        _deviceObject.setIndividualAddress(_defaultIndividualAddress);
+    }
+
+    KNX_LOGW(TAG, "Master reset, erase code 0x%02X: links%s, parameters%s, security%s, address%s",
+             static_cast<unsigned>(eraseCode),
+             resetLinks ? " reset" : " kept",
+             resetParameters ? " reset" : " kept",
+             factoryReset ? " reset" : " kept",
+             resetAddress ? " reset" : " kept");
+
+    // Written synchronously: the restart callback runs next.
+    (void)_propertyAccessBridge->saveToPersistence();
+    return util::Result<void>::ok();
 }
 
 util::Result<void> BusAccessUnit::setReferenceObjectProperty(InterfaceObjectType objectType,

@@ -114,7 +114,8 @@ Tp1CapabilityProfile BitBangMediumBackendAdapter::getCapabilities() const {
     // its own timing domain (address match mid-frame, ACK byte at t_ack).
     capabilities.supportsHardwareAutoAck = true;
     capabilities.supportsAddressedFiltering = false;
-    capabilities.supportsByteEventStream = true;
+    // Per-octet events were never consumed and are no longer produced.
+    capabilities.supportsByteEventStream = false;
     capabilities.supportsDetailedTxConfirm = true;
     capabilities.supportsCollisionIndication = true;
     capabilities.supportsDiagnosticsSnapshot = true;

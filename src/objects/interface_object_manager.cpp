@@ -26,6 +26,42 @@ constexpr uint16_t makePersistenceKeyId(knx::InterfaceObjectType objectType, knx
     return (static_cast<uint16_t>(objectType.value()) << 8) | static_cast<uint16_t>(static_cast<uint8_t>(propertyId));
 }
 
+/// The key a persisted property has in @p bank (see kPersistenceBankMarkerKeyId).
+constexpr uint16_t bankedKeyId(uint16_t keyId, uint8_t bank)
+{
+    return bank == 0u ? keyId
+                      : static_cast<uint16_t>(keyId | knx::objects::InterfaceObjectManager::kPersistenceBank1KeyBit);
+}
+
+/// Interface objects whose persisted properties make up the commissioned state.
+///
+/// The KNXnet/IP Parameter Object is here for its Secure Routing settings
+/// (backbone key, latency tolerance, sync fraction): without them a device
+/// that ETS commissioned for Secure Routing fell back to plain routing at the
+/// next boot. On a device without that object the reads fail and nothing is
+/// stored for it.
+constexpr knx::InterfaceObjectType kPersistedTypes[] = {
+    knx::InterfaceObjectType::device(),
+    knx::InterfaceObjectType::addressTable(),
+    knx::InterfaceObjectType::associationTable(),
+    knx::InterfaceObjectType::applicationProgram(),
+    knx::InterfaceObjectType::groupObjectTable(),
+    knx::InterfaceObjectType::security(),
+    knx::InterfaceObjectType::knxNetIpParameter(),
+};
+
+template <typename Visitor>
+void forEachPersistedProperty(Visitor&& visit)
+{
+    for (const auto objectType : kPersistedTypes) {
+        for (const auto& entry : knx::objects::objectPropertyManifestEntries(objectType)) {
+            if (knx::objects::isPersistedProperty(entry)) {
+                visit(objectType, entry.registration.propertyId);
+            }
+        }
+    }
+}
+
 knx::objects::PropertyAccessResult mapKernelResult(const knx::util::Result<void>& res, knx::AccessType accessType) {
     using knx::objects::PropertyAccessResult;
     using knx::util::ErrorCode;
@@ -252,6 +288,7 @@ util::Result<void> InterfaceObjectManager::init(bool enablePersistence,
         }
 
         enforcePersistenceSchemaVersion(schemaVersion);
+        _activeBank = readActivePersistenceBank();
 
         _persistenceManager = std::make_unique<PersistenceManager>(*_persistence);
         KNX_LOGD(TAG, "Persistence enabled");
@@ -333,7 +370,7 @@ size_t InterfaceObjectManager::loadFromPersistence() {
     const InterfaceObjectInstance instance(1);
 
     auto loadProp = [&](InterfaceObjectType objectType, application::PropertyID propertyId) {
-        const uint16_t keyId = makePersistenceKeyId(objectType, propertyId);
+        const uint16_t keyId = bankedKeyId(makePersistenceKeyId(objectType, propertyId), _activeBank);
         std::vector<uint8_t> data;
         const PersistenceResult res = _persistence->loadById(keyId, data);
         if (res == PersistenceResult::NotFound) {
@@ -357,26 +394,32 @@ size_t InterfaceObjectManager::loadFromPersistence() {
         ++loaded;
     };
 
-    static const InterfaceObjectType kPersistedTypes[] = {
-        InterfaceObjectType::device(),
-        InterfaceObjectType::addressTable(),
-        InterfaceObjectType::associationTable(),
-        InterfaceObjectType::applicationProgram(),
-        InterfaceObjectType::groupObjectTable(),
-        InterfaceObjectType::security(),
-    };
+    forEachPersistedProperty(loadProp);
 
-    for (const auto objectType : kPersistedTypes) {
-        for (const auto& entry : coreObjectPropertyManifestEntries(objectType)) {
-            if (!isPersistedProperty(entry)) {
-                continue;
-            }
-            loadProp(objectType, entry.registration.propertyId);
-        }
-    }
+    // Whatever the other bank holds is a save that never reached its marker
+    // switch (or the bank a completed save could not finish erasing). It is
+    // never read, but it would be mixed into the next save's bank, so clear it.
+    erasePersistenceBank(static_cast<uint8_t>(_activeBank ^ 1u));
 
-    KNX_LOGD(TAG, "Loaded %zu properties from persistence", loaded);
+    KNX_LOGD(TAG, "Loaded %zu properties from persistence bank %u", loaded,
+             static_cast<unsigned>(_activeBank));
     return loaded;
+}
+
+uint8_t InterfaceObjectManager::readActivePersistenceBank() {
+    std::vector<uint8_t> stored;
+    if (_persistence->loadById(kPersistenceBankMarkerKeyId, stored) == PersistenceResult::Success &&
+        stored.size() == 1u && stored[0] <= 1u) {
+        return stored[0];
+    }
+    // No marker: state written before banks existed, which is bank 0.
+    return 0u;
+}
+
+void InterfaceObjectManager::erasePersistenceBank(uint8_t bank) {
+    forEachPersistedProperty([&](InterfaceObjectType objectType, application::PropertyID propertyId) {
+        (void)_persistence->eraseById(bankedKeyId(makePersistenceKeyId(objectType, propertyId), bank));
+    });
 }
 
 size_t InterfaceObjectManager::saveToPersistence() {
@@ -407,13 +450,28 @@ size_t InterfaceObjectManager::saveToPersistence() {
         return std::nullopt;
     };
 
+    // The whole state goes into the inactive bank; the marker switch at the
+    // end makes it current in one write (see kPersistenceBankMarkerKeyId).
+    // Writing each property over its live copy, as this used to, meant a reset
+    // part-way through a save booted with a mixture of two downloads, e.g. a
+    // new address table against the old association table.
+    const uint8_t nextBank = static_cast<uint8_t>(_activeBank ^ 1u);
+    bool bankComplete = true;
+
     auto saveProp = [&](InterfaceObjectType objectType, application::PropertyID propertyId, auto getter) {
+        const uint16_t baseKeyId = makePersistenceKeyId(objectType, propertyId);
+        const uint16_t keyId = bankedKeyId(baseKeyId, nextBank);
         std::vector<uint8_t> data;
         if (!getter(data)) {
-            return;
+            // Nothing readable now (an object this device does not have, say).
+            // The old bank is about to be dropped, so carry its copy across
+            // rather than lose it.
+            data.clear();
+            if (_persistence->loadById(bankedKeyId(baseKeyId, _activeBank), data) != PersistenceResult::Success) {
+                data.clear();
+            }
         }
 
-        const uint16_t keyId = makePersistenceKeyId(objectType, propertyId);
         // Avoid saving empty blobs for NVS safety; erase instead.
         if (data.empty()) {
             (void)_persistence->eraseById(keyId);
@@ -423,6 +481,7 @@ size_t InterfaceObjectManager::saveToPersistence() {
         const PersistenceResult res = _persistence->saveById(keyId, data);
         if (res != PersistenceResult::Success) {
             KNX_LOGW(TAG, "Failed to save keyId=0x%04x (res=%d)", keyId, static_cast<int>(res));
+            bankComplete = false;
             return;
         }
         ++saved;
@@ -471,22 +530,8 @@ size_t InterfaceObjectManager::saveToPersistence() {
                  });
     };
 
-    static const InterfaceObjectType kPersistedTypes[] = {
-        InterfaceObjectType::device(),
-        InterfaceObjectType::addressTable(),
-        InterfaceObjectType::associationTable(),
-        InterfaceObjectType::applicationProgram(),
-        InterfaceObjectType::groupObjectTable(),
-        InterfaceObjectType::security(),
-    };
-
-    for (const auto objectType : kPersistedTypes) {
-        for (const auto& entry : coreObjectPropertyManifestEntries(objectType)) {
-            if (!isPersistedProperty(entry)) {
-                continue;
-            }
-
-            const auto propertyId = entry.registration.propertyId;
+    forEachPersistedProperty([&](InterfaceObjectType objectType, application::PropertyID propertyId) {
+        {
 
             // The Security Interface Object's key tables are variable-length
             // arrays held as one blob. savePropViaManager reads a *single*
@@ -505,45 +550,65 @@ size_t InterfaceObjectManager::saveToPersistence() {
                         out = (blob != nullptr) ? *blob : std::vector<uint8_t>{};
                         return true;
                     });
-                    continue;
+                    return;
                 }
             }
 
             if (objectType == InterfaceObjectType::addressTable() &&
                 propertyId == static_cast<application::PropertyID>(AddressTableProperty::TableData)) {
                 savePropertyFromKernel(objectType, propertyId, *_addressTablePtr, _addressTablePtr->entryCount());
-                continue;
+                return;
             }
 
             if (objectType == InterfaceObjectType::associationTable() &&
                 propertyId == static_cast<application::PropertyID>(AssociationTableProperty::TableData)) {
                 savePropertyFromKernel(objectType, propertyId, *_associationTablePtr, _associationTablePtr->entryCount());
-                continue;
+                return;
             }
 
             if (objectType == InterfaceObjectType::applicationProgram()) {
                 if (propertyId == static_cast<application::PropertyID>(AppProgramProperty::ProgramName)) {
                     savePropertyFromKernel(objectType, propertyId, *_applicationProgramPtr,
                                            static_cast<uint16_t>(_applicationProgramPtr->getProgramName().size()));
-                    continue;
+                    return;
                 }
                 if (propertyId == static_cast<application::PropertyID>(AppProgramProperty::ProgramDescription)) {
                     savePropertyFromKernel(objectType, propertyId, *_applicationProgramPtr,
                                            static_cast<uint16_t>(_applicationProgramPtr->getProgramDescription().size()));
-                    continue;
+                    return;
                 }
                 if (propertyId == static_cast<application::PropertyID>(AppProgramProperty::ProgramData)) {
                     savePropertyFromKernel(objectType, propertyId, *_applicationProgramPtr,
                                            static_cast<uint16_t>(_applicationProgramPtr->getProgramData().size()));
-                    continue;
+                    return;
                 }
             }
 
             savePropViaManager(objectType, propertyId);
         }
+    });
+
+    if (!bankComplete) {
+        // The marker still names the old bank, so the device keeps booting
+        // with the previous complete state; the partial bank is cleared at the
+        // next load.
+        KNX_LOGE(TAG, "Saving to persistence bank %u failed; keeping bank %u",
+                 static_cast<unsigned>(nextBank), static_cast<unsigned>(_activeBank));
+        return 0;
     }
 
-    KNX_LOGI(TAG, "Saved %zu properties to persistence", saved);
+    // The switch: one key, one commit.
+    const std::array<uint8_t, 1> marker{nextBank};
+    if (_persistence->saveById(kPersistenceBankMarkerKeyId, marker) != PersistenceResult::Success) {
+        KNX_LOGE(TAG, "Failed to switch persistence bank marker to %u; keeping bank %u",
+                 static_cast<unsigned>(nextBank), static_cast<unsigned>(_activeBank));
+        return 0;
+    }
+    const uint8_t previousBank = _activeBank;
+    _activeBank = nextBank;
+    erasePersistenceBank(previousBank);
+
+    KNX_LOGI(TAG, "Saved %zu properties to persistence bank %u", saved, static_cast<unsigned>(_activeBank));
     return saved;
 }
 
@@ -557,9 +622,12 @@ size_t InterfaceObjectManager::saveSecuritySequenceState() {
     // The per-partner numbers live in the array property itself (the Security
     // Interface Object writes them through on every accepted telegram), so
     // storing that one blob stores all of them.
-    const uint16_t tableKeyId = makePersistenceKeyId(
-        InterfaceObjectType::security(),
-        static_cast<application::PropertyID>(SecurityProperty::SecurityIndividualAddressTable));
+    // Written in place in the active bank: it is the same property the last
+    // full save stored, only with newer sequence numbers.
+    const uint16_t tableKeyId = bankedKeyId(
+        makePersistenceKeyId(InterfaceObjectType::security(),
+                             static_cast<application::PropertyID>(SecurityProperty::SecurityIndividualAddressTable)),
+        _activeBank);
     if (const auto* blob = _securityObjectPtr->findExtraProperty(
             SecurityProperty::SecurityIndividualAddressTable);
         blob != nullptr && !blob->empty()) {

@@ -114,6 +114,11 @@ public:
         _accessCheck = std::move(check);
     }
 
+    /// See AccessLevelQuery; enforced on A_PropertyExtValue_Write* only.
+    void setAccessLevelQuery(AccessLevelQuery query) {
+        _accessLevel = std::move(query);
+    }
+
     /// A_PropertyExtValue_Read → A_PropertyExtValue_Response
     util::Result<void> handleValueRead(const IndividualAddress& source,
                                        const PropertyExtValueRequest& request);
@@ -152,6 +157,7 @@ private:
     FunctionResponseCallback _functionResponseCallback;
     FunctionProvider _functionProvider;
     AccessCheck _accessCheck;
+    AccessLevelQuery _accessLevel;
 
     void sendValueFailure(const IndividualAddress& destination,
                           APCIService service,

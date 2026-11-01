@@ -60,6 +60,10 @@ public:
         DescriptorSupportEntry{3u, false, 0u},
     }};
 
+    /// The descriptor_type of the error answer to an unsupported type
+    /// (03/03/07 §3.4.2.1), sent without data.
+    static constexpr uint8_t kUnsupportedDescriptorType = 0x3Fu;
+
     /**
      * @brief Constructor
      * @param descriptor Device descriptor data

@@ -240,10 +240,10 @@ void test_InterfaceObjectManager_ElementZeroWriteSetsElementCount(void) {
 // --- KNXnet/IP Parameter Object: PID 90-94 (Secure PIDs) ---
 
 // PID values from the reference registry (DIN EN ISO 22510:2021 §5.7.2.5)
-static constexpr knx::application::PropertyID kPidTunnellingUsers   = static_cast<knx::application::PropertyID>(90);
+static constexpr knx::application::PropertyID kPidTunnellingUsers   = static_cast<knx::application::PropertyID>(97);
 static constexpr knx::application::PropertyID kPidBackboneKey       = static_cast<knx::application::PropertyID>(91);
-static constexpr knx::application::PropertyID kPidMulticastLatency  = static_cast<knx::application::PropertyID>(92);
-static constexpr knx::application::PropertyID kPidSyncLatencyFrac   = static_cast<knx::application::PropertyID>(93);
+static constexpr knx::application::PropertyID kPidMulticastLatency  = static_cast<knx::application::PropertyID>(95);
+static constexpr knx::application::PropertyID kPidSyncLatencyFrac   = static_cast<knx::application::PropertyID>(96);
 static constexpr knx::application::PropertyID kPidSecuredSvcFamilies = static_cast<knx::application::PropertyID>(94);
 
 void test_KnxNetIpParam_BackboneKey_Describe(void)
@@ -448,11 +448,11 @@ void test_KnxNetIpParam_UndeclaredPid_RejectsInvalid(void)
     mgr.registerReferenceObject(paramObj);
 
     knx::application::PropertyServiceDataBuffer buf;
-    // PID 95 is not declared in the knxNetIpParameter manifest
+    // PID 98 is not declared in the knxNetIpParameter manifest
     auto rres = mgr.readProperty(
         InterfaceObjectType::knxNetIpParameter(),
         InterfaceObjectInstance(1),
-        static_cast<knx::application::PropertyID>(95),
+        static_cast<knx::application::PropertyID>(98),
         1, 1, buf);
 
     TEST_ASSERT_NOT_EQUAL(

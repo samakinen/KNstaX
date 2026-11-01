@@ -3,16 +3,6 @@
 
 menu "KNX Stack Configuration"
 
-    config KNX_PRODUCTION_BUILD
-        bool "Production build mode"
-        default n
-        help
-            Enable production build mode.
-
-            This repository does not ship stub platform drivers in src/.
-            Use this flag as a project-level indicator for stricter build
-            settings (e.g., disabling debug features, tightening checks).
-
     choice KNX_MEDIUM
         prompt "KNX Medium"
         default KNX_MEDIUM_TP1
@@ -28,11 +18,6 @@ menu "KNX Stack Configuration"
             bool "IP (KNXnet/IP)"
             help
                 KNXnet/IP over Ethernet/WiFi
-        
-        config KNX_MEDIUM_RF
-            bool "RF (Radio Frequency)"
-            help
-                KNX RF medium (868 MHz)
     endchoice
 
     menu "TP1 Configuration"
@@ -40,17 +25,25 @@ menu "KNX Stack Configuration"
         
         choice KNX_TP1_PHYSICAL
             prompt "TP1 Physical Layer"
-            default KNX_TP1_TPUART
-            
+            default KNX_TP1_BITBANG
+
             config KNX_TP1_TPUART
-                bool "TPUART (NCN5120/NCN5121)"
+                bool "TPUART (NCN5120/NCN5121) (broken, do not use)"
                 help
-                    Use hardware TPUART chip (NCN5120, NCN5121, etc.)
-            
+                    Hardware TPUART chip (NCN5120, NCN5121, etc.).
+
+                    Broken: it has never run against the chip, and the code
+                    disagrees with the NCN5120 datasheet on the L_Data.con
+                    code, on which control octets it accepts (ordinary 0xBC
+                    frames are dropped) and on TX framing. Do not select it
+                    until it has been rewritten against the datasheet and
+                    tested on hardware.
+
             config KNX_TP1_BITBANG
                 bool "Bit-Bang (Software)"
                 help
-                    Use software bit-bang implementation
+                    Use software bit-bang implementation. This is the tested
+                    backend.
         endchoice
         
         config KNX_TP1_UART_NUM
@@ -320,7 +313,10 @@ menu "KNX Stack Configuration"
                 Enable KNXnet/IP Tunneling (unicast): the client role, this
                 device opening a connection to a KNXnet/IP gateway. A KNX IP
                 device (03/02/06) is not a tunnelling client, so an image that
-                only has to be commissioned by ETS does not need this.
+                only has to be commissioned by ETS does not need this, and
+                with it off the client sources (gateway discovery, the
+                device-management connection, the TCP channel and the secure
+                session) are not built.
 
                 Not available when KNX Secure is enabled against mbedTLS 4
                 (ESP-IDF 6.x): IP Secure session establishment needs X25519 and
@@ -329,13 +325,6 @@ menu "KNX Stack Configuration"
 
         comment "Tunnelling withdrawn: IP Secure sessions need X25519/PBKDF2 from the legacy mbedTLS API, gone in mbedTLS 4"
             depends on KNX_ENABLE_SECURITY && MBEDTLS_VER_4_X_SUPPORT
-        
-        config KNX_IP_MULTICAST_ADDR
-            string "Multicast Address"
-            depends on KNX_ENABLE_ROUTING
-            default "224.0.23.12"
-            help
-                KNXnet/IP multicast address
         
         config KNX_IP_PORT
             int "KNXnet/IP Port"
@@ -380,11 +369,6 @@ menu "KNX Stack Configuration"
             default n
             help
                 Enable KNX Data Security and/or System-B Secure
-        
-        config KNX_SECURITY_KEY_SIZE
-            int
-            default 16
-            depends on KNX_ENABLE_SECURITY
     endmenu
 
     menu "Object Limits"
@@ -488,12 +472,6 @@ menu "KNX Stack Configuration"
             default 256
             help
                 Flash page/sector size
-        
-        config KNX_USE_NVS
-            bool "Use ESP32 NVS"
-            default y
-            help
-                Use ESP32 Non-Volatile Storage instead of raw flash
     endmenu
 
     menu "Feature Flags"
@@ -503,18 +481,6 @@ menu "KNX Stack Configuration"
             default y
             help
                 Filter incoming group telegrams based on address table
-        
-        config KNX_ENABLE_DEVICE_DESCRIPTOR
-            bool "Enable Device Descriptor"
-            default y
-            help
-                Support device descriptor read
-        
-        config KNX_ENABLE_PROPERTY_SERVICES
-            bool "Enable Property Services"
-            default y
-            help
-                Support property read/write services
     endmenu
 
     menu "Debug Configuration"
@@ -533,12 +499,16 @@ menu "KNX Stack Configuration"
                 Enable verbose frame-level logging
         
         config KNX_LOG_LEVEL
-            int "Log Level"
-            depends on KNX_DEBUG_ENABLED
+            int "Log Level (compile-time ceiling)"
             default 3
             range 0 5
             help
                 0=None, 1=Error, 2=Warning, 3=Info, 4=Debug, 5=Verbose
+
+                The most verbose KNstaX log level compiled into the image.
+                Calls above it expand to nothing, so their format strings cost
+                no flash. Independent of KNX_DEBUG_ENABLED: the level applies
+                with debug output off too.
     endmenu
 
 endmenu

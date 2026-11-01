@@ -121,12 +121,20 @@ void RoutingFlowControl::noteBusyReceived(const RoutingBusyInfo& info,
     lastBusyMs_ = nowMs;
     busyDecayStartMs_ = nowMs + (busyCounter_ * 100u);  // tslowduration = N * 100 ms
 
-    uint32_t wait = info.waitTimeMs;
+    // tw "SHALL be at least 20 ms and SHALL not exceed 100 ms" (03_08_05
+    // §2.3.5). A sender is held to that, so a larger value is either a broken
+    // router or someone using the field to silence the group; either way
+    // obeying it as sent would stop this device for up to 65 s per frame.
+    uint32_t wait = std::min<uint32_t>(info.waitTimeMs, kMaxBusyWaitMs);
     if (config_.randomBackoffSlotMs != 0) {
         const float clamped = std::clamp(random01, 0.0f, 1.0f);
         wait += static_cast<uint32_t>(clamped * static_cast<float>(busyCounter_) *
                                       static_cast<float>(config_.randomBackoffSlotMs));
     }
+    // N, and with it trandom, grows with every BUSY a few milliseconds apart.
+    // The total is bounded so that a stream of them delays this device rather
+    // than stopping it.
+    wait = std::min(wait, kMaxTotalBusyWaitMs);
 
     const uint32_t candidate = nowMs + wait;
     // Overlapping notifications take the longer of the two, never the newer.

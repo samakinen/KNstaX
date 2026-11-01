@@ -8,6 +8,7 @@
 #include "knx/physical/bitbang_timing_stats.hpp"
 #include "knx/physical/timer_gpio_hal.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -70,6 +71,12 @@ public:
         /// the per-bit alarm lateness of every individually addressed frame is
         /// invisible. data = worst per-bit lateness in µs, saturated at 255.
         TxFrameEnd = 16,
+        /// The frame lost bitwise arbitration on every one of
+        /// MAX_TX_ARBITRATION_ATTEMPTS tries and was abandoned. data = the
+        /// number of losses. A single loss is not reported this way: the ISR
+        /// restarts the frame itself once the bus is idle (see
+        /// detectCollision()), and only the Collision diagnostic is queued.
+        TxArbitrationLost = 17,
     };
 
     /// One ISR→task event.
@@ -105,8 +112,23 @@ public:
     static constexpr uint8_t ACK_BYTE_BUSY = 0xC0;
     static constexpr uint8_t ACK_BYTE_NACK_BUSY = 0x00;
 
-    /// Maximum group addresses the ISR early-ACK matcher scans per telegram.
-    static constexpr uint8_t MAX_ACK_GROUP_ADDRESSES = 64;
+    /// Set in an End message's data byte, next to the RX error flags, when the
+    /// telegram was refused with BUSY. The sender repeats such a frame
+    /// (03_02_02 §2.4.2), so the consumer must not pass this copy upwards.
+    static constexpr uint8_t END_FLAG_ANSWERED_BUSY = 0x80;
+
+    /// Group addresses the ISR early-ACK matcher can hold: the data link's
+    /// whole table (Tp1DataLinkLayer::MAX_GROUP_ADDRESSES). A smaller table
+    /// left every address beyond it unacknowledged, so senders repeated each
+    /// of those frames three times and reported failure.
+    static constexpr uint16_t MAX_ACK_GROUP_ADDRESSES = 256;
+
+    /// Tries for one send() before a frame that keeps losing bitwise
+    /// arbitration is abandoned. Losing arbitration is normal TP1 bus access,
+    /// not a transmission error, so it is retried here rather than charged to
+    /// the data link's BUSY or NAK budget; the bound only keeps a jammed bus
+    /// from looping forever.
+    static constexpr uint8_t MAX_TX_ARBITRATION_ATTEMPTS = 10;
 
     bool init(const knx_timer_gpio_hal_t& hal, const BitBangConfig& config);
     void shutdown();
@@ -120,36 +142,60 @@ public:
     // 15-bit-time (~1.56 ms) t_ack deadline. Tasks only configure the decision
     // inputs ahead of time here.
 
-    /// Publish the subscribed group addresses the ISR should L_ACK (when the
-    /// sender requests acknowledgement).
+    /// Publish the group addresses the ISR acknowledges: those in the device's
+    /// group address table (03_02_02 §2.4.2, "addressed" case 3.1).
+    ///
+    /// The table is sorted here, in task context, so the ISR can binary-search
+    /// it — at most eight probes for 256 entries, where a linear scan of the
+    /// full table would cost the receive path up to 256 compares inside the
+    /// byte that has to latch the ACK decision.
     ///
     /// Published under the same ISR lock send() uses. `volatile` on the count
     /// orders nothing with respect to the plain array stores beside it, so the
     /// compiler was free to publish the count before the entries it describes;
     /// a critical section makes the table and its length change together. This
-    /// runs at commissioning, not on any hot path, and the section is bounded by
-    /// a 64-entry copy.
-    void setAckGroupAddresses(const uint16_t* addresses, uint8_t count) {
+    /// runs at commissioning, not on any hot path; the sort happens before the
+    /// lock is taken, so the section is bounded by a 512-byte copy.
+    void setAckGroupAddresses(const uint16_t* addresses, size_t count) {
         if (count > MAX_ACK_GROUP_ADDRESSES) {
             count = MAX_ACK_GROUP_ADDRESSES;
         }
+        std::array<uint16_t, MAX_ACK_GROUP_ADDRESSES> sorted{};
+        std::copy_n(addresses, count, sorted.begin());
+        std::sort(sorted.begin(), sorted.begin() + static_cast<std::ptrdiff_t>(count));
+
         _isrHal.lockFromTask();
-        for (uint8_t i = 0; i < count; ++i) {
-            _ackGroupAddresses[i] = addresses[i];
-        }
-        _ackGroupAddressCount = count;
+        std::copy_n(sorted.begin(), count, _ackGroupAddresses.begin());
+        _ackGroupAddressCount = static_cast<uint16_t>(count);
         _isrHal.unlockFromTask();
     }
 
     /// Busy state reflected in the ISR's ACK decision (BUSY instead of ACK).
     void setLocalBusy(bool busy) { _localBusy = busy; }
 
+    /// Bus-monitor mode: the device only listens. It must not acknowledge
+    /// anything, or a monitoring tool would change the traffic it observes —
+    /// a frame meant for a device that is absent would look delivered.
+    void setBusMonitorMode(bool enabled) { _busMonitor = enabled; }
+
     bool popMessage(Message& outMessage);
 
     using QueueNotifyCallback = void(*)(void* context);
+
+    /// Install or clear the ISR→task wake-up.
+    ///
+    /// Written under the ISR lock so the interrupt never sees a callback from
+    /// one call paired with the context of another. Once this returns, no
+    /// later interrupt can use the old pair, which is what lets a caller
+    /// clear it and then free whatever the context pointed at. On the
+    /// single-core targets this driver runs on, no interrupt can be part-way
+    /// through the old callback while task code runs, so there is nothing
+    /// further to wait for.
     void setQueueNotifyCallback(QueueNotifyCallback callback, void* context) {
+        _isrHal.lockFromTask();
         _queueNotifyCallback = callback;
         _queueNotifyContext = context;
+        _isrHal.unlockFromTask();
     }
 
     void onTimerAlarm();
@@ -255,7 +301,14 @@ private:
     uint8_t  _rxErrors{0};
     uint8_t  _pendingAckByte{0};
     // Per-frame state for ISR-level early DL-ACK decision
-    uint8_t  _rxByteCount{0};
+    // 16-bit for the same reason as _txBytePosition: an L_Data_Extended frame
+    // is up to 263 octets, and a uint8_t count wrapped mid-frame and re-ran
+    // the header decoding on payload octets 256 onwards.
+    uint16_t _rxByteCount{0};
+    // Running XOR of every octet of the telegram, check octet included. A
+    // correct frame leaves 0xFF: the check octet is the inverted XOR of the
+    // octets before it (03_02_02 §2.2.1).
+    uint8_t  _rxCheckXor{0};
     uint8_t  _rxDstHi{0};
     uint8_t  _rxDstLo{0};
     bool     _rxExtendedFrame{false};    // CTRL bits 7..6 == 00 (L_Data_Extended)
@@ -263,8 +316,11 @@ private:
     uint8_t  _rxDominantLevel{1};        // GPIO level meaning "dominant", from config
     uint16_t _ownAddressRaw{0};
     // ISR ACK decision inputs, configured from task context (see setters above).
-    volatile bool    _localBusy{false};
-    volatile uint8_t _ackGroupAddressCount{0};
+    volatile bool     _localBusy{false};
+    volatile bool     _busMonitor{false};
+    volatile uint16_t _ackGroupAddressCount{0};
+    // Sorted ascending by setAckGroupAddresses(); armEarlyAckIfAddressed()
+    // binary-searches it.
     std::array<uint16_t, MAX_ACK_GROUP_ADDRESSES> _ackGroupAddresses{};
     // ACK receive transaction: one-bit state feeding the timeout classification
     // in txHandleWaitingAck(). Cleared by prepareAckReception().
@@ -272,7 +328,14 @@ private:
     bool     _ackStartValidated{false};
     // TX fields
     bool     _dlAckEchoSeen{false};  // ISR: RX was dominant during ≥1 active bit of the DL-ACK
-    uint8_t  _dlAckRxErrors{0};      // RX error flags captured at telegram-complete for the armed DL-ACK slot
+    // Arbitration losses of the frame currently in _txBuffer; reset by send().
+    uint8_t  _txArbitrationLosses{0};
+    // Earliest instant the next frame may start after a BUSY acknowledge, or 0.
+    // 03_02_02 §2.4.2 and A.8: wait at least 150 bit times "regardless of
+    // whether the bus is free or not" before repeating. The data link layer
+    // could not enforce it: it has no clock on the production path, so its
+    // BUSY back-off was zero. Here it is one compare on the CSMA gate.
+    uint64_t _txHoldoffUntilUs{0};
     uint8_t  _txCurrentByte{0};
     int8_t   _txBitPosition{-1};
     // 16-bit because MAX_TELEGRAM_SIZE is 263: a full L_Data_Extended frame
@@ -415,7 +478,7 @@ private:
     uint64_t processStartBit();
     uint64_t rxHandleStop(uint8_t bit);
     uint64_t rxHandleTelegramComplete();
-    uint8_t finishRxTelegram();
+    uint8_t finishRxTelegram(uint8_t endFlags = 0);
 
     uint64_t sendBit(uint8_t bit);
     uint64_t processEndOfTxBit();
@@ -500,21 +563,22 @@ private:
         return ackByte;
     }
 
-    // ISR-side DL-ACK decision, evaluated the instant the destination address
-    // is fully known (mid-frame). Latches the ACK/BUSY intent that the DL-ACK
-    // slot alarm transmits after t_ack; reception errors detected later
-    // downgrade it to NACK at slot time.
-    /// Whether the frame just transmitted from _txBuffer must be acknowledged
-    /// by its addressee, i.e. whether to open the ACK window instead of going
-    /// idle.  Mirrors armEarlyAckIfAddressed() on the receive side: TP1 has no
-    /// meaningful ACK-request bit on the wire, so every individually addressed
-    /// frame is acknowledged and gating on CTRL bit 1 alone means the sender
-    /// never learns that a frame was NAK'd or lost.
+    /// Whether the frame just transmitted from _txBuffer must be acknowledged,
+    /// i.e. whether to open the ACK window instead of going idle.
+    ///
+    /// "The L_Data service shall be an acknowledged datagram service" for
+    /// every destination, group and broadcast included (03_02_02 §2.4.2), and
+    /// TP1 has no meaningful ACK-request bit on the wire. Skipping the window
+    /// for group frames meant a group telegram that was NAK'd, refused with
+    /// BUSY or lost was never repeated. Mirrors armEarlyAckIfAddressed() on
+    /// the receive side, including its one exclusion.
     [[gnu::always_inline]] bool txFrameExpectsAck() const noexcept
     {
         if (_txTelegramLength == 0) {
             return false;
         }
+        // Kept from the earlier rule: a sender that sets the A bit asked for
+        // the window, whatever the destination.
         if ((_txBuffer[datalink::CTRL_FIELD_POS] & datalink::CTRL_ACK_REQ) != 0u) {
             return true;
         }
@@ -530,7 +594,7 @@ private:
             return false;
         }
         if ((_txBuffer[addressTypePos] & datalink::DEST_ADDR_TYPE) != 0u) {
-            return false;  // group addressed, including broadcast 0/0/0
+            return true;  // group addressed, including broadcast 0/0/0
         }
 
         const uint16_t destRaw = static_cast<uint16_t>(
@@ -540,27 +604,62 @@ private:
         return destRaw != 0xFFFFu;
     }
 
+    /// Whether the telegram just received is "correct" in the sense of
+    /// 03_02_02 §2.4.2: no character error (checked by the caller through
+    /// _rxErrors), a check octet that matches, and 8–23 octets for a standard
+    /// or 9–263 for an extended frame, check octet included. The spec rules
+    /// out any further length check before acknowledging — in particular the
+    /// length field is NOT compared with the real length (§2.4.2, Example 1).
+    [[gnu::always_inline]] bool rxFrameIsCorrect() const noexcept
+    {
+        const uint16_t length = _rxByteCount;
+        const bool lengthOk = _rxExtendedFrame ? (length >= 9u && length <= 263u)
+                                               : (length >= 8u && length <= 23u);
+        return lengthOk && _rxCheckXor == 0xFFu;
+    }
+
+    /// Binary search of the sorted group-address table. Hand-written rather
+    /// than std::binary_search so nothing outside this IRAM-resident code is
+    /// reached from the interrupt.
+    [[gnu::always_inline]] bool ackGroupTableContains(uint16_t destRaw) const noexcept
+    {
+        uint16_t low = 0;
+        uint16_t high = _ackGroupAddressCount;
+        while (low < high) {
+            const uint16_t mid = static_cast<uint16_t>((low + high) / 2u);
+            const uint16_t entry = _ackGroupAddresses[mid];
+            if (entry == destRaw) {
+                return true;
+            }
+            if (entry < destRaw) {
+                low = static_cast<uint16_t>(mid + 1u);
+            } else {
+                high = mid;
+            }
+        }
+        return false;
+    }
+
+    // ISR-side DL-ACK decision, evaluated the instant the destination address
+    // is fully known (mid-frame). Latches the ACK/BUSY intent that the DL-ACK
+    // slot alarm transmits after t_ack; rxHandleTelegramComplete() downgrades
+    // it to NAK if the telegram turns out not to be correct.
     [[gnu::always_inline]] void armEarlyAckIfAddressed(bool isGroupAddressed) noexcept
     {
+        if (_busMonitor) {
+            return;
+        }
+
         const uint16_t destRaw = (static_cast<uint16_t>(_rxDstHi) << 8) | _rxDstLo;
         bool addressed;
         if (isGroupAddressed) {
             // Group frames: the device is addressed when the destination is in
             // its group address table, or is the broadcast address 0/0/0 —
-            // and an addressed device SHALL confirm (03_02_02 §2.3, mirrors
+            // and an addressed device SHALL confirm (03_02_02 §2.4.2, mirrors
             // TPUART/NCN5120 auto-ACK). There is no ACK-request bit on the
             // TP1 wire: certified senders keep CTRL bits 1..0 at zero, so
             // gating on them would suppress every acknowledgment.
-            addressed = destRaw == 0x0000u;
-            if (!addressed) {
-                const uint8_t count = _ackGroupAddressCount;
-                for (uint8_t i = 0; i < count; ++i) {
-                    if (_ackGroupAddresses[i] == destRaw) {
-                        addressed = true;
-                        break;
-                    }
-                }
-            }
+            addressed = destRaw == 0x0000u || ackGroupTableContains(destRaw);
         } else {
             // Individually-addressed frames: always ACK when they match our
             // address; the individual broadcast 0xFFFF is never acknowledged.

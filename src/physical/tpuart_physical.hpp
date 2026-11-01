@@ -7,6 +7,17 @@
  * 
  * Implements the KNX TP1 physical layer using TPUART chips like NCN5120/NCN5121.
  * Handles low-level frame transmission and reception with collision detection.
+ *
+ * @warning BROKEN — DO NOT USE. Known defects (code review, October 2026):
+ *   - L_Data.con is expected as 0x0B; the chip sends 0x8B (positive) / 0x0B
+ *     (negative), so every transmission is misread;
+ *   - only 0x9x control octets are accepted as indications, so ordinary
+ *     0xBC standard frames are dropped;
+ *   - the TX framing (start/continue/end service octets) does not follow the
+ *     NCN5120 datasheet.
+ *   It has never been tested against a chip and cannot be fixed without one.
+ *   The supported TP1 backend is the bit-bang driver. The backlog keeps
+ *   "rewrite against the NCN5120 datasheet".
  */
 
 #pragma once

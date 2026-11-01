@@ -606,7 +606,9 @@ void TransportLayer::processRetransmissions(uint32_t currentTimeMs) {
 void TransportLayer::runConnectionTimers(uint32_t currentTimeMs) {
     _timebaseMs = currentTimeMs;
 
-    auto needsRetransmit = _connectionTable.processRetransmissions(currentTimeMs);
+    util::FixedVector<ClosedConnection, ConnectionTable::MAX_CONNECTIONS> exhausted;
+    auto needsRetransmit = _connectionTable.processRetransmissions(currentTimeMs, &exhausted);
+    disconnectClosedConnections(exhausted);
     for (ConnectionIndex connIdx : needsRetransmit) {
         auto* entry = _connectionTable.getConnection(connIdx);
         if (!entry || entry->pendingData.empty() || !entry->pendingRetransmission) {
@@ -638,10 +640,29 @@ void TransportLayer::runConnectionTimers(uint32_t currentTimeMs) {
         }
     }
 
-    auto timedOut = _connectionTable.processTimeouts(currentTimeMs, constants::timing::CONNECTION_TIMEOUT_MS);
-    for (ConnectionIndex connIdx : timedOut) {
-        KNX_LOGW(TAG, "Connection %d timed out and was removed", connIdx.value());
+    disconnectClosedConnections(
+        _connectionTable.processTimeouts(currentTimeMs, constants::timing::CONNECTION_TIMEOUT_MS));
+}
+
+void TransportLayer::disconnectClosedConnections(
+    const util::FixedVector<ClosedConnection, ConnectionTable::MAX_CONNECTIONS>& closed) {
+    // E16 (connection timeout) and E18 (repetitions used up) both lead to A6,
+    // which sends T_Disconnect before closing. Closing silently left the
+    // partner in OPEN_IDLE until its own 6 s timer ran out, and a partner that
+    // had just sent a frame we never saw kept repeating it into a connection
+    // that no longer existed.
+    for (const ClosedConnection& conn : closed) {
+        KNX_LOGW(TAG, "Connection %d to 0x%04X closed, sending T_Disconnect",
+                 conn.index.value(), conn.remoteAddress.raw);
+        (void)sendDisconnect(conn.remoteAddress, conn.priority);
     }
+}
+
+void TransportLayer::closeConnectionWithDisconnect(ConnectionEntry& entry) {
+    const IndividualAddress remote = entry.remoteAddress;
+    const Priority priority = entry.priority;
+    (void)_connectionTable.removeConnection(entry.index);
+    (void)sendDisconnect(remote, priority);
 }
 
 util::Result<void> TransportLayer::beginProcessRetransmissions(uint32_t currentTimeMs) {
@@ -657,7 +678,9 @@ util::Result<void> TransportLayer::beginProcessRetransmissions(uint32_t currentT
     _retransmissionOperation.active = true;
     _retransmissionOperation.currentTimeMs = currentTimeMs;
 
-    auto needsRetransmit = _connectionTable.processRetransmissions(currentTimeMs);
+    util::FixedVector<ClosedConnection, ConnectionTable::MAX_CONNECTIONS> exhausted;
+    auto needsRetransmit = _connectionTable.processRetransmissions(currentTimeMs, &exhausted);
+    disconnectClosedConnections(exhausted);
     for (size_t i = 0; i < needsRetransmit.size() && i < _retransmissionOperation.pending.size(); ++i) {
         _retransmissionOperation.pending[i] = needsRetransmit[i];
         ++_retransmissionOperation.pendingCount;
@@ -749,10 +772,8 @@ util::Result<TransportLayer::ControlSendProgressState> TransportLayer::pollProce
         return ControlSendProgressState::Pending;
     }
 
-    auto timedOut = _connectionTable.processTimeouts(_retransmissionOperation.currentTimeMs, constants::timing::CONNECTION_TIMEOUT_MS);
-    for (ConnectionIndex connIdx : timedOut) {
-        KNX_LOGW(TAG, "Connection %d timed out and was removed", connIdx.value());
-    }
+    disconnectClosedConnections(_connectionTable.processTimeouts(_retransmissionOperation.currentTimeMs,
+                                                                 constants::timing::CONNECTION_TIMEOUT_MS));
 
     finishRetransmissionOperation();
     return ControlSendProgressState::Success;

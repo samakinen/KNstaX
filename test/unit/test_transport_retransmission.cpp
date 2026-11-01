@@ -55,13 +55,14 @@ void test_RetransmissionTimeout(void) {
     (void)table.markDataSent(idx);
     entry->lastTxTimeMs = 4500;  // Update last TX time
     
-    // Timeout should have doubled (3000 -> 6000)
+    // The acknowledge timeout stays at 3 s (03_03_04 §5, A9); it used to
+    // double to 6 s, which this test asserted.
     entry = table.getConnection(idx);
-    TEST_ASSERT_EQUAL(6000, entry->retransmitTimeoutMs);
+    TEST_ASSERT_EQUAL(3000, entry->retransmitTimeoutMs);
     TEST_ASSERT_EQUAL(1, entry->retransmitCount);
 }
 
-void test_ExponentialBackoff(void) {
+void test_AcknowledgeTimeoutIsFixed(void) {
     ConnectionTable table;
     TEST_ASSERT_TRUE(table.init(4).isOk());
     
@@ -78,20 +79,20 @@ void test_ExponentialBackoff(void) {
     entry->retransmitTimeoutMs = 3000;
     entry->retransmitCount = 0;
     
-    // First retry: 3000ms -> 6000ms
-    table.processRetransmissions(3500);
+    // First repetition after 3 s.
+    TEST_ASSERT_EQUAL(1, table.processRetransmissions(3500).size());
     (void)table.markDataSent(idx);  // Simulate actual send
     entry = table.getConnection(idx);
     entry->lastTxTimeMs = 3500;  // Update last TX time
-    TEST_ASSERT_EQUAL(6000, entry->retransmitTimeoutMs);
     TEST_ASSERT_EQUAL(1, entry->retransmitCount);
-    
-    // Second retry: should cap at 6000ms
-    entry->lastTxTimeMs = 4000;
-    table.processRetransmissions(10500);
+
+    // The second repetition is due 3 s after the first, not 6 s (the old
+    // exponential back-off would have waited until 9500).
+    TEST_ASSERT_EQUAL(0, table.processRetransmissions(6499).size());
+    TEST_ASSERT_EQUAL(1, table.processRetransmissions(6500).size());
     (void)table.markDataSent(idx);  // Simulate actual send
     entry = table.getConnection(idx);
-    TEST_ASSERT_EQUAL(6000, entry->retransmitTimeoutMs); // Capped
+    TEST_ASSERT_EQUAL(3000, entry->retransmitTimeoutMs);
     TEST_ASSERT_EQUAL(2, entry->retransmitCount);
 }
 
@@ -121,15 +122,16 @@ void test_MaxRetries(void) {
     entry->lastTxTimeMs = 200;  // Update last TX time
     TEST_ASSERT_EQUAL(3, entry->retransmitCount);
     
-    // Fourth retry should fail and NOT remove connection (processRetransmissions just stops)
-    retransmits = table.processRetransmissions(400);
+    // E18: repetitions used up. The connection is closed (A6) and reported so
+    // the transport layer can send T_Disconnect. This test used to assert the
+    // connection stayed open with its pending frame silently dropped.
+    knx::util::FixedVector<ClosedConnection, ConnectionTable::MAX_CONNECTIONS> closed;
+    retransmits = table.processRetransmissions(400, &closed);
     TEST_ASSERT_EQUAL(0, retransmits.size()); // No more retransmits
-    
-    // Connection should still exist (cleanup happens elsewhere)
-    entry = table.getConnection(idx);
-    TEST_ASSERT_NOT_NULL(entry);
-    // But retransmit state should be reset
-    TEST_ASSERT_FALSE(entry->pendingRetransmission);
+    TEST_ASSERT_EQUAL(1, closed.size());
+    TEST_ASSERT_EQUAL(idx.value(), closed[0].index.value());
+    TEST_ASSERT_EQUAL_HEX16(0x1234, closed[0].remoteAddress.raw);
+    TEST_ASSERT_NULL(table.getConnection(idx));
 }
 
 void test_ResetRetransmitState(void) {
@@ -181,7 +183,8 @@ void test_ConnectionTimeout(void) {
     // Check at 8000ms - should timeout
     timedOut = table.processTimeouts(8000, 6000);
     TEST_ASSERT_EQUAL(1, timedOut.size());
-    TEST_ASSERT_EQUAL(idx.value(), timedOut[0].value());
+    TEST_ASSERT_EQUAL(idx.value(), timedOut[0].index.value());
+    TEST_ASSERT_EQUAL_HEX16(0x1234, timedOut[0].remoteAddress.raw);
     
     // Connection should be removed
     entry = table.getConnection(idx);
@@ -287,7 +290,7 @@ int main(int argc, char **argv) {
     
     // Retransmission timing and backoff
     RUN_TEST(test_RetransmissionTimeout);
-    RUN_TEST(test_ExponentialBackoff);
+    RUN_TEST(test_AcknowledgeTimeoutIsFixed);
     RUN_TEST(test_MaxRetries);
     RUN_TEST(test_ResetRetransmitState);
     RUN_TEST(test_ConnectionTimeout);

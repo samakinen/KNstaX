@@ -101,10 +101,10 @@ enum class ReferencePropertyId : uint8_t {
     KnxNetIpTunnellingAddresses = 79,
 
     // KNXnet/IP Secure PIDs (DIN EN ISO 22510:2021, §5.7.2.5)
-    KnxNetIpTunnellingUsers = 90,           // PID_TUNNELLING_USERS: access control table for non-management tunnel users
+    KnxNetIpTunnellingUsers = 97,           // PID_TUNNELLING_USERS (03_08_09 §2.3.1.8): access control table for non-management tunnel users
     KnxNetIpBackboneKey = 91,               // PID_BACKBONE_KEY: 16-byte AES-128 key for secure multicast group
-    KnxNetIpMulticastLatencyTolerance = 92, // PID_MULTICAST_LATENCY_TOLERANCE: ms, default 2000
-    KnxNetIpSyncLatencyFraction = 93,       // PID_SYNC_LATENCY_FRACTION: %, default 10
+    KnxNetIpMulticastLatencyTolerance = 95, // PID_MULTICAST_LATENCY_TOLERANCE (03_08_09 §2.3.1.6): ms, default 2000
+    KnxNetIpSyncLatencyFraction = 96,       // PID_SYNC_LATENCY_FRACTION (03_08_09 §2.3.1.7): PDT_SCALING, default 1Ah
     KnxNetIpSecuredServiceFamilies = 94,    // PID_SECURED_SERVICE_FAMILIES: per-family secure enforcement flags
 
     // E-Mode Channel
@@ -169,6 +169,13 @@ constexpr PropertyManifestEntry entry(application::PropertyID propertyId,
 {
     return PropertyManifestEntry{{propertyId, dataType, access, maxElements, readLevel, writeLevel},
                                  PropertyPersistenceMode::None};
+}
+
+/// The same entry, stored by InterfaceObjectManager::saveToPersistence().
+constexpr PropertyManifestEntry persisted(PropertyManifestEntry manifestEntry)
+{
+    manifestEntry.persistence = PropertyPersistenceMode::Persist;
+    return manifestEntry;
 }
 
 constexpr PropertyManifestEntry objectTypeEntry()
@@ -313,9 +320,11 @@ std::span<const PropertyManifestEntry> referenceObjectPropertyManifestEntries(In
             entry(toPid(ReferencePropertyId::KnxNetIpTunnellingAddresses), PDT::UnsignedChar, PA::ReadWrite, 0xFFFFu),
             // KNXnet/IP Secure PIDs (DIN EN ISO 22510:2021, §5.7.2.5)
             entry(toPid(ReferencePropertyId::KnxNetIpTunnellingUsers), PDT::GenericData, PA::ReadWrite, 0xFFFFu),
-            entry(toPid(ReferencePropertyId::KnxNetIpBackboneKey), PDT::Generic16, PA::ReadWrite, 1),
-            entry(toPid(ReferencePropertyId::KnxNetIpMulticastLatencyTolerance), PDT::UnsignedInt, PA::ReadWrite, 1),
-            entry(toPid(ReferencePropertyId::KnxNetIpSyncLatencyFraction), PDT::UnsignedChar, PA::ReadWrite, 1),
+            // The Secure Routing configuration ETS downloads must survive the
+            // restart that ends the download, like the Data Secure key tables.
+            persisted(entry(toPid(ReferencePropertyId::KnxNetIpBackboneKey), PDT::Generic16, PA::ReadWrite, 1)),
+            persisted(entry(toPid(ReferencePropertyId::KnxNetIpMulticastLatencyTolerance), PDT::UnsignedInt, PA::ReadWrite, 1)),
+            persisted(entry(toPid(ReferencePropertyId::KnxNetIpSyncLatencyFraction), PDT::UnsignedChar, PA::ReadWrite, 1)),
             // PDT_FUNCTION, not stored data: 03/08/09 §2.3.1.5 defines it as a
             // Function Property whose encoding differs between the write and
             // the response, so no single datatype describes it. Declaring it as

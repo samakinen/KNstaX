@@ -11,6 +11,20 @@ static const char* TAG = "KNX.Transport";
 namespace knx {
 namespace transport {
 
+namespace {
+
+/// E05 of 03_03_04 §5.2: "SeqNo_of_PDU == ((SeqNoRcv - 1) & Fh)", i.e. a
+/// repeat of the last frame we accepted. It is only possible once a frame has
+/// been accepted on the connection. This used to compare against the last
+/// sequence number *seen*, which a frame NAK'd for being out of order also
+/// updated, so the partner's repetition of that frame was answered with a
+/// T_ACK and never delivered.
+bool isRepeatOfLastAccepted(const ConnectionEntry& entry, uint8_t seqNum) {
+    return entry.lastReceivedSeq != 0xFFu && seqNum == ((entry.expectedRxSeq - 1u) & 0x0Fu);
+}
+
+} // namespace
+
 util::Result<void> TransportLayer::beginControlResponse(const IndividualAddress& remoteAddress,
                                                         const protocol::TPCIField& tpci,
                                                         Priority priority) {
@@ -40,6 +54,7 @@ void TransportLayer::finalizeReceiveOperation() {
     if (_receiveOperation.advanceExpectedSequence) {
         ConnectionEntry* entry = _connectionTable.getConnection(_receiveOperation.connectionIndex);
         if (entry) {
+            entry->lastReceivedSeq = entry->expectedRxSeq & 0x0Fu;
             entry->expectedRxSeq = (entry->expectedRxSeq + 1u) & 0x0F;
         }
     }
@@ -105,14 +120,7 @@ void TransportLayer::beginHandleNumberedData(const IndividualAddress& remoteAddr
     _connectionTable.updateActivityTime(entry->index, nowMs());
     _receiveOperation.connectionIndex = entry->index;
 
-    auto dupRes = _connectionTable.isDuplicate(entry->index, seqNum);
-    if (dupRes.isError()) {
-        KNX_LOGW(TAG, "Duplicate check failed for connection %u", entry->index.value());
-        _receiveOperation.terminalState = ControlSendProgressState::TransmissionFailed;
-        return;
-    }
-
-    if (dupRes.value()) {
+    if (isRepeatOfLastAccepted(*entry, seqNum)) {
         KNX_LOGD(TAG, "Duplicate packet detected from 0x%04X, seq=%d - sending ACK",
                  remoteAddress.raw, seqNum);
         auto beginResult = beginControlResponse(remoteAddress, protocol::TPCIField::ack(seqNum), priority);
@@ -127,9 +135,8 @@ void TransportLayer::beginHandleNumberedData(const IndividualAddress& remoteAddr
     if (seqNum != (entry->expectedRxSeq & 0x0F)) {
         KNX_LOGW(TAG, "Sequence mismatch: expected %d, got %d",
                  entry->expectedRxSeq & 0x0F, seqNum);
-        auto beginResult = beginControlResponse(remoteAddress,
-                                                protocol::TPCIField::nak(entry->expectedRxSeq & 0x0F),
-                                                priority);
+        // A4: the T_NAK names the received frame (see handleNumberedData).
+        auto beginResult = beginControlResponse(remoteAddress, protocol::TPCIField::nak(seqNum), priority);
         if (beginResult.isOk()) {
             _receiveOperation.waitingResponse = true;
             return;
@@ -206,7 +213,7 @@ void TransportLayer::handleNetworkRx(const network::NDataFrame& frame) {
     } else if (tpciType == protocol::TPCI::NumberedControl) {
         const uint8_t seqNum = extractSeqNum(tpci);
         if (tpci.isAck()) {
-            handleAck(remoteAddr, seqNum);
+            handleAck(remoteAddr, seqNum, frame.dlFrame.repeated);
             return;
         } else if (tpci.isNak()) {
             handleNak(remoteAddr, seqNum);
@@ -465,39 +472,45 @@ void TransportLayer::handleNumberedData(const IndividualAddress& remoteAddress, 
     seqNum &= 0x0F;
     entry->priority = priority;
 
-    auto dupRes = _connectionTable.isDuplicate(entry->index, seqNum);
-    if (dupRes.isError()) {
-        KNX_LOGW(TAG, "Duplicate check failed for connection %u", entry->index.value());
-        return;
-    }
-    if (dupRes.value()) {
+    if (isRepeatOfLastAccepted(*entry, seqNum)) {
+        // E05 → A3: the partner missed our T_ACK and repeated the frame.
         KNX_LOGD(TAG, "Duplicate packet detected from 0x%04X, seq=%d - sending ACK",
                  remoteAddress.raw, seqNum);
         (void)sendAck(remoteAddress, seqNum, priority);
         _connectionTable.updateActivityTime(entry->index, nowMs());
         // ETS didn't receive our last response — retransmit immediately rather
         // than waiting for the 3 s periodic timer. Zero retransmitTimeoutMs so
-        // processRetransmissions fires now; restore it after (the doubling step
-        // inside would otherwise leave it at 0, causing retransmit on every tick).
+        // processRetransmissions fires now, then restore it. The entry is
+        // looked up again afterwards because the timer pass may close
+        // connections.
         if (entry->pendingRetransmission && !entry->pendingData.empty()
                 && entry->retransmitCount < entry->maxRetries) {
+            const ConnectionIndex index = entry->index;
             entry->retransmitTimeoutMs = 0;
             processRetransmissions(nowMs());
-            entry->retransmitTimeoutMs = constants::timing::ACK_TIMEOUT_MS;
+            if (ConnectionEntry* still = _connectionTable.getConnection(index)) {
+                still->retransmitTimeoutMs = constants::timing::ACK_TIMEOUT_MS;
+            }
         }
         return;
     }
 
     if (seqNum != (entry->expectedRxSeq & 0x0F)) {
+        // E06 → A4: T_NAK carrying the sequence number of the received frame,
+        // not the one we expected. The partner matches a T_NAK against its own
+        // SeqNoSend (E11/E12), so a T_NAK naming our expectation was read as
+        // a T_NAK for some other frame and ignored.
         KNX_LOGW(TAG, "Sequence mismatch: expected %d, got %d",
                  entry->expectedRxSeq & 0x0F, seqNum);
-        (void)sendNak(remoteAddress, entry->expectedRxSeq & 0x0F, priority);
+        (void)sendNak(remoteAddress, seqNum, priority);
         _connectionTable.updateActivityTime(entry->index, nowMs());
         return;
     }
 
+    // E04 → A2.
     (void)sendAck(remoteAddress, seqNum, priority);
     _connectionTable.updateActivityTime(entry->index, nowMs());
+    entry->lastReceivedSeq = seqNum;
     entry->expectedRxSeq = (entry->expectedRxSeq + 1) & 0x0F;
 
     TDataFrame tFrame;
@@ -534,22 +547,48 @@ void TransportLayer::handleNumberedData(const IndividualAddress& remoteAddress, 
     }
 }
 
-void TransportLayer::handleAck(const IndividualAddress& remoteAddress, uint8_t seqNum) {
+void TransportLayer::handleAck(const IndividualAddress& remoteAddress, uint8_t seqNum, bool repeatedFrame) {
     KNX_LOGD(TAG, "Received T_ACK from 0x%04X, seq=%d", remoteAddress.raw, seqNum);
 
     ConnectionEntry* entry = _connectionTable.findConnection(remoteAddress);
-    if (entry) {
-        // A T_ACK only closes the acknowledgement window (OPEN_WAIT ->
-        // OPEN_IDLE); it does not carry SeqNoSend. Advancing the counter here
-        // instead of on transmission made a single lost T_ACK freeze it for
-        // good: every later response repeated a sequence number the peer had
-        // already consumed, the peer discarded them as duplicates, and an ETS
-        // download died on the first telegram after the loss.
-        if (entry->pendingRetransmission && ((seqNum & 0x0F) == (entry->pendingSeq & 0x0F))) {
-            (void)_connectionTable.resetRetransmitState(entry->index);
-        }
-        _connectionTable.updateActivityTime(entry->index, nowMs());
+    if (!entry) {
+        return;
     }
+
+    // A T_ACK only closes the acknowledgement window (OPEN_WAIT ->
+    // OPEN_IDLE); it does not carry SeqNoSend. Advancing the counter here
+    // instead of on transmission made a single lost T_ACK freeze it for
+    // good: every later response repeated a sequence number the peer had
+    // already consumed, the peer discarded them as duplicates, and an ETS
+    // download died on the first telegram after the loss.
+    if (entry->pendingRetransmission) {
+        if ((seqNum & 0x0F) == (entry->pendingSeq & 0x0F)) {
+            // E08 → A8.
+            (void)_connectionTable.resetRetransmitState(entry->index);
+            _connectionTable.updateActivityTime(entry->index, nowMs());
+            return;
+        }
+        if (!repeatedFrame) {
+            // E09 in OPEN_WAIT → A6 (Style 1 and Style 1 Rationalised): the
+            // partner acknowledged a frame we are not waiting for, so the two
+            // sides disagree on SeqNoSend and nothing sent from here on can be
+            // matched up. Close now rather than repeat the frame three times
+            // into a connection that cannot recover.
+            //
+            // A data-link repetition (repeat flag set) is exempt: it is the
+            // partner's T_ACK for our previous frame sent again because our
+            // L2 acknowledgement was lost, the same case handleConnectRequest
+            // exempts for T_Connect.
+            KNX_LOGW(TAG, "T_ACK seq=%u from 0x%04X while waiting for seq=%u - disconnecting",
+                     seqNum & 0x0Fu, remoteAddress.raw, entry->pendingSeq & 0x0Fu);
+            closeConnectionWithDisconnect(*entry);
+            return;
+        }
+    }
+    // A T_ACK in OPEN_IDLE is E08/E09 → A6 in every style, but it is ignored
+    // here: a late or repeated T_ACK for a frame already acknowledged is
+    // harmless, and dropping a working ETS connection over it is not.
+    _connectionTable.updateActivityTime(entry->index, nowMs());
 }
 
 void TransportLayer::handleNak(const IndividualAddress& remoteAddress, uint8_t seqNum) {
@@ -557,6 +596,13 @@ void TransportLayer::handleNak(const IndividualAddress& remoteAddress, uint8_t s
 
     ConnectionEntry* entry = _connectionTable.findConnection(remoteAddress);
     if (entry) {
+        // Only a T_NAK naming the outstanding frame triggers a repetition
+        // (E12 → A9; E13, repetitions used up, ends in A6 through the
+        // acknowledge timer). A T_NAK with any other sequence number (E11) is
+        // ignored, which is Style 2's A0. Style 1 would disconnect (A6), but a
+        // stale T_NAK, e.g. one the data link repeated, says nothing about
+        // the frame now outstanding, whose own acknowledge timeout still
+        // guards it.
         if (entry->pendingRetransmission && ((seqNum & 0x0F) == (entry->pendingSeq & 0x0F))) {
             entry->pendingRetransmission = true;
             const uint32_t now = nowMs();

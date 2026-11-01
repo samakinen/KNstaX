@@ -25,6 +25,8 @@
 #include <mutex>
 #include <optional>
 #include <span>
+#include <algorithm>
+#include <string>
 #include <vector>
 
 using namespace knx;
@@ -118,8 +120,15 @@ public:
     }
 
     void setQueueNotifyCallback(QueueNotifyCallback callback, void* context) override {
-        (void)callback;
         (void)context;
+        if (_callLog != nullptr) {
+            _callLog->push_back(callback == nullptr ? "notify-cleared" : "notify-set");
+        }
+    }
+
+    /// Order-of-teardown probe for Tp1DataLinkLayer::close().
+    void setCallLog(std::vector<std::string>* log) {
+        _callLog = log;
     }
 
     DriverState getState() const override {
@@ -260,10 +269,18 @@ protected:
                         setState(DriverState::Idle);
                     }
 
-                    if (message.data != 0u) {
+                    // Mirrors BitBangDriverTimerIsrEspIdf: the BUSY marker is
+                    // not an error, and a frame refused with BUSY is not
+                    // delivered (the sender repeats it).
+                    const uint8_t errorFlags = static_cast<uint8_t>(
+                        message.data & ~BitBangDriverTimerIsr::END_FLAG_ANSWERED_BUSY);
+                    const bool answeredBusy =
+                        (message.data & BitBangDriverTimerIsr::END_FLAG_ANSWERED_BUSY) != 0u;
+
+                    if (errorFlags != 0u) {
                         Tp1RxEvent errorEvent;
                         errorEvent.type = Tp1RxEventType::ReceiveError;
-                        errorEvent.errorFlags = message.data;
+                        errorEvent.errorFlags = errorFlags;
                         (void)enqueueTp1Event(errorEvent);
                     }
 
@@ -271,7 +288,7 @@ protected:
                     endEvent.type = Tp1RxEventType::TelegramEnd;
                     (void)enqueueTp1Event(endEvent);
 
-                    if (_rxCallback && _activeFrameStarted && _activeFrameLength > 0u) {
+                    if (_rxCallback && _activeFrameStarted && _activeFrameLength > 0u && !answeredBusy) {
                         _rxCallback(std::span<const uint8_t>(_activeFrame).first(_activeFrameLength), _rxContext);
                     }
 
@@ -302,6 +319,15 @@ protected:
                 case BitBangDriverTimerIsr::MessageType::TxComplete: {
                     // Frames sent without the CTRL A-bit finish via TxComplete
                     // (no DL-ACK wait) — return to idle like the espidf wrapper.
+                    setState(DriverState::Idle);
+                    break;
+                }
+
+                case BitBangDriverTimerIsr::MessageType::TxArbitrationLost: {
+                    Tp1RxEvent event;
+                    event.type = Tp1RxEventType::TxAckResponse;
+                    event.ackClass = Tp1AckClass::None;
+                    (void)enqueueTp1Event(event);
                     setState(DriverState::Idle);
                     break;
                 }
@@ -412,6 +438,36 @@ private:
 
     mutable std::mutex _sentFramesMutex;
     std::vector<std::vector<uint8_t>> _sentFrames;
+    std::vector<std::string>* _callLog{nullptr};
+};
+
+/// Tasking platform that never runs the task it "creates" and records when it
+/// is deleted, so the order of Tp1DataLinkLayer::close() can be observed.
+class TeardownOrderPlatform : public platform::TaskingPlatform {
+public:
+    TeardownOrderPlatform(platform::TaskingPlatform& inner, std::vector<std::string>& log)
+        : _inner(inner), _log(log) {}
+
+    platform::MutexHandle createMutex() override { return _inner.createMutex(); }
+    void deleteMutex(platform::MutexHandle mutex) override { _inner.deleteMutex(mutex); }
+    util::Result<void> lockMutex(platform::MutexHandle mutex, uint32_t timeoutMs) override {
+        return _inner.lockMutex(mutex, timeoutMs);
+    }
+    void unlockMutex(platform::MutexHandle mutex) override { _inner.unlockMutex(mutex); }
+
+    platform::TaskHandle createTask(const platform::TaskConfig&) override { return &_dummyTask; }
+    void deleteTask(platform::TaskHandle) override { _log.push_back("deleteTask"); }
+    platform::TaskHandle currentTask() override { return nullptr; }
+    void taskDelay(uint32_t) override {}
+    void taskYield() override {}
+    util::Result<void> taskNotifyGive(platform::TaskHandle) override { return util::Result<void>::ok(); }
+    util::Result<void> taskNotifyGiveFromISR(platform::TaskHandle) override { return util::Result<void>::ok(); }
+    uint32_t taskNotifyTake(platform::TaskNotifyClearMode, uint32_t) override { return 0u; }
+
+private:
+    platform::TaskingPlatform& _inner;
+    std::vector<std::string>& _log;
+    int _dummyTask{0};
 };
 
 VirtualTp1TestRuntime runtime;
@@ -1119,6 +1175,96 @@ void test_VDLBUS_203_busy_retries_do_not_consume_the_l2_repetition_budget() {
     TEST_ASSERT_EQUAL_UINT32(3u, stats.txRepetitions);
 }
 
+// 03_02_02 §2.4.2: group frames are acknowledged too, so an unanswered group
+// frame is repeated three times. Nobody listening to a group address is a
+// legitimate configuration, so the send then counts as done; before, the
+// first copy was reported sent without waiting for anything.
+void test_VDLBUS_204_unacknowledged_group_frame_is_repeated_then_reported_sent() {
+    const auto frame = makeOutboundGroupWrite(GroupAddress(3, 3, 4), 0x84u);
+
+    const auto result = sendLDataFrameWithAckSequence(
+        frame,
+        {
+            VirtualTp1PeerResponse::Silent,
+            VirtualTp1PeerResponse::Silent,
+            VirtualTp1PeerResponse::Silent,
+            VirtualTp1PeerResponse::Silent,
+        });
+
+    TEST_ASSERT_TRUE(result.isOk());
+    TEST_ASSERT_EQUAL_UINT32(4u, static_cast<uint32_t>(driver->sentFrameCount()));
+    // Every repetition carries the repeat flag (wire bit 5 cleared).
+    for (size_t i = 1; i < 4u; ++i) {
+        TEST_ASSERT_EQUAL_UINT8(0u, driver->sentFrame(i)[0] & CTRL_REPEAT);
+    }
+    TEST_ASSERT_EQUAL_UINT32(3u, dlLayer->getStatistics().txRepetitions);
+}
+
+// A NAK means somebody received the group frame and could not read it: that
+// still fails once the repetitions are spent.
+void test_VDLBUS_205_nakked_group_frame_still_fails_after_repetitions() {
+    const auto frame = makeOutboundGroupWrite(GroupAddress(3, 3, 5), 0x85u);
+
+    const auto result = sendLDataFrameWithAckSequence(
+        frame,
+        {
+            VirtualTp1PeerResponse::Nack,
+            VirtualTp1PeerResponse::Nack,
+            VirtualTp1PeerResponse::Nack,
+            VirtualTp1PeerResponse::Nack,
+        });
+
+    TEST_ASSERT_TRUE(result.isError());
+    TEST_ASSERT_EQUAL(static_cast<int>(util::ErrorCode::TransmissionFailed), static_cast<int>(result.error()));
+    TEST_ASSERT_EQUAL_UINT32(4u, static_cast<uint32_t>(driver->sentFrameCount()));
+}
+
+// Only group frames get that leniency: an individual frame nobody answers is
+// a failed delivery.
+void test_VDLBUS_206_unacknowledged_individual_frame_still_times_out() {
+    LDataFrame frame = makeOutboundGroupWrite(GroupAddress(3, 3, 6), 0x86u);
+    frame.setDestination(kRemoteAddress);
+
+    const auto result = sendLDataFrameWithAckSequence(
+        frame,
+        {
+            VirtualTp1PeerResponse::Silent,
+            VirtualTp1PeerResponse::Silent,
+            VirtualTp1PeerResponse::Silent,
+            VirtualTp1PeerResponse::Silent,
+        });
+
+    TEST_ASSERT_TRUE(result.isError());
+    TEST_ASSERT_EQUAL(static_cast<int>(util::ErrorCode::Timeout), static_cast<int>(result.error()));
+}
+
+// close() must disconnect the interrupt's wake-up before it deletes the task
+// that wake-up notifies; the reverse order let an edge in between hand a freed
+// task to vTaskNotifyGiveFromISR.
+void test_VDLBUS_207_close_clears_isr_notify_before_deleting_rx_task() {
+    dlLayer->close();
+    dlLayer.reset();
+
+    std::vector<std::string> log;
+    TeardownOrderPlatform platform(runtime.platform(), log);
+    driver->setCallLog(&log);
+
+    Tp1DataLinkConfig config = Tp1DataLinkConfig::defaults();
+    config.enableRxTask = true;
+    auto layer = std::make_unique<Tp1DataLinkLayer>(platform, *macPhysical, config);
+    TEST_ASSERT_TRUE(layer->init(kOwnAddress).isOk());
+    log.clear();
+
+    layer->close();
+    driver->setCallLog(nullptr);
+
+    const auto cleared = std::find(log.begin(), log.end(), std::string("notify-cleared"));
+    const auto deleted = std::find(log.begin(), log.end(), std::string("deleteTask"));
+    TEST_ASSERT_TRUE(cleared != log.end());
+    TEST_ASSERT_TRUE(deleted != log.end());
+    TEST_ASSERT_TRUE(cleared < deleted);
+}
+
 void test_VDLBUS_301_transport_matching_nak_retransmits_same_sequence_over_virtual_bus() {
     initTransportStack();
 
@@ -1187,7 +1333,9 @@ void test_VDLBUS_302_transport_matching_ack_prevents_timeout_retransmit_over_vir
 
     injectInboundLDataFrame(makeInboundTransportControlFrame(remote, protocol::TPCIField::ack(seq)));
     TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(processRxAvailableWithTxOutcome(VirtualTp1PeerResponse::Silent, 0u)));
-    tpLayer->processRetransmissions(10000u);
+    // Past the 3 s acknowledge timeout but inside the 6 s connection timeout,
+    // which since E16 closes an idle connection with T_Disconnect.
+    tpLayer->processRetransmissions(1000u + constants::timing::ACK_TIMEOUT_MS + 1000u);
 
     TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(driver->sentFrameCount()));
 }
@@ -1253,6 +1401,10 @@ int main() {
     RUN_TEST(test_VDLBUS_201_datalink_send_retries_busy_then_succeeds_on_ack);
     RUN_TEST(test_VDLBUS_202_datalink_send_fails_after_busy_retry_budget_is_exhausted);
     RUN_TEST(test_VDLBUS_203_busy_retries_do_not_consume_the_l2_repetition_budget);
+    RUN_TEST(test_VDLBUS_204_unacknowledged_group_frame_is_repeated_then_reported_sent);
+    RUN_TEST(test_VDLBUS_205_nakked_group_frame_still_fails_after_repetitions);
+    RUN_TEST(test_VDLBUS_206_unacknowledged_individual_frame_still_times_out);
+    RUN_TEST(test_VDLBUS_207_close_clears_isr_notify_before_deleting_rx_task);
     RUN_TEST(test_VDLBUS_301_transport_matching_nak_retransmits_same_sequence_over_virtual_bus);
     RUN_TEST(test_VDLBUS_302_transport_matching_ack_prevents_timeout_retransmit_over_virtual_bus);
     RUN_TEST(test_VDLBUS_303_transport_numbered_data_can_be_explicitly_progressed_and_queued);

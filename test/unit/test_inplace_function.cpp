@@ -172,6 +172,38 @@ static void test_inplace_function_destructor_called_on_reset()
 }
 
 // ---------------------------------------------------------------------------
+// Move-only callables
+// ---------------------------------------------------------------------------
+
+struct MoveOnlyCallable {
+    MoveOnlyCallable() = default;
+    MoveOnlyCallable(const MoveOnlyCallable&) = delete;
+    MoveOnlyCallable(MoveOnlyCallable&&) noexcept = default;
+    int operator()() const { return 11; }
+};
+
+// A copyable wrapper used to accept a move-only callable, and copying the
+// wrapper then left the copy's storage unconstructed while its vtable claimed
+// a live object. Both halves must now be rejected at compile time.
+static_assert(!std::is_constructible_v<InplaceFunction<int(), 16>, MoveOnlyCallable>,
+              "a copyable InplaceFunction must not accept a move-only callable");
+static_assert(!std::is_assignable_v<InplaceFunction<int(), 16>&, MoveOnlyCallable>,
+              "a copyable InplaceFunction must not be assigned a move-only callable");
+static_assert(std::is_copy_constructible_v<InplaceFunction<int(), 16>>);
+static_assert(!std::is_copy_constructible_v<knx::util::MoveOnlyInplaceFunction<int(), 16>>);
+static_assert(!std::is_copy_assignable_v<knx::util::MoveOnlyInplaceFunction<int(), 16>>);
+static_assert(std::is_nothrow_move_constructible_v<knx::util::MoveOnlyInplaceFunction<int(), 16>>);
+
+static void test_move_only_inplace_function_holds_and_moves_move_only_callable()
+{
+    knx::util::MoveOnlyInplaceFunction<int(), 16> fn = MoveOnlyCallable{};
+    TEST_ASSERT_EQUAL_INT(11, fn());
+    knx::util::MoveOnlyInplaceFunction<int(), 16> moved = std::move(fn);
+    TEST_ASSERT_EQUAL_INT(11, moved());
+    TEST_ASSERT_FALSE(static_cast<bool>(fn));
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 
@@ -198,6 +230,7 @@ int main()
 
     RUN_TEST(test_inplace_function_reassignment_replaces_callable);
     RUN_TEST(test_inplace_function_destructor_called_on_reset);
+    RUN_TEST(test_move_only_inplace_function_holds_and_moves_move_only_callable);
 
     return UNITY_END();
 }
