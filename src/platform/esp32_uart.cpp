@@ -21,23 +21,10 @@ namespace {
 
 constexpr uint8_t kHardwareFlowControlThreshold = 120;
 
+// No Kconfig option selects UART pins any more (the only user, the TPUART
+// backend, is gone), so the pins are left as the driver has them.
 knx::platform::Esp32UartBuildConfig selectedBuildConfig() {
-    knx::platform::Esp32UartBuildConfig config;
-
-#if defined(CONFIG_KNX_TP1_UART_TX_PIN)
-    config.txPin = CONFIG_KNX_TP1_UART_TX_PIN;
-#endif
-#if defined(CONFIG_KNX_TP1_UART_RX_PIN)
-    config.rxPin = CONFIG_KNX_TP1_UART_RX_PIN;
-#endif
-#if defined(CONFIG_KNX_TP1_UART_RTS_PIN)
-    config.rtsPin = CONFIG_KNX_TP1_UART_RTS_PIN;
-#endif
-#if defined(CONFIG_KNX_TP1_UART_CTS_PIN)
-    config.ctsPin = CONFIG_KNX_TP1_UART_CTS_PIN;
-#endif
-
-    return config;
+    return knx::platform::Esp32UartBuildConfig{};
 }
 
 uint8_t hardwareFlowControlThreshold(size_t rxBufferSize) {
@@ -89,12 +76,7 @@ util::Result<void> Esp32Uart::init(const UartConfig& config) {
         return buildValidation.error();
     }
     
-    // Use build-selected TPUART UART when available.
-#if defined(CONFIG_KNX_TP1_UART_NUM)
-    _uartNum = static_cast<uart_port_t>(CONFIG_KNX_TP1_UART_NUM);
-#else
     _uartNum = UART_NUM_1;
-#endif
     
     // Convert parity
     uart_parity_t parity;

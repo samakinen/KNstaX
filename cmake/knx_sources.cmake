@@ -74,25 +74,17 @@ set(KNX_SOURCES_TP1
     "src/physical/bitbang_driver_timer_isr.cpp"
     "src/physical/bitbang_driver_timer_isr_espidf.cpp"
     "src/physical/bitbang_medium_backend_adapter.cpp"
-    "src/physical/tpuart_medium_backend_adapter.cpp"
     "src/physical/timer_gpio_hal_espidf.cpp"
     "src/physical/physical_factory.cpp"
 )
 
 # --- KNXnet/IP medium ----------------------------------------------------
 # Gated by KNX_FEATURE_NETIP.  A TP1-only device links none of this.
-#
-# ip_tunneling_physical and tunneling_session_client are the client role too,
-# but the BAU stack port, the physical factory and the product runtime
-# construct IpTunnelingPhysical whenever KNXnet/IP is built, so they stay here
-# until those call sites are gated as well.
 set(KNX_SOURCES_NETIP
     "src/physical/ip_physical_layer.cpp"
-    "src/physical/ip_tunneling_physical.cpp"
     "src/physical/ip_routing_physical.cpp"
     "src/netip/cemi.cpp"
     "src/netip/header_codec.cpp"
-    "src/netip/tunneling_session_client.cpp"
     "src/netip/tunneling_server_endpoint.cpp"
     "src/netip/udp_datagram_channel.cpp"
     "src/netip/routing.cpp"
@@ -106,8 +98,11 @@ set(KNX_SOURCES_NETIP
 # The KNXnet/IP client role: discovering a gateway and opening a tunnelling or
 # device-management connection to it. A KNX IP device (03/02/06) is never a
 # client, so this is built only with tunnelling enabled
-# (CONFIG_KNX_ENABLE_TUNNELING / KNX_FEATURE_TUNNELING).
+# (CONFIG_KNX_ENABLE_TUNNELING / KNX_FEATURE_TUNNELING), and the headers hide
+# its entry points behind KNX_IP_TUNNELING.
 set(KNX_SOURCES_NETIP_CLIENT
+    "src/physical/ip_tunneling_physical.cpp"
+    "src/netip/tunneling_session_client.cpp"
     "src/netip/gateway_discovery_client.cpp"
     "src/netip/tcp_frame_channel.cpp"
     "src/netip/device_management.cpp"
@@ -197,7 +192,3 @@ set(KNX_SOURCES_PLATFORM_LINUX
     "src/platform/linux_platform.cpp"
 )
 
-# TPUART front-end is only meaningful with the TP1 medium.
-set(KNX_SOURCES_TPUART
-    "src/physical/tpuart_physical.cpp"
-)

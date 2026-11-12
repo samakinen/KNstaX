@@ -165,6 +165,7 @@ void test_cemi_decode_random_inputs_does_not_crash(void) {
     }
 }
 
+#if KNX_IP_TUNNELING
 void test_knxnetip_gateway_parsers_random_inputs_does_not_crash(void) {
     for (const auto& bytes : knxnetipCorpus()) {
         GatewayInfo info1{};
@@ -200,6 +201,7 @@ void test_knxnetip_gateway_parsers_reject_length_mismatches(void) {
         TEST_ASSERT_TRUE(GatewayDiscoveryClient::parseSearchResponsePacket(std::span<const uint8_t>(pkt), info).isError());
     }
 }
+#endif  // KNX_IP_TUNNELING
 
 void test_knxnetip_routing_codec_random_inputs_does_not_crash(void) {
     for (const auto& bytes : knxnetipRoutingCorpus()) {
@@ -246,8 +248,10 @@ int main(int argc, char** argv) {
     UNITY_BEGIN();
     RUN_TEST(test_tp1_framecodec_decode_random_inputs_does_not_crash);
     RUN_TEST(test_cemi_decode_random_inputs_does_not_crash);
+#if KNX_IP_TUNNELING
     RUN_TEST(test_knxnetip_gateway_parsers_random_inputs_does_not_crash);
     RUN_TEST(test_knxnetip_gateway_parsers_reject_length_mismatches);
+#endif
     RUN_TEST(test_knxnetip_routing_codec_random_inputs_does_not_crash);
     RUN_TEST(test_knxnetip_routing_codec_rejects_length_mismatches);
     return UNITY_END();

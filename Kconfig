@@ -26,18 +26,10 @@ menu "KNX Stack Configuration"
         choice KNX_TP1_PHYSICAL
             prompt "TP1 Physical Layer"
             default KNX_TP1_BITBANG
-
-            config KNX_TP1_TPUART
-                bool "TPUART (NCN5120/NCN5121) (broken, do not use)"
-                help
-                    Hardware TPUART chip (NCN5120, NCN5121, etc.).
-
-                    Broken: it has never run against the chip, and the code
-                    disagrees with the NCN5120 datasheet on the L_Data.con
-                    code, on which control octets it accepts (ordinary 0xBC
-                    frames are dropped) and on TX framing. Do not select it
-                    until it has been rewritten against the datasheet and
-                    tested on hardware.
+            help
+                The software bit-bang backend is the only TP1 backend. A
+                transceiver with its own MAC (NCN5120 and similar) would be
+                another entry here, implemented as a Tp1MediumBackend.
 
             config KNX_TP1_BITBANG
                 bool "Bit-Bang (Software)"
@@ -45,44 +37,6 @@ menu "KNX Stack Configuration"
                     Use software bit-bang implementation. This is the tested
                     backend.
         endchoice
-        
-        config KNX_TP1_UART_NUM
-            int "UART Number"
-            depends on KNX_TP1_TPUART
-            default 1
-            range 0 2
-            help
-                UART port number for TPUART communication
-        
-        config KNX_TP1_UART_TX_PIN
-            int "UART TX Pin"
-            depends on KNX_TP1_TPUART
-            default 17
-            help
-                GPIO pin for UART TX
-        
-        config KNX_TP1_UART_RX_PIN
-            int "UART RX Pin"
-            depends on KNX_TP1_TPUART
-            default 16
-            help
-                GPIO pin for UART RX
-
-        config KNX_TP1_UART_RTS_PIN
-            int "UART RTS Pin"
-            depends on KNX_TP1_TPUART
-            default -1
-            help
-                GPIO pin for UART RTS hardware flow control.
-                Set to -1 to leave RTS unassigned.
-
-        config KNX_TP1_UART_CTS_PIN
-            int "UART CTS Pin"
-            depends on KNX_TP1_TPUART
-            default -1
-            help
-                GPIO pin for UART CTS hardware flow control.
-                Set to -1 to leave CTS unassigned.
         
         config KNX_TP1_BITBANG_TX_PIN
             int "Bit-Bang TX Pin"

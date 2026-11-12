@@ -3,9 +3,13 @@
 
 #pragma once
 
+#include "knx/config.hpp"
 #include "knx/netip/detail/polling.hpp"
 #include "knx/netip/device_management.hpp"
+
+#if KNX_IP_TUNNELING
 #include "knx/netip/tunneling_session_client.hpp"
+#endif
 
 #if KNX_SECURE_ENABLED
 #include "knx/netip/ip_secure/secure_tunneling_client.hpp"
@@ -433,6 +437,7 @@ private:
     PlanStatus planStatus_{};
 };
 
+#if KNX_IP_TUNNELING
 class TunnelingDeviceManagementSession final
     : public BasicDeviceManagementSession<TunnelingSessionClient, DeviceManagementClient> {
 public:
@@ -492,6 +497,7 @@ public:
         return detail::completionResult(terminal.value());
     }
 };
+#endif  // KNX_IP_TUNNELING
 
 #if KNX_SECURE_ENABLED
 

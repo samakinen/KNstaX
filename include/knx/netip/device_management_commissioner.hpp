@@ -440,6 +440,7 @@ private:
     OperationStatus operationStatus_{};
 };
 
+#if KNX_IP_TUNNELING
 class TunnelingDeviceManagementCommissioner final
     : public BasicDeviceManagementCommissioner<TunnelingDeviceManagementSession, TunnelingDeviceManagementProcedures> {
 public:
@@ -629,6 +630,7 @@ public:
             [this](CommissionIndividualAddressResult& result) { return pollOpenAndCommissionIndividualAddress(result); });
     }
 };
+#endif  // KNX_IP_TUNNELING
 
 #if KNX_SECURE_ENABLED
 

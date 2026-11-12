@@ -21,8 +21,8 @@ individual-address assignment, application download, group communication — and
 with KNX Data Secure enabled, a secure download and secure group communication.
 
 Everything else is implemented and covered by host tests but has never been run
-against real ETS, a real gateway, or real transceiver hardware — TPUART,
-KNXnet/IP tunnelling and routing, the coupler routing actions, and the
+against real ETS, a real gateway, or real transceiver hardware — KNXnet/IP
+tunnelling and routing, the coupler routing actions, and the
 IP-side secure paths (Secure Tunnelling and Secure Routing). Assume anything
 outside the proven path needs debugging on first contact; the support matrix
 splits it row by row.
@@ -48,8 +48,7 @@ There is no FDSK: key provisioning is manual by design, which makes secure
 commissioning a self-service flow rather than the certificate-based one an
 integrator expects from a catalogue product.
 
-**The bit-bang TP1 backend is beta.** TPUART is the conservative choice.
-Bit-bang works, but it needs the
+**The bit-bang TP1 backend is beta.** It works, but it needs the
 [bring-up guide](docs/reference/board_bringup_guide.md) and a scope to
 commission on a new board.
 
@@ -75,10 +74,10 @@ about every gap between the current state and a certifiable device.
   and 244, across 84 catalogue entries. The named helpers pick the KNX-standard
   sub-type per signal — a contact reported as 1.001 instead of 1.019 works on
   the wire but shows up in ETS as a switch.
-- **Two TP1 backends behind one MAC engine**: a timer-ISR software bit-bang
-  (the tested path) and TPUART for NCN5120/NCN5121 (implemented, never run
-  against the chip). Selected from Kconfig; nothing above the backend boundary
-  changes between them.
+- **TP1 over a timer-ISR software bit-bang backend** behind a medium-neutral
+  MAC engine. TP1 is bit-bang only; a driver for a transceiver with its own MAC
+  (NCN5120 and similar) can be added behind the same `Tp1MediumBackend`
+  interface without changing anything above it.
 - **KNXnet/IP** tunnelling and routing, compiled out entirely on a TP1-only
   build — CI proves the gate by failing if a gated-out medium so much as
   compiles.
@@ -147,8 +146,8 @@ inline constexpr auto kProduct = makeCommissionedProduct(
 Firmware binds callbacks to those ports and starts the runtime:
 
 ```cpp
-// createTp1Physical() picks the bit-bang or TPUART backend from Kconfig;
-// nothing above this line changes between the two.
+// createTp1Physical() builds the bit-bang TP1 physical layer (see the
+// esp_idf_switch example).
 auto physical = createTp1Physical(platform);
 
 auto result = startCommissionedProduct(
@@ -205,7 +204,6 @@ more than the feature list.
 | Area | Implemented | Validated against hardware / ETS |
 |---|---|---|
 | TP1 (timer-ISR bit-bang) | Yes, beta quality | **Yes** — ETS6 download and group communication on a real bus |
-| TP1 (TPUART) | Yes | **No** — never run against an NCN5120-class transceiver |
 | KNXnet/IP tunnelling (unicast) | Yes | **No** — host interop against `xknx` only, never a real ETS connection or gateway |
 | KNXnet/IP routing (multicast) | Yes | **No** — same |
 | KNX Data Secure | Yes; manual key provisioning | **Yes** — ETS secure download and secure group communication exercised on hardware |

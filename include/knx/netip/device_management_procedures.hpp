@@ -1002,7 +1002,9 @@ DeviceManagementProcedures<Workflow> makeDeviceManagementProcedures(Workflow& wo
     return DeviceManagementProcedures<Workflow>(workflow);
 }
 
+#if KNX_IP_TUNNELING
 using TunnelingDeviceManagementProcedures = DeviceManagementProcedures<TunnelingDeviceManagementSession>;
+#endif
 
 #if KNX_SECURE_ENABLED
 using SecureTunnelingDeviceManagementProcedures = DeviceManagementProcedures<SecureTunnelingDeviceManagementSession>;

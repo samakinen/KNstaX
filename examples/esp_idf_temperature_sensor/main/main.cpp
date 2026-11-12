@@ -52,27 +52,13 @@ float readBoardTemperatureC()
 
 util::Result<std::unique_ptr<physical::Tp1MacPhysical>> createTp1Physical(platform::Esp32Platform& platform)
 {
-    physical::Tp1BackendSelection selection{};
-
-#if defined(CONFIG_KNX_TP1_TPUART)
-    selection.family = physical::Tp1BackendFamily::Tpuart;
-#elif defined(CONFIG_KNX_TP1_BITBANG)
-    selection.family = physical::Tp1BackendFamily::Bitbang;
-#else
-    return util::ErrorCode::OperationNotSupported;
-#endif
-
-    physical::Tp1PlatformDependencies dependencies{};
-    dependencies.platform = &platform;
-    dependencies.uart = platform.uart();
-
-#if defined(CONFIG_KNX_TP1_BITBANG)
     static physical::BitBangDriverTimerIsrEspIdf bitbangDriver;
+    physical::Tp1PlatformDependencies dependencies{};
     dependencies.bitbangDriver = &bitbangDriver;
     dependencies.bitbangTp1Driver = &bitbangDriver;
-#endif
+    dependencies.platform = &platform;
 
-    return physical::createTp1PhysicalForPlatform(selection, dependencies);
+    return physical::createTp1PhysicalForPlatform(dependencies);
 }
 
 void initNvs()

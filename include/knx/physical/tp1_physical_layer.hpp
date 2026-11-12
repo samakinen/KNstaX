@@ -115,17 +115,5 @@ public:
     virtual util::Result<void> setBusMonitorMode(Toggle mode) = 0;
 };
 
-class Tp1PhysicalFrameSource {
-public:
-    virtual ~Tp1PhysicalFrameSource() = default;
-
-    /**
-     * @brief Receive a raw KNX frame as a non-owning view.
-     * @param timeoutMs Timeout in milliseconds
-     * @return Non-owning frame view valid until the next receive call on the same object
-     */
-    virtual util::Result<std::span<const uint8_t>> receiveFrameView(uint32_t timeoutMs) = 0;
-};
-
 } // namespace physical
 } // namespace knx

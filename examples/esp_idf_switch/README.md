@@ -18,9 +18,8 @@ idf.py menuconfig              # KNX Stack Configuration → pins, timing, backe
 idf.py build flash monitor
 ```
 
-`sdkconfig.defaults` selects the **software bit-bang** TP1 backend. Switch to
-`CONFIG_KNX_TP1_TPUART` for an NCN5120-class transceiver — `main.cpp` handles
-both and nothing above `createTp1Physical()` changes.
+`sdkconfig.defaults` selects the **software bit-bang** TP1 backend, the only
+TP1 backend.
 
 ## Wiring
 
@@ -65,7 +64,7 @@ from NVS on the next boot.
 | Concern | Where |
 |---|---|
 | Product definition (ports, DPTs, ETS identity) | `main/product.hpp` — no hardware, no OS |
-| Backend selection from Kconfig | `createTp1Physical()` |
+| TP1 physical layer construction | `createTp1Physical()` |
 | KNX write → hardware | `.onCommand<Port::RelayCommand>` |
 | Hardware → KNX read response | `.provideState<Port::RelayState>` |
 | Commissioning state → LED | `.onLifecycleChanged` |

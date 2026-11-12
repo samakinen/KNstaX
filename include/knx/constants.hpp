@@ -358,13 +358,6 @@ namespace physical {
     constexpr uint8_t TP1_DATA_BITS = 8;
     constexpr char TP1_PARITY = 'E';                        // Even parity
     
-    // TPUART specific
-    constexpr uint8_t TPUART_RESET_CMD = 0x01;
-    constexpr uint8_t TPUART_STATE_REQ = 0x02;
-    constexpr uint8_t TPUART_ACTIVATE_BUSMON = 0x05;
-    constexpr uint8_t TPUART_ACK_INFO = 0x10;
-    constexpr uint8_t TPUART_FRAME_END = 0x00;
-    
     // IP constants (KNXnet/IP)
     constexpr NetIpPort KNXNETIP_DEFAULT_PORT = NetIpPort(netip::config::kDefaultPort);
     constexpr uint8_t KNXNETIP_PROTOCOL_VERSION = 0x10;     // Version 1.0

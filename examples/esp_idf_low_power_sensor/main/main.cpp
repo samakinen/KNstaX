@@ -20,8 +20,8 @@
  * this device receives as well as transmits, and the TP1 receive path is a GPIO
  * edge feeding a timer ISR. Deep sleep powers down the timer, so an incoming
  * telegram would be missed entirely rather than merely delayed. A deep-sleep
- * design needs either a transceiver that buffers frames (TPUART with its own
- * MCU) or a device that only ever transmits. Light sleep keeps the peripherals
+ * design needs either a transceiver that buffers frames (a TPUART-class chip
+ * with its own MCU, for which KNstaX has no driver yet) or a device that only ever transmits. Light sleep keeps the peripherals
  * clocked and still cuts the bulk of the idle draw.
  */
 
@@ -106,23 +106,13 @@ bool readContactOpen()
 util::Result<std::unique_ptr<physical::Tp1MacPhysical>> createTp1Physical(
     platform::Esp32Platform& platform)
 {
-    physical::Tp1BackendSelection selection{};
-    physical::Tp1PlatformDependencies dependencies{};
-    dependencies.platform = &platform;
-    dependencies.uart = platform.uart();
-
-#if defined(CONFIG_KNX_TP1_TPUART)
-    selection.family = physical::Tp1BackendFamily::Tpuart;
-#elif defined(CONFIG_KNX_TP1_BITBANG)
-    selection.family = physical::Tp1BackendFamily::Bitbang;
     static physical::BitBangDriverTimerIsrEspIdf bitbangDriver;
+    physical::Tp1PlatformDependencies dependencies{};
     dependencies.bitbangDriver = &bitbangDriver;
     dependencies.bitbangTp1Driver = &bitbangDriver;
-#else
-#error "Select a TP1 backend: CONFIG_KNX_TP1_BITBANG or CONFIG_KNX_TP1_TPUART"
-#endif
+    dependencies.platform = &platform;
 
-    return physical::createTp1PhysicalForPlatform(selection, dependencies);
+    return physical::createTp1PhysicalForPlatform(dependencies);
 }
 
 /// Enable automatic light sleep. The KNX RX path stays clocked, so the device

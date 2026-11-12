@@ -14,10 +14,7 @@ preflight_only=0
 required_tests=(
   "test_tp1_frame_golden"
   "test_tp1_datalink_frame_pool"
-  "test_tpuart_medium_backend_adapter"
   "test_bitbang_mac_physical"
-  "test_tpuart_mac_physical"
-  "test_physical_factory_tp1"
   "test_tp1_mac_controller"
   "test_tp1_integration"
   "test_tp1_to_ip_routing_coupler"

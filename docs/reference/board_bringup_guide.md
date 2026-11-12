@@ -5,13 +5,10 @@ dozen Kconfig knobs and getting them wrong produces the same symptom — silence
 regardless of which one is wrong, so this guide is ordered to eliminate causes
 one at a time rather than by topic.
 
-If you are using a TPUART transceiver (NCN5120/NCN5121), most of this does not
-apply: select `KNX_TP1_TPUART`, set the UART pins, and skip to
-[Step 5](#step-5-first-telegram).
-
 ## Step 0: what you need
 
-- A TP1 transceiver (STKNX, NCN5120, or equivalent) wired to the ESP32.
+- A TP1 transceiver driven by the bit-bang backend (STKNX or equivalent) wired
+  to the ESP32.
 - A KNX power supply and at least one other device or a bus monitor.
 - A logic analyser or scope on TX and RX. **You will not get through bring-up
   without one.** The failure modes below are all timing or polarity problems

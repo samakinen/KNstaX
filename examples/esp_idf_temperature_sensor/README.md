@@ -18,14 +18,12 @@ idf.py menuconfig              # KNX Stack Configuration → pins, timing, backe
 idf.py build flash monitor
 ```
 
-`sdkconfig.defaults` selects the **TPUART** backend (NCN5120/NCN5121) on UART 1,
-TX 17 / RX 16. Switch to `CONFIG_KNX_TP1_BITBANG` for a software backend —
-`createTp1Physical()` handles both and nothing above it changes.
+`sdkconfig.defaults` selects the **software bit-bang** TP1 backend (the only
+TP1 backend) on TX 17 / RX 16.
 
 > **Read [`../../docs/reference/board_bringup_guide.md`](../../docs/reference/board_bringup_guide.md)
-> before connecting to a live installation**, particularly if you switch to the
-> bit-bang backend. An inverted TX polarity holds the bus dominant and takes
-> down the whole line, not just this device.
+> before connecting to a live installation**. An inverted TX polarity holds the
+> bus dominant and takes down the whole line, not just this device.
 
 The example builds from inside this repository checkout; its `CMakeLists.txt`
 prefers the repository root at `../..`, and falls back to a
@@ -37,7 +35,7 @@ workspace.
 | Concern | Where |
 |---|---|
 | Product definition (port, DPT, ETS identity) | `kTemperatureSensorProduct` in `main/main.cpp` |
-| Backend selection from Kconfig | `createTp1Physical()` |
+| TP1 physical layer construction | `createTp1Physical()` |
 | Hardware → KNX read response | `.provideState<SensorPort::Temperature>` |
 | Periodic publish, gated on `Operational` | the `for(;;)` loop |
 

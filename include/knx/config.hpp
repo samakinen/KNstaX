@@ -154,9 +154,28 @@ constexpr uint16_t RESTART_PROCESS_TIME_S = 0;
 #  endif
 #endif
 
+// KNX_IP_TUNNELING gates the KNXnet/IP *client* role: the tunnelling client
+// (IpTunnelingPhysical, TunnelingSessionClient), gateway discovery and the
+// device-management connection. A KNX IP device (03/02/06) is never a
+// tunnelling client, so an image that is only commissioned by ETS builds
+// without it and links none of that code; the public entry points that would
+// construct a client are absent, not stubbed. Set by the build system from
+// CONFIG_KNX_ENABLE_TUNNELING (ESP-IDF) or KNX_FEATURE_TUNNELING (host); the
+// fallback follows the same "everything available" contract as above.
+#ifndef KNX_IP_TUNNELING
+#  if defined(CONFIG_KNX_ENABLE_TUNNELING)
+#    define KNX_IP_TUNNELING KNX_FEATURE_NETIP
+#  elif defined(CONFIG_KNX_MEDIUM_IP)
+#    define KNX_IP_TUNNELING 0
+#  else
+#    define KNX_IP_TUNNELING KNX_FEATURE_NETIP
+#  endif
+#endif
+
 // KNX_SECURE_IP_TUNNELING gates the IP Secure *session* machinery — ECDH key
 // agreement, PBKDF2, the SESSION_REQUEST handshake and the secure tunnelling
-// client — separately from the rest of KNX Secure.
+// client — separately from the rest of KNX Secure. It implies
+// KNX_IP_TUNNELING.
 //
 // It has to be separable because the two IP Secure features need different
 // amounts of cryptography. Secure Routing is AES-CCM under a group key the
@@ -167,13 +186,7 @@ constexpr uint16_t RESTART_PROCESS_TIME_S = 0;
 // compiling that machinery in would cost a device a build failure for a
 // feature it cannot use.
 #ifndef KNX_SECURE_IP_TUNNELING
-#  if defined(CONFIG_KNX_ENABLE_TUNNELING)
-#    define KNX_SECURE_IP_TUNNELING (KNX_SECURE_ENABLED && KNX_FEATURE_NETIP)
-#  elif defined(CONFIG_KNX_MEDIUM_IP)
-#    define KNX_SECURE_IP_TUNNELING 0
-#  else
-#    define KNX_SECURE_IP_TUNNELING (KNX_SECURE_ENABLED && KNX_FEATURE_NETIP)
-#  endif
+#  define KNX_SECURE_IP_TUNNELING (KNX_SECURE_ENABLED && KNX_IP_TUNNELING)
 #endif
 
 namespace feature {
@@ -181,6 +194,8 @@ namespace feature {
 constexpr bool NETIP = (KNX_FEATURE_NETIP != 0);
 /// True when the TP1 medium is compiled into this build.
 constexpr bool TP1 = (KNX_FEATURE_TP1 != 0);
+/// True when the KNXnet/IP client role (tunnelling) is compiled into this build.
+constexpr bool IP_TUNNELING = (KNX_IP_TUNNELING != 0);
 } // namespace feature
 
 } // namespace config

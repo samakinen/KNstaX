@@ -9,7 +9,7 @@
  * firmware developer needs to answer "how do I wire this to my transceiver"
  * is in this file:
  *
- *   - createTp1Physical()      picks the bitbang or TPUART backend from Kconfig
+ *   - createTp1Physical()      builds the bit-bang TP1 physical layer
  *   - onCommand<>()            KNX write  -> GPIO
  *   - provideState<>()         KNX read   <- GPIO
  *   - onLifecycleChanged()     commissioning state -> indicator LED
@@ -91,30 +91,18 @@ void setRelay(bool on)
     gpio_set_level(kRelayGpio, on ? 1 : 0);
 }
 
-/// Build the TP1 physical layer for whichever backend Kconfig selected.
-/// Both backends land on the same Tp1MacPhysical, so nothing above this
-/// function knows or cares which transceiver is fitted.
+/// Build the TP1 physical layer over the software bit-bang backend.
 util::Result<std::unique_ptr<physical::Tp1MacPhysical>> createTp1Physical(
     platform::Esp32Platform& platform)
 {
-    physical::Tp1BackendSelection selection{};
-    physical::Tp1PlatformDependencies dependencies{};
-    dependencies.platform = &platform;
-    dependencies.uart = platform.uart();
-
-#if defined(CONFIG_KNX_TP1_TPUART)
-    selection.family = physical::Tp1BackendFamily::Tpuart;
-#elif defined(CONFIG_KNX_TP1_BITBANG)
-    selection.family = physical::Tp1BackendFamily::Bitbang;
     // Static: the timer ISR keeps a pointer to it for the life of the program.
     static physical::BitBangDriverTimerIsrEspIdf bitbangDriver;
+    physical::Tp1PlatformDependencies dependencies{};
     dependencies.bitbangDriver = &bitbangDriver;
     dependencies.bitbangTp1Driver = &bitbangDriver;
-#else
-#error "Select a TP1 backend: CONFIG_KNX_TP1_BITBANG or CONFIG_KNX_TP1_TPUART"
-#endif
+    dependencies.platform = &platform;
 
-    return physical::createTp1PhysicalForPlatform(selection, dependencies);
+    return physical::createTp1PhysicalForPlatform(dependencies);
 }
 
 /// Debounced programming-button edge detector.

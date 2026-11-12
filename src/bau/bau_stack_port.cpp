@@ -234,13 +234,15 @@ public:
             } else if (_macPhysical) {
                 _dataLink = std::make_unique<datalink::Tp1DataLinkLayer>(_platform, *_macPhysical);
 #endif
-#if KNX_FEATURE_NETIP
+#if KNX_IP_TUNNELING
             } else if (_ipTunnelingPhysical) {
                 _dataLink = std::make_unique<datalink::Tp1DataLinkLayer>(_platform, *_ipTunnelingPhysical);
+#endif
 #if KNX_SECURE_IP_TUNNELING
             } else if (_ipSecureTunnelingPhysical) {
                 _dataLink = std::make_unique<datalink::Tp1DataLinkLayer>(_platform, *_ipSecureTunnelingPhysical);
 #endif
+#if KNX_FEATURE_NETIP
             } else if (_ipRoutingPhysical) {
                 _dataLink = std::make_unique<datalink::Tp1DataLinkLayer>(_platform, *_ipRoutingPhysical);
 #endif  // KNX_FEATURE_NETIP
@@ -319,13 +321,15 @@ private:
         } else if constexpr (std::is_same_v<ConcretePhysical, physical::Tp1MacPhysical>) {
             _macPhysical = std::move(physicalLayer);
 #endif
-#if KNX_FEATURE_NETIP
+#if KNX_IP_TUNNELING
         } else if constexpr (std::is_same_v<ConcretePhysical, physical::IpTunnelingPhysical>) {
             _ipTunnelingPhysical = std::move(physicalLayer);
+#endif
 #if KNX_SECURE_IP_TUNNELING
         } else if constexpr (std::is_same_v<ConcretePhysical, physical::IpSecureTunnelingPhysical>) {
             _ipSecureTunnelingPhysical = std::move(physicalLayer);
 #endif
+#if KNX_FEATURE_NETIP
         } else if constexpr (std::is_same_v<ConcretePhysical, physical::IpRoutingPhysical>) {
             _ipRoutingPhysical = std::move(physicalLayer);
 #endif  // KNX_FEATURE_NETIP
@@ -342,11 +346,13 @@ private:
 #if KNX_FEATURE_TP1
     std::unique_ptr<physical::Tp1MacPhysical> _macPhysical;
 #endif
-#if KNX_FEATURE_NETIP
+#if KNX_IP_TUNNELING
     std::unique_ptr<physical::IpTunnelingPhysical> _ipTunnelingPhysical;
+#endif
 #if KNX_SECURE_IP_TUNNELING
     std::unique_ptr<physical::IpSecureTunnelingPhysical> _ipSecureTunnelingPhysical;
 #endif
+#if KNX_FEATURE_NETIP
     std::unique_ptr<physical::IpRoutingPhysical> _ipRoutingPhysical;
 #endif
 #if KNX_ENABLE_TEST_HOOKS
@@ -1369,12 +1375,13 @@ public:
         return out;
     }
 
-#if KNX_FEATURE_NETIP
+#if KNX_IP_TUNNELING
     Tp1StackPort(platform::Platform& platform,
                  std::unique_ptr<physical::IpTunnelingPhysical> physicalLayer)
         : _lowerStack(createTp1LowerStackRoles(platform, std::move(physicalLayer)))
     {
     }
+#endif
 
 #if KNX_SECURE_IP_TUNNELING
     Tp1StackPort(platform::Platform& platform,
@@ -1384,6 +1391,7 @@ public:
     }
 #endif
 
+#if KNX_FEATURE_NETIP
     Tp1StackPort(platform::Platform& platform,
                  std::unique_ptr<physical::IpRoutingPhysical> physicalLayer)
         : _lowerStack(createTp1LowerStackRoles(platform, std::move(physicalLayer)))
@@ -1681,12 +1689,13 @@ std::unique_ptr<BusAccessStackPort> createTp1CouplerStackPort(
 }
 #endif  // KNX_FEATURE_TP1
 
-#if KNX_FEATURE_NETIP
+#if KNX_IP_TUNNELING
 std::unique_ptr<BusAccessStackPort> createTp1StackPort(platform::Platform& platform,
                                                        std::unique_ptr<physical::IpTunnelingPhysical> physicalLayer)
 {
     return std::make_unique<Tp1StackPort>(platform, std::move(physicalLayer));
 }
+#endif
 
 #if KNX_SECURE_IP_TUNNELING
 std::unique_ptr<BusAccessStackPort> createTp1StackPort(platform::Platform& platform,
@@ -1696,6 +1705,7 @@ std::unique_ptr<BusAccessStackPort> createTp1StackPort(platform::Platform& platf
 }
 #endif
 
+#if KNX_FEATURE_NETIP
 std::unique_ptr<BusAccessStackPort> createTp1StackPort(platform::Platform& platform,
                                                        std::unique_ptr<physical::IpRoutingPhysical> physicalLayer)
 {

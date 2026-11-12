@@ -85,7 +85,7 @@ Medium and TP1 backend are compile-time choices:
 
 ```
 KNX_MEDIUM_TP1 / KNX_MEDIUM_IP        # medium (mutually exclusive)
-KNX_TP1_BITBANG / KNX_TP1_TPUART      # TP1 backend (bit-bang default; TPUART broken)
+KNX_TP1_BITBANG                       # TP1 backend (bit-bang is the only one)
 ```
 
 Most-adjusted values, with defaults:

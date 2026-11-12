@@ -17,12 +17,18 @@ on:
 
 jobs:
   host:
-    name: Host build and CTest (secure ${{ matrix.secure }})
+    name: Host build and CTest (secure ${{ matrix.secure }}, tunnelling ${{ matrix.tunneling }})
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
         secure: ["ON", "OFF"]
+        tunneling: ["ON"]
+        # Without the KNXnet/IP client role, as the knxip image ships it, so
+        # the tests that remain keep building and passing in that shape.
+        include:
+          - secure: "ON"
+            tunneling: "OFF"
     steps:
       - uses: actions/checkout@v4
 
@@ -36,6 +42,7 @@ jobs:
         run: >
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
           -DKNX_SECURE_ENABLED=${{ matrix.secure }} -DBUILD_TESTS=ON
+          -DKNX_FEATURE_TUNNELING=${{ matrix.tunneling }}
 
       - name: Build
         run: cmake --build build -j"$(nproc)"

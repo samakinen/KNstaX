@@ -1,8 +1,7 @@
 # Only the settings this example actually needs. `sdkconfig` itself is
 # generated and gitignored.
 
-# TP1 over the software bit-bang backend, so this example and the TPUART one
-# together give both TP1 backend families build coverage.
+# TP1 over the software bit-bang backend (the only TP1 backend).
 CONFIG_KNX_MEDIUM_TP1=y
 CONFIG_KNX_TP1_BITBANG=y
 

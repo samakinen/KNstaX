@@ -38,8 +38,8 @@ telegram would be *missed* rather than merely delayed.
 
 A deep-sleep design needs either:
 
-- a transceiver that buffers frames while the host sleeps (a TPUART has its own
-  MCU), or
+- a transceiver that buffers frames while the host sleeps (a TPUART-class chip
+  has its own MCU; KNstaX has no driver for one yet), or
 - a device that only ever transmits and never has to answer a read — which means
   clearing the Read flag on every object, and accepting that ETS diagnostics
   cannot poll it.

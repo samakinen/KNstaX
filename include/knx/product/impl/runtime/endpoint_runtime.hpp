@@ -14,6 +14,8 @@
 #include "knx/config.hpp"
 #if KNX_FEATURE_NETIP
 #include "knx/physical/ip_routing_physical.hpp"
+#endif
+#if KNX_IP_TUNNELING
 #include "knx/physical/ip_tunneling_physical.hpp"
 #endif
 #include "knx/physical/tp1_mac_physical.hpp"
@@ -251,7 +253,7 @@ public:
     }
 #endif
 
-#if KNX_FEATURE_NETIP
+#if KNX_IP_TUNNELING
     util::Result<void> start(platform::Platform& platform,
                              std::unique_ptr<physical::IpTunnelingPhysical> physical)
     {
@@ -263,6 +265,9 @@ public:
         _bau = std::make_unique<bau::BusAccessUnit>(platform, std::move(stackPort));
         return finishStart();
     }
+#endif  // KNX_IP_TUNNELING
+
+#if KNX_FEATURE_NETIP
 
     util::Result<void> start(platform::Platform& platform,
                              std::unique_ptr<physical::IpRoutingPhysical> physical)

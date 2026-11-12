@@ -53,7 +53,7 @@ if(DEFINED IDF_PATH OR COMMAND idf_component_register)
     set(KNX_COMPONENT_SOURCES ${KNX_SOURCES_CORE} ${KNX_SOURCES_PLATFORM_ESPIDF})
 
     if(KNX_FEATURE_TP1)
-        list(APPEND KNX_COMPONENT_SOURCES ${KNX_SOURCES_TP1} ${KNX_SOURCES_TPUART})
+        list(APPEND KNX_COMPONENT_SOURCES ${KNX_SOURCES_TP1})
     endif()
     if(KNX_FEATURE_NETIP)
         list(APPEND KNX_COMPONENT_SOURCES ${KNX_SOURCES_NETIP})
@@ -125,8 +125,12 @@ if(DEFINED IDF_PATH OR COMMAND idf_component_register)
     # when the macro is not defined, so leaving it out of the ESP-IDF branch
     # silently compiled KNX Secure out of the firmware even with
     # CONFIG_KNX_ENABLE_SECURITY=y.
+    set(KNX_FEATURE_IP_TUNNELING 0)
+    if(KNX_FEATURE_NETIP AND CONFIG_KNX_ENABLE_TUNNELING)
+        set(KNX_FEATURE_IP_TUNNELING 1)
+    endif()
     set(KNX_FEATURE_SECURE_IP_TUNNELING 0)
-    if(KNX_FEATURE_SECURE AND KNX_FEATURE_NETIP AND CONFIG_KNX_ENABLE_TUNNELING)
+    if(KNX_FEATURE_SECURE AND KNX_FEATURE_IP_TUNNELING)
         set(KNX_FEATURE_SECURE_IP_TUNNELING 1)
     endif()
 
@@ -136,8 +140,9 @@ if(DEFINED IDF_PATH OR COMMAND idf_component_register)
         KNX_SECURE_ENABLED=${KNX_FEATURE_SECURE}
         # PUBLIC for the same reason as the others: application code includes
         # bau.hpp, and a header that disagrees with the library about whether
-        # the secure tunnelling entry points exist produces a link error rather
-        # than a compile one.
+        # the (secure) tunnelling entry points exist produces a link error
+        # rather than a compile one.
+        KNX_IP_TUNNELING=${KNX_FEATURE_IP_TUNNELING}
         KNX_SECURE_IP_TUNNELING=${KNX_FEATURE_SECURE_IP_TUNNELING}
     )
     target_compile_definitions(${COMPONENT_LIB} PRIVATE
@@ -361,8 +366,10 @@ else()
     target_compile_definitions(knx_core PUBLIC
         KNX_STACK_VERSION="${KNX_VERSION_STRING}"
         KNX_SECURE_ENABLED=$<IF:$<BOOL:${KNX_SECURE_ENABLED}>,1,0>
-        # Secure tunnelling follows the tunnelling switch, as on ESP-IDF, so a
-        # host build can reproduce a routing-only (knxip-shaped) device.
+        # The client role and secure tunnelling follow the tunnelling switch,
+        # as on ESP-IDF, so a host build can reproduce a routing-only
+        # (knxip-shaped) device.
+        KNX_IP_TUNNELING=$<IF:$<AND:$<BOOL:${KNX_FEATURE_NETIP}>,$<BOOL:${KNX_FEATURE_TUNNELING}>>,1,0>
         KNX_SECURE_IP_TUNNELING=$<IF:$<AND:$<BOOL:${KNX_SECURE_ENABLED}>,$<BOOL:${KNX_FEATURE_NETIP}>,$<BOOL:${KNX_FEATURE_TUNNELING}>>,1,0>
         KNX_HAS_ZLIB=$<IF:$<BOOL:${KNX_HAS_ZLIB}>,1,0>
         KNX_FEATURE_NETIP=$<IF:$<BOOL:${KNX_FEATURE_NETIP}>,1,0>
@@ -565,10 +572,7 @@ else()
         knx_add_test(test_tp1_datalink_virtual_bus_conformance SOURCES test/unit/test_tp1_datalink_virtual_bus_conformance.cpp
             LABELS ${TP1_VIRTUAL_UNIT} TIMEOUT 30)
 
-        knx_add_test(test_tpuart_medium_backend_adapter SOURCES test/unit/test_tpuart_medium_backend_adapter.cpp LABELS tp1 unit)
         knx_add_test(test_bitbang_mac_physical SOURCES test/unit/test_bitbang_mac_physical.cpp LABELS tp1 unit)
-        knx_add_test(test_tpuart_mac_physical SOURCES test/unit/test_tpuart_mac_physical.cpp LABELS tp1 unit)
-        knx_add_test(test_physical_factory_tp1 SOURCES test/unit/test_physical_factory_tp1.cpp LABELS tp1 unit)
 
         # Shell tests of the TP1 CI gate scripts.
         foreach(script
@@ -625,28 +629,16 @@ else()
         knx_add_test(test_ets_format_validation SOURCES test/unit/test_ets_format_validation.cpp LABELS unit)
 
         # KNXnet/IP
-        knx_add_test(test_netip_tunneling SOURCES test/unit/test_netip_tunneling.cpp LABELS unit)
-        knx_add_test(test_netip_tunneling_session_client SOURCES test/unit/test_netip_tunneling_session_client.cpp LABELS unit)
         knx_add_test(test_netip_tunneling_server_endpoint SOURCES test/unit/test_netip_tunneling_server_endpoint.cpp)
         knx_add_test(test_tp1_ip_interface_bridge SOURCES test/unit/test_tp1_ip_interface_bridge.cpp)
         knx_add_test(test_netip_header_codec SOURCES test/unit/test_netip_header_codec.cpp LABELS unit)
         knx_add_test(test_netip_control_packet_codec SOURCES test/unit/test_netip_control_packet_codec.cpp)
         knx_add_test(test_netip_gateway_discovery_codec SOURCES test/unit/test_netip_gateway_discovery_codec.cpp)
-        knx_add_test(test_netip_secure_session_bootstrap SOURCES test/unit/test_netip_secure_session_bootstrap.cpp
-            LABELS unit WORKING_DIRECTORY ${SRC_DIR})
         knx_add_test(test_netip_routing_flow_control SOURCES test/unit/test_netip_routing_flow_control.cpp LABELS unit)
         knx_add_test(test_netip_backbone_key SOURCES test/unit/test_netip_backbone_key.cpp LABELS unit)
         knx_add_test(test_netip_core_discovery SOURCES test/unit/test_netip_core_discovery.cpp LABELS unit)
         knx_add_test(test_netip_system_broadcast SOURCES test/unit/test_netip_system_broadcast.cpp LABELS unit)
         knx_add_test(test_netip_udp_datagram_channel SOURCES test/unit/test_netip_udp_datagram_channel.cpp LABELS unit)
-        knx_add_test(test_netip_device_management_client SOURCES test/unit/test_netip_device_management_client.cpp)
-        knx_add_test(test_netip_device_management_session SOURCES test/unit/test_netip_device_management_session.cpp
-            NO_UNITY WORKING_DIRECTORY ${SRC_DIR})
-        knx_add_test(test_netip_device_management_procedures SOURCES test/unit/test_netip_device_management_procedures.cpp
-            NO_UNITY WORKING_DIRECTORY ${SRC_DIR})
-        knx_add_test(test_netip_device_management_commissioner SOURCES test/unit/test_netip_device_management_commissioner.cpp
-            NO_UNITY WORKING_DIRECTORY ${SRC_DIR})
-        knx_add_test(test_netip_tcp_frame_channel SOURCES test/unit/test_netip_tcp_frame_channel.cpp LABELS unit)
         knx_add_test(test_netip_routing SOURCES test/unit/test_netip_routing.cpp LABELS unit)
         # Multicast join / rejoin
         knx_add_test(test_netip_routing_membership SOURCES test/unit/test_netip_routing_membership.cpp LABELS unit)
@@ -657,17 +649,8 @@ else()
             # TIMER_NOTIFY vector from Wireshark/KNXUltimate
             knx_add_test(test_netip_secure_timernotify_vector SOURCES test/unit/test_netip_secure_timernotify_vector.cpp
                 LABELS unit WORKING_DIRECTORY ${SRC_DIR})
-            # KNXUltimate-generated session vectors
-            knx_add_test(test_netip_secure_session_vectors SOURCES test/unit/test_netip_secure_session_vectors.cpp
-                NO_UNITY LABELS unit WORKING_DIRECTORY ${SRC_DIR})
-            # Scripted TCP handshake with vectors
-            knx_add_test(test_netip_secure_tunneling_handshake SOURCES test/unit/test_netip_secure_tunneling_handshake.cpp
-                NO_UNITY LABELS unit WORKING_DIRECTORY ${SRC_DIR})
         endif()
 
-        # Adapter wiring with Tp1DataLinkLayer
-        knx_add_test(test_ip_tunneling_adapter SOURCES test/integration/test_ip_tunneling_adapter.cpp
-            LABELS integration Long)
         # Smoke test: TP1 <-> IP interface bridge path
         knx_add_test(test_tp1_ip_interface SOURCES test/integration/test_tp1_ip_interface.cpp LABELS integration)
         knx_add_test(test_netip_routing_multicast SOURCES test/integration/test_netip_routing_multicast.cpp
@@ -677,9 +660,6 @@ else()
             # KNX/IP Secure routing multicast (SecureWrapper 0x0950)
             knx_add_test(test_netip_routing_multicast_secure SOURCES test/integration/test_netip_routing_multicast_secure.cpp
                 LABELS integration)
-            # Tp1DataLinkLayer over the KNXnet/IP Secure tunnelling physical adapter
-            knx_add_test(test_ip_secure_tunneling_physical SOURCES test/integration/test_ip_secure_tunneling_physical.cpp
-                LABELS integration WORKING_DIRECTORY ${SRC_DIR})
         endif()
 
         # Tp1DataLinkLayer over the KNXnet/IP routing physical adapter
@@ -690,14 +670,51 @@ else()
         knx_add_test(test_coupler_stack_port SOURCES test/integration/test_coupler_stack_port.cpp LABELS tp1 integration)
         knx_add_test(test_two_port_coupler SOURCES test/integration/test_two_port_coupler.cpp LABELS tp1 integration)
 
+        # The KNXnet/IP client role (tunnelling, gateway discovery, device
+        # management, IP Secure sessions) exists only with tunnelling on.
+        if(KNX_FEATURE_TUNNELING)
+            knx_add_test(test_netip_tunneling SOURCES test/unit/test_netip_tunneling.cpp LABELS unit)
+            knx_add_test(test_netip_tunneling_session_client SOURCES test/unit/test_netip_tunneling_session_client.cpp LABELS unit)
+            knx_add_test(test_netip_secure_session_bootstrap SOURCES test/unit/test_netip_secure_session_bootstrap.cpp
+                LABELS unit WORKING_DIRECTORY ${SRC_DIR})
+            knx_add_test(test_netip_device_management_client SOURCES test/unit/test_netip_device_management_client.cpp)
+            knx_add_test(test_netip_device_management_session SOURCES test/unit/test_netip_device_management_session.cpp
+                NO_UNITY WORKING_DIRECTORY ${SRC_DIR})
+            knx_add_test(test_netip_device_management_procedures SOURCES test/unit/test_netip_device_management_procedures.cpp
+                NO_UNITY WORKING_DIRECTORY ${SRC_DIR})
+            knx_add_test(test_netip_device_management_commissioner SOURCES test/unit/test_netip_device_management_commissioner.cpp
+                NO_UNITY WORKING_DIRECTORY ${SRC_DIR})
+            knx_add_test(test_netip_tcp_frame_channel SOURCES test/unit/test_netip_tcp_frame_channel.cpp LABELS unit)
+            # Adapter wiring with Tp1DataLinkLayer
+            knx_add_test(test_ip_tunneling_adapter SOURCES test/integration/test_ip_tunneling_adapter.cpp
+                LABELS integration Long)
+            knx_add_test(test_knxnetip_discovery SOURCES test/unit/test_knxnetip_discovery.cpp LIBS pthread)
+            knx_add_test(test_netip_gateway_discovery_client SOURCES test/unit/test_netip_gateway_discovery_client.cpp
+                LIBS pthread LABELS unit)
+            knx_add_test(test_knxnetip_integration SOURCES test/integration/test_knxnetip_integration.cpp LIBS pthread LABELS integration)
+            if(KNX_SECURE_ENABLED)
+                # KNXUltimate-generated session vectors
+                knx_add_test(test_netip_secure_session_vectors SOURCES test/unit/test_netip_secure_session_vectors.cpp
+                    NO_UNITY LABELS unit WORKING_DIRECTORY ${SRC_DIR})
+                # Scripted TCP handshake with vectors
+                knx_add_test(test_netip_secure_tunneling_handshake SOURCES test/unit/test_netip_secure_tunneling_handshake.cpp
+                    NO_UNITY LABELS unit WORKING_DIRECTORY ${SRC_DIR})
+                # Tp1DataLinkLayer over the KNXnet/IP Secure tunnelling physical adapter
+                knx_add_test(test_ip_secure_tunneling_physical SOURCES test/integration/test_ip_secure_tunneling_physical.cpp
+                    LABELS integration WORKING_DIRECTORY ${SRC_DIR})
+            endif()
+        endif()
+
         # Interop helpers: KNstaX tunnelling and routing peers (used by the
         # Python interop harness)
-        add_executable(knstax_tunnel_peer
-            interop/knstax_peer/knstax_tunnel_peer.cpp
-        )
-        target_link_libraries(knstax_tunnel_peer PRIVATE
-            knx_core
-        )
+        if(KNX_FEATURE_TUNNELING)
+            add_executable(knstax_tunnel_peer
+                interop/knstax_peer/knstax_tunnel_peer.cpp
+            )
+            target_link_libraries(knstax_tunnel_peer PRIVATE
+                knx_core
+            )
+        endif()
         add_executable(knstax_routing_peer
             interop/knstax_peer/knstax_routing_peer.cpp
         )
@@ -706,6 +723,9 @@ else()
         )
 
         option(ENABLE_INTEROP_TESTS "Build and register the interop Python harness tests" OFF)
+        if(ENABLE_INTEROP_TESTS AND NOT KNX_FEATURE_TUNNELING)
+            message(FATAL_ERROR "ENABLE_INTEROP_TESTS needs KNX_FEATURE_TUNNELING: the harness drives knstax_tunnel_peer")
+        endif()
         if(ENABLE_INTEROP_TESTS)
             set(INTEROP_BIN_DIR ${CMAKE_CURRENT_BINARY_DIR}/interop/bin)
             file(MAKE_DIRECTORY ${INTEROP_BIN_DIR})
@@ -777,14 +797,10 @@ else()
 
         knx_add_test(test_error_injection SOURCES test/unit/test_error_injection.cpp)
         knx_add_test(test_protocol_conformance SOURCES test/integration/test_protocol_conformance.cpp)
-        knx_add_test(test_knxnetip_discovery SOURCES test/unit/test_knxnetip_discovery.cpp LIBS pthread)
         knx_add_test(test_netip_secured_service_families SOURCES test/unit/test_netip_secured_service_families.cpp
             LABELS unit TIMEOUT 20)
         # Event-driven receive plumbing
         knx_add_test(test_netip_socket_wait SOURCES test/unit/test_netip_socket_wait.cpp LABELS unit TIMEOUT 20)
-        knx_add_test(test_netip_gateway_discovery_client SOURCES test/unit/test_netip_gateway_discovery_client.cpp
-            LIBS pthread LABELS unit)
-        knx_add_test(test_knxnetip_integration SOURCES test/integration/test_knxnetip_integration.cpp LIBS pthread LABELS integration)
         # BAU on-wire golden tests
         knx_add_test(test_bau_onwire SOURCES test/integration/test_bau_onwire.cpp LABELS integration)
         # Connection-oriented ETS session
@@ -843,12 +859,6 @@ else()
             knx_core
         )
 
-        add_executable(ip_device
-            examples/ip_device/main.cpp
-        )
-        target_link_libraries(ip_device PRIVATE
-            knx_core
-        )
 
         add_executable(ip_routing_device
             examples/ip_routing_device/main.cpp
@@ -857,12 +867,24 @@ else()
             knx_core
         )
 
-        add_executable(tp1_ip_interface
-            examples/tp1_ip_interface/main.cpp
-        )
-        target_link_libraries(tp1_ip_interface PRIVATE
-            knx_core
-        )
+        # The tunnelling examples are KNXnet/IP clients.
+        set(KNX_TUNNELING_EXAMPLES)
+        if(KNX_FEATURE_TUNNELING)
+            add_executable(ip_device
+                examples/ip_device/main.cpp
+            )
+            target_link_libraries(ip_device PRIVATE
+                knx_core
+            )
+
+            add_executable(tp1_ip_interface
+                examples/tp1_ip_interface/main.cpp
+            )
+            target_link_libraries(tp1_ip_interface PRIVATE
+                knx_core
+            )
+            set(KNX_TUNNELING_EXAMPLES ip_device tp1_ip_interface)
+        endif()
 
         if(BUILD_TESTS)
             knx_add_test(test_knxnetip_routing_sniffer_e2e
@@ -875,9 +897,8 @@ else()
                 tp1_thermostat
                 tp1_line_coupler
                 knxnetip_routing_sniffer
-                ip_device
                 ip_routing_device
-                tp1_ip_interface
+                ${KNX_TUNNELING_EXAMPLES}
         )
 
         # Build-time .knxprod generation, demonstrating the single-source-of-truth

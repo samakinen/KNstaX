@@ -13,7 +13,9 @@
 #include "knx/netip/ip_secure/mc_timer_store.hpp"
 #include "knx/objects/object_persistence.hpp"
 #include "knx/physical/ip_routing_physical.hpp"
+#if KNX_IP_TUNNELING
 #include "knx/physical/ip_tunneling_physical.hpp"
+#endif
 #include "knx/physical/tp1_mac_physical.hpp"
 #include "knx/physical/tp1_medium_backend.hpp"
 #include "knx/platform/platform.hpp"
@@ -798,12 +800,13 @@ constexpr CommissionedSupportTier supportTierForTransportPath(CommissionedTransp
     return CommissionedSupportTier::AdvancedManual;
 }
 
+#if KNX_FEATURE_NETIP
+#if KNX_IP_TUNNELING
 /// Options for starting a commissioned product over KNXnet/IP tunneling.
 ///
 /// The network interface is taken from the `platform::Platform` argument
 /// passed to `startCommissionedProduct` — firmware does not need to extract
 /// it manually.
-#if KNX_FEATURE_NETIP
 struct IpTunnelingOptions {
     /// Required: KNXnet/IP gateway host address.
     IpAddress host{};
@@ -813,6 +816,7 @@ struct IpTunnelingOptions {
     /// behavior-safe (security disabled, no keys).
     SecureCommissioningOptions secure{};
 };
+#endif  // KNX_IP_TUNNELING
 
 /// Optional KNX/IP Secure Routing configuration (network-level AES encryption).
 /// Distinct from device-level Data Secure (`SecureCommissioningOptions`).
@@ -1094,7 +1098,7 @@ private:
                                          CouplerOptions options)
         -> util::Result<CommissionedProductHandle<DefinitionT, Cap>>;
 
-#if KNX_FEATURE_NETIP
+#if KNX_IP_TUNNELING
     template <typename DefinitionT, size_t Cap>
     friend auto startCommissionedProduct(platform::Platform& platform,
                                          const DefinitionT& definition,
@@ -1106,14 +1110,16 @@ private:
     friend auto startCommissionedProduct(platform::Platform& platform,
                                          const DefinitionT& definition,
                                          CommissionedBindingsBuilder<DefinitionT, Cap>&& bindings,
-                                         std::unique_ptr<physical::IpRoutingPhysical> physical)
+                                         IpTunnelingOptions options)
         -> util::Result<CommissionedProductHandle<DefinitionT, Cap>>;
+#endif  // KNX_IP_TUNNELING
 
+#if KNX_FEATURE_NETIP
     template <typename DefinitionT, size_t Cap>
     friend auto startCommissionedProduct(platform::Platform& platform,
                                          const DefinitionT& definition,
                                          CommissionedBindingsBuilder<DefinitionT, Cap>&& bindings,
-                                         IpTunnelingOptions options)
+                                         std::unique_ptr<physical::IpRoutingPhysical> physical)
         -> util::Result<CommissionedProductHandle<DefinitionT, Cap>>;
 
     template <typename DefinitionT, size_t Cap>
@@ -1336,7 +1342,7 @@ public:
     }
 #endif  // KNX_FEATURE_TP1
 
-#if KNX_FEATURE_NETIP
+#if KNX_IP_TUNNELING
     auto start(platform::Platform& platform,
                std::unique_ptr<physical::IpTunnelingPhysical> physical) -> util::Result<void>
     {
@@ -1362,7 +1368,9 @@ public:
 
         return util::Result<void>::ok();
     }
+#endif  // KNX_IP_TUNNELING
 
+#if KNX_FEATURE_NETIP
     auto start(platform::Platform& platform,
                std::unique_ptr<physical::IpRoutingPhysical> physical) -> util::Result<void>
     {
@@ -1397,6 +1405,7 @@ public:
     // The network interface is taken from the supplied Platform.
     // -----------------------------------------------------------------------
 
+#if KNX_IP_TUNNELING
     auto start(platform::Platform& platform, IpTunnelingOptions options) -> util::Result<void>
     {
         if (options.host.raw == 0) {
@@ -1431,6 +1440,7 @@ public:
 
         return util::Result<void>::ok();
     }
+#endif  // KNX_IP_TUNNELING
 
     /// Install the description a Core search response is built from.
     ///
@@ -2225,7 +2235,7 @@ auto startCommissionedProduct(platform::Platform& platform,
     return runtime;
 }
 
-/// Overload: assemble with a TP1 MAC physical layer (TPUART chip, bitbang, etc.).
+/// Overload: assemble with a TP1 MAC physical layer (the bit-bang backend).
 template <typename ProductDefinitionT, size_t BindingCapacity>
 auto startCommissionedProduct(platform::Platform& platform,
                               const ProductDefinitionT& definition,
@@ -2252,7 +2262,7 @@ auto startCommissionedProduct(platform::Platform& platform,
     return runtime;
 }
 
-#if KNX_FEATURE_NETIP
+#if KNX_IP_TUNNELING
 /// Overload: assemble with an IP tunneling physical layer (KNXnet/IP tunneling).
 template <typename ProductDefinitionT, size_t BindingCapacity>
 auto startCommissionedProduct(platform::Platform& platform,
@@ -2279,7 +2289,9 @@ auto startCommissionedProduct(platform::Platform& platform,
 
     return runtime;
 }
+#endif  // KNX_IP_TUNNELING
 
+#if KNX_FEATURE_NETIP
 /// Overload: assemble with an IP routing physical layer (KNXnet/IP routing).
 template <typename ProductDefinitionT, size_t BindingCapacity>
 auto startCommissionedProduct(platform::Platform& platform,
@@ -2307,6 +2319,7 @@ auto startCommissionedProduct(platform::Platform& platform,
     return runtime;
 }
 
+#if KNX_IP_TUNNELING
 /// Overload: assemble with a KNXnet/IP tunneling managed options struct.
 ///
 /// The platform's `NetworkInterface` is used automatically. Set `options.host`
@@ -2339,6 +2352,7 @@ auto startCommissionedProduct(platform::Platform& platform,
 
     return runtime;
 }
+#endif  // KNX_IP_TUNNELING
 
 /// Overload: assemble with a KNXnet/IP routing managed options struct.
 ///

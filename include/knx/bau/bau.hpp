@@ -22,8 +22,12 @@
 #if KNX_FEATURE_NETIP
 #include "knx/netip/netip_parameter_object.hpp"
 #include "knx/physical/ip_routing_physical.hpp"
-#include "knx/physical/ip_secure_tunneling_physical.hpp"
+#endif
+#if KNX_IP_TUNNELING
 #include "knx/physical/ip_tunneling_physical.hpp"
+#endif
+#if KNX_SECURE_IP_TUNNELING
+#include "knx/physical/ip_secure_tunneling_physical.hpp"
 #endif
 #include "knx/physical/tp1_mac_physical.hpp"
 #include "knx/physical/tp1_medium_backend.hpp"
@@ -1137,8 +1141,11 @@ std::unique_ptr<BusAccessStackPort> createTp1CouplerStackPort(
 // KNXnet/IP entry points.  Gated so a TP1-only firmware neither compiles nor
 // links the IP stack: without this the tunnelling client, routing endpoint and
 // their codecs stay reachable from bau.hpp and the linker cannot drop them.
+// The tunnelling (client-role) overloads exist only with KNX_IP_TUNNELING.
+#if KNX_IP_TUNNELING
 std::unique_ptr<BusAccessStackPort> createTp1StackPort(platform::Platform& platform,
                                                        std::unique_ptr<physical::IpTunnelingPhysical> physicalLayer);
+#endif
 
 #if KNX_SECURE_IP_TUNNELING
 std::unique_ptr<BusAccessStackPort> createTp1StackPort(platform::Platform& platform,

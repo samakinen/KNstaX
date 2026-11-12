@@ -8,12 +8,16 @@
 
 #pragma once
 
+#include "knx/config.hpp"
 #include "knx/physical/ip_routing_physical.hpp"
-#include "knx/physical/ip_secure_tunneling_physical.hpp"
+#if KNX_IP_TUNNELING
 #include "knx/physical/ip_tunneling_physical.hpp"
+#endif
+#if KNX_SECURE_IP_TUNNELING
+#include "knx/physical/ip_secure_tunneling_physical.hpp"
+#endif
 #include "knx/physical/null_tp1_medium_backend.hpp"
 #include "knx/physical/tp1_mac_physical.hpp"
-#include "knx/physical/tpuart_medium_backend_adapter.hpp"
 #include "knx/netip/netip_security.hpp"
 #include "knx/types.hpp"
 #include "knx/physical/bitbang_driver_interface.hpp"
@@ -28,28 +32,21 @@ namespace knx {
 namespace platform {
 class Platform;
 class NetworkInterface;
-class UartInterface;
 }
 }
 
 namespace knx {
 namespace physical {
 
-enum class Tp1BackendFamily : uint8_t {
-	Bitbang,
-	Tpuart,
-};
-
-struct Tp1BackendSelection {
-	Tp1BackendFamily family{Tp1BackendFamily::Bitbang};
-};
-
 #if defined(ESP_PLATFORM)
+/// What `createTp1PhysicalForPlatform()` needs. TP1 has one backend, the
+/// software bit-bang driver; a transceiver chip with its own MAC (an NCN5120,
+/// say) would be another `Tp1MediumBackend` and add its own dependencies here.
 struct Tp1PlatformDependencies {
 	BitBangDriverInterface* bitbangDriver{nullptr};
 	BitBangDriverTp1Interface* bitbangTp1Driver{nullptr};
+	/// Optional: timing source for the MAC; nullptr keeps the default.
 	platform::Platform* platform{nullptr};
-	platform::UartInterface* uart{nullptr};
 };
 #endif
 
@@ -65,49 +62,17 @@ struct Tp1PlatformDependencies {
 std::unique_ptr<Tp1MacPhysical> createBorrowedTp1BitbangPhysical(BitBangDriverInterface& driver,
 						BitBangDriverTp1Interface& tp1Driver);
 
-/**
- * @brief Create TP1 TPUART-composed physical layer over a low-level TP1 physical implementation
- *
- * Wraps a TPUART-class TP1 physical transport behind `Tp1MacController` + `Tp1MediumBackend`
- * composition to share medium-neutral TP1 MAC policy flow.
- *
- * @param physical Low-level TP1 physical implementation (must outlive returned object)
- * @param frameSource Non-owning receive view provider for the same physical path
- * @return TP1 physical layer instance
- */
-template <TpuartCompatiblePhysical PhysicalT>
-std::unique_ptr<Tp1MacPhysical> createBorrowedTp1TpuartPhysical(PhysicalT& physical,
-									Tp1PhysicalFrameSource* frameSource = nullptr)
-{
-	return std::make_unique<Tp1MacPhysical>(
-		std::make_unique<TpuartMediumBackendAdapter>(physical, frameSource));
-}
-
 #if defined(ESP_PLATFORM)
 /**
- * @brief Create TP1 TPUART-composed physical layer with owned low-level TPUART transport
+ * @brief Create the TP1 physical layer for an ESP-IDF build
  *
- * Allocates and owns both low-level TPUART physical transport and MAC-composed adapter,
- * providing a single TP1 physical instance for runtime selection paths.
- *
- * @param platform Platform abstraction used by TPUART transport
- * @param uart UART interface used by TPUART transport
- * @return TP1 physical layer instance
- */
-std::unique_ptr<Tp1MacPhysical> createOwnedTp1TpuartPhysical(platform::Platform& platform,
-							   platform::UartInterface& uart);
-
-/**
- * @brief Create TP1 physical via backend-family selector using platform-owned TPUART construction
- *
- * For `Tp1BackendFamily::Bitbang`, `bitbangDriver` is required.
- * For `Tp1BackendFamily::Tpuart`, `platform` and `uart` are required.
+ * `bitbangDriver` and `bitbangTp1Driver` are required.
  */
 util::Result<std::unique_ptr<Tp1MacPhysical>> createTp1PhysicalForPlatform(
-									const Tp1BackendSelection& selection,
 									const Tp1PlatformDependencies& dependencies);
 #endif
 
+#if KNX_IP_TUNNELING
 /**
  * @brief Create an IP Tunneling physical adapter
  * @param host KNXnet/IP gateway host
@@ -126,6 +91,7 @@ std::unique_ptr<IpTunnelingPhysical> createConfiguredIpTunnelingPhysical(platfor
 										  IpAddress host,
 										  NetIpPort port,
 										  netip::NetIpSecurity* security = nullptr);
+#endif
 
 #if KNX_SECURE_IP_TUNNELING
 /**

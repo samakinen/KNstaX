@@ -374,6 +374,7 @@ void test_product_commissioned_apply_ets_group_key_post_start(void)
 // IP managed transport path tests
 // ──────────────────────────────────────────────────────────────────────────────
 
+#if KNX_IP_TUNNELING
 void test_product_commissioned_ip_tunneling_zero_host_returns_invalid_parameter(void)
 {
     // IpTunnelingOptions with a zero host must be rejected before any network
@@ -392,6 +393,7 @@ void test_product_commissioned_ip_tunneling_zero_host_returns_invalid_parameter(
     TEST_ASSERT_EQUAL_INT(static_cast<int>(util::ErrorCode::InvalidParameter),
                           static_cast<int>(result.error()));
 }
+#endif  // KNX_IP_TUNNELING
 
 void test_product_commissioned_ip_routing_zero_multicast_returns_invalid_parameter(void)
 {
@@ -412,6 +414,7 @@ void test_product_commissioned_ip_routing_zero_multicast_returns_invalid_paramet
                           static_cast<int>(result.error()));
 }
 
+#if KNX_IP_TUNNELING
 void test_product_commissioned_ip_tunneling_managed_sets_functional_tier(void)
 {
     // When IpTunnelingOptions passes validation (non-zero host), the runtime
@@ -449,6 +452,7 @@ void test_product_commissioned_ip_tunneling_managed_sets_functional_tier(void)
         TEST_ASSERT_FALSE(runtime->isProductGradePath());
     }
 }
+#endif  // KNX_IP_TUNNELING
 
 void test_product_commissioned_ip_routing_managed_sets_functional_tier(void)
 {
@@ -520,9 +524,13 @@ int main(void)
     RUN_TEST(test_product_commissioned_apply_ets_tool_key_post_start);
     RUN_TEST(test_product_commissioned_apply_ets_group_key_post_start);
     RUN_TEST(test_product_commissioned_support_tier_values);
+#if KNX_IP_TUNNELING
     RUN_TEST(test_product_commissioned_ip_tunneling_zero_host_returns_invalid_parameter);
+#endif
     RUN_TEST(test_product_commissioned_ip_routing_zero_multicast_returns_invalid_parameter);
+#if KNX_IP_TUNNELING
     RUN_TEST(test_product_commissioned_ip_tunneling_managed_sets_functional_tier);
+#endif
     RUN_TEST(test_product_commissioned_ip_routing_managed_sets_functional_tier);
     return UNITY_END();
 }

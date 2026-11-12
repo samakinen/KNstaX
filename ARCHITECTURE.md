@@ -66,8 +66,7 @@ Tp1PhysicalLayer
 Tp1MacPhysical
     ├─ Tp1MacController
     └─ Tp1MediumBackend
-             ├─ BitBangMediumBackendAdapter
-             └─ TpuartMediumBackendAdapter
+             └─ BitBangMediumBackendAdapter
 ```
 
 This is the only supported TP1 architecture.
@@ -127,7 +126,6 @@ Medium health is medium-neutral vocabulary, defined in `knx/physical/link_state.
 | Medium | Source of the indication |
 | --- | --- |
 | TP1 bitbang | transceiver bus-health output (STKNX `KNX_OK`) |
-| TP1 TPUART | `SAVE` pin and `U_State.indication` warning bits (not yet wired) |
 | KNXnet/IP tunneling | interface up plus a live tunnel connection (not yet wired) |
 | KNXnet/IP routing | interface up plus multicast group joined (not yet wired) |
 
@@ -157,9 +155,9 @@ Design intent:
 - explicit TP1 byte/event interpretation before MAC policy flow
 - observable diagnostics for collision, ACK-window, deadline, and receive-integrity status
 
-### TPUART backend
+### Other TP1 backends
 
-The TPUART family is integrated through `TpuartMediumBackendAdapter`, so TPUART-class transports reuse the same TP1 MAC policy engine instead of defining a parallel TP1 architecture.
+Bit-bang is the only TP1 backend. A transceiver with its own MAC (NCN5120 and similar) would be integrated as another `Tp1MediumBackend`, reusing the same TP1 MAC policy engine instead of defining a parallel TP1 architecture.
 
 ## Platform boundary
 
@@ -183,13 +181,7 @@ Host tests are expected to follow the same high-level semantics as embedded buil
 
 ## Configuration model
 
-Embedded TP1 backend-family selection is compile-time driven through Kconfig.
-
-Current production choices:
-- `KNX_TP1_TPUART`
-- `KNX_TP1_BITBANG`
-
-Factories build the same canonical TP1 composition regardless of the selected backend family.
+Embedded TP1 backend selection is compile-time driven through Kconfig. `KNX_TP1_BITBANG` is the only choice today; the factory builds the canonical TP1 composition over it.
 
 Bitbang builds also consume board/transceiver traits from Kconfig, including:
 - GPIO pin selection
