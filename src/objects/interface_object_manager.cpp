@@ -8,7 +8,6 @@
 
 #include "knx/objects/interface_object_manager.hpp"
 #include "knx/objects/generic_interface_object.hpp"
-#include "knx/objects/object_property_manifest.hpp"
 #include "knx/objects/property_kernel.hpp"
 #include "knx/util/hex.hpp"
 #include "knx/util/log.hpp"
@@ -33,32 +32,11 @@ constexpr uint16_t bankedKeyId(uint16_t keyId, uint8_t bank)
                       : static_cast<uint16_t>(keyId | knx::objects::InterfaceObjectManager::kPersistenceBank1KeyBit);
 }
 
-/// Interface objects whose persisted properties make up the commissioned state.
-///
-/// The KNXnet/IP Parameter Object is here for its Secure Routing settings
-/// (backbone key, latency tolerance, sync fraction): without them a device
-/// that ETS commissioned for Secure Routing fell back to plain routing at the
-/// next boot. On a device without that object the reads fail and nothing is
-/// stored for it.
-constexpr knx::InterfaceObjectType kPersistedTypes[] = {
-    knx::InterfaceObjectType::device(),
-    knx::InterfaceObjectType::addressTable(),
-    knx::InterfaceObjectType::associationTable(),
-    knx::InterfaceObjectType::applicationProgram(),
-    knx::InterfaceObjectType::groupObjectTable(),
-    knx::InterfaceObjectType::security(),
-    knx::InterfaceObjectType::knxNetIpParameter(),
-};
-
 template <typename Visitor>
 void forEachPersistedProperty(Visitor&& visit)
 {
-    for (const auto objectType : kPersistedTypes) {
-        for (const auto& entry : knx::objects::objectPropertyManifestEntries(objectType)) {
-            if (knx::objects::isPersistedProperty(entry)) {
-                visit(objectType, entry.registration.propertyId);
-            }
-        }
+    for (const auto& property : knx::objects::InterfaceObjectManager::persistedProperties()) {
+        visit(property.objectType, property.propertyId);
     }
 }
 
@@ -91,6 +69,72 @@ knx::objects::PropertyAccessResult mapKernelResult(const knx::util::Result<void>
 
 namespace knx {
 namespace objects {
+
+std::span<const InterfaceObjectManager::PersistedProperty> InterfaceObjectManager::persistedProperties()
+{
+    using PID = application::PropertyID;
+    constexpr auto device = InterfaceObjectType::device();
+    constexpr auto addressTable = InterfaceObjectType::addressTable();
+    constexpr auto associationTable = InterfaceObjectType::associationTable();
+    constexpr auto applicationProgram = InterfaceObjectType::applicationProgram();
+    constexpr auto security = InterfaceObjectType::security();
+    // The KNXnet/IP Parameter Object is here for its Secure Routing settings
+    // (backbone key, latency tolerance, sync fraction): without them a device
+    // that ETS commissioned for Secure Routing fell back to plain routing at
+    // the next boot. On a device without that object the reads fail and
+    // nothing is stored for it.
+    constexpr auto knxNetIp = InterfaceObjectType::knxNetIpParameter();
+
+    // PID_PROG_MODE is deliberately absent: KNX devices leave programming mode
+    // on power-up, and persisting it left the device stuck in the
+    // Commissioning lifecycle after a reboot, muting group communication.
+    static const PersistedProperty kPersisted[] = {
+        {device, static_cast<PID>(DeviceProperty::SubnetAddress)},
+        {device, static_cast<PID>(DeviceProperty::DeviceAddress)},
+        {device, static_cast<PID>(DeviceProperty::RoutingCount)},
+        {device, static_cast<PID>(DeviceProperty::MaxRetryCount)},
+        {device, static_cast<PID>(DeviceProperty::ErrorFlags)},
+        {device, static_cast<PID>(DeviceProperty::ProgramVersion)},
+        {device, static_cast<PID>(DeviceProperty::DeviceControl)},
+        {device, static_cast<PID>(DeviceProperty::RunStateControl)},
+        {addressTable, static_cast<PID>(AddressTableProperty::TableData)},
+        {associationTable, static_cast<PID>(AssociationTableProperty::TableData)},
+        {applicationProgram, static_cast<PID>(AppProgramProperty::ProgramVersion)},
+        {applicationProgram, static_cast<PID>(AppProgramProperty::ApplicationId)},
+        {applicationProgram, static_cast<PID>(AppProgramProperty::ApplicationVersion)},
+        {applicationProgram, static_cast<PID>(AppProgramProperty::ApplicationNumber)},
+        {applicationProgram, static_cast<PID>(AppProgramProperty::ApplicationArea)},
+        {applicationProgram, static_cast<PID>(AppProgramProperty::ApplicationManufacturer)},
+        {applicationProgram, static_cast<PID>(AppProgramProperty::ProgramState)},
+        {applicationProgram, static_cast<PID>(AppProgramProperty::ParameterStart)},
+        {applicationProgram, static_cast<PID>(AppProgramProperty::ParameterEnd)},
+        {applicationProgram, static_cast<PID>(AppProgramProperty::ProgramData)},
+        {applicationProgram, static_cast<PID>(AppProgramProperty::ProgramName)},
+        {applicationProgram, static_cast<PID>(AppProgramProperty::ProgramDescription)},
+        // The key tables must survive a restart. 03/05/01 §6.3.6-6.3.8
+        // "Master Reset": erase code 01h (ConfirmedRestart) leaves all three
+        // "not influenced: no change", and §6.3.8 additionally requires the
+        // Last Valid SeqNr values to "be saved in full at power-down and be
+        // restored in full at power-up". ETS ends every secure download with a
+        // ConfirmedRestart, so without this the keys it just wrote are gone
+        // before they are ever used.
+        {security, static_cast<PID>(SecurityProperty::SecurityMode)},
+        {security, static_cast<PID>(SecurityProperty::P2PKeyTable)},
+        {security, static_cast<PID>(SecurityProperty::GroupKeyTable)},
+        {security, static_cast<PID>(SecurityProperty::SecurityIndividualAddressTable)},
+        {security, static_cast<PID>(SecurityProperty::ToolKey)},
+        {security, static_cast<PID>(SecurityProperty::SequenceNumberSending)},
+        {security, static_cast<PID>(SecurityProperty::ZoneKeyTable)},
+        // PID_GO_SECURITY_FLAGS says which group objects are secured at all;
+        // it is downloaded alongside the key tables and is just as useless if
+        // it does not survive the restart that immediately follows.
+        {security, static_cast<PID>(SecurityProperty::GoSecurityFlags)},
+        {knxNetIp, static_cast<PID>(91)},  // PID_BACKBONE_KEY
+        {knxNetIp, static_cast<PID>(95)},  // PID_MULTICAST_LATENCY_TOLERANCE
+        {knxNetIp, static_cast<PID>(96)},  // PID_SYNC_LATENCY_FRACTION
+    };
+    return kPersisted;
+}
 
 const InterfaceObjectManager::RegisteredObject* InterfaceObjectManager::findRegisteredObject(InterfaceObjectType objectType,
                                                                                              InterfaceObjectInstance objectInstance) const {
@@ -704,26 +748,6 @@ PropertyAccessResult InterfaceObjectManager::readProperty(
         return PropertyAccessResult::InvalidValue;
     }
 
-    // For core object types: gate through the manifest before consulting the
-    // kernel binding. Unknown or explicitly unsupported PIDs return InvalidProperty
-    // rather than falling through to the kernel's generic not-found path.
-    if (isCoreObjectType(objectType)) {
-        const auto entries = coreObjectPropertyManifestEntries(objectType);
-        bool declared = false;
-        for (const auto& manifestEntry : entries) {
-            if (manifestEntry.registration.propertyId == propertyId) {
-                declared = true;
-                if (!isSupportedProperty(manifestEntry)) {
-                    return PropertyAccessResult::InvalidProperty;
-                }
-                break;
-            }
-        }
-        if (!declared) {
-            return PropertyAccessResult::InvalidProperty;
-        }
-    }
-
     const auto* object = findKernelObject(objectType);
     if (!object) {
         return PropertyAccessResult::InvalidObject;
@@ -816,25 +840,6 @@ PropertyAccessResult InterfaceObjectManager::writeProperty(
         return PropertyAccessResult::Success;
     }
 
-    // For core object types: gate through the manifest before consulting the
-    // kernel binding.
-    if (isCoreObjectType(objectType)) {
-        const auto entries = coreObjectPropertyManifestEntries(objectType);
-        bool declared = false;
-        for (const auto& manifestEntry : entries) {
-            if (manifestEntry.registration.propertyId == propertyId) {
-                declared = true;
-                if (!isSupportedProperty(manifestEntry)) {
-                    return PropertyAccessResult::InvalidProperty;
-                }
-                break;
-            }
-        }
-        if (!declared) {
-            return PropertyAccessResult::InvalidProperty;
-        }
-    }
-
     const auto* object = findKernelObject(objectType);
     if (!object) {
         return PropertyAccessResult::InvalidObject;
@@ -875,13 +880,8 @@ PropertyAccessResult InterfaceObjectManager::describeProperty(
     InterfaceObjectType objectType,
     InterfaceObjectInstance objectInstance,
     application::PropertyID propertyId,
-    PropertyIndex propertyIndex,
-    application::PropertyID& resolvedPropertyId,
-    application::PropertyDataType& type,
-    uint16_t& maxElements,
-    uint8_t& access,
-    uint8_t& readLevel,
-    uint8_t& writeLevel)
+    uint16_t propertyIndex,
+    PropertyDescription& description)
 {
     const auto target = resolveDispatchTarget(objectType, objectInstance);
     if (target.kind == DispatchTargetKind::None) {
@@ -893,38 +893,7 @@ PropertyAccessResult InterfaceObjectManager::describeProperty(
         if (!obj) {
             return PropertyAccessResult::InvalidObject;
         }
-        return obj->handlers.describe(propertyId,
-                                      propertyIndex,
-                                      resolvedPropertyId,
-                                      type,
-                                      maxElements,
-                                      access,
-                                      readLevel,
-                                      writeLevel);
-    }
-
-    // Access flags: bit0=read, bit1=write.
-    constexpr uint8_t ACCESS_READ = 0x01;
-    constexpr uint8_t ACCESS_WRITE = 0x02;
-
-    // For core object types queried by PID: gate through the manifest so that
-    // unknown or explicitly unsupported PIDs return InvalidProperty without
-    // reaching the kernel binding.
-    if (isCoreObjectType(objectType) && propertyIndex.value() == 0) {
-        const auto entries = coreObjectPropertyManifestEntries(objectType);
-        bool declared = false;
-        for (const auto& manifestEntry : entries) {
-            if (manifestEntry.registration.propertyId == propertyId) {
-                declared = true;
-                if (!isSupportedProperty(manifestEntry)) {
-                    return PropertyAccessResult::InvalidProperty;
-                }
-                break;
-            }
-        }
-        if (!declared) {
-            return PropertyAccessResult::InvalidProperty;
-        }
+        return obj->handlers.describe(propertyId, propertyIndex, description);
     }
 
     const auto* object = findKernelObject(objectType);
@@ -932,42 +901,22 @@ PropertyAccessResult InterfaceObjectManager::describeProperty(
         return PropertyAccessResult::InvalidObject;
     }
 
+    // The handler table is the declaration: a property exists, and has the
+    // type, size and access it has, because its handler says so. There is no
+    // second list to consult.
     const auto binding = object->kernelBinding();
     if (!binding.handlers || binding.handlerCount == 0) {
         return PropertyAccessResult::NotImplemented;
     }
 
-    PropertyCapability capability = PropertyCapability::ReadOnly;
     const auto res = ::knx::objects::describeProperty(binding.handlers,
                                                       binding.handlerCount,
                                                       propertyId,
                                                       propertyIndex,
-                                                      resolvedPropertyId,
-                                                      type,
-                                                      maxElements,
-                                                      capability);
+                                                      description);
     if (res.isError()) {
         return PropertyAccessResult::InvalidProperty;
     }
-
-    // KNX PropertyDescriptionResponse uses an 8-bit max-elements field.
-    // For Group Object Table TableData queried by property ID
-    // (propertyIndex==0), expose one logical element descriptor.
-    if (objectType == InterfaceObjectType::groupObjectTable() &&
-        resolvedPropertyId == static_cast<application::PropertyID>(GroupObjectTableProperty::TableData) &&
-        propertyIndex.value() == 0) {
-        maxElements = 1;
-    }
-
-    access = 0;
-    if (::knx::objects::canRead(capability)) {
-        access |= ACCESS_READ;
-    }
-    if (::knx::objects::canWrite(capability)) {
-        access |= ACCESS_WRITE;
-    }
-    readLevel = 0;
-    writeLevel = 0;
     return PropertyAccessResult::Success;
 }
 

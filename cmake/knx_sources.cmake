@@ -33,7 +33,6 @@ set(KNX_SOURCES_CORE
     "src/application/dpt.cpp"
     "src/application/group_object.cpp"
     "src/application/device_descriptor_service.cpp"
-    "src/application/property_store.cpp"
     "src/application/property_services.cpp"
     "src/application/property_ext_services.cpp"
     "src/application/function_property_services.cpp"
@@ -46,7 +45,6 @@ set(KNX_SOURCES_CORE
     "src/application/application_layer.cpp"
 
     # Objects
-    "src/objects/interface_object.cpp"
     "src/objects/device_object.cpp"
     "src/objects/address_table_object.cpp"
     "src/objects/group_object_table_object.cpp"
@@ -54,9 +52,7 @@ set(KNX_SOURCES_CORE
     "src/objects/association_table_object.cpp"
     "src/objects/security_interface_object.cpp"
     "src/objects/generic_interface_object.cpp"
-    "src/objects/object_property_manifest.cpp"
     "src/objects/reference_object_registry.cpp"
-    "src/objects/object_property_compliance.cpp"
     "src/objects/object_persistence.cpp"
     "src/objects/interface_object_manager.cpp"
 

@@ -458,18 +458,23 @@ struct DeviceObjectBackend {
                 if (objectIndex.value() != 0) {
                     return std::nullopt;
                 }
-                PropertyDescriptionInfo info;
-                uint8_t access = 0;
+                knx::objects::PropertyDescription description;
                 if (manager.describeProperty(InterfaceObjectType::device(), InterfaceObjectInstance(1),
-                                             propertyId, propertyIndex, info.propertyId, info.type,
-                                             info.maxElements, access, info.readLevel,
-                                             info.writeLevel) != PropertyAccessResult::Success) {
+                                             propertyId, propertyIndex.value(),
+                                             description) != PropertyAccessResult::Success) {
                     return std::nullopt;
                 }
+                PropertyDescriptionInfo info;
                 info.objectIndex = objectIndex;
-                info.propertyIndex = propertyIndex;
-                info.writeAccess = (access & 0x02) != 0 ? PropertyWriteAccess::Allowed
-                                                        : PropertyWriteAccess::Denied;
+                info.propertyId = description.id;
+                info.propertyIndex = PropertyIndex(static_cast<uint8_t>(description.index));
+                info.type = description.type;
+                info.maxElements = description.maxElements;
+                info.readLevel = description.readLevel;
+                info.writeLevel = description.writeLevel;
+                info.readable = knx::objects::canRead(description.capability);
+                info.writeAccess = knx::objects::canWrite(description.capability) ? PropertyWriteAccess::Allowed
+                                                                                 : PropertyWriteAccess::Denied;
                 return info;
             });
     }

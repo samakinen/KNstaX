@@ -7,7 +7,6 @@
  */
 
 #include "knx/objects/security_interface_object.hpp"
-#include "knx/objects/object_property_manifest.hpp"
 #include "knx/objects/property_kernel.hpp"
 #include "knx/util/log.hpp"
 #include "knx/util/result.hpp"

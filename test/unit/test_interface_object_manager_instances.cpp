@@ -19,6 +19,36 @@ using namespace knx;
 using namespace knx::objects;
 
 namespace {
+// describeProperty() with its result spread over out-parameters, the shape
+// these tests were written against. access: bit 0 read, bit 1 write.
+[[maybe_unused]] knx::objects::PropertyAccessResult describeInto(
+    knx::objects::InterfaceObjectManager& manager,
+    knx::InterfaceObjectType objectType,
+    knx::InterfaceObjectInstance objectInstance,
+    knx::application::PropertyID propertyId,
+    knx::PropertyIndex propertyIndex,
+    knx::application::PropertyID& resolvedPropertyId,
+    knx::application::PropertyDataType& type,
+    uint16_t& maxElements,
+    uint8_t& access,
+    uint8_t& readLevel,
+    uint8_t& writeLevel)
+{
+    knx::objects::PropertyDescription description;
+    const auto res = manager.describeProperty(objectType, objectInstance, propertyId,
+                                              propertyIndex.value(), description);
+    resolvedPropertyId = description.id;
+    type = description.type;
+    maxElements = description.maxElements;
+    access = static_cast<uint8_t>((knx::objects::canRead(description.capability) ? 0x01u : 0u)
+                                  | (knx::objects::canWrite(description.capability) ? 0x02u : 0u));
+    readLevel = description.readLevel;
+    writeLevel = description.writeLevel;
+    return res;
+}
+} // namespace
+
+namespace {
 constexpr uint16_t OBJTYPE_CUSTOM = 200;
 constexpr uint8_t PROP_OBJECT_TYPE = 1;
 constexpr uint8_t PROP_VALUE = 10;
@@ -69,22 +99,20 @@ void test_InterfaceObjectManager_MultiInstance_ReadWriteAndDescribeRoutedByInsta
         };
 
         h.describe = [instance](knx::application::PropertyID propertyId,
-                 PropertyIndex propertyIndex,
-                         knx::application::PropertyID& resolvedPropertyId,
-                         knx::application::PropertyDataType& type,
-                         uint16_t& maxElements,
-                         uint8_t& access,
-                         uint8_t& readLevel,
-                         uint8_t& writeLevel) {
+                                uint16_t propertyIndex,
+                                PropertyDescription& description) {
+            auto& resolvedPropertyId = description.id;
+            auto& type = description.type;
+            auto& maxElements = description.maxElements;
+            auto& readLevel = description.readLevel;
+            auto& writeLevel = description.writeLevel;
             (void)instance;
-            // access bits: bit0=read, bit1=write
-            constexpr uint8_t ACCESS_READ = 0x01;
-            constexpr uint8_t ACCESS_WRITE = 0x02;
 
-            if (propertyIndex.value() != 0) {
-                if (propertyIndex.value() == 1) {
+            // By PID when it is not zero, otherwise by 0-based index.
+            if (static_cast<uint8_t>(propertyId) == 0) {
+                if (propertyIndex == 0) {
                     resolvedPropertyId = static_cast<knx::application::PropertyID>(PROP_OBJECT_TYPE);
-                } else if (propertyIndex.value() == 2) {
+                } else if (propertyIndex == 1) {
                     resolvedPropertyId = static_cast<knx::application::PropertyID>(PROP_VALUE);
                 } else {
                     return PropertyAccessResult::InvalidProperty;
@@ -99,13 +127,13 @@ void test_InterfaceObjectManager_MultiInstance_ReadWriteAndDescribeRoutedByInsta
 
             if (static_cast<uint8_t>(resolvedPropertyId) == PROP_OBJECT_TYPE) {
                 type = knx::application::PropertyDataType::UnsignedInt;
-                access = ACCESS_READ;
+                description.capability = PropertyCapability::ReadOnly;
                 return PropertyAccessResult::Success;
             }
 
             if (static_cast<uint8_t>(resolvedPropertyId) == PROP_VALUE) {
                 type = knx::application::PropertyDataType::GenericData;
-                access = ACCESS_READ | ACCESS_WRITE;
+                description.capability = PropertyCapability::ReadWrite;
                 return PropertyAccessResult::Success;
             }
 
@@ -164,10 +192,10 @@ void test_InterfaceObjectManager_MultiInstance_ReadWriteAndDescribeRoutedByInsta
     uint8_t writeLevel = 0;
 
     TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
-                      mgr.describeProperty(InterfaceObjectType(OBJTYPE_CUSTOM),
+                      describeInto(mgr, InterfaceObjectType(OBJTYPE_CUSTOM),
                                           InterfaceObjectInstance(1),
                                           static_cast<knx::application::PropertyID>(0),
-                                          PropertyIndex(2),
+                                          PropertyIndex(1),  // 0-based: the second property
                                           resolvedId,
                                           type,
                                           maxElements,
@@ -213,20 +241,12 @@ void test_InterfaceObjectManager_MixedBuiltInAndRegisteredInstance_CountAndRouti
     };
 
     handlers.describe = [&](knx::application::PropertyID propertyId,
-                            PropertyIndex propertyIndex,
-                            knx::application::PropertyID& resolvedPropertyId,
-                            knx::application::PropertyDataType& type,
-                            uint16_t& maxElements,
-                            uint8_t& access,
-                            uint8_t& readLevel,
-                            uint8_t& writeLevel) {
-        (void)propertyIndex;
-        resolvedPropertyId = propertyId;
-        type = knx::application::PropertyDataType::GenericData;
-        maxElements = 1;
-        access = 0x03;
-        readLevel = 0;
-        writeLevel = 0;
+                            uint16_t /*propertyIndex*/,
+                            PropertyDescription& description) {
+        description.id = propertyId;
+        description.type = knx::application::PropertyDataType::GenericData;
+        description.maxElements = 1;
+        description.capability = PropertyCapability::ReadWrite;
         return PropertyAccessResult::Success;
     };
 

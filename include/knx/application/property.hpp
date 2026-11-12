@@ -107,127 +107,17 @@ enum class PropertyID : uint8_t {
 };
 
 /**
- * @brief Property descriptor
- * 
- * Metadata describing a property.
+ * @brief Size in octets of one element of @p type; 0 for variable or unknown.
  */
-struct PropertyDescriptor {
-    PropertyID id;                  ///< Property ID
-    PropertyDataType type;          ///< Data type
-    PropertyAccess access;          ///< Access rights
-    uint16_t maxElements;           ///< Maximum number of elements
-    uint8_t readLevel;              ///< Read access level (0-15)
-    uint8_t writeLevel;             ///< Write access level (0-15)
-    
-    /**
-     * @brief Get element size in bytes
-     * @return Size of one element
-     */
-    uint8_t getElementSize() const {
-        switch (type) {
+constexpr uint8_t propertyDataTypeSize(PropertyDataType type) {
+    switch (type) {
 #define KNX_PDT_CATALOG_ENTRY(enumName, token, value, size, desc) case PropertyDataType::enumName: return size;
 #include "knx/application/pdt_catalog.inc"
 #undef KNX_PDT_CATALOG_ENTRY
-            default:
-                return 0;  // Variable or unknown
-        }
+        default:
+            return 0;  // Variable or unknown
     }
-};
-
-/**
- * @brief Property value container
- * 
- * Holds the value of a property with its metadata.
- */
-struct PropertyValue {
-    PropertyID id;                  ///< Property ID
-    PropertyDataType type;          ///< Data type
-    uint16_t elementCount;          ///< Number of elements
-    std::vector<uint8_t> data;      ///< Raw property data
-    
-    /**
-     * @brief Create from raw data
-     */
-    static PropertyValue create(PropertyID id, PropertyDataType type, 
-                                std::span<const uint8_t> data) {
-        PropertyValue value;
-        value.id = id;
-        value.type = type;
-        value.data.assign(data.begin(), data.end());
-        value.elementCount = 1;  // Default to single element
-        return value;
-    }
-    
-    /**
-     * @brief Get as uint8_t
-     */
-    uint8_t asUInt8() const {
-        return data.empty() ? 0 : data[0];
-    }
-    
-    /**
-     * @brief Get as uint16_t
-     */
-    uint16_t asUInt16() const {
-        if (data.size() < 2) return 0;
-        return (static_cast<uint16_t>(data[0]) << 8) | data[1];
-    }
-    
-    /**
-     * @brief Get as uint32_t
-     */
-    uint32_t asUInt32() const {
-        if (data.size() < 4) return 0;
-        return (static_cast<uint32_t>(data[0]) << 24) |
-               (static_cast<uint32_t>(data[1]) << 16) |
-               (static_cast<uint32_t>(data[2]) << 8) |
-               data[3];
-    }
-    
-    /**
-     * @brief Create from uint8_t
-     */
-    static PropertyValue fromUInt8(PropertyID id, uint8_t value) {
-        PropertyValue prop;
-        prop.id = id;
-        prop.type = PropertyDataType::UnsignedChar;
-        prop.data = {value};
-        prop.elementCount = 1;
-        return prop;
-    }
-    
-    /**
-     * @brief Create from uint16_t
-     */
-    static PropertyValue fromUInt16(PropertyID id, uint16_t value) {
-        PropertyValue prop;
-        prop.id = id;
-        prop.type = PropertyDataType::UnsignedInt;
-        prop.data = {
-            static_cast<uint8_t>((value >> 8) & 0xFF),
-            static_cast<uint8_t>(value & 0xFF)
-        };
-        prop.elementCount = 1;
-        return prop;
-    }
-    
-    /**
-     * @brief Create from uint32_t
-     */
-    static PropertyValue fromUInt32(PropertyID id, uint32_t value) {
-        PropertyValue prop;
-        prop.id = id;
-        prop.type = PropertyDataType::UnsignedLong;
-        prop.data = {
-            static_cast<uint8_t>((value >> 24) & 0xFF),
-            static_cast<uint8_t>((value >> 16) & 0xFF),
-            static_cast<uint8_t>((value >> 8) & 0xFF),
-            static_cast<uint8_t>(value & 0xFF)
-        };
-        prop.elementCount = 1;
-        return prop;
-    }
-};
+}
 
 } // namespace application
 } // namespace knx

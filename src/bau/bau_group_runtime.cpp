@@ -24,7 +24,6 @@
 #include "knx/util/log.hpp"
 #include "knx/util/result.hpp"
 #include "knx/application/apci_services.hpp"
-#include "knx/application/property_store.hpp"
 #include "knx/datalink/tp1_data_link_layer.hpp"
 #include "knx/platform/raii_resources.hpp"
 #include "knx/physical/tp1_mac_physical.hpp"

@@ -232,15 +232,12 @@ public:
             uint16_t startIndex,
             std::span<const uint8_t> value)> write;
 
+        /// Same addressing as describeProperty(): by PID when it is not zero,
+        /// otherwise by the 0-based property index.
         std::function<PropertyAccessResult(
             application::PropertyID propertyId,
-            PropertyIndex propertyIndex,
-            application::PropertyID& resolvedPropertyId,
-            application::PropertyDataType& type,
-            uint16_t& maxElements,
-            uint8_t& access,
-            uint8_t& readLevel,
-            uint8_t& writeLevel)> describe;
+            uint16_t propertyIndex,
+            PropertyDescription& description)> describe;
     };
 
     /**
@@ -305,30 +302,34 @@ public:
     }
     
     /**
-     * @brief Get property description
-     * @param objectType Interface object type
-     * @param objectInstance Object instance (1-based)
-     * @param propertyId Property ID
-     * @param propertyIndex Property index
-     * @param resolvedPropertyId Output: resolved property ID (when selecting by index)
-     * @param type Output: property data type
-     * @param maxElements Output: maximum number of elements
-     * @param access Output: access level (read/write)
-     * @param readLevel Output: required authorization level to read
-     * @param writeLevel Output: required authorization level to write
-     * @return Access result
+     * @brief Describe a property, as the description services report it
+     *
+     * Addressed the way 03/03/07 §3.4.3 addresses it: by @p propertyId when it
+     * is not zero, otherwise by the 0-based @p propertyIndex ("property_index
+     * = 0 shall mean the first Property"). The description carries both the
+     * PID and the index, so a by-PID request learns the property's index too.
+     * This is the one description both A_PropertyDescription_Read and
+     * A_PropertyExtDescription_Read answer from.
      */
     PropertyAccessResult describeProperty(
         InterfaceObjectType objectType,
         InterfaceObjectInstance objectInstance,
         application::PropertyID propertyId,
-        PropertyIndex propertyIndex,
-        application::PropertyID& resolvedPropertyId,
-        application::PropertyDataType& type,
-        uint16_t& maxElements,
-        uint8_t& access,
-        uint8_t& readLevel,
-        uint8_t& writeLevel);
+        uint16_t propertyIndex,
+        PropertyDescription& description);
+
+    /**
+     * @brief The (object type, PID) pairs that make up the commissioned state.
+     *
+     * saveToPersistence() stores and loadFromPersistence() restores exactly
+     * these. The type, size and access of each are those of the live property;
+     * this list only says which ones survive a restart.
+     */
+    struct PersistedProperty {
+        InterfaceObjectType objectType;
+        application::PropertyID propertyId;
+    };
+    static std::span<const PersistedProperty> persistedProperties();
     
     /**
      * @brief Get number of objects of a specific type

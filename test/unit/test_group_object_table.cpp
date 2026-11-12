@@ -29,7 +29,34 @@ static util::Result<void> writeGroupTableProperty(GroupObjectTableObject& obj,
     const auto binding = obj.kernelBinding();
     return writeProperty(binding.handlers, binding.handlerCount, binding.context, id, 1, value);
 }
+
+static util::Result<uint16_t> groupTableLength(const GroupObjectTableObject& obj, application::PropertyID id) {
+    const auto binding = obj.kernelBinding();
+    return propertyElementCount(binding.handlers, binding.handlerCount, binding.context, id);
+}
 using namespace knx::application;
+
+namespace {
+// Kernel describeProperty() with its result spread over out-parameters.
+[[maybe_unused]] knx::util::Result<void> describeInto(const knx::objects::PropertyHandler* handlers,
+                                                      size_t count,
+                                                      knx::application::PropertyID propertyId,
+                                                      knx::PropertyIndex propertyIndex,
+                                                      knx::application::PropertyID& resolved,
+                                                      knx::application::PropertyDataType& type,
+                                                      uint16_t& maxElements,
+                                                      knx::objects::PropertyCapability& capability)
+{
+    knx::objects::PropertyDescription description;
+    const auto res = knx::objects::describeProperty(handlers, count, propertyId,
+                                                    propertyIndex.value(), description);
+    resolved = description.id;
+    type = description.type;
+    maxElements = description.maxElements;
+    capability = description.capability;
+    return res;
+}
+} // namespace
 
 void setUp(void) {
     // Set up before each test
@@ -302,30 +329,77 @@ void test_GroupObjectTable_PropertyAccess_TableData() {
     second.flags.priority = Priority::Urgent;
     table.addGroupObject(std::make_unique<GroupObject>(second));
 
-    // KNX 03/05/01 Table 51: 2-octet length field followed by one 2-octet
-    // Group Object Descriptor per object.
-    const uint16_t expectedBytes = 2 + 2 * 2;
+    // 03/05/01 §4.18.6.2.4, Table 86: PID_TABLE is PDT_GENERIC_02[]; element 0
+    // is the length (the number of Group Objects) and element n is the 2-octet
+    // Group Object Descriptor of Group Object n.
+    const auto length = groupTableLength(table, static_cast<application::PropertyID>(GroupObjectTableProperty::TableData));
+    TEST_ASSERT_TRUE(length.isOk());
+    TEST_ASSERT_EQUAL_UINT16(2u, length.value());
+
     std::vector<uint8_t> value;
     TEST_ASSERT_TRUE(readGroupTableProperty(table,
                                             static_cast<application::PropertyID>(GroupObjectTableProperty::TableData),
-                                            expectedBytes,
+                                            2,
                                             value)
                          .isOk());
-    TEST_ASSERT_EQUAL(expectedBytes, value.size());
+    TEST_ASSERT_EQUAL(4u, value.size());
 
-    // Length field.
-    TEST_ASSERT_EQUAL(0u, value[0]);
-    TEST_ASSERT_EQUAL(2u, value[1]);
-
-    // Table 52 bit layout: U(15) T(14) I(13) W(12) R(11) C(10) prio(9..8) type(7..0).
+    // Table 87 bit layout: U(15) T(14) I(13) W(12) R(11) C(10) prio(9..8) type(7..0).
     // DPT 1 is 1 bit wide → Value Field Type code 0 (Table 53).
-    const uint16_t d0 = static_cast<uint16_t>((value[2] << 8) | value[3]);
+    const uint16_t d0 = static_cast<uint16_t>((value[0] << 8) | value[1]);
     TEST_ASSERT_EQUAL(0x1400u | (static_cast<uint16_t>(Priority::Low) << 8),
                       d0);  // C + W, priority Low, type 0
 
-    const uint16_t d1 = static_cast<uint16_t>((value[4] << 8) | value[5]);
+    const uint16_t d1 = static_cast<uint16_t>((value[2] << 8) | value[3]);
     TEST_ASSERT_EQUAL(0x6C00u | (static_cast<uint16_t>(Priority::Urgent) << 8),
                       d1);  // T + I + R + C, priority Urgent, type 0
+
+    // Past the current length there is no descriptor to read.
+    TEST_ASSERT_FALSE(readGroupTableProperty(table,
+                                             static_cast<application::PropertyID>(GroupObjectTableProperty::TableData),
+                                             3,
+                                             value)
+                          .isOk());
+}
+
+// 03/05/01 §4.18.6.2.4: PID_TABLE (23) is the Group Object Table property,
+// PDT_GENERIC_02, writeable ("Writing shall only have effect in the load state
+// Loading"), with a maximum length fixed in the device.
+void test_GroupObjectTable_TableDescriptionMatchesSpec() {
+    GroupObjectTableObject table;
+    const auto binding = table.kernelBinding();
+
+    application::PropertyID resolved{};
+    application::PropertyDataType type{};
+    uint16_t maxElements = 0;
+    PropertyCapability capability = PropertyCapability::ReadOnly;
+    TEST_ASSERT_TRUE(describeInto(binding.handlers,
+                                  binding.handlerCount,
+                                  application::PropertyID::Table,
+                                  PropertyIndex(0),
+                                  resolved,
+                                  type,
+                                  maxElements,
+                                  capability)
+                         .isOk());
+    TEST_ASSERT_EQUAL_UINT8(23u, static_cast<uint8_t>(resolved));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(application::PropertyDataType::Generic02),
+                            static_cast<uint8_t>(type));
+    TEST_ASSERT_EQUAL_UINT16(GroupObjectTableDomain::kMaxObjects, maxElements);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(PropertyCapability::ReadWrite),
+                            static_cast<uint8_t>(capability));
+
+    // PID 9 is PID_FIRMWARE_REVISION in the generic numbering; it is not a
+    // table alias here.
+    TEST_ASSERT_FALSE(describeInto(binding.handlers,
+                                   binding.handlerCount,
+                                   static_cast<application::PropertyID>(9),
+                                   PropertyIndex(0),
+                                   resolved,
+                                   type,
+                                   maxElements,
+                                   capability)
+                          .isOk());
 }
 
 void test_GroupObjectTable_DescriptorRoundTrip() {
@@ -385,8 +459,8 @@ void test_GroupObjectTable_PropertyAccess_TableDataWriteAppliesFlags() {
     config.flags.write = true;
     table.addGroupObject(std::make_unique<GroupObject>(config));
 
-    // ETS writes descriptors starting after the 2-octet length field.  Turn
-    // the object into a read+transmit object with read-on-init.
+    // Element 1 is the descriptor of Group Object 1. Turn the object into a
+    // read+transmit object with read-on-init.
     application::GroupObjectFlags desired{};
     desired.communication = true;
     desired.read = true;
@@ -396,7 +470,6 @@ void test_GroupObjectTable_PropertyAccess_TableDataWriteAppliesFlags() {
     const uint16_t descriptor = application::encodeGroupObjectDescriptor(desired, 0u);
 
     std::vector<uint8_t> value = {
-        0x00, 0x02,  // length field (ignored on write)
         static_cast<uint8_t>(descriptor >> 8),
         static_cast<uint8_t>(descriptor & 0xFF),
     };
@@ -412,6 +485,16 @@ void test_GroupObjectTable_PropertyAccess_TableDataWriteAppliesFlags() {
     TEST_ASSERT_TRUE(obj->readOnInit());
     TEST_ASSERT_FALSE(obj->writable());
     TEST_ASSERT_EQUAL(static_cast<int>(Priority::Normal), static_cast<int>(obj->priority()));
+
+    // The length belongs to the firmware, which defines the group objects: a
+    // length write (ETS clearing the table) is accepted and not applied.
+    const auto binding = table.kernelBinding();
+    const auto countBefore = table.objectCount();
+    TEST_ASSERT_TRUE(resizeProperty(binding.handlers, binding.handlerCount, binding.context,
+                                    static_cast<application::PropertyID>(GroupObjectTableProperty::TableData),
+                                    0)
+                         .isOk());
+    TEST_ASSERT_EQUAL(countBefore, table.objectCount());
 }
 
 void test_GroupObjectTable_PropertyAccess_UnsupportedRead() {
@@ -433,9 +516,9 @@ void test_GroupObjectTable_PropertyAccess_MisalignedWriteRejected() {
     config.dpt = application::dptids::Bool;
     table.addGroupObject(std::make_unique<GroupObject>(config));
 
-    // Three octets starting at 0 leaves the cursor mid-descriptor.  Applying
-    // half a descriptor would corrupt a flag set, so it must be rejected
-    // rather than partially applied.
+    // Three octets are one and a half descriptors. Applying half a
+    // descriptor would corrupt a flag set, so it must be rejected rather than
+    // partially applied.
     std::vector<uint8_t> value = {0x00, 0x02, 0x03};
     TEST_ASSERT_FALSE(writeGroupTableProperty(table,
                                               static_cast<application::PropertyID>(GroupObjectTableProperty::TableData),
@@ -457,7 +540,7 @@ void test_GroupObjectTable_PropertyAccess_GoDiagnosticsIsDescribedAsFunction() {
     uint16_t maxElements = 0;
     PropertyCapability capability = PropertyCapability::ReadOnly;
 
-    TEST_ASSERT_TRUE(describeProperty(binding.handlers,
+    TEST_ASSERT_TRUE(describeInto(binding.handlers,
                                       binding.handlerCount,
                                       static_cast<application::PropertyID>(GroupObjectTableProperty::GoDiagnostics),
                                       PropertyIndex(0),
@@ -689,6 +772,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_GroupObjectTable_PropertyAccess_ObjectType);
     RUN_TEST(test_GroupObjectTable_PropertyAccess_TableSize);
     RUN_TEST(test_GroupObjectTable_PropertyAccess_TableData);
+    RUN_TEST(test_GroupObjectTable_TableDescriptionMatchesSpec);
     RUN_TEST(test_GroupObjectTable_DescriptorRoundTrip);
     RUN_TEST(test_GroupObjectTable_ValueFieldTypeCoding);
     RUN_TEST(test_GroupObjectTable_PropertyAccess_TableDataWriteAppliesFlags);

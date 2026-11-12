@@ -15,6 +15,11 @@
  * request — including failures — with a return code from the shared KNX Error
  * Code Set.  That last point is the one that matters at commissioning time: a
  * silent refusal leaves the tool waiting.
+ *
+ * They answer from the same providers as the classic PropertyServices — the
+ * interface objects' own descriptions and values — so both service families
+ * report the same property at the same index with the same datatype, size and
+ * access: they describe the same object.
  */
 
 #pragma once
@@ -22,7 +27,6 @@
 #include "knx/application/apci_services.hpp"
 #include "knx/application/function_property_services.hpp"
 #include "knx/application/property_services.hpp"
-#include "knx/application/property_store.hpp"
 #include "knx/types.hpp"
 #include "knx/util/inplace_function.hpp"
 #include "knx/util/result.hpp"
@@ -82,7 +86,16 @@ public:
         uint16_t propertyId,
         bool write), 32>;
 
-    explicit PropertyExtServices(PropertyStoreManager& storeManager);
+    /**
+     * @brief (object type, object instance) → object index
+     *
+     * 03/05/01 §4.18.5.2.5: "The Object Instance shall for each Object Type
+     * start with 1 and shall ascend with the local Interface Object index in
+     * the device." Returning nullopt means there is no such object.
+     */
+    using ObjectResolver = util::InplaceFunction<std::optional<InterfaceObjectIndex>(
+        uint16_t objectType,
+        uint16_t objectInstance), 32>;
 
     void setValueResponseCallback(ValueResponseCallback callback) {
         _valueResponseCallback = std::move(callback);
@@ -93,17 +106,25 @@ public:
     void setFunctionResponseCallback(FunctionResponseCallback callback) {
         _functionResponseCallback = std::move(callback);
     }
-    /// Route value access to the live interface objects instead of the local
-    /// property store. Without these, an extended property write lands in a
-    /// store blob that nothing reads: ETS installs its own Tool Key through
-    /// A_PropertyExtValue_WriteCon, so a device that only stores it keeps
-    /// answering with the old key and ETS reports "no key to decrypt".
+    void setObjectResolver(ObjectResolver resolver) {
+        _objectResolver = std::move(resolver);
+    }
+
+    /// The interface objects' values. ETS installs its own Tool Key through
+    /// A_PropertyExtValue_WriteCon, so these must reach the live objects.
     void setReadProvider(PropertyReadProvider provider) {
         _readProvider = std::move(provider);
     }
 
     void setWriteProvider(PropertyWriteProvider provider) {
         _writeProvider = std::move(provider);
+    }
+
+    /// The interface objects' descriptions: existence, access, datatype,
+    /// size, levels and the property index — the same provider the classic
+    /// A_PropertyDescription_Read answers from.
+    void setDescriptionProvider(PropertyDescriptionProvider provider) {
+        _descriptionProvider = std::move(provider);
     }
 
     void setFunctionProvider(FunctionProvider provider) {
@@ -138,26 +159,26 @@ public:
                                               const FunctionPropertyExtRequest& request,
                                               FunctionPropertyInvocation invocation);
 
-    /**
-     * @brief Resolve (object type, object instance) to an object index.
-     *
-     * Object instance is 1-based and counts objects of that type in index
-     * order, per 03/05/01.  Exposed for tests and for callers that need the
-     * same mapping.
-     */
-    std::optional<InterfaceObjectIndex> resolveObject(uint16_t objectType,
-                                                      uint16_t objectInstance) const;
-
 private:
-    PropertyStoreManager& _storeManager;
+    ObjectResolver _objectResolver;
     PropertyReadProvider _readProvider;
     PropertyWriteProvider _writeProvider;
+    PropertyDescriptionProvider _descriptionProvider;
     ValueResponseCallback _valueResponseCallback;
     DescriptionResponseCallback _descriptionResponseCallback;
     FunctionResponseCallback _functionResponseCallback;
     FunctionProvider _functionProvider;
     AccessCheck _accessCheck;
     AccessLevelQuery _accessLevel;
+
+    std::optional<InterfaceObjectIndex> resolveObject(uint16_t objectType,
+                                                      uint16_t objectInstance) const;
+
+    /// The description of a property, by PID (non-zero) or by index.
+    std::optional<PropertyDescriptionInfo> describe(const IndividualAddress& source,
+                                                    InterfaceObjectIndex objectIndex,
+                                                    uint16_t propertyId,
+                                                    uint16_t propertyIndex) const;
 
     void sendValueFailure(const IndividualAddress& destination,
                           APCIService service,

@@ -3,20 +3,36 @@
 
 /**
  * @file reference_object_registry.hpp
- * @brief Property registration lists for reference interface objects
+ * @brief Property declarations of the reference interface objects
  */
 
 #pragma once
 
-#include "knx/objects/object_property_manifest.hpp"
+#include "knx/application/property.hpp"
+#include "knx/types.hpp"
 
+#include <cstdint>
 #include <span>
 
 namespace knx {
 namespace objects {
 
+/**
+ * @brief One property of a reference interface object
+ *
+ * A GenericInterfaceObject builds its property handlers from these, so for a
+ * reference object this list is the only place a property's type, access and
+ * size are stated. The core objects state theirs in their handler tables.
+ */
+struct PropertyDeclaration {
+    application::PropertyID propertyId;
+    application::PropertyDataType dataType;
+    application::PropertyAccess access;
+    uint16_t maxElements;
+};
+
 bool isReferenceObjectType(InterfaceObjectType type);
-std::span<const PropertyManifestEntry> referenceObjectPropertyManifestEntries(InterfaceObjectType type);
+std::span<const PropertyDeclaration> referenceObjectProperties(InterfaceObjectType type);
 
 } // namespace objects
 } // namespace knx

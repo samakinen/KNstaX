@@ -23,48 +23,12 @@ void tearDown(void) {}
 // Property Tests
 // ============================================================================
 
-void test_PropertyValue_CreateFromUInt8(void) {
-    auto prop = PropertyValue::fromUInt8(PropertyID::ProgMode, 1);
-    
-    TEST_ASSERT_EQUAL(PropertyID::ProgMode, prop.id);
-    TEST_ASSERT_EQUAL(PropertyDataType::UnsignedChar, prop.type);
-    TEST_ASSERT_EQUAL(1, prop.data.size());
-    TEST_ASSERT_EQUAL(1, prop.data[0]);
-    TEST_ASSERT_EQUAL(1, prop.asUInt8());
-}
-
-void test_PropertyValue_CreateFromUInt16(void) {
-    auto prop = PropertyValue::fromUInt16(PropertyID::ManufacturerId, 0x1234);
-    
-    TEST_ASSERT_EQUAL(PropertyDataType::UnsignedInt, prop.type);
-    TEST_ASSERT_EQUAL(2, prop.data.size());
-    TEST_ASSERT_EQUAL(0x12, prop.data[0]);
-    TEST_ASSERT_EQUAL(0x34, prop.data[1]);
-    TEST_ASSERT_EQUAL(0x1234, prop.asUInt16());
-}
-
-void test_PropertyValue_CreateFromUInt32(void) {
-    auto prop = PropertyValue::fromUInt32(PropertyID::SerialNumber, 0x12345678);
-    
-    TEST_ASSERT_EQUAL(PropertyDataType::UnsignedLong, prop.type);
-    TEST_ASSERT_EQUAL(4, prop.data.size());
-    TEST_ASSERT_EQUAL(0x12345678, prop.asUInt32());
-}
-
-void test_PropertyDescriptor_GetElementSize(void) {
-    PropertyDescriptor desc;
-    
-    desc.type = PropertyDataType::UnsignedChar;
-    TEST_ASSERT_EQUAL(1, desc.getElementSize());
-    
-    desc.type = PropertyDataType::UnsignedInt;
-    TEST_ASSERT_EQUAL(2, desc.getElementSize());
-    
-    desc.type = PropertyDataType::UnsignedLong;
-    TEST_ASSERT_EQUAL(4, desc.getElementSize());
-    
-    desc.type = PropertyDataType::Double;
-    TEST_ASSERT_EQUAL(8, desc.getElementSize());
+void test_PropertyDataTypeSize(void) {
+    TEST_ASSERT_EQUAL(1, propertyDataTypeSize(PropertyDataType::UnsignedChar));
+    TEST_ASSERT_EQUAL(2, propertyDataTypeSize(PropertyDataType::UnsignedInt));
+    TEST_ASSERT_EQUAL(4, propertyDataTypeSize(PropertyDataType::UnsignedLong));
+    TEST_ASSERT_EQUAL(8, propertyDataTypeSize(PropertyDataType::Double));
+    TEST_ASSERT_EQUAL(2, propertyDataTypeSize(PropertyDataType::Generic02));
 }
 
 // ============================================================================
@@ -248,10 +212,7 @@ int main(int argc, char **argv) {
     UNITY_BEGIN();
 
     // Property Tests
-    RUN_TEST(test_PropertyValue_CreateFromUInt8);
-    RUN_TEST(test_PropertyValue_CreateFromUInt16);
-    RUN_TEST(test_PropertyValue_CreateFromUInt32);
-    RUN_TEST(test_PropertyDescriptor_GetElementSize);
+    RUN_TEST(test_PropertyDataTypeSize);
 
     // PropertyServices Tests
     RUN_TEST(test_PropertyServices_ValueRead);

@@ -9,11 +9,9 @@
  */
 
 #include "knx/application/property_ext_services.hpp"
-#include "knx/objects/interface_object.hpp"
-#include "knx/util/fixed_vector.hpp"
+#include "knx/config.hpp"
 #include "knx/util/log.hpp"
 
-#include <algorithm>
 #include <array>
 
 namespace knx {
@@ -22,69 +20,36 @@ namespace application {
 namespace {
 constexpr const char* TAG = "KNX.App.PropExt";
 
-/// Upper bound for the bounded object-index enumeration.  The stack registers
-/// far fewer than this; it exists so resolveObject() never heap-allocates.
-constexpr size_t kMaxInterfaceObjects = 32u;
-
-/// §3.4.5.5 maps refusals onto the shared Error Code Set.  A write to a
-/// read-only property is E_ACCESS_READ_ONLY, not the authorisation-flavoured
-/// E_ACCESS_DENIED — the two mean different things to the tool.
-constexpr KnxReturnCode accessRefusalFor(PropertyAccess access, AccessType requested)
-{
-    if (requested == AccessType::Write && access == PropertyAccess::ReadOnly) {
-        return KnxReturnCode::AccessReadOnly;
-    }
-    if (requested == AccessType::Read && access == PropertyAccess::WriteOnly) {
-        return KnxReturnCode::AccessWriteOnly;
-    }
-    return KnxReturnCode::AccessDenied;
-}
+/// The classic PropertyID is one octet; the extended services carry 12 bits.
+/// No interface object here has a PID or a property index above 255, so
+/// anything larger does not exist.
+constexpr uint16_t kMaxPropertyId = 0xFFu;
+constexpr uint16_t kMaxPropertyIndex = 0xFFu;
 } // namespace
-
-PropertyExtServices::PropertyExtServices(PropertyStoreManager& storeManager)
-    : _storeManager(storeManager)
-{
-}
 
 std::optional<InterfaceObjectIndex> PropertyExtServices::resolveObject(uint16_t objectType,
                                                                       uint16_t objectInstance) const
 {
-    // Object instance is 1-based and counts the objects of that type in index
-    // order (03/05/01).  Instance 0 does not exist.
-    if (objectInstance == 0) {
+    // Object instance is 1-based (03/05/01 §4.18.5.2.5); 0 does not exist.
+    if (objectInstance == 0 || !_objectResolver) {
         return std::nullopt;
     }
+    return _objectResolver(objectType, objectInstance);
+}
 
-    // Query-then-fill, the same bounded pattern PropertyServices uses.
-    const auto neededRes = _storeManager.getAllObjectIndices(std::span<InterfaceObjectIndex>{});
-    if (neededRes.isError()) {
+std::optional<PropertyDescriptionInfo> PropertyExtServices::describe(const IndividualAddress& source,
+                                                                     InterfaceObjectIndex objectIndex,
+                                                                     uint16_t propertyId,
+                                                                     uint16_t propertyIndex) const
+{
+    if (!_descriptionProvider || propertyId > kMaxPropertyId
+            || (propertyId == 0 && propertyIndex > kMaxPropertyIndex)) {
         return std::nullopt;
     }
-    util::FixedVector<InterfaceObjectIndex, kMaxInterfaceObjects> indices;
-    if (neededRes.value() > indices.capacity()) {
-        KNX_LOGW(TAG, "Interface object count %zu exceeds bounded metadata", neededRes.value());
-        return std::nullopt;
-    }
-    indices.resize(neededRes.value());
-    if (_storeManager.getAllObjectIndices(indices.span()).isError()) {
-        return std::nullopt;
-    }
-
-    uint16_t seen = 0;
-    for (size_t i = 0; i < indices.size(); ++i) {
-        const auto* store = _storeManager.getObject(indices[i]);
-        if (store == nullptr) {
-            continue;
-        }
-        if (store->getObjectType().value() != objectType) {
-            continue;
-        }
-        if (++seen == objectInstance) {
-            return indices[i];
-        }
-    }
-
-    return std::nullopt;
+    return _descriptionProvider(source,
+                                objectIndex,
+                                static_cast<PropertyID>(propertyId),
+                                PropertyIndex(static_cast<uint8_t>(propertyId == 0 ? propertyIndex : 0)));
 }
 
 void PropertyExtServices::sendValueFailure(const IndividualAddress& destination,
@@ -132,109 +97,67 @@ util::Result<void> PropertyExtServices::handleValueRead(const IndividualAddress&
         return util::Result<void>::err(util::ErrorCode::AccessDenied);
     }
 
-    const auto* store = _storeManager.getObject(*objectIndex);
-    const auto descriptor = store != nullptr
-                                ? store->getDescriptor(static_cast<PropertyID>(request.header.propertyId))
-                                : std::nullopt;
-    if (!descriptor.has_value()) {
+    // PID 0 is not a property; it only selects "by index" in a description.
+    const auto description = request.header.propertyId != 0
+                                 ? describe(source, *objectIndex, request.header.propertyId, 0)
+                                 : std::nullopt;
+    if (!description.has_value()) {
         sendValueFailure(source, kService, request, KnxReturnCode::AddressVoid);
         return util::Result<void>::err(util::ErrorCode::InvalidAddress);
     }
 
-    if (descriptor->access == PropertyAccess::WriteOnly) {
-        sendValueFailure(source, kService, request,
-                         accessRefusalFor(descriptor->access, AccessType::Read));
+    // §3.4.5.5: E_ACCESS_WRITE_ONLY for a read of a write-only property.
+    if (!description->readable) {
+        sendValueFailure(source, kService, request, KnxReturnCode::AccessWriteOnly);
         return util::Result<void>::err(util::ErrorCode::OperationNotSupported);
+    }
+
+    // §3.4.5.1: start_index 0 asks for the *current* element count, answered
+    // as a 2-octet value with nr_of_elem forced to 1 however many were
+    // requested. Otherwise nr_of_elem 0 reads nothing and is not a request.
+    if (request.startIndex != 0 && request.elementCount == 0) {
+        sendValueFailure(source, kService, request, KnxReturnCode::DataVoid);
+        return util::Result<void>::err(util::ErrorCode::InvalidParameter);
+    }
+
+    PropertyValueReadRequest classicRequest;
+    classicRequest.objectIndex = *objectIndex;
+    classicRequest.propertyId = description->propertyId;
+    classicRequest.startIndex = request.startIndex;
+    classicRequest.elementCount = request.startIndex == 0 ? uint8_t{1} : request.elementCount;
+
+    std::array<uint8_t, config::MAX_APDU_LENGTH> buffer{};
+    const auto provided = _readProvider ? _readProvider(source, classicRequest, buffer)
+                                        : std::optional<util::Result<size_t>>{};
+    if (!provided.has_value()) {
+        // The property exists, so what is missing is the addressed element
+        // range: E_ADDRESS_VOID covers "index out of range".
+        sendValueFailure(source, kService, request, KnxReturnCode::AddressVoid);
+        return util::Result<void>::err(util::ErrorCode::InvalidAddress);
+    }
+    if (provided->isError()) {
+        sendValueFailure(source, kService, request, KnxReturnCode::DataVoid);
+        return provided->error();
+    }
+    if (provided->value() > PropertyExtValueResponse::DataBuffer::capacity()) {
+        sendValueFailure(source, kService, request, KnxReturnCode::ExceedsMaxApduLength);
+        return util::Result<void>::err(util::ErrorCode::BufferTooSmall);
     }
 
     PropertyExtValueResponse response;
     response.header = request.header;
     response.startIndex = request.startIndex;
-
-    // §3.4.5.1: start_index 0 asks for the *current* element count, answered as
-    // a 2-octet value with nr_of_elem forced to 1 however many were requested.
-    // The interface objects own that number — for a table property it is the
-    // downloaded length, not the capacity — so ask them first and fall back to
-    // the descriptor only for stores that cannot answer.
-    if (request.startIndex == 0) {
-        response.elementCount = 1;
-        uint16_t currentElements = descriptor->maxElements;
-        if (_readProvider) {
-            PropertyValueReadRequest countRequest;
-            countRequest.objectIndex = *objectIndex;
-            countRequest.propertyId = static_cast<PropertyID>(request.header.propertyId);
-            countRequest.elementCount = 1;
-            countRequest.startIndex = 0;
-            std::array<uint8_t, config::MAX_APDU_LENGTH> countBuffer{};
-            if (auto provided = _readProvider(source, countRequest, countBuffer);
-                provided.has_value() && provided->isOk() && provided->value() == 2u) {
-                currentElements = static_cast<uint16_t>((countBuffer[0] << 8) | countBuffer[1]);
-            }
-        }
-        (void)response.data.push_back(static_cast<uint8_t>((currentElements >> 8) & 0xFF));
-        (void)response.data.push_back(static_cast<uint8_t>(currentElements & 0xFF));
-        if (_valueResponseCallback) {
-            _valueResponseCallback(source, kService, response);
-        }
-        return util::Result<void>::ok();
-    }
-
-    if (request.elementCount == 0) {
-        sendValueFailure(source, kService, request, KnxReturnCode::DataVoid);
-        return util::Result<void>::err(util::ErrorCode::InvalidParameter);
-    }
-
-    std::array<uint8_t, config::MAX_APDU_LENGTH> buffer{};
-    if (_readProvider) {
-        PropertyValueReadRequest classicRequest;
-        classicRequest.objectIndex = *objectIndex;
-        classicRequest.propertyId = static_cast<PropertyID>(request.header.propertyId);
-        classicRequest.elementCount = static_cast<uint8_t>(request.elementCount);
-        classicRequest.startIndex = request.startIndex;
-
-        if (auto provided = _readProvider(source, classicRequest, buffer); provided.has_value()) {
-            if (provided->isError()) {
-                sendValueFailure(source, kService, request, KnxReturnCode::DataVoid);
-                return provided->error();
-            }
-            response.elementCount = request.elementCount;
-            for (size_t i = 0; i < provided->value(); ++i) {
-                (void)response.data.push_back(buffer[i]);
-            }
-            if (_valueResponseCallback) {
-                _valueResponseCallback(source, kService, response);
-            }
-            return util::Result<void>::ok();
-        }
-    }
-
-    const auto read = _storeManager.readProperty(*objectIndex,
-                                                 static_cast<PropertyID>(request.header.propertyId),
-                                                 request.startIndex,
-                                                 request.elementCount,
-                                                 buffer);
-    if (read.isError()) {
-        sendValueFailure(source, kService, request, KnxReturnCode::AddressVoid);
-        return read.error();
-    }
-
-    if (read.value() > PropertyExtValueResponse::DataBuffer::capacity()) {
-        sendValueFailure(source, kService, request, KnxReturnCode::ExceedsMaxApduLength);
-        return util::Result<void>::err(util::ErrorCode::BufferTooSmall);
-    }
-
-    response.elementCount = request.elementCount;
-    for (size_t i = 0; i < read.value(); ++i) {
+    response.elementCount = classicRequest.elementCount;
+    for (size_t i = 0; i < provided->value(); ++i) {
         (void)response.data.push_back(buffer[i]);
     }
-
     if (_valueResponseCallback) {
         _valueResponseCallback(source, kService, response);
     }
 
     KNX_LOGD(TAG, "Ext read OT=%u OI=%u PID=%u -> %zu bytes",
              request.header.objectType, request.header.objectInstance,
-             request.header.propertyId, read.value());
+             request.header.propertyId, provided->value());
     return util::Result<void>::ok();
 }
 
@@ -269,25 +192,26 @@ util::Result<void> PropertyExtServices::handleValueWrite(const IndividualAddress
         return fail(KnxReturnCode::AccessDenied, util::ErrorCode::AccessDenied);
     }
 
-    const auto* store = _storeManager.getObject(*objectIndex);
-    const auto descriptor = store != nullptr
-                                ? store->getDescriptor(static_cast<PropertyID>(request.header.propertyId))
-                                : std::nullopt;
-    if (!descriptor.has_value()) {
+    const auto description = request.header.propertyId != 0
+                                 ? describe(source, *objectIndex, request.header.propertyId, 0)
+                                 : std::nullopt;
+    if (!description.has_value()) {
         return fail(KnxReturnCode::AddressVoid, util::ErrorCode::InvalidAddress);
     }
 
-    if (descriptor->access == PropertyAccess::ReadOnly) {
-        return fail(accessRefusalFor(descriptor->access, AccessType::Write),
-                    util::ErrorCode::OperationNotSupported);
+    // §3.4.5.5 maps refusals onto the shared Error Code Set. A write to a
+    // read-only property is E_ACCESS_READ_ONLY, not the authorisation-flavoured
+    // E_ACCESS_DENIED — the two mean different things to the tool.
+    if (description->writeAccess != PropertyWriteAccess::Allowed) {
+        return fail(KnxReturnCode::AccessReadOnly, util::ErrorCode::OperationNotSupported);
     }
 
     // 03/03/07 §3.5.7: refused when the current access level is below the
     // description's write level. E_ACCESS_DENIED is the A_Authorize refusal.
-    if (_accessLevel && _accessLevel(source) > descriptor->writeLevel) {
+    if (_accessLevel && _accessLevel(source) > description->writeLevel) {
         KNX_LOGW(TAG, "Ext property write refused: src=0x%04X ot=%u pid=%u needs level %u",
                  source.raw, request.header.objectType, request.header.propertyId,
-                 static_cast<unsigned>(descriptor->writeLevel));
+                 static_cast<unsigned>(description->writeLevel));
         return fail(KnxReturnCode::AccessDenied, util::ErrorCode::AccessDenied);
     }
 
@@ -307,35 +231,28 @@ util::Result<void> PropertyExtServices::handleValueWrite(const IndividualAddress
     } else {
         // A declared element count that outruns the octets actually sent is a
         // truncated APDU, not a data-content problem.
-        const size_t elementSize = descriptor->getElementSize();
+        const size_t elementSize = propertyDataTypeSize(description->type);
         if (elementSize != 0 && request.data.size() < elementSize * request.elementCount) {
             return fail(KnxReturnCode::ExceedsMaxApduLength, util::ErrorCode::InvalidParameter);
         }
     }
 
-    if (_writeProvider) {
-        PropertyValueWriteRequest classicRequest;
-        classicRequest.objectIndex = *objectIndex;
-        classicRequest.propertyId = static_cast<PropertyID>(request.header.propertyId);
-        classicRequest.elementCount = static_cast<uint8_t>(request.elementCount);
-        classicRequest.startIndex = request.startIndex;
-        if (!classicRequest.data.assign(request.data.span())) {
-            return fail(KnxReturnCode::ExceedsMaxApduLength, util::ErrorCode::BufferTooSmall);
-        }
+    if (!_writeProvider) {
+        return fail(KnxReturnCode::TemporarilyNotAvailable, util::ErrorCode::OperationNotReady);
+    }
 
-        const auto provided = _writeProvider(source, classicRequest);
-        if (provided.isError()) {
-            return fail(KnxReturnCode::DataVoid, provided.error());
-        }
-    } else {
-        const auto written = _storeManager.writeProperty(*objectIndex,
-                                                         static_cast<PropertyID>(request.header.propertyId),
-                                                         request.startIndex,
-                                                         request.elementCount,
-                                                         request.data.span());
-        if (written.isError()) {
-            return fail(KnxReturnCode::DataVoid, written.error());
-        }
+    PropertyValueWriteRequest classicRequest;
+    classicRequest.objectIndex = *objectIndex;
+    classicRequest.propertyId = description->propertyId;
+    classicRequest.elementCount = request.elementCount;
+    classicRequest.startIndex = request.startIndex;
+    if (!classicRequest.data.assign(request.data.span())) {
+        return fail(KnxReturnCode::ExceedsMaxApduLength, util::ErrorCode::BufferTooSmall);
+    }
+
+    const auto written = _writeProvider(source, classicRequest);
+    if (written.isError()) {
+        return fail(KnxReturnCode::DataVoid, written.error());
     }
 
     if (confirmed) {
@@ -359,9 +276,14 @@ util::Result<void> PropertyExtServices::handleDescriptionRead(
     const IndividualAddress& source,
     const PropertyExtDescriptionRequest& request)
 {
+    // §3.4.3.2: "If another Property Description Type than zero is requested,
+    // then the MaS shall answer with the A_PropertyExtDescription_Response-PDU
+    // of the Property Description Type zero." So the type is always zero, and
+    // on a problem "the fields Property Description Type, DPT, writeable, PDT,
+    // max_nr_of_elem, and access […] shall be zero" — the defaults.
     PropertyExtDescriptionResponse response;
     response.header = request.header;
-    response.descriptionType = request.descriptionType;
+    response.descriptionType = 0;
     response.propertyIndex = request.propertyIndex;
 
     const auto respond = [&]() {
@@ -370,9 +292,7 @@ util::Result<void> PropertyExtServices::handleDescriptionRead(
         }
     };
 
-    // Only description type zero is defined; anything else gets the all-zero
-    // answer §3.4.3.2 prescribes rather than a silent drop.
-    if (request.descriptionType != 0 || !request.header.fieldsInRange()) {
+    if (!request.header.fieldsInRange()) {
         respond();
         return util::Result<void>::err(util::ErrorCode::InvalidParameter);
     }
@@ -393,49 +313,27 @@ util::Result<void> PropertyExtServices::handleDescriptionRead(
         return util::Result<void>::err(util::ErrorCode::AccessDenied);
     }
 
-    const auto* store = _storeManager.getObject(*objectIndex);
-    if (store == nullptr) {
+    // §3.4.3.2: a zero Property Identifier selects by Property Index ("Property
+    // Index = 0 shall mean the first Property"), otherwise the index "shall be
+    // ignored". The index order is the interface objects' own, which is also
+    // what the classic A_PropertyDescription_Read reports.
+    const auto description = describe(source, *objectIndex, request.header.propertyId,
+                                       request.propertyIndex);
+    if (!description.has_value()) {
         respond();
         return util::Result<void>::err(util::ErrorCode::InvalidAddress);
     }
 
-    // §3.4.3.2: a zero Property Identifier selects by index instead of by ID.
-    PropertyID propertyId = static_cast<PropertyID>(request.header.propertyId);
-    if (request.header.propertyId == 0) {
-        // propertyIndex is 0-based here: index 0 selects the object's first
-        // property, which is PID_OBJECT_TYPE by construction.
-        const auto neededRes = store->getAllPropertyIds(std::span<PropertyID>{});
-        if (neededRes.isError()) {
-            respond();
-            return util::Result<void>::err(util::ErrorCode::InvalidAddress);
-        }
-        util::FixedVector<PropertyID, objects::InterfaceObject::kMaxPropertyRegistrations> ids;
-        if (neededRes.value() > ids.capacity() || request.propertyIndex >= neededRes.value()) {
-            respond();
-            return util::Result<void>::err(util::ErrorCode::InvalidAddress);
-        }
-        ids.resize(neededRes.value());
-        if (store->getAllPropertyIds(ids.span()).isError()) {
-            respond();
-            return util::Result<void>::err(util::ErrorCode::InvalidAddress);
-        }
-        propertyId = ids[request.propertyIndex];
-        response.header.propertyId = static_cast<uint16_t>(propertyId);
-    }
-
-    const auto descriptor = store->getDescriptor(propertyId);
-    if (!descriptor.has_value()) {
-        respond();
-        return util::Result<void>::err(util::ErrorCode::InvalidAddress);
-    }
-
-    response.writeEnabled = descriptor->access != PropertyAccess::ReadOnly;
-    response.propertyDataType = static_cast<uint8_t>(descriptor->type) & 0x3Fu;
-    response.maxElements = descriptor->maxElements;
-    response.readLevel = descriptor->readLevel & 0x0Fu;
-    response.writeLevel = descriptor->writeLevel & 0x0Fu;
-    // DPT main/sub are not tracked per property by the store; zero means
-    // "not specified", which is what the reserved encoding calls for.
+    // "The Property Index in the A_PropertyExtDescription_Response-PDU shall
+    // be the correct value of the Property Index of the addressed Property."
+    response.header.propertyId = static_cast<uint16_t>(description->propertyId);
+    response.propertyIndex = description->propertyIndex.value();
+    response.writeEnabled = description->writeAccess == PropertyWriteAccess::Allowed;
+    response.propertyDataType = static_cast<uint8_t>(description->type) & 0x3Fu;
+    response.maxElements = description->maxElements;
+    response.readLevel = description->readLevel & 0x0Fu;
+    response.writeLevel = description->writeLevel & 0x0Fu;
+    // "If no DPT is available, both DPT fields shall be set to zero."
     response.dptMain = 0;
     response.dptSub = 0;
 

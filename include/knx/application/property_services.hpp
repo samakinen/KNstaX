@@ -53,9 +53,9 @@ using PropertyDescriptionResponseCallback = std::function<void(
  * @brief Backend provider for property reads
  *
  * The interface objects own the property values; the BAU answers from them.
- * Returning nullopt means the provider cannot answer: the classic services then
- * send the negative response, the extended ones still fall back to the
- * property store.
+ * Returning nullopt means the provider cannot answer (no such property, or
+ * the element range does not exist): both service families then send their
+ * negative response.
  */
 using PropertyReadProvider = util::InplaceFunction<std::optional<util::Result<size_t>>(
     const IndividualAddress& source,
@@ -109,6 +109,9 @@ struct PropertyDescriptionInfo {
     PropertyID propertyId{};
     PropertyIndex propertyIndex{};
     PropertyWriteAccess writeAccess{PropertyWriteAccess::Denied};
+    /// False for a write-only property. Not part of the classic description
+    /// PDU, but the extended value services answer E_ACCESS_WRITE_ONLY with it.
+    bool readable{true};
     PropertyDataType type{PropertyDataType::GenericData};
     uint16_t maxElements{1};
     uint8_t readLevel{0};
@@ -118,9 +121,13 @@ struct PropertyDescriptionInfo {
 /**
  * @brief Backend provider for property descriptions
  *
- * The descriptions of the interface objects. Besides answering
- * A_PropertyDescription_Read, it supplies the write level a property write is
- * checked against. Returning nullopt means "no such object or property".
+ * The descriptions of the interface objects, addressed as 03/03/07 §3.4.3
+ * addresses them: by @p propertyId when it is not zero, otherwise by the
+ * 0-based @p propertyIndex. The returned info carries the property's PID and
+ * its index either way. Besides answering A_PropertyDescription_Read and
+ * A_PropertyExtDescription_Read, it supplies the existence, access and write
+ * level both value services check against. Returning nullopt means "no such
+ * object or property".
  */
 using PropertyDescriptionProvider = util::InplaceFunction<std::optional<PropertyDescriptionInfo>(
     const IndividualAddress& source,

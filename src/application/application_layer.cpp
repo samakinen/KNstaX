@@ -10,7 +10,6 @@
 
 #include "knx/application/application_layer.hpp"
 #include "knx/application/device_descriptor.hpp"
-#include "knx/application/property_store.hpp"
 #include "knx/application/address_space.hpp"
 #include "knx/application/communication_mode.hpp"
 #include "knx/application/security_access_policy.hpp"
@@ -144,10 +143,9 @@ SendOptions ApplicationLayer::optionsForPreset(SendPolicyPreset preset) {
 }
 
 void ApplicationLayer::registerPropertyObject(InterfaceObjectType objectType,
-                                              InterfaceObjectIndex objectIndex,
-                                              PropertyRegistration registration)
+                                              InterfaceObjectIndex objectIndex)
 {
-    // The first announcement of an index wins, as it does in the store.
+    // The first announcement of an index wins.
     bool known = false;
     for (const auto& object : _registeredObjects) {
         known = known || object.index == objectIndex;
@@ -155,11 +153,6 @@ void ApplicationLayer::registerPropertyObject(InterfaceObjectType objectType,
     if (!known && !_registeredObjects.push_back(RegisteredObject{objectIndex, objectType})) {
         KNX_LOGW(TAG, "Interface object %d not recorded: more than %zu objects",
                  objectIndex.value(), kMaxInterfaceObjects);
-    }
-
-    auto* store = _propertyStoreManager ? _propertyStoreManager->addObject(objectType, objectIndex) : nullptr;
-    if (store) {
-        registration(*store);
     }
 }
 
@@ -238,6 +231,12 @@ void ApplicationLayer::setPropertyWriteProvider(PropertyWriteProvider provider)
 
 void ApplicationLayer::setPropertyDescriptionProvider(PropertyDescriptionProvider provider)
 {
+    // One description for both families, so A_PropertyDescription_Read and
+    // A_PropertyExtDescription_Read report the same PID at the same index, and
+    // both value services check the same access and levels.
+    if (_propertyExtServices) {
+        _propertyExtServices->setDescriptionProvider(provider);
+    }
     if (_propertyServices) {
         _propertyServices->setDescriptionProvider(std::move(provider));
     }
@@ -334,15 +333,35 @@ util::Result<void> ApplicationLayer::init(const IndividualAddress& ownAddress) {
 
     // Initialize dependencies
     _deviceDescriptor = std::make_unique<DeviceDescriptor>(DeviceDescriptor::createDefault());
-    // Only the extended property services still read the store; see the
-    // registration in the BAU.
-    _propertyStoreManager = std::make_unique<PropertyStoreManager>();
     _addressSpace = std::make_unique<AddressSpace>();
 
     // Initialize service handlers
     _deviceDescriptorService = std::make_unique<DeviceDescriptorService>(*_deviceDescriptor);
     _propertyServices = std::make_unique<PropertyServices>();
-    _propertyExtServices = std::make_unique<PropertyExtServices>(*_propertyStoreManager);
+    _propertyExtServices = std::make_unique<PropertyExtServices>();
+    // 03/05/01 §4.18.5.2.5: "The Object Instance shall for each Object Type
+    // start with 1 and shall ascend with the local Interface Object index in
+    // the device."
+    _propertyExtServices->setObjectResolver(
+        [this](uint16_t objectType, uint16_t objectInstance) -> std::optional<InterfaceObjectIndex> {
+            std::optional<InterfaceObjectIndex> found;
+            for (const auto& candidate : _registeredObjects) {
+                if (candidate.type.value() != objectType) {
+                    continue;
+                }
+                // Count, rather than rely on, the announcement order.
+                uint16_t rank = 1;
+                for (const auto& other : _registeredObjects) {
+                    if (other.type.value() == objectType && other.index.value() < candidate.index.value()) {
+                        ++rank;
+                    }
+                }
+                if (rank == objectInstance) {
+                    found = candidate.index;
+                }
+            }
+            return found;
+        });
     _memoryService = std::make_unique<MemoryService>(*_addressSpace);
     _authorizationService = std::make_unique<AuthorizationService>();
     _restartService = std::make_unique<RestartService>();
@@ -760,6 +779,11 @@ void ApplicationLayer::wireServiceCallbacks() {
                uint16_t maxElements,
                uint8_t readLevel,
                uint8_t writeLevel) {
+            // The classic PDU has 4 reserved bits and a 12-bit max_nr_of_elem
+            // (03/03/07 §3.4.3.1), where the extended one has 16 bits. A larger
+            // capacity is reported as the largest the field can carry, not
+            // truncated into the reserved bits or wrapped to "does not exist".
+            const uint16_t encodedMax = maxElements > 0x0FFFu ? uint16_t{0x0FFFu} : maxElements;
             ResponsePayload payload;
             if (!appendPayloadByte(payload, objectIndex.value())
                 || !appendPayloadByte(payload, static_cast<uint8_t>(propertyId))
@@ -767,8 +791,8 @@ void ApplicationLayer::wireServiceCallbacks() {
                 || !appendPayloadByte(payload,
                                       static_cast<uint8_t>(static_cast<uint8_t>(type)
                                                            | (isWriteAllowed(writeAccess) ? 0x80 : 0x00)))
-                || !appendPayloadByte(payload, static_cast<uint8_t>((maxElements >> 8) & 0xFF))
-                || !appendPayloadByte(payload, static_cast<uint8_t>(maxElements & 0xFF))
+                || !appendPayloadByte(payload, static_cast<uint8_t>((encodedMax >> 8) & 0x0F))
+                || !appendPayloadByte(payload, static_cast<uint8_t>(encodedMax & 0xFF))
                 || !appendPayloadByte(payload, static_cast<uint8_t>((readLevel << 4) | (writeLevel & 0x0F)))) {
                 logOversizedServiceResponse("PropertyDescription", 7u);
                 return;

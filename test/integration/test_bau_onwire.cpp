@@ -1321,7 +1321,7 @@ void test_bau_go_diagnostics_refuses_secure_read_without_group_key(void) {
 
 // PID_GRP_KEY_TABLE (03/05/01 §6.3.7) arrives as PDT_GENERIC_18[]: GA_Index +
 // 16-octet key, where GA_Index is the TSAP — the 1-based index into the Group
-// Address Table — and NOT the group address. The property store keeps the array
+// Address Table — and NOT the group address. The Security Object keeps the array
 // verbatim, so unless the BAU resolves it the Secure Application Layer finds no
 // key, every group telegram goes out in plain, and PID_GO_DIAGNOSTICS refuses a
 // secured send with E_DATA_VOID.

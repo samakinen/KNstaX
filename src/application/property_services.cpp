@@ -176,9 +176,7 @@ util::Result<void> PropertyServices::handleValueWrite(
             const auto description = _descriptionProvider(source, request.objectIndex,
                                                           request.propertyId, PropertyIndex(0));
             if (description.has_value() && description->maxElements != 0) {
-                PropertyDescriptor element{};
-                element.type = description->type;
-                if (element.getElementSize() != 0) {
+                if (propertyDataTypeSize(description->type) != 0) {
                     readData.clear();
                     haveReadBack = true;
                 }

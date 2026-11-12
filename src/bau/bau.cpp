@@ -28,13 +28,12 @@
 #include "knx/objects/table_segments.hpp"
 #include "knx/objects/generic_interface_object.hpp"
 #include "knx/objects/interface_object_manager.hpp"
-#include "knx/objects/object_property_manifest.hpp"
+#include "knx/objects/reference_object_registry.hpp"
 #include "knx/objects/reference_object_registry.hpp"
 #include "knx/util/fixed_vector.hpp"
 #include "knx/util/log.hpp"
 #include "knx/util/result.hpp"
 #include "knx/application/apci_services.hpp"
-#include "knx/application/property_store.hpp"
 #include "knx/datalink/tp1_data_link_layer.hpp"
 #include "knx/platform/raii_resources.hpp"
 #include "knx/physical/tp1_mac_physical.hpp"
@@ -327,7 +326,7 @@ public:
             if (referenceObject(objectType) != nullptr) {
                 continue;
             }
-            // GenericInterfaceObject pulls its schema from the reference manifest directly.
+            // GenericInterfaceObject builds its handlers from referenceObjectProperties().
             _referenceObjects.emplace_back(std::make_unique<objects::GenericInterfaceObject>(objectType));
             _interfaceObjectManager->registerReferenceObject(*_referenceObjects.back());
         }
@@ -422,16 +421,11 @@ public:
             objects::InterfaceObject* object = interfaceObjects[i];
             const InterfaceObjectIndex objectIndex(static_cast<uint8_t>(i));
 
-            // The classic property services and the Access Policy answer from
-            // the interface objects through the providers below. The copy into
-            // the property store is still what the extended property services
-            // run on: moving them changes the property-index order and the
-            // Group Object Table PID_TABLE access they report, which is pending
-            // a decision (habinari-firmware docs/code-review-2026-10-fix-design.md,
-            // section 8).
-            stackPort.registerPropertyObject(object->objectType(), objectIndex, [object](application::PropertyStore& store) {
-                object->registerProperties(store);
-            });
+            // Both property service families and the Access Policy answer
+            // from the interface objects through the providers below; the
+            // application layer only needs to know which type sits at which
+            // index.
+            stackPort.registerPropertyObject(object->objectType(), objectIndex);
             _indexToTypeMap.push_back(object->objectType());
         }
 
@@ -498,36 +492,31 @@ public:
                     return std::nullopt;
                 }
 
-                application::PropertyID resolvedId = static_cast<application::PropertyID>(0);
-                application::PropertyDataType type = application::PropertyDataType::GenericData;
-                uint16_t maxElements = 0;
-                uint8_t access = 0;
-                uint8_t readLevel = 0;
-                uint8_t writeLevel = 0;
+                objects::PropertyDescription description;
                 const auto res = _interfaceObjectManager->describeProperty(
                     *objectType,
                     InterfaceObjectInstance(1),
                     propertyId,
-                    propertyIndex,
-                    resolvedId,
-                    type,
-                    maxElements,
-                    access,
-                    readLevel,
-                    writeLevel);
+                    propertyIndex.value(),
+                    description);
                 if (res != objects::PropertyAccessResult::Success) {
                     return std::nullopt;
                 }
 
                 application::PropertyDescriptionInfo info;
                 info.objectIndex = objectIndex;
-                info.propertyId = resolvedId;
-                info.propertyIndex = propertyIndex;
-                info.type = type;
-                info.maxElements = maxElements;
-                info.writeAccess = (access & 0x02) != 0 ? PropertyWriteAccess::Allowed : PropertyWriteAccess::Denied;
-                info.readLevel = readLevel;
-                info.writeLevel = writeLevel;
+                info.propertyId = description.id;
+                // 03/03/07 §3.4.3.1: "For new implementations the
+                // property_index shall contain the correct value of the
+                // addressed Property", also when it was addressed by PID.
+                info.propertyIndex = PropertyIndex(static_cast<uint8_t>(description.index));
+                info.type = description.type;
+                info.maxElements = description.maxElements;
+                info.writeAccess = objects::canWrite(description.capability) ? PropertyWriteAccess::Allowed
+                                                                             : PropertyWriteAccess::Denied;
+                info.readable = objects::canRead(description.capability);
+                info.readLevel = description.readLevel;
+                info.writeLevel = description.writeLevel;
                 return info;
             });
     }
@@ -906,8 +895,8 @@ util::Result<void> BusAccessUnit::init(const IndividualAddress& ownAddress,
         notifyWorkAvailableIfTransitioned();
     });
 
-    // Populate property store with interface-object properties and route property
-    // services back through the BAU-owned interface-object inventory.
+    // Route the property services through the BAU-owned interface-object
+    // inventory.
     if (_propertyAccessBridge) {
         // Wire DLL group-address subscription so the bridge can add new GAs
         // immediately when ETS writes the address table during this session.

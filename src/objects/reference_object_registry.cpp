@@ -3,7 +3,7 @@
 
 /**
  * @file reference_object_registry.cpp
- * @brief Property manifests for reference interface objects
+ * @brief Property declarations of the reference interface objects
  */
 
 #include "knx/objects/reference_object_registry.hpp"
@@ -160,25 +160,15 @@ constexpr application::PropertyID toPid(ReferencePropertyId id)
     return static_cast<application::PropertyID>(id);
 }
 
-constexpr PropertyManifestEntry entry(application::PropertyID propertyId,
-                                      application::PropertyDataType dataType,
-                                      application::PropertyAccess access,
-                                      uint16_t maxElements,
-                                      uint8_t readLevel = 0,
-                                      uint8_t writeLevel = 0)
+constexpr PropertyDeclaration entry(application::PropertyID propertyId,
+                                   application::PropertyDataType dataType,
+                                   application::PropertyAccess access,
+                                   uint16_t maxElements)
 {
-    return PropertyManifestEntry{{propertyId, dataType, access, maxElements, readLevel, writeLevel},
-                                 PropertyPersistenceMode::None};
+    return PropertyDeclaration{propertyId, dataType, access, maxElements};
 }
 
-/// The same entry, stored by InterfaceObjectManager::saveToPersistence().
-constexpr PropertyManifestEntry persisted(PropertyManifestEntry manifestEntry)
-{
-    manifestEntry.persistence = PropertyPersistenceMode::Persist;
-    return manifestEntry;
-}
-
-constexpr PropertyManifestEntry objectTypeEntry()
+constexpr PropertyDeclaration objectTypeEntry()
 {
     return entry(application::PropertyID::ObjectType, PDT::UnsignedInt, PA::ReadOnly, 1);
 }
@@ -202,10 +192,10 @@ bool isReferenceObjectType(InterfaceObjectType type)
            type == InterfaceObjectType::rfMedium();
 }
 
-std::span<const PropertyManifestEntry> referenceObjectPropertyManifestEntries(InterfaceObjectType type)
+std::span<const PropertyDeclaration> referenceObjectProperties(InterfaceObjectType type)
 {
     if (type == InterfaceObjectType::interfaceProgram()) {
-        static const PropertyManifestEntry regs[] = {
+        static const PropertyDeclaration regs[] = {
             objectTypeEntry(),
             entry(toPid(ReferencePropertyId::InterfaceProgramOperationMode), PDT::VariableLength, PA::ReadWrite, 1),
         };
@@ -213,14 +203,14 @@ std::span<const PropertyManifestEntry> referenceObjectPropertyManifestEntries(In
     }
 
     if (type == InterfaceObjectType::eibObjectAssociation()) {
-        static const PropertyManifestEntry regs[] = {
+        static const PropertyDeclaration regs[] = {
             objectTypeEntry(),
         };
         return regs;
     }
 
     if (type == InterfaceObjectType::router()) {
-        static const PropertyManifestEntry regs[] = {
+        static const PropertyDeclaration regs[] = {
             objectTypeEntry(),
             // PID_LINE_STATUS is device-reported, not configured.
             entry(toPid(ReferencePropertyId::RouterLineStatus), PDT::Bitset8, PA::ReadOnly, 1),
@@ -245,7 +235,7 @@ std::span<const PropertyManifestEntry> referenceObjectPropertyManifestEntries(In
     }
 
     if (type == InterfaceObjectType::lteFsm()) {
-        static const PropertyManifestEntry regs[] = {
+        static const PropertyDeclaration regs[] = {
             objectTypeEntry(),
             entry(toPid(ReferencePropertyId::LteRouteSelect), PDT::GenericData, PA::ReadWrite, 1),
             entry(toPid(ReferencePropertyId::LteRouteTable), PDT::Generic05, PA::ReadWrite, 1),
@@ -254,7 +244,7 @@ std::span<const PropertyManifestEntry> referenceObjectPropertyManifestEntries(In
     }
 
     if (type == InterfaceObjectType::cemiServer()) {
-        static const PropertyManifestEntry regs[] = {
+        static const PropertyDeclaration regs[] = {
             objectTypeEntry(),
             entry(toPid(ReferencePropertyId::CemiMediumType), PDT::Bitset16, PA::ReadWrite, 1),
             entry(toPid(ReferencePropertyId::CemiCommMode), PDT::Enum8, PA::ReadWrite, 1),
@@ -278,7 +268,7 @@ std::span<const PropertyManifestEntry> referenceObjectPropertyManifestEntries(In
     }
 
     if (type == InterfaceObjectType::pollingMaster()) {
-        static const PropertyManifestEntry regs[] = {
+        static const PropertyDeclaration regs[] = {
             objectTypeEntry(),
             entry(toPid(ReferencePropertyId::PollingMasterProperty1), PDT::GenericData, PA::ReadWrite, 1),
             entry(toPid(ReferencePropertyId::PollingMasterProperty2), PDT::GenericData, PA::ReadWrite, 1),
@@ -288,7 +278,7 @@ std::span<const PropertyManifestEntry> referenceObjectPropertyManifestEntries(In
     }
 
     if (type == InterfaceObjectType::knxNetIpParameter()) {
-        static const PropertyManifestEntry regs[] = {
+        static const PropertyDeclaration regs[] = {
             objectTypeEntry(),
             entry(toPid(ReferencePropertyId::KnxNetIpProjectInstallationId), PDT::UnsignedInt, PA::ReadWrite, 1),
             entry(toPid(ReferencePropertyId::KnxNetIpIndividualAddress), PDT::UnsignedInt, PA::ReadWrite, 1),
@@ -320,11 +310,10 @@ std::span<const PropertyManifestEntry> referenceObjectPropertyManifestEntries(In
             entry(toPid(ReferencePropertyId::KnxNetIpTunnellingAddresses), PDT::UnsignedChar, PA::ReadWrite, 0xFFFFu),
             // KNXnet/IP Secure PIDs (DIN EN ISO 22510:2021, §5.7.2.5)
             entry(toPid(ReferencePropertyId::KnxNetIpTunnellingUsers), PDT::GenericData, PA::ReadWrite, 0xFFFFu),
-            // The Secure Routing configuration ETS downloads must survive the
-            // restart that ends the download, like the Data Secure key tables.
-            persisted(entry(toPid(ReferencePropertyId::KnxNetIpBackboneKey), PDT::Generic16, PA::ReadWrite, 1)),
-            persisted(entry(toPid(ReferencePropertyId::KnxNetIpMulticastLatencyTolerance), PDT::UnsignedInt, PA::ReadWrite, 1)),
-            persisted(entry(toPid(ReferencePropertyId::KnxNetIpSyncLatencyFraction), PDT::UnsignedChar, PA::ReadWrite, 1)),
+            // Persisted: see InterfaceObjectManager::persistedProperties().
+            entry(toPid(ReferencePropertyId::KnxNetIpBackboneKey), PDT::Generic16, PA::ReadWrite, 1),
+            entry(toPid(ReferencePropertyId::KnxNetIpMulticastLatencyTolerance), PDT::UnsignedInt, PA::ReadWrite, 1),
+            entry(toPid(ReferencePropertyId::KnxNetIpSyncLatencyFraction), PDT::UnsignedChar, PA::ReadWrite, 1),
             // PDT_FUNCTION, not stored data: 03/08/09 §2.3.1.5 defines it as a
             // Function Property whose encoding differs between the write and
             // the response, so no single datatype describes it. Declaring it as
@@ -336,14 +325,14 @@ std::span<const PropertyManifestEntry> referenceObjectPropertyManifestEntries(In
     }
 
     if (type == InterfaceObjectType::fileServer()) {
-        static const PropertyManifestEntry regs[] = {
+        static const PropertyDeclaration regs[] = {
             objectTypeEntry(),
         };
         return regs;
     }
 
     if (type == InterfaceObjectType::eModeChannel() || type == InterfaceObjectType::adjustedEModeChannel()) {
-        static const PropertyManifestEntry regs[] = {
+        static const PropertyDeclaration regs[] = {
             objectTypeEntry(),
             entry(toPid(ReferencePropertyId::EModeChanNumber), PDT::UnsignedInt, PA::ReadWrite, 1),
             entry(toPid(ReferencePropertyId::EModeChanCode), PDT::UnsignedInt, PA::ReadWrite, 1),
@@ -366,7 +355,7 @@ std::span<const PropertyManifestEntry> referenceObjectPropertyManifestEntries(In
     }
 
     if (type == InterfaceObjectType::textCatalogue()) {
-        static const PropertyManifestEntry regs[] = {
+        static const PropertyDeclaration regs[] = {
             objectTypeEntry(),
             entry(toPid(ReferencePropertyId::TextCatalogueLocaleList), PDT::Generic04, PA::ReadWrite, 0xFFFFu),
             entry(toPid(ReferencePropertyId::TextCatalogueLocaleSelection), PDT::Generic04, PA::ReadWrite, 1),
@@ -377,7 +366,7 @@ std::span<const PropertyManifestEntry> referenceObjectPropertyManifestEntries(In
     }
 
     if (type == InterfaceObjectType::eModeDevice()) {
-        static const PropertyManifestEntry regs[] = {
+        static const PropertyDeclaration regs[] = {
             objectTypeEntry(),
             entry(toPid(ReferencePropertyId::EModeLocalisationMode), PDT::BinaryInfo, PA::ReadWrite, 1),
             entry(toPid(ReferencePropertyId::EModeLocalisationReport), PDT::UnsignedInt, PA::ReadWrite, 1),
@@ -387,7 +376,7 @@ std::span<const PropertyManifestEntry> referenceObjectPropertyManifestEntries(In
     }
 
     if (type == InterfaceObjectType::rfMedium()) {
-        static const PropertyManifestEntry regs[] = {
+        static const PropertyDeclaration regs[] = {
             objectTypeEntry(),
             entry(toPid(ReferencePropertyId::RfMultiType), PDT::Bitset8, PA::ReadWrite, 1),
             entry(toPid(ReferencePropertyId::RfMultiPhysicalFeatures), PDT::Bitset8, PA::ReadWrite, 1),
@@ -409,7 +398,7 @@ std::span<const PropertyManifestEntry> referenceObjectPropertyManifestEntries(In
         return regs;
     }
 
-    return std::span<const PropertyManifestEntry>{};
+    return std::span<const PropertyDeclaration>{};
 }
 
 } // namespace objects

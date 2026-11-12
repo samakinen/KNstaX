@@ -17,6 +17,36 @@
 using namespace knx;
 using namespace knx::objects;
 
+namespace {
+// describeProperty() with its result spread over out-parameters, the shape
+// these tests were written against. access: bit 0 read, bit 1 write.
+[[maybe_unused]] knx::objects::PropertyAccessResult describeInto(
+    knx::objects::InterfaceObjectManager& manager,
+    knx::InterfaceObjectType objectType,
+    knx::InterfaceObjectInstance objectInstance,
+    knx::application::PropertyID propertyId,
+    knx::PropertyIndex propertyIndex,
+    knx::application::PropertyID& resolvedPropertyId,
+    knx::application::PropertyDataType& type,
+    uint16_t& maxElements,
+    uint8_t& access,
+    uint8_t& readLevel,
+    uint8_t& writeLevel)
+{
+    knx::objects::PropertyDescription description;
+    const auto res = manager.describeProperty(objectType, objectInstance, propertyId,
+                                              propertyIndex.value(), description);
+    resolvedPropertyId = description.id;
+    type = description.type;
+    maxElements = description.maxElements;
+    access = static_cast<uint8_t>((knx::objects::canRead(description.capability) ? 0x01u : 0u)
+                                  | (knx::objects::canWrite(description.capability) ? 0x02u : 0u));
+    readLevel = description.readLevel;
+    writeLevel = description.writeLevel;
+    return res;
+}
+} // namespace
+
 void setUp(void) {}
 void tearDown(void) {}
 
@@ -31,7 +61,7 @@ void test_InterfaceObjectManager_DescribeProperty_DeviceObject(void) {
     uint8_t readLevel = 0;
     uint8_t writeLevel = 0;
 
-    auto res = mgr.describeProperty(
+    auto res = describeInto(mgr, 
         InterfaceObjectType::device(),
         InterfaceObjectInstance(1),
         static_cast<knx::application::PropertyID>(DeviceProperty::SubnetAddress),
@@ -61,7 +91,7 @@ void test_InterfaceObjectManager_DescribeProperty_AddressTable_TableData(void) {
     uint8_t readLevel = 0;
     uint8_t writeLevel = 0;
 
-    auto res = mgr.describeProperty(
+    auto res = describeInto(mgr, 
         InterfaceObjectType::addressTable(),
         InterfaceObjectInstance(1),
         static_cast<knx::application::PropertyID>(AddressTableProperty::TableData),
@@ -260,7 +290,7 @@ void test_KnxNetIpParam_BackboneKey_Describe(void)
     uint8_t readLevel = 0;
     uint8_t writeLevel = 0;
 
-    auto res = mgr.describeProperty(
+    auto res = describeInto(mgr, 
         InterfaceObjectType::knxNetIpParameter(),
         InterfaceObjectInstance(1),
         kPidBackboneKey,
@@ -389,7 +419,7 @@ void test_KnxNetIpParam_SecuredServiceFamilies_IsAFunctionProperty(void)
     uint8_t readLevel = 0;
     uint8_t writeLevel = 0;
 
-    auto res = mgr.describeProperty(
+    auto res = describeInto(mgr, 
         InterfaceObjectType::knxNetIpParameter(),
         InterfaceObjectInstance(1),
         kPidSecuredSvcFamilies,
@@ -422,7 +452,7 @@ void test_KnxNetIpParam_TunnellingUsers_Describe(void)
     uint8_t readLevel = 0;
     uint8_t writeLevel = 0;
 
-    auto res = mgr.describeProperty(
+    auto res = describeInto(mgr, 
         InterfaceObjectType::knxNetIpParameter(),
         InterfaceObjectInstance(1),
         kPidTunnellingUsers,
@@ -460,6 +490,103 @@ void test_KnxNetIpParam_UndeclaredPid_RejectsInvalid(void)
         static_cast<int>(rres));
 }
 
+// The handler tables are the one declaration of each object's properties.
+// Every table must be valid (unique PIDs, PID_OBJECT_TYPE present), which is
+// what makes the PID order a well-defined property index.
+void test_PropertyModel_EveryHandlerTableIsValid(void)
+{
+    InterfaceObjectManager mgr;
+    TEST_ASSERT_TRUE(mgr.init(false).isOk());
+    const InterfaceObject* objects[] = {
+        &mgr.deviceObject(), &mgr.addressTable(), &mgr.associationTable(),
+        &mgr.applicationProgram(), &mgr.groupObjectTable(), &mgr.securityObject(),
+    };
+    for (const auto* object : objects) {
+        const auto binding = object->kernelBinding();
+        TEST_ASSERT_TRUE(validatePropertyTable(binding.handlers, binding.handlerCount).isOk());
+    }
+    GenericInterfaceObject paramObj(InterfaceObjectType::knxNetIpParameter());
+    const auto binding = paramObj.kernelBinding();
+    TEST_ASSERT_NOT_NULL(binding.handlers);
+    TEST_ASSERT_TRUE(validatePropertyTable(binding.handlers, binding.handlerCount).isOk());
+}
+
+// 03/03/07 §3.4.3.1: "property_index = 0 shall mean the first Property".
+// Indices run over the PIDs in ascending order, so index 0 is PID_OBJECT_TYPE,
+// and a by-PID description reports the same index the property has.
+void test_PropertyModel_IndicesFollowAscendingPids(void)
+{
+    InterfaceObjectManager mgr;
+    TEST_ASSERT_TRUE(mgr.init(false).isOk());
+    const InterfaceObjectType types[] = {
+        InterfaceObjectType::device(), InterfaceObjectType::addressTable(),
+        InterfaceObjectType::associationTable(), InterfaceObjectType::applicationProgram(),
+        InterfaceObjectType::groupObjectTable(), InterfaceObjectType::security(),
+    };
+    for (const auto type : types) {
+        uint16_t index = 0;
+        uint8_t previous = 0;
+        for (;; ++index) {
+            TEST_ASSERT_TRUE(index < 64);
+            PropertyDescription byIndex;
+            if (mgr.describeProperty(type, InterfaceObjectInstance(1), static_cast<knx::application::PropertyID>(0),
+                                     index, byIndex) != PropertyAccessResult::Success) {
+                break;
+            }
+            const auto pid = static_cast<uint8_t>(byIndex.id);
+            TEST_ASSERT_EQUAL_UINT16(index, byIndex.index);
+            if (index == 0) {
+                TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(knx::application::PropertyID::ObjectType), pid);
+            } else {
+                TEST_ASSERT_TRUE(pid > previous);
+            }
+            previous = pid;
+
+            PropertyDescription byPid;
+            TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
+                              mgr.describeProperty(type, InterfaceObjectInstance(1), byIndex.id, 0, byPid));
+            TEST_ASSERT_EQUAL_UINT16(index, byPid.index);
+        }
+        TEST_ASSERT_TRUE(index > 1);
+    }
+}
+
+// An undeclared PID does not exist: no second list decides otherwise.
+void test_PropertyModel_UndeclaredPidIsInvalidProperty(void)
+{
+    InterfaceObjectManager mgr;
+    TEST_ASSERT_TRUE(mgr.init(false).isOk());
+    const auto unknownPid = static_cast<knx::application::PropertyID>(0xEF);
+
+    knx::application::PropertyServiceDataBuffer buf;
+    TEST_ASSERT_EQUAL(PropertyAccessResult::InvalidProperty,
+                      mgr.readProperty(InterfaceObjectType::device(), InterfaceObjectInstance(1),
+                                       unknownPid, 1, 1, buf));
+    PropertyDescription description;
+    TEST_ASSERT_EQUAL(PropertyAccessResult::InvalidProperty,
+                      mgr.describeProperty(InterfaceObjectType::device(), InterfaceObjectInstance(1),
+                                           unknownPid, 0, description));
+}
+
+// Every persisted property must be a live, readable and writeable property, or
+// saveToPersistence() stores nothing and loadFromPersistence() restores nothing.
+void test_PropertyModel_PersistedPropertiesExistAndAreWriteable(void)
+{
+    GenericInterfaceObject paramObj(InterfaceObjectType::knxNetIpParameter());
+    InterfaceObjectManager mgr;
+    TEST_ASSERT_TRUE(mgr.init(false).isOk());
+    mgr.registerReferenceObject(paramObj);
+
+    for (const auto& property : InterfaceObjectManager::persistedProperties()) {
+        PropertyDescription description;
+        TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
+                          mgr.describeProperty(property.objectType, InterfaceObjectInstance(1),
+                                               property.propertyId, 0, description));
+        TEST_ASSERT_TRUE(canRead(description.capability));
+        TEST_ASSERT_TRUE(canWrite(description.capability));
+    }
+}
+
 int main(int argc, char** argv) {
     (void)argc;
     (void)argv;
@@ -480,6 +607,10 @@ int main(int argc, char** argv) {
     RUN_TEST(test_KnxNetIpParam_SecuredServiceFamilies_IsAFunctionProperty);
     RUN_TEST(test_KnxNetIpParam_TunnellingUsers_Describe);
     RUN_TEST(test_KnxNetIpParam_UndeclaredPid_RejectsInvalid);
+    RUN_TEST(test_PropertyModel_EveryHandlerTableIsValid);
+    RUN_TEST(test_PropertyModel_IndicesFollowAscendingPids);
+    RUN_TEST(test_PropertyModel_UndeclaredPidIsInvalidProperty);
+    RUN_TEST(test_PropertyModel_PersistedPropertiesExistAndAreWriteable);
 
     return UNITY_END();
 }

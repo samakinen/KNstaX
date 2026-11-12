@@ -7,7 +7,6 @@
  */
 
 #include "knx/objects/group_object_table_object.hpp"
-#include "knx/objects/object_property_manifest.hpp"
 #include "knx/objects/table_segments.hpp"
 #include "knx/objects/property_kernel.hpp"
 #include "knx/util/log.hpp"
@@ -21,19 +20,19 @@ namespace {
 
 constexpr const char* TAG = "KNX.Obj.GroupObjectTable";
 
-// PID_TABLE of the Group Object Table Object (Object Type 9) has a normative
-// wire format: KNX 03/05/01 §4.12.5.2.4.1, Tables 51 and 52 — "Group Object
-// Table - Realisation Type 7", which is the realisation mask 07B0 (System B)
-// devices use.
+// PID_TABLE of the Group Object Table Object (Object Type 9), 03/05/01
+// §4.18.6.2.4 "Group Object Table - Realisation Type 7" (System B, mask 07B0):
 //
-//   index 0 : Length, 2 octets  — number of Group Object descriptors
-//   index n : Group Object descriptor, 2 octets, big-endian
+//   "Table  23 = PID_TABLE  PDT_GENERIC_02[]  Group Object table Format 1"
+//   (Table 85), and Table 86: "Property array index […] 0: Length
+//   (2 octets); 1: Group Object descriptor (2 octets) […] n".
 //
-// A descriptor carries only communication policy plus the value width.  It
-// deliberately contains neither the group address (that lives in the Address
-// Table, referenced through the Association Table) nor the live value.
-constexpr size_t kTableLengthFieldBytes = 2u;
-constexpr size_t kDescriptorBytes = 2u;
+// So it is an array of 2-octet elements: element n is the descriptor of group
+// object n, and element 0 is the length, which the kernel answers through
+// `count` like for any other array ("The current length shall be the number of
+// entries in the Group Object Table"). A descriptor carries only communication
+// policy plus the value width (Table 87): neither the group address (that is in
+// the Address Table, referenced through the Association Table) nor the value.
 
 size_t descriptorCount(const GroupObjectTableDomain& domain) {
     size_t count = 0;
@@ -49,6 +48,28 @@ util::Result<uint16_t> getObjectType(const GroupObjectTableDomain& /*domain*/) {
     return InterfaceObjectType::groupObjectTable().value();
 }
 
+util::Result<uint16_t> tableLength(const PropertyContext& context, const void* /*userData*/)
+{
+    const auto* domain = static_cast<const GroupObjectTableDomain*>(context.domain);
+    if (!domain) {
+        return util::Result<uint16_t>(util::ErrorCode::InvalidParameter);
+    }
+    return static_cast<uint16_t>(descriptorCount(*domain));
+}
+
+// A write of the length (element 0). ETS sets it to 0 to clear a table before
+// downloading it again (see resizeProperty), and refusing that would fail the
+// download. The group objects are defined by the firmware, so the write is
+// accepted and not applied, as the streamed PID_TABLE_REFERENCE content is: a
+// read of element 0 keeps answering the real number of group objects.
+util::Result<void> acceptTableLength(const PropertyContext& /*context*/, uint16_t elementCount,
+                                     const void* /*userData*/)
+{
+    KNX_LOGD(TAG, "PID_TABLE length write (%u) accepted, not applied: group objects are firmware-defined",
+             static_cast<unsigned>(elementCount));
+    return util::Result<void>::ok();
+}
+
 util::Result<void> readTableData(
     const PropertyContext& context,
     DomainIndex startIndex,
@@ -61,58 +82,26 @@ util::Result<void> readTableData(
         return util::Result<void>::err(util::ErrorCode::InvalidParameter);
     }
 
-    const size_t count = descriptorCount(*domain);
-    if (count > 0xFFFFu) {
-        return util::Result<void>::err(util::ErrorCode::InvalidParameter);
-    }
-    const size_t totalSize = kTableLengthFieldBytes + count * kDescriptorBytes;
-
-    const size_t offset = static_cast<size_t>(startIndex.value);
-    const size_t requested = static_cast<size_t>(elementCount);
-    if (offset + requested > totalSize) {
+    // "The content of this Property shall only be valid in the load state
+    // Loaded"; elements past the current length have no content at all.
+    const size_t first = startIndex.value;
+    if (first + elementCount > descriptorCount(*domain)) {
         return util::Result<void>::err(util::ErrorCode::OutOfRange);
     }
 
-    size_t remaining = requested;
-    size_t skip = offset;
-
-    auto emitByte = [&](uint8_t value) -> util::Result<void> {
-        if (remaining == 0) {
-            return util::Result<void>::ok();
-        }
-        if (skip > 0) {
-            --skip;
-            return util::Result<void>::ok();
-        }
-        auto res = out.u8(value);
-        if (res.isError()) {
-            return res;
-        }
-        --remaining;
-        return util::Result<void>::ok();
-    };
-
-    auto emitWord = [&](uint16_t value) -> util::Result<void> {
-        auto res = emitByte(static_cast<uint8_t>((value >> 8) & 0xFFu));
-        if (res.isError()) return res;
-        return emitByte(static_cast<uint8_t>(value & 0xFFu));
-    };
-
-    // Table 51 index 0: number of entries.
-    auto res = emitWord(static_cast<uint16_t>(count));
-    if (res.isError()) return res;
-
+    size_t slot = 0;
     for (const auto& obj : domain->objects()) {
         if (!obj) {
             continue;
         }
-        if (remaining == 0) {
-            break;
+        if (slot >= first && slot < first + elementCount) {
+            auto res = out.u16be(obj->descriptor());
+            if (res.isError()) {
+                return res;
+            }
         }
-        res = emitWord(obj->descriptor());
-        if (res.isError()) return res;
+        ++slot;
     }
-
     return util::Result<void>::ok();
 }
 
@@ -128,48 +117,19 @@ util::Result<void> writeTableData(
     if (!domain) {
         return util::Result<void>::err(util::ErrorCode::InvalidParameter);
     }
-    if (in.remaining() < elementCount) {
-        return util::Result<void>::err(util::ErrorCode::BufferTooSmall);
-    }
 
     // ETS downloads descriptors to apply the flags an integrator set on each
-    // communication object.  Only the policy bits are adopted: the Value Field
+    // communication object. Only the policy bits are adopted: the Value Field
     // Type is a property of the firmware's datapoint, not something a download
     // may redefine, so a mismatch is reported rather than silently applied.
-    size_t absolute = static_cast<size_t>(startIndex.value);
-    size_t consumed = 0;
-
-    // Skip any part of the 2-octet length field this write covers; it is
-    // derived from the live object table and is not settable.
-    while (absolute < kTableLengthFieldBytes && consumed < elementCount) {
-        auto skipped = in.u8();
-        if (skipped.isError()) {
-            return skipped.error();
-        }
-        ++absolute;
-        ++consumed;
-    }
-
-    // A write that starts or ends mid-descriptor cannot be applied atomically;
-    // ETS always writes whole descriptors, so treat anything else as malformed
-    // rather than corrupting a flag set with half an update.
-    if (((absolute - kTableLengthFieldBytes) % kDescriptorBytes) != 0u) {
-        return util::Result<void>::err(util::ErrorCode::InvalidParameter);
-    }
-    if (((static_cast<size_t>(elementCount) - consumed) % kDescriptorBytes) != 0u) {
-        return util::Result<void>::err(util::ErrorCode::InvalidParameter);
-    }
-
-    while (consumed + kDescriptorBytes <= static_cast<size_t>(elementCount)) {
+    // A descriptor for a slot the firmware has no object for changes nothing.
+    for (uint16_t i = 0; i < elementCount; ++i) {
         auto word = in.u16be();
         if (word.isError()) {
             return word.error();
         }
-        consumed += kDescriptorBytes;
 
-        const size_t slot = (absolute - kTableLengthFieldBytes) / kDescriptorBytes;
-        absolute += kDescriptorBytes;
-
+        const size_t slot = static_cast<size_t>(startIndex.value) + i;
         auto* obj = domain->objectAt(slot);
         if (obj == nullptr) {
             continue;
@@ -221,15 +181,24 @@ static const PropertyHandler kGroupObjectTableHandlers[] = {
         PropertyCapability::ReadOnly,
         &kTableReferenceData),
 
+    // PID_TABLE, writeable: "Writing shall only have effect in the load state
+    // Loading" (03/05/01 §4.18.6.2.4.1.1) presupposes a write access. The
+    // maximum length "shall be calculated via the Load Control Data Relative
+    // Allocation or shall be fixed in the device"; here it is fixed at the
+    // capacity of the table. The current length belongs to the firmware, which
+    // defines the group objects; a write to element 0 is accepted and not
+    // applied (acceptTableLength).
     {
         static_cast<application::PropertyID>(GroupObjectTableProperty::TableData),
-        application::PropertyDataType::GenericData,
+        application::PropertyDataType::Generic02,
         PropertyCapability::ReadWrite,
-        GroupObjectTableDomain::kMaxSerializedBytes,
-        1,
+        GroupObjectTableDomain::kMaxObjects,
+        0,
         &readTableData,
         &writeTableData,
-        nullptr
+        nullptr,
+        &tableLength,
+        &acceptTableLength
     },
 
     // PID_GO_DIAGNOSTICS (03/05/01 §4.8.1): the Group Object Diagnostics

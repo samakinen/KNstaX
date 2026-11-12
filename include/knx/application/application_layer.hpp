@@ -111,7 +111,6 @@ public:
         AddressType destinationType
     ), 64>;
     using IndividualAddressUpdateCallback = util::InplaceFunction<void(const IndividualAddress&), 32>;
-    using PropertyRegistration = std::function<void(PropertyStore& store)>;
 
     /**
      * @brief Answers "is PID_SECURITY_MODE enabled?".
@@ -255,13 +254,12 @@ public:
     /**
      * @brief Announce the interface object at @p objectIndex
      *
-     * Records the object's type, which the Access Policy needs for the classic
-     * services that address objects by index, and fills the property store
-     * the extended property services still run on.
+     * Records the object's type. The classic property services address objects
+     * by index and the extended ones by (type, instance); this mapping is what
+     * lets both, and the Access Policy, name the same object.
      */
     void registerPropertyObject(InterfaceObjectType objectType,
-                                InterfaceObjectIndex objectIndex,
-                                PropertyRegistration registration);
+                                InterfaceObjectIndex objectIndex);
     void setPropertyReadProvider(PropertyReadProvider provider);
     void setPropertyWriteProvider(PropertyWriteProvider provider);
     void setPropertyDescriptionProvider(PropertyDescriptionProvider provider);
@@ -415,8 +413,6 @@ private:
 
     // Service handler dependencies (owned by application layer)
     std::unique_ptr<DeviceDescriptor> _deviceDescriptor;
-    /// Backs the extended property services only.
-    std::unique_ptr<PropertyStoreManager> _propertyStoreManager;
     std::unique_ptr<AddressSpace> _addressSpace;
 
     /// Index -> type of every object announced through registerPropertyObject().

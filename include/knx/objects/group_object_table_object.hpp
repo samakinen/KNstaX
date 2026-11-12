@@ -31,11 +31,13 @@ enum class GroupObjectTableProperty : uint8_t {
     ObjectName = 2,           // Name of the object
     LoadStateControl = 5,     // Load state control
     TableReference = 7,       // Reference to table data
-    TableData = 9,            // Serialized table data
-    ErrorCode = 11,           // Last error code
+    /// PID_TABLE (03/05/01 §4.18.6.2.4, Realisation Type 7): PDT_GENERIC_02[],
+    /// one Group Object Descriptor per element; element 0 is the length.
+    TableData = 23,
+    ErrorCode = 28,           // PID_ERROR_CODE (not implemented)
     /// PID_GO_DIAGNOSTICS (03/05/01 §4.8.1): PDT_FUNCTION, the service a
     /// management client uses to read or write a group value through this
-    /// device.  Handled by BusAccessUnit, not by this object's property store.
+    /// device.  Handled by BusAccessUnit through the Function Property services.
     GoDiagnostics = 66,
 };
 
@@ -49,7 +51,6 @@ public:
     using Index = DomainIndex; // 0-based domain index
 
     static constexpr uint16_t kMaxObjects = 256;
-    static constexpr uint16_t kMaxSerializedBytes = 0xFFFF;
 
     util::Result<Index> add(std::unique_ptr<application::GroupObject> obj);
     util::Result<void> remove(Index index);

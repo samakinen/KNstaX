@@ -7,13 +7,35 @@
  */
 
 #include "knx/objects/device_object.hpp"
-#include "knx/objects/object_property_manifest.hpp"
+#include "knx/objects/interface_object_manager.hpp"
 #include "knx/objects/property_kernel.hpp"
 #include <unity.h>
 #include <vector>
 
 using namespace knx;
 using namespace knx::objects;
+
+namespace {
+// Kernel describeProperty() with its result spread over out-parameters.
+[[maybe_unused]] knx::util::Result<void> describeInto(const knx::objects::PropertyHandler* handlers,
+                                                      size_t count,
+                                                      knx::application::PropertyID propertyId,
+                                                      knx::PropertyIndex propertyIndex,
+                                                      knx::application::PropertyID& resolved,
+                                                      knx::application::PropertyDataType& type,
+                                                      uint16_t& maxElements,
+                                                      knx::objects::PropertyCapability& capability)
+{
+    knx::objects::PropertyDescription description;
+    const auto res = knx::objects::describeProperty(handlers, count, propertyId,
+                                                    propertyIndex.value(), description);
+    resolved = description.id;
+    type = description.type;
+    maxElements = description.maxElements;
+    capability = description.capability;
+    return res;
+}
+} // namespace
 
 static DeviceObject* device = nullptr;
 
@@ -423,7 +445,7 @@ void test_DeviceObject_ProgModeDescriptionMatchesSpec() {
     uint16_t maxElements = 0;
     PropertyCapability capability{};
 
-    TEST_ASSERT_TRUE(describeProperty(binding.handlers,
+    TEST_ASSERT_TRUE(describeInto(binding.handlers,
                                       binding.handlerCount,
                                       static_cast<application::PropertyID>(DeviceProperty::ProgMode),
                                       PropertyIndex(0),
@@ -444,17 +466,17 @@ void test_DeviceObject_ProgModeDescriptionMatchesSpec() {
 void test_DeviceObject_ProgModeIsNotPersisted() {
     // §4.3.5: "The value shall be set to 0 on reset."  Persisting it once left
     // the device booting straight back into the Commissioning lifecycle with
-    // group communication muted, so this guards the manifest entry.
-    const auto entries = objectPropertyManifestEntries(InterfaceObjectType::device());
-    bool found = false;
-    for (const auto& entry : entries) {
-        if (entry.registration.propertyId ==
-            static_cast<application::PropertyID>(DeviceProperty::ProgMode)) {
-            found = true;
-            TEST_ASSERT_FALSE(isPersistedProperty(entry));
+    // group communication muted, so this guards the persisted-property list.
+    bool sawDevice = false;
+    for (const auto& property : InterfaceObjectManager::persistedProperties()) {
+        if (property.objectType != InterfaceObjectType::device()) {
+            continue;
         }
+        sawDevice = true;
+        TEST_ASSERT_NOT_EQUAL(static_cast<int>(DeviceProperty::ProgMode),
+                              static_cast<int>(property.propertyId));
     }
-    TEST_ASSERT_TRUE(found);
+    TEST_ASSERT_TRUE(sawDevice);
 }
 
 void test_DeviceObject_PropertyAccess_LoadState() {

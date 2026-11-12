@@ -198,11 +198,23 @@ inline util::Result<void> validatePropertyTable(const PropertyHandler* handlers,
             return util::Result<void>::err(util::ErrorCode::InvalidParameter);
         }
 
+        // Property indices are derived from the PIDs (see handlerAtIndex), so
+        // a PID may occur only once.
         for (size_t j = i + 1; j < count; ++j) {
             if (handlers[j].id == handler.id) {
                 return util::Result<void>::err(util::ErrorCode::InvalidParameter);
             }
         }
+    }
+
+    // 03/05/01 §4.2.1: PID_OBJECT_TYPE "is always mandatory and shall always be
+    // readable". Being the lowest PID, it is also property index 0.
+    bool hasObjectType = false;
+    for (size_t i = 0; i < count; ++i) {
+        hasObjectType = hasObjectType || handlers[i].id == application::PropertyID::ObjectType;
+    }
+    if (!hasObjectType) {
+        return util::Result<void>::err(util::ErrorCode::InvalidParameter);
     }
 
     return util::Result<void>::ok();
@@ -436,35 +448,77 @@ inline util::Result<void> resizeProperty(
     return handler->resize(context, elementCount, handler->userData);
 }
 
+/// The property index of @p handler: its rank by PID within the object.
+///
+/// 03/03/07 §3.4.3.1 only asks for "a sequential number, i.e. property_index = 0
+/// shall mean the first Property of the associated Interface Object"; it fixes
+/// no order. KNstaX numbers an object's properties in ascending PID order, so
+/// the index never depends on how a handler table happens to be written, and
+/// PID_OBJECT_TYPE (PID 1, the lowest) is always index 0. Both the classic and
+/// the extended description services resolve indices through this one rule.
+inline uint16_t propertyIndexOf(const PropertyHandler* handlers, size_t count, const PropertyHandler& handler) {
+    uint16_t rank = 0;
+    for (size_t i = 0; i < count; ++i) {
+        if (static_cast<uint8_t>(handlers[i].id) < static_cast<uint8_t>(handler.id)) {
+            ++rank;
+        }
+    }
+    return rank;
+}
+
+/// The handler at 0-based property index @p index (see propertyIndexOf).
+inline const PropertyHandler* handlerAtIndex(const PropertyHandler* handlers, size_t count, uint16_t index) {
+    if (!handlers || index >= count) {
+        return nullptr;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        if (propertyIndexOf(handlers, count, handlers[i]) == index) {
+            return &handlers[i];
+        }
+    }
+    return nullptr;
+}
+
+/// What A_PropertyDescription_Read / A_PropertyExtDescription_Read report.
+struct PropertyDescription {
+    application::PropertyID id{};
+    uint16_t index{0};  ///< 0-based property index (03/03/07 §3.4.3)
+    application::PropertyDataType type{};
+    uint16_t maxElements{0};
+    PropertyCapability capability{PropertyCapability::ReadOnly};
+    uint8_t readLevel{0};
+    uint8_t writeLevel{0};
+};
+
+/// Describe a property addressed the way both description services address it
+/// (03/03/07 §3.4.3.1 / §3.4.3.2): by @p propertyId when it is not zero,
+/// otherwise by the 0-based @p propertyIndex. Either way @p out carries the
+/// property's PID and its index.
 inline util::Result<void> describeProperty(
     const PropertyHandler* handlers,
     size_t count,
     application::PropertyID propertyId,
-    PropertyIndex propertyIndex,
-    application::PropertyID& resolvedPropertyId,
-    application::PropertyDataType& type,
-    uint16_t& maxElements,
-    PropertyCapability& capability)
+    uint16_t propertyIndex,
+    PropertyDescription& out)
 {
     if (!handlers || count == 0) {
         return util::Result<void>::err(util::ErrorCode::OperationNotSupported);
     }
 
-    const PropertyHandler* handler = nullptr;
-    if (propertyIndex.value() == 0) {
-        handler = findHandler(handlers, count, propertyId);
-    } else if (propertyIndex.value() <= count) {
-        handler = &handlers[propertyIndex.value() - 1];
-    }
-
+    const PropertyHandler* handler = (propertyId != static_cast<application::PropertyID>(0))
+                                         ? findHandler(handlers, count, propertyId)
+                                         : handlerAtIndex(handlers, count, propertyIndex);
     if (!handler) {
         return util::Result<void>::err(util::ErrorCode::OperationNotSupported);
     }
 
-    resolvedPropertyId = handler->id;
-    type = handler->type;
-    maxElements = handler->maxElements;
-    capability = handler->capability;
+    out.id = handler->id;
+    out.index = propertyIndexOf(handlers, count, *handler);
+    out.type = handler->type;
+    out.maxElements = handler->maxElements;
+    out.capability = handler->capability;
+    out.readLevel = 0;
+    out.writeLevel = 0;
     return util::Result<void>::ok();
 }
 

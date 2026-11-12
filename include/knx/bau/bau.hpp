@@ -984,8 +984,6 @@ public:
                                                        MessageKind,
                                                        std::span<const uint8_t>,
                                                        AddressType), 32>;
-    /// Init-time only, so the capacity can stay small.
-    using PropertyRegistration = util::InplaceFunction<void(application::PropertyStore&), 32>;
     using PropertyReadProvider = application::PropertyReadProvider;
     using PropertyWriteProvider = application::PropertyWriteProvider;
     using PropertyDescriptionProvider = application::PropertyDescriptionProvider;
@@ -1042,8 +1040,7 @@ public:
     virtual void setDeviceMedium(MediumType medium) = 0;
     virtual void setInboundCallback(InboundCallback callback) = 0;
     virtual void registerPropertyObject(InterfaceObjectType objectType,
-                                        InterfaceObjectIndex objectIndex,
-                                        PropertyRegistration registration) = 0;
+                                        InterfaceObjectIndex objectIndex) = 0;
     virtual void setPropertyReadProvider(PropertyReadProvider provider) = 0;
     virtual void setPropertyWriteProvider(PropertyWriteProvider provider) = 0;
     virtual void setPropertyDescriptionProvider(PropertyDescriptionProvider provider) = 0;

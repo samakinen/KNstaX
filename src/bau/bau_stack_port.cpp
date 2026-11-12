@@ -20,7 +20,6 @@
 #include "knx/util/log.hpp"
 #include "knx/util/result.hpp"
 #include "knx/application/apci_services.hpp"
-#include "knx/application/property_store.hpp"
 #include "knx/datalink/tp1_data_link_layer.hpp"
 #include "knx/platform/raii_resources.hpp"
 #include "knx/physical/tp1_mac_physical.hpp"
@@ -175,8 +174,7 @@ public:
     virtual ~LowerStackPropertyAccess() = default;
 
     virtual void registerPropertyObject(InterfaceObjectType objectType,
-                                        InterfaceObjectIndex objectIndex,
-                                        StackPort::PropertyRegistration registration) = 0;
+                                        InterfaceObjectIndex objectIndex) = 0;
     virtual void setPropertyReadProvider(StackPort::PropertyReadProvider provider) = 0;
     virtual void setPropertyWriteProvider(StackPort::PropertyWriteProvider provider) = 0;
     virtual void setPropertyDescriptionProvider(StackPort::PropertyDescriptionProvider provider) = 0;
@@ -672,13 +670,12 @@ public:
     }
 
     void registerPropertyObject(InterfaceObjectType objectType,
-                                InterfaceObjectIndex objectIndex,
-                                StackPort::PropertyRegistration registration) {
+                                InterfaceObjectIndex objectIndex) {
         if (!_application) {
             return;
         }
 
-        _application->registerPropertyObject(objectType, objectIndex, std::move(registration));
+        _application->registerPropertyObject(objectType, objectIndex);
     }
 
     void setPropertyReadProvider(StackPort::PropertyReadProvider provider) {
@@ -1205,9 +1202,8 @@ public:
     }
 
     void registerPropertyObject(InterfaceObjectType objectType,
-                                InterfaceObjectIndex objectIndex,
-                                StackPort::PropertyRegistration registration) override {
-        _context->application.registerPropertyObject(objectType, objectIndex, std::move(registration));
+                                InterfaceObjectIndex objectIndex) override {
+        _context->application.registerPropertyObject(objectType, objectIndex);
     }
 
     void setPropertyReadProvider(StackPort::PropertyReadProvider provider) override {
@@ -1490,9 +1486,8 @@ public:
     }
 
     void registerPropertyObject(InterfaceObjectType objectType,
-                                InterfaceObjectIndex objectIndex,
-                                PropertyRegistration registration) override {
-        _lowerStack.properties->registerPropertyObject(objectType, objectIndex, std::move(registration));
+                                InterfaceObjectIndex objectIndex) override {
+        _lowerStack.properties->registerPropertyObject(objectType, objectIndex);
     }
 
     void setPropertyReadProvider(PropertyReadProvider provider) override {

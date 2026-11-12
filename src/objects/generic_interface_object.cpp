@@ -7,7 +7,6 @@
  */
 
 #include "knx/objects/generic_interface_object.hpp"
-#include "knx/objects/object_property_compliance.hpp"
 #include "knx/objects/property_kernel.hpp"
 #include "knx/objects/reference_object_registry.hpp"
 #include "knx/util/log.hpp"
@@ -30,40 +29,24 @@ static const ScalarPropertyData<GenericInterfaceObject, uint16_t> kObjectTypeDat
 
 GenericInterfaceObject::GenericInterfaceObject(InterfaceObjectType type)
     : _type(type)
-    , _registrations()
     , _values()
     , _handlerInfo()
     , _handlers()
 {
-    // Pull the schema from the reference-object manifest — single source of truth.
-    const auto manifestEntries = referenceObjectPropertyManifestEntries(type);
-
-    // Convert manifest entries to PropertyRegistrationInfo spans expected by the init path.
-    util::FixedVector<PropertyRegistrationInfo, kMaxRegistrationCount> regs;
-    for (const auto& entry : manifestEntries) {
-        if (!regs.push_back(entry.registration)) {
-            KNX_LOGE(TAG,
-                     "Manifest registration overflow for reference object type %u",
-                     static_cast<unsigned>(type.value()));
-            _handlersValidated = true;
-            _handlersValid = false;
-            return;
-        }
-    }
-    initFromRegistrations_(regs.span());
+    initFromDeclarations_(referenceObjectProperties(type));
 }
 
-void GenericInterfaceObject::initFromRegistrations_(std::span<const PropertyRegistrationInfo> registrations)
+void GenericInterfaceObject::initFromDeclarations_(std::span<const PropertyDeclaration> declarations)
 {
     auto markInvalid = [this]() {
         _handlersValidated = true;
         _handlersValid = false;
     };
 
-    if (!_registrations.assign(registrations)) {
+    if (declarations.size() > kMaxRegistrationCount) {
         KNX_LOGE(TAG,
-                 "Property registration count %u exceeds fixed bound %u for object type %u",
-                 static_cast<unsigned>(registrations.size()),
+                 "Property declaration count %u exceeds fixed bound %u for object type %u",
+                 static_cast<unsigned>(declarations.size()),
                  static_cast<unsigned>(kMaxRegistrationCount),
                  static_cast<unsigned>(_type.value()));
         markInvalid();
@@ -82,17 +65,7 @@ void GenericInterfaceObject::initFromRegistrations_(std::span<const PropertyRegi
         return;
     }
 
-    const auto schemaValidation = validateObjectPropertyRegistrations(_type, _registrations.span());
-    if (schemaValidation.isError()) {
-        KNX_LOGE(TAG,
-                 "Property registration schema validation failed for object type %u (err=%d)",
-                 static_cast<unsigned>(_type.value()),
-                 static_cast<int>(schemaValidation.error()));
-        markInvalid();
-        return;
-    }
-
-    for (const auto& reg : _registrations.span()) {
+    for (const auto& reg : declarations) {
         if (reg.propertyId == application::PropertyID::ObjectType) {
             continue;
         }
@@ -150,14 +123,6 @@ void GenericInterfaceObject::initFromRegistrations_(std::span<const PropertyRegi
             return;
         }
     }
-}
-
-size_t GenericInterfaceObject::getPropertyRegistrations(std::span<PropertyRegistrationInfo> out) const {
-    const size_t count = _registrations.size();
-    if (out.empty()) return count;
-    const size_t toCopy = std::min(count, out.size());
-    for (size_t i = 0; i < toCopy; ++i) out[i] = _registrations[i];
-    return toCopy;
 }
 
 bool GenericInterfaceObject::validateHandlersOnce_() const {
@@ -309,7 +274,7 @@ KernelBinding GenericInterfaceObject::kernelBinding() const {
 util::Result<void> GenericInterfaceObject::setPropertyValue(application::PropertyID propertyId,
                                                             std::span<const uint8_t> value)
 {
-    // The property must be part of this object's manifest; seeding an unknown
+    // The property must be one this object declares; seeding an unknown
     // property would create a value no read handler can ever serve.
     const GenericPropertyInfo* info = nullptr;
     for (const auto& candidate : _handlerInfo) {

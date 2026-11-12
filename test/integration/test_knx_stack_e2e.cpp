@@ -672,7 +672,10 @@ void test_e2e_property_description_read_prog_mode_descriptor(void) {
 
     TEST_ASSERT_EQUAL_UINT8(0, payload[0]);
     TEST_ASSERT_EQUAL_UINT8(54, payload[1]);
-    TEST_ASSERT_EQUAL_UINT8(0, payload[2]);
+    // 03/03/07 §3.4.3.1: "For new implementations the property_index shall
+    // contain the correct value of the addressed Property". Device Object
+    // properties are numbered in ascending PID order, PID_PROG_MODE is the 14th.
+    TEST_ASSERT_EQUAL_UINT8(13, payload[2]);
 
     // type=Bitset8 (0x33) and writeEnabled=true (bit7)
     TEST_ASSERT_EQUAL_UINT8(0xB3, payload[3]);
@@ -731,7 +734,7 @@ void test_e2e_property_description_read_manufacturer_id_descriptor(void) {
 
     TEST_ASSERT_EQUAL_UINT8(0, payload[0]);
     TEST_ASSERT_EQUAL_UINT8(12, payload[1]);
-    TEST_ASSERT_EQUAL_UINT8(0, payload[2]);
+    TEST_ASSERT_EQUAL_UINT8(5, payload[2]);  // the property's own index, not the echo
 
     // type=UnsignedInt (4) and writeEnabled=false
     TEST_ASSERT_EQUAL_UINT8(0x04, payload[3]);
@@ -741,7 +744,7 @@ void test_e2e_property_description_read_manufacturer_id_descriptor(void) {
     TEST_ASSERT_EQUAL_UINT8(0x00, payload[6]);
 }
 
-// 11) Property services: PropertyDescriptionRead => non-device object descriptor (Group Object Table TableData)
+// 11) Property services: PropertyDescriptionRead => non-device object descriptor (Group Object Table PID_TABLE)
 // Group Object Table (object type 9) sits at object index 3 in the canonical
 // SystemB layout (0=Device, 1=AddrTable, 2=AssocTable, 3=GOTable, 4=AppProgram)
 void test_e2e_property_description_read_group_object_table_table_data_descriptor(void) {
@@ -759,7 +762,7 @@ void test_e2e_property_description_read_group_object_table_table_data_descriptor
     tx.hopCount = 6;
     setTpdu(tx, knx::protocol::TPCI::UnnumberedData, application::APCIService::PropertyDescriptionRead, {
         3,  // objectIndex: Group Object Table (canonical SystemB ordering)
-        9,  // propertyId: TableData
+        23, // propertyId: PID_TABLE
         0,  // propertyIndex: ID query
     });
     tx.ackRequested = true;
@@ -789,15 +792,15 @@ void test_e2e_property_description_read_group_object_table_table_data_descriptor
     auto payload = resp.payload();
     TEST_ASSERT_EQUAL(7, static_cast<int>(payload.size()));
     TEST_ASSERT_EQUAL_UINT8(3, payload[0]);  // objectIndex 3 (Group Object Table)
-    TEST_ASSERT_EQUAL_UINT8(9, payload[1]);
-    TEST_ASSERT_EQUAL_UINT8(0, payload[2]);
-    // type=GenericData (17) with the write-enabled bit (0x80) set: PID_TABLE of
-    // the Group Object Table is writable, because ETS downloads the Group
-    // Object Descriptors (03/05/01 §4.12.5.2.4) to apply per-object
-    // communication flags.
-    TEST_ASSERT_EQUAL_UINT8(0x91, payload[3]);
-    TEST_ASSERT_EQUAL_UINT8(0x00, payload[4]);
-    TEST_ASSERT_EQUAL_UINT8(0x01, payload[5]);
+    TEST_ASSERT_EQUAL_UINT8(23, payload[1]);
+    TEST_ASSERT_EQUAL_UINT8(3, payload[2]);  // PIDs 1, 5, 7, 23, 66: index 3
+    // 03/05/01 §4.18.6.2.4 (Realisation Type 7): PID_TABLE is PDT_GENERIC_02[]
+    // (0x12), one Group Object Descriptor per element, and writeable (0x80):
+    // "Writing shall only have effect in the load state Loading".
+    TEST_ASSERT_EQUAL_UINT8(0x92, payload[3]);
+    // max_nr_of_elem = 256, the table's fixed capacity (12-bit field).
+    TEST_ASSERT_EQUAL_UINT8(0x01, payload[4]);
+    TEST_ASSERT_EQUAL_UINT8(0x00, payload[5]);
     TEST_ASSERT_EQUAL_UINT8(0x00, payload[6]);
 }
 
@@ -817,8 +820,8 @@ void test_e2e_property_description_read_by_index_device_object(void) {
     tx.hopCount = 6;
     setTpdu(tx, knx::protocol::TPCI::UnnumberedData, application::APCIService::PropertyDescriptionRead, {
         0,  // objectIndex: Device Object
-        0,  // propertyId: ignored when propertyIndex>0
-        1,  // propertyIndex: second registered property (SerialNumber, PID 11)
+        0,  // propertyId: 0 selects by index
+        4,  // propertyIndex: 0-based, ascending PIDs 1, 5, 6, 9, 11 → SerialNumber
     });
     tx.ackRequested = true;
 
@@ -847,13 +850,158 @@ void test_e2e_property_description_read_by_index_device_object(void) {
     auto payload = resp.payload();
     TEST_ASSERT_EQUAL(7, static_cast<int>(payload.size()));
     TEST_ASSERT_EQUAL_UINT8(0, payload[0]);
-    TEST_ASSERT_EQUAL_UINT8(11, payload[1]); // SerialNumber (PID 11) at index 1
-    TEST_ASSERT_EQUAL_UINT8(1, payload[2]); // echoed propertyIndex
+    TEST_ASSERT_EQUAL_UINT8(11, payload[1]); // SerialNumber (PID 11) at index 4
+    TEST_ASSERT_EQUAL_UINT8(4, payload[2]); // echoed propertyIndex
     // type=PDT_GENERIC_06 (0x16) and writeEnabled=false
     TEST_ASSERT_EQUAL_UINT8(0x16, payload[3]);
     TEST_ASSERT_EQUAL_UINT8(0x00, payload[4]);
     TEST_ASSERT_EQUAL_UINT8(0x01, payload[5]);
     TEST_ASSERT_EQUAL_UINT8(0x00, payload[6]);
+}
+
+// Send one unconnected management request to the device and return the
+// payload of the response (empty when none came back).
+static std::vector<uint8_t> requestResponse(application::APCIService service,
+                                            std::initializer_list<uint8_t> payload,
+                                            application::APCIService expectedResponse) {
+    drainSentFrames();
+    const IndividualAddress requester(1, 1, 20);
+    const IndividualAddress ourAddr(1, 1, 10);
+
+    datalink::LDataFrame tx;
+    tx.source = requester;
+    tx.destination = GroupAddress();
+    tx.destination.raw = ourAddr.raw;
+    tx.destinationType = AddressType::Individual;
+    tx.priority = Priority::Normal;
+    tx.hopCount = 6;
+    setTpdu(tx, knx::protocol::TPCI::UnnumberedData, service, payload);
+    tx.ackRequested = true;
+
+    std::vector<uint8_t> raw;
+    if (!bauUnit->link().sendFrame(tx).isOk() || !waitForSentFrame(raw)) {
+        return {};
+    }
+    physicalLayer->injectFrame(raw);
+
+    // Skip anything that is not the expected response (e.g. a DL ACK).
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        std::vector<uint8_t> respRaw;
+        if (!waitForSentFrame(respRaw)) {
+            return {};
+        }
+        datalink::LDataFrame resp;
+        if (!datalink::FrameCodec::decodeFrame(std::span<const uint8_t>(respRaw), resp).isOk()) {
+            continue;
+        }
+        if (resp.apci().raw == static_cast<uint16_t>(expectedResponse)) {
+            auto data = resp.payload();
+            return std::vector<uint8_t>(data.begin(), data.end());
+        }
+    }
+    return {};
+}
+
+static std::vector<uint8_t> classicDescription(uint8_t objectIndex, uint8_t pid, uint8_t index) {
+    return requestResponse(application::APCIService::PropertyDescriptionRead, {objectIndex, pid, index},
+                           application::APCIService::PropertyDescriptionResponse);
+}
+
+static std::vector<uint8_t> extDescription(uint16_t objectType, uint16_t pid, uint16_t index) {
+    // OT(2) | OI(12 bit) PID(12 bit) | type(4 bit) index(12 bit)
+    return requestResponse(application::APCIService::PropertyExtDescriptionRead,
+                           {static_cast<uint8_t>(objectType >> 8), static_cast<uint8_t>(objectType & 0xFF),
+                            0x00, static_cast<uint8_t>(0x10 | ((pid >> 8) & 0x0F)),
+                            static_cast<uint8_t>(pid & 0xFF),
+                            static_cast<uint8_t>((index >> 8) & 0x0F), static_cast<uint8_t>(index & 0xFF)},
+                           application::APCIService::PropertyExtDescriptionResponse);
+}
+
+// 12b) A_PropertyDescription_Read and A_PropertyExtDescription_Read describe
+// the same objects: for every index of every core object they name the same
+// PID with the same datatype, size and access, and a by-PID read in either
+// family reports that index (03/03/07 §3.4.3.1, §3.4.3.2).
+void test_e2e_classic_and_extended_descriptions_agree(void) {
+    // Canonical SystemB layout: index → object type.
+    const uint16_t kTypes[] = {0, 1, 2, 9, 3, 17};
+    for (uint8_t object = 0; object < 6; ++object) {
+        uint8_t index = 0;
+        for (; index < 64; ++index) {
+            const auto classic = classicDescription(object, 0, index);
+            const auto ext = extDescription(kTypes[object], 0, index);
+            TEST_ASSERT_EQUAL(7, static_cast<int>(classic.size()));
+            TEST_ASSERT_EQUAL(15, static_cast<int>(ext.size()));
+
+            const uint16_t classicMax = static_cast<uint16_t>(((classic[4] & 0x0F) << 8) | classic[5]);
+            const uint16_t extMax = static_cast<uint16_t>((ext[12] << 8) | ext[13]);
+            const uint16_t extPid = static_cast<uint16_t>(((ext[3] & 0x0F) << 8) | ext[4]);
+            const uint16_t extIndex = static_cast<uint16_t>(((ext[5] & 0x0F) << 8) | ext[6]);
+            if (classicMax == 0) {
+                TEST_ASSERT_EQUAL_UINT16(0, extMax);
+                break;
+            }
+            TEST_ASSERT_EQUAL_UINT16(classic[1], extPid);
+            TEST_ASSERT_EQUAL_UINT8(index, classic[2]);
+            TEST_ASSERT_EQUAL_UINT16(index, extIndex);
+            TEST_ASSERT_EQUAL_UINT8(classic[3], ext[11]);  // write bit + PDT
+            // Same capacity; the classic field has 12 bits and saturates.
+            TEST_ASSERT_EQUAL_UINT16(extMax > 0x0FFF ? 0x0FFF : extMax, classicMax);
+            TEST_ASSERT_EQUAL_UINT8(0, classic[4] & 0xF0);  // reserved bits
+            TEST_ASSERT_EQUAL_UINT8(classic[6], ext[14]);  // access levels
+            if (index == 0) {
+                TEST_ASSERT_EQUAL_UINT8(1, classic[1]);  // PID_OBJECT_TYPE first
+            }
+
+            const auto classicById = classicDescription(object, classic[1], 0);
+            const auto extById = extDescription(kTypes[object], classic[1], 0);
+            TEST_ASSERT_EQUAL(7, static_cast<int>(classicById.size()));
+            TEST_ASSERT_EQUAL(15, static_cast<int>(extById.size()));
+            // A by-PID description is gated by the Access Policy (03/04/01
+            // §6.2.6.3.4), e.g. the Security Object's key tables over a plain
+            // connection: then both families refuse it alike.
+            const uint16_t classicByIdMax = static_cast<uint16_t>(((classicById[4] & 0x0F) << 8) | classicById[5]);
+            const uint16_t extByIdMax = static_cast<uint16_t>((extById[12] << 8) | extById[13]);
+            if (classicByIdMax == 0) {
+                TEST_ASSERT_EQUAL_UINT16(0, extByIdMax);
+                continue;
+            }
+            TEST_ASSERT_EQUAL_UINT8(index, classicById[2]);
+            TEST_ASSERT_EQUAL_UINT16(index, static_cast<uint16_t>(((extById[5] & 0x0F) << 8) | extById[6]));
+        }
+        TEST_ASSERT_TRUE(index > 1 && index < 64);
+    }
+}
+
+// 12c) The Group Object Table's PID_TABLE through both families on the wire:
+// same description, and the extended write is no longer refused while the
+// classic one is accepted.
+void test_e2e_group_object_table_table_through_both_families(void) {
+    const auto classic = classicDescription(3, 23, 0);
+    const auto ext = extDescription(9, 23, 0);
+    TEST_ASSERT_EQUAL(7, static_cast<int>(classic.size()));
+    TEST_ASSERT_EQUAL(15, static_cast<int>(ext.size()));
+    TEST_ASSERT_EQUAL_UINT8(0x92, classic[3]);
+    TEST_ASSERT_EQUAL_UINT8(0x92, ext[11]);
+    TEST_ASSERT_EQUAL_UINT8(0x01, ext[12]);
+    TEST_ASSERT_EQUAL_UINT8(0x00, ext[13]);
+
+    // Element 0 (the length) through A_PropertyExtValue_Read, then a
+    // descriptor write to element 1.
+    const auto length = requestResponse(application::APCIService::PropertyExtValueRead,
+                                        {0x00, 0x09, 0x00, 0x10, 23, 1, 0x00, 0x00},
+                                        application::APCIService::PropertyExtValueResponse);
+    TEST_ASSERT_EQUAL(10, static_cast<int>(length.size()));
+    const uint16_t count = static_cast<uint16_t>((length[8] << 8) | length[9]);
+    TEST_ASSERT_TRUE(count > 0);  // setUp() adds group objects
+    const auto element = requestResponse(application::APCIService::PropertyExtValueRead,
+                                         {0x00, 0x09, 0x00, 0x10, 23, 1, 0x00, 0x01},
+                                         application::APCIService::PropertyExtValueResponse);
+    TEST_ASSERT_EQUAL(10, static_cast<int>(element.size()));
+    const auto written = requestResponse(application::APCIService::PropertyExtValueWriteCon,
+                                         {0x00, 0x09, 0x00, 0x10, 23, 1, 0x00, 0x01, element[8], element[9]},
+                                         application::APCIService::PropertyExtValueWriteConRes);
+    TEST_ASSERT_EQUAL(9, static_cast<int>(written.size()));
+    TEST_ASSERT_EQUAL_UINT8(0x00, written[8]);  // E_SUCCESS, was E_ACCESS_READ_ONLY
 }
 
 // 13) Property services: indexed Address Table TableData write + indexed read
@@ -1288,6 +1436,8 @@ int run_all_knx_stack_e2e_tests(void) {
     RUN_TEST(test_e2e_property_description_read_manufacturer_id_descriptor);
     RUN_TEST(test_e2e_property_description_read_group_object_table_table_data_descriptor);
     RUN_TEST(test_e2e_property_description_read_by_index_device_object);
+    RUN_TEST(test_e2e_classic_and_extended_descriptions_agree);
+    RUN_TEST(test_e2e_group_object_table_table_through_both_families);
     RUN_TEST(test_e2e_property_value_indexed_address_table_table_data);
     RUN_TEST(test_e2e_property_value_indexed_association_table_table_data);
     RUN_TEST(test_e2e_bau_send_group_value);

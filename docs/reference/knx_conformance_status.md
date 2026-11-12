@@ -93,7 +93,7 @@ What differs from the classic property services, and why they could not simply
 be widened:
 
 - Objects are addressed by **(object type, object instance)** rather than by
-  object index. `PropertyExtServices::resolveObject()` maps them, treating
+  object index. The application layer maps them (its object resolver), treating
   instance as 1-based over the objects of that type in index order.
 - **Object instance and property ID are 12 bits each**, straddling octet 11 of
   the PDU. `PropertyExtHeader` owns that packing.
@@ -103,9 +103,25 @@ be widened:
   including refusals — the exception being `_WriteUnCon`, which must stay
   silent even on failure.
 
+Both families answer from the same place: the interface objects' property
+handlers, through the providers the BAU installs. Only the PDU encoding
+differs, so the classic and extended services report the same property at the
+same index with the same datatype, access and size (the classic
+`max_nr_of_elem` has 12 bits and saturates at 4095; the extended one has 16).
+
 Known limitation: `A_PropertyExtDescription_Response` reports DPT main and sub
-as zero, because the property store does not track a DPT per property. The
-access flags, PDT and max-element count are real.
+as zero ("If no DPT is available, both DPT fields shall be set to zero"),
+because the property handlers do not carry a DPT. The access flags, PDT and
+max-element count are real.
+
+### Property index
+
+03/03/07 §3.4.3.1 and §3.4.3.2 only require a sequential number ("property_index
+= 0 shall mean the first Property"). KNstaX numbers an object's properties in
+ascending PID order (`propertyIndexOf()` in `property_kernel.hpp`), so
+PID_OBJECT_TYPE is always index 0 and the order does not depend on how a
+handler table is written. A description read by PID reports the property's own
+index, as §3.4.3.1 requires of new implementations.
 
 ## Interface objects (03/05/01)
 
@@ -117,7 +133,7 @@ access flags, PDT and max-element count are real.
 | Address Table | 1 | Memory-mapped download via PID_TABLE_REFERENCE |
 | Association Table | 2 | Memory-mapped download |
 | Application Program | 3 | Program version, load state, parameter memory segment |
-| Group Object Table | 9 | PID_TABLE serves and accepts spec Group Object Descriptors (§4.12.5.2.4, Table 52). PID_GO_DIAGNOSTICS (§4.8.1) is implemented in the BAU and declared here as a PDT_FUNCTION property, which is how a Management Client discovers Group Object Diagnostics exists |
+| Group Object Table | 9 | PID_TABLE (23, PDT_GENERIC_02[], writeable, 256 elements; 03/05/01 §4.18.6.2.4, Tables 85–87) serves and accepts the Group Object Descriptors, one per element, element 0 being the length. PID_GO_DIAGNOSTICS (§4.8.1) is implemented in the BAU and declared here as a PDT_FUNCTION property, which is how a Management Client discovers Group Object Diagnostics exists |
 | Security | 17 | Data Secure keys, sequence numbers, security mode via Function Property |
 
 ### Array properties: the current number of elements
@@ -136,14 +152,14 @@ both; the address, association and group object tables report their length but
 refuse to have it set, because there it follows the downloaded entries rather
 than a client's declaration.
 
-### Registered on demand, backed by the reference property manifest
+### Registered on demand, built from the reference property declarations
 
 | Type | # | Status |
 |---|---|---|
 | KNXnet/IP Parameter | 11 | Auto-registered on IP builds; individual address, installation id and friendly name are seeded at start-up. The address-bearing properties — current IP address, subnet mask, gateway, routing multicast address, TTL, MAC, assignment method and device capabilities — are supplied by the firmware through `applyKnxNetIpConfiguration()`, since none of them is knowable before the interface has a lease and most change again when one is renewed. `PID_BACKBONE_KEY` is not inert storage: writing it applies a Secure Routing group key to the live socket. |
 | Router | 6 | Published by `BusAccessUnit::configureRouterRole()`. Opt-in on purpose: a plain end device advertising a Router Object would claim routing it does not perform. Once declared, `PID_ROUTETABLE_CONTROL` (a Function Property) applies ETS filter-table downloads to the coupler's live `FilterTable`, and `PID_*_LCCONFIG` / `PID_*_LCGRPCONFIG` reach the live `CouplerRoutingPolicy` via `syncRouterRoutingConfig()`. |
-| cEMI Server | 8 | Manifest present, no live wiring. |
-| Interface Program, LTE routing, Polling Master, File Server, RF Medium, E-mode objects | 4, 7, 10, 13, 19, … | Manifest only, via `setReferenceInterfaceObjectTypes()`. |
+| cEMI Server | 8 | Declared, no live wiring. |
+| Interface Program, LTE routing, Polling Master, File Server, RF Medium, E-mode objects | 4, 7, 10, 13, 19, … | Declarations only, via `setReferenceInterfaceObjectTypes()`. |
 
 ## Group object communication flags
 
@@ -249,15 +265,14 @@ device:
 4. **`A_PropertyExtValue_InfoReport` is not emitted.** Listed `M` in Profiles
    §9.1.2.3.2. It is device-initiated, so nothing rejects a device that never
    sends one, but a strict profile review would flag it.
-5. **Property access levels are not populated from the profile tables.** The
-   manifest carries `readLevel` / `writeLevel` per property, but every entry
-   leaves them at 0, and `InterfaceObjectManager::describeProperty` reports 0
-   for the built-in objects whatever the manifest says. Profiles §9.1.2.6.2
+5. **Property access levels are not populated from the profile tables.**
+   `InterfaceObjectManager::describeProperty` reports 0 / 0 for every
+   property. Profiles §9.1.2.6.2
    specifies real values — PID_PROGMODE is 3/2, for example. The property write
    services compare the partner's current level with the described write level
    in wire numbering (0 = maximum access; refused when the partner's level is
    numerically higher), so populating the levels means carrying wire-order
-   numbers through `describeProperty` as well as the manifest. The internal
+   numbers through the property handlers and `describeProperty`. The internal
    `AuthorizationLevel` enum is privilege-ordered; do not mix the two.
 6. **Coupler profile is implemented, untested, and not complete.** None of the
    routing actions below has been exercised against real hardware or a real

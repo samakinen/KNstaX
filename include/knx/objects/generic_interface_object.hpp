@@ -12,6 +12,7 @@
 #include "knx/objects/property_kernel.hpp"
 #include "knx/util/fixed_vector.hpp"
 #include "knx/util/inplace_function.hpp"
+#include "knx/objects/reference_object_registry.hpp"
 #include "knx/util/result.hpp"
 #include <map>
 #include <mutex>
@@ -22,9 +23,9 @@ namespace objects {
 
 class GenericInterfaceObject : public InterfaceObject {
 public:
-    /// Construct from the reference-object manifest. Schema is pulled directly
-    /// from referenceObjectPropertyManifestEntries(type) — no caller-supplied
-    /// registration list needed. Only valid for types returned by isReferenceObjectType().
+    /// Construct from the reference-object declarations,
+    /// referenceObjectProperties(type). Only valid for types returned by
+    /// isReferenceObjectType().
     explicit GenericInterfaceObject(InterfaceObjectType type);
     ~GenericInterfaceObject() override = default;
 
@@ -34,7 +35,6 @@ public:
     GenericInterfaceObject& operator=(GenericInterfaceObject&&) = delete;
 
     InterfaceObjectType objectType() const override { return _type; }
-    size_t getPropertyRegistrations(std::span<PropertyRegistrationInfo> out) const override;
     KernelBinding kernelBinding() const override;
 
     /**
@@ -45,8 +45,8 @@ public:
      * with no IP address and no name.  The runtime uses this to publish the
      * values it actually knows (address, MAC, friendly name, ...).
      *
-     * Fails when the property is not part of this object's manifest, or when
-     * the value is larger than the manifest's declared capacity.
+     * Fails when the object does not declare the property, or when the value
+     * is larger than its declared capacity.
      */
     util::Result<void> setPropertyValue(application::PropertyID propertyId,
                                         std::span<const uint8_t> value);
@@ -88,7 +88,7 @@ private:
         const void* userData);
 
     bool validateHandlersOnce_() const;
-    void initFromRegistrations_(std::span<const PropertyRegistrationInfo> registrations);
+    void initFromDeclarations_(std::span<const PropertyDeclaration> declarations);
 
     struct GenericPropertyInfo {
         application::PropertyID id{};
@@ -97,11 +97,10 @@ private:
         application::PropertyDataType type{application::PropertyDataType::GenericData};
     };
 
-    static constexpr size_t kMaxRegistrationCount = InterfaceObject::kMaxPropertyRegistrations;
+    static constexpr size_t kMaxRegistrationCount = 64u;
     static constexpr size_t kMaxHandlerCount = kMaxRegistrationCount + 1u;
 
     InterfaceObjectType _type;
-    util::FixedVector<PropertyRegistrationInfo, kMaxRegistrationCount> _registrations;
     mutable std::mutex _valuesMutex;
     std::map<application::PropertyID, std::vector<uint8_t>> _values;
     util::FixedVector<GenericPropertyInfo, kMaxRegistrationCount> _handlerInfo;
