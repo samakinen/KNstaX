@@ -199,16 +199,11 @@ public:
     void setReceiveCallback(DataCallback callback);
     void setReceiveWorkAvailableCallback(WorkAvailableCallback callback);
     void setDefaultSendOptions(const SendOptions& options) { _defaultSendOptions = options; }
-    const SendOptions& defaultSendOptions() const { return _defaultSendOptions; }
     void setServiceResponseSendOptions(const SendOptions& options) { _serviceResponseSendOptions = options; }
-    const SendOptions& serviceResponseSendOptions() const { return _serviceResponseSendOptions; }
     void setProgrammingModeEnabled(bool enabled) { _programmingModeEnabled = enabled; }
     bool programmingModeEnabled() const { return _programmingModeEnabled; }
     void setOwnAddress(const IndividualAddress& ownAddress);
     void setIndividualAddressUpdateCallback(IndividualAddressUpdateCallback callback);
-    bool popReceivedFrame(ADataFrame& frame);
-    size_t queuedReceiveCount() const { return _rxQueueCount; }
-    size_t droppedReceiveFrameCount() const { return _droppedReceiveFrames; }
     bool popSendOutcome(ASendOutcome& outcome);
     size_t queuedSendOutcomeCount() const { return _txOutcomeQueueCount; }
     size_t droppedSendOutcomeCount() const { return _droppedSendOutcomes; }
@@ -257,11 +252,17 @@ public:
      */
     DeviceDescriptorService& deviceDescriptorService() { return *_deviceDescriptorService; }
 
+    /**
+     * @brief Announce the interface object at @p objectIndex
+     *
+     * Records the object's type, which the Access Policy needs for the classic
+     * services that address objects by index, and fills the property store
+     * the extended property services still run on.
+     */
     void registerPropertyObject(InterfaceObjectType objectType,
                                 InterfaceObjectIndex objectIndex,
                                 PropertyRegistration registration);
     void setPropertyReadProvider(PropertyReadProvider provider);
-    void setPropertyWriteConsumer(PropertyWriteConsumer consumer);
     void setPropertyWriteProvider(PropertyWriteProvider provider);
     void setPropertyDescriptionProvider(PropertyDescriptionProvider provider);
 
@@ -276,14 +277,6 @@ public:
      */
     PropertyServices& propertyServices() { return *_propertyServices; }
     PropertyExtServices& propertyExtServices() { return *_propertyExtServices; }
-
-    /**
-     * @brief Get property store manager
-     *
-     * Exposed so higher layers (e.g. BAU/facade) can register interface objects
-     * and properties that Property Services operate on.
-     */
-    PropertyStoreManager& propertyStoreManager() { return *_propertyStoreManager; }
 
     /**
      * @brief Get memory service handler
@@ -422,8 +415,17 @@ private:
 
     // Service handler dependencies (owned by application layer)
     std::unique_ptr<DeviceDescriptor> _deviceDescriptor;
+    /// Backs the extended property services only.
     std::unique_ptr<PropertyStoreManager> _propertyStoreManager;
     std::unique_ptr<AddressSpace> _addressSpace;
+
+    /// Index -> type of every object announced through registerPropertyObject().
+    struct RegisteredObject {
+        InterfaceObjectIndex index;
+        InterfaceObjectType type;
+    };
+    static constexpr size_t kMaxInterfaceObjects = 32;
+    util::FixedVector<RegisteredObject, kMaxInterfaceObjects> _registeredObjects;
 
     // Memory-mapped regions registered via registerMemoryRegion(); the memory
     // service read/write callbacks route A_Memory accesses into these spans.
@@ -452,12 +454,6 @@ private:
     DataCallback _rxCallback;
     WorkAvailableCallback _receiveWorkAvailableCallback;
     IndividualAddressUpdateCallback _individualAddressUpdateCallback;
-
-    static constexpr size_t RX_QUEUE_CAPACITY = 8u;
-    std::array<ADataFrame, RX_QUEUE_CAPACITY> _rxQueue{};
-    size_t _rxQueueHead{0};
-    size_t _rxQueueCount{0};
-    size_t _droppedReceiveFrames{0};
 
     static constexpr size_t TX_OUTCOME_QUEUE_CAPACITY = 8u;
     std::array<ASendOutcome, TX_OUTCOME_QUEUE_CAPACITY> _txOutcomeQueue{};
@@ -496,7 +492,6 @@ private:
     };
     SendOperationState _sendOperation{};
 
-    void enqueueReceivedFrame(const ADataFrame& frame);
     void enqueueSendOutcome(const ASendOutcome& outcome);
     void finishSendOperation();
     util::Result<void> startSendAttempt();
@@ -517,10 +512,6 @@ private:
                                         APCIService service,
                                         std::span<const uint8_t> data,
                                         const SendOptions& options);
-    util::Result<void> sendToGroup(GroupAddress destination,
-                                   APCIService service,
-                                   std::span<const uint8_t> data,
-                                   const SendOptions& options);
     util::Result<void> sendBroadcast(APCIService service,
                                      std::span<const uint8_t> data,
                                      const SendOptions& options);

@@ -12,7 +12,6 @@ set -euo pipefail
 build_dir="build"
 preflight_only=0
 required_tests=(
-  "test_tp1_frame_codec"
   "test_tp1_frame_golden"
   "test_tp1_datalink_frame_pool"
   "test_tpuart_medium_backend_adapter"

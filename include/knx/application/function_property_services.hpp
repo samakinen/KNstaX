@@ -154,25 +154,6 @@ public:
     util::Result<void> handleRequest(const IndividualAddress& source,
                                      const FunctionPropertyRequest& request);
 
-    /**
-     * @brief Decode an A_FunctionPropertyCommand / State_Read APDU.
-     *
-     * @param apdu Full APDU including the 2-octet TPCI/APCI header.
-     */
-    static util::Result<FunctionPropertyRequest> decodeRequest(std::span<const uint8_t> apdu);
-
-    /**
-     * @brief Encode an A_FunctionPropertyState_Response APDU.
-     *
-     * @return Number of octets written to `out`.
-     */
-    static util::Result<size_t> encodeResponse(InterfaceObjectIndex objectIndex,
-                                               PropertyID propertyId,
-                                               bool hasReturnCode,
-                                               FunctionPropertyReturnCode returnCode,
-                                               std::span<const uint8_t> data,
-                                               std::span<uint8_t> out);
-
 private:
     FunctionPropertyHandler _handler{};
     FunctionPropertyResponseCallback _responseCallback{};

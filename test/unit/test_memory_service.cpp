@@ -312,88 +312,6 @@ void test_MemoryService_WriteDenied(void) {
     TEST_ASSERT_FALSE(writeCallbackCalled);
 }
 
-void test_MemoryService_EncodeReadRequest(void) {
-    std::array<uint8_t, MemoryService::kEncodedReadRequestLength> encoded{};
-    auto result = MemoryService::encodeReadRequest(10, knx::MemoryAddress(0x1234), encoded);
-
-    TEST_ASSERT_TRUE(result.isOk());
-    TEST_ASSERT_TRUE(encoded.size() > 0);
-    TEST_ASSERT_EQUAL(4, encoded.size());
-
-    // TPDU header (TPCI=0x00, APCI=A_Memory_Read=0x200) with count in APCI data6
-    TEST_ASSERT_EQUAL(0x02, encoded[0]);
-    TEST_ASSERT_EQUAL(10, encoded[1] & 0x3F);
-    // Payload: address
-    TEST_ASSERT_EQUAL(0x12, encoded[2]);
-    TEST_ASSERT_EQUAL(0x34, encoded[3]);
-}
-
-void test_MemoryService_EncodeWriteRequest(void) {
-    std::vector<uint8_t> data = {0xAA, 0xBB, 0xCC};
-    std::array<uint8_t, 7> encoded{};
-    auto result = MemoryService::encodeWriteRequest(3, knx::MemoryAddress(0x5678), data, encoded);
-
-    TEST_ASSERT_TRUE(result.isOk());
-    TEST_ASSERT_EQUAL(7, result.value());
-
-    // TPDU header (TPCI=0x00, APCI=A_Memory_Write=0x280) with count in APCI data6
-    TEST_ASSERT_EQUAL(0x02, encoded[0]);
-    TEST_ASSERT_EQUAL((0x80 | 3), encoded[1]);
-    // Payload: address + data
-    TEST_ASSERT_EQUAL(0x56, encoded[2]);
-    TEST_ASSERT_EQUAL(0x78, encoded[3]);
-    TEST_ASSERT_EQUAL(0xAA, encoded[4]);
-    TEST_ASSERT_EQUAL(0xBB, encoded[5]);
-    TEST_ASSERT_EQUAL(0xCC, encoded[6]);
-}
-
-void test_MemoryService_EncodeResponse(void) {
-    std::vector<uint8_t> data = {0x11, 0x22, 0x33, 0x44};
-    std::array<uint8_t, 8> encoded{};
-    auto result = MemoryService::encodeResponse(4, knx::MemoryAddress(0xABCD), data, encoded);
-
-    TEST_ASSERT_TRUE(result.isOk());
-    TEST_ASSERT_EQUAL(8, result.value());
-
-    // TPDU header (TPCI=0x00, APCI=A_Memory_Response=0x240) with count in APCI data6
-    TEST_ASSERT_EQUAL(0x02, encoded[0]);
-    TEST_ASSERT_EQUAL((0x40 | 4), encoded[1]);
-    // Payload: address + data
-    TEST_ASSERT_EQUAL(0xAB, encoded[2]);
-    TEST_ASSERT_EQUAL(0xCD, encoded[3]);
-    TEST_ASSERT_EQUAL(0x11, encoded[4]);
-}
-
-void test_MemoryService_DecodeRequest(void) {
-    std::vector<uint8_t> encoded = {0x02, static_cast<uint8_t>(0x00 | 15), 0x12, 0x34};
-    
-    uint8_t count;
-    knx::MemoryAddress address;
-    auto result = MemoryService::decodeRequest(encoded, count, address);
-    
-    TEST_ASSERT_TRUE(result.isOk());
-    TEST_ASSERT_EQUAL(15, count);
-    TEST_ASSERT_EQUAL(0x1234, address.raw);
-}
-
-void test_MemoryService_DecodeWriteRequest(void) {
-    std::vector<uint8_t> encoded = {0x02, static_cast<uint8_t>(0x80 | 3), 0x56, 0x78, 0xAA, 0xBB, 0xCC};
-    
-    uint8_t count;
-    knx::MemoryAddress address;
-    MemoryWriteRequest::DataBuffer data;
-    data.resize(3);
-    auto result = MemoryService::decodeWriteRequest(encoded, count, address, data.span());
-    
-    TEST_ASSERT_TRUE(result.isOk());
-    TEST_ASSERT_EQUAL(3, count);
-    TEST_ASSERT_EQUAL(0x5678, address.raw);
-    TEST_ASSERT_EQUAL(3, data.size());
-    TEST_ASSERT_EQUAL(0xAA, data[0]);
-    TEST_ASSERT_EQUAL(0xBB, data[1]);
-    TEST_ASSERT_EQUAL(0xCC, data[2]);
-}
-
 void test_MemoryService_ValidateAccess(void) {
     AddressSpace space;
     MemoryRegion region{knx::MemoryAddress(0x0100), 0x0100, MemoryAccessMode::ReadWrite, "Test"};
@@ -420,15 +338,6 @@ void test_MemoryService_ValidateAccess(void) {
     // Region not found
     result = service.validateAccess(knx::MemoryAddress(0x0050), 10, knx::AccessType::Read);
     TEST_ASSERT_EQUAL(static_cast<int>(MemoryAccessResult::RegionNotFound), static_cast<int>(result));
-}
-
-void test_MemoryService_InvalidLengthEncoding(void) {
-    // Zero length
-    std::array<uint8_t, MemoryService::kEncodedReadRequestLength> encoded{};
-    TEST_ASSERT_TRUE(MemoryService::encodeReadRequest(0, knx::MemoryAddress(0x1234), encoded).isError());
-    
-    // Too large
-    TEST_ASSERT_TRUE(MemoryService::encodeReadRequest(64, knx::MemoryAddress(0x1234), encoded).isError());
 }
 
 void test_MemoryService_DataSizeMismatch(void) {
@@ -798,29 +707,12 @@ void test_MemoryService_WritePermissionRefusesWrite(void) {
     TEST_ASSERT_EQUAL_HEX8(0x00, mockMemory[0x0180]);
 }
 
-// The negative response is encodable: number = 0, no data.
-void test_MemoryService_EncodeResponseAcceptsCountZero(void) {
-    std::array<uint8_t, 4> encoded{};
-    auto result = MemoryService::encodeResponse(0, knx::MemoryAddress(0x1234), {}, encoded);
-    TEST_ASSERT_TRUE(result.isOk());
-    TEST_ASSERT_EQUAL(4, result.value());
-    TEST_ASSERT_EQUAL_HEX8(0x02, encoded[0]);
-    TEST_ASSERT_EQUAL_HEX8(0x40, encoded[1]);
-    TEST_ASSERT_EQUAL_HEX8(0x12, encoded[2]);
-    TEST_ASSERT_EQUAL_HEX8(0x34, encoded[3]);
-
-    // A positive count without its data is malformed.
-    std::array<uint8_t, 8> out{};
-    TEST_ASSERT_TRUE(MemoryService::encodeResponse(4, knx::MemoryAddress(0x1234), {}, out).isError());
-}
-
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_MemoryService_FailedReadAnswersWithNumberZero);
     RUN_TEST(test_MemoryService_WriteWithoutVerifyModeIsNotAnswered);
     RUN_TEST(test_MemoryService_WriteWithVerifyModeAnswersReadBackOrZero);
     RUN_TEST(test_MemoryService_WritePermissionRefusesWrite);
-    RUN_TEST(test_MemoryService_EncodeResponseAcceptsCountZero);
     
     // AddressSpace tests
     RUN_TEST(test_AddressSpace_Init);
@@ -839,13 +731,7 @@ int main(void) {
     RUN_TEST(test_MemoryService_WriteRequest);
     RUN_TEST(test_MemoryService_ReadDenied);
     RUN_TEST(test_MemoryService_WriteDenied);
-    RUN_TEST(test_MemoryService_EncodeReadRequest);
-    RUN_TEST(test_MemoryService_EncodeWriteRequest);
-    RUN_TEST(test_MemoryService_EncodeResponse);
-    RUN_TEST(test_MemoryService_DecodeRequest);
-    RUN_TEST(test_MemoryService_DecodeWriteRequest);
     RUN_TEST(test_MemoryService_ValidateAccess);
-    RUN_TEST(test_MemoryService_InvalidLengthEncoding);
     RUN_TEST(test_MemoryService_DataSizeMismatch);
 
     RUN_TEST(test_MemoryExtended_ApciDecodeDoesNotCollideWithAdcResponse);

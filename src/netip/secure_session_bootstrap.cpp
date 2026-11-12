@@ -4,6 +4,7 @@
 #include "knx/netip/ip_secure/secure_session_bootstrap.hpp"
 
 #include "knx/netip/header_codec.hpp"
+#include "knx/security/data_secure.hpp"
 
 #if KNX_SECURE_ENABLED
 
@@ -14,17 +15,6 @@ namespace ip_secure {
 namespace {
 
 constexpr uint64_t kSeq48Mask = 0xFFFFFFFFFFFFULL;
-
-void encodeSeq48BE(uint64_t seq48, std::span<uint8_t, SecureWrapper::kSeqLen> out) noexcept
-{
-    seq48 &= kSeq48Mask;
-    out[0] = static_cast<uint8_t>((seq48 >> 40) & 0xFF);
-    out[1] = static_cast<uint8_t>((seq48 >> 32) & 0xFF);
-    out[2] = static_cast<uint8_t>((seq48 >> 24) & 0xFF);
-    out[3] = static_cast<uint8_t>((seq48 >> 16) & 0xFF);
-    out[4] = static_cast<uint8_t>((seq48 >> 8) & 0xFF);
-    out[5] = static_cast<uint8_t>(seq48 & 0xFF);
-}
 
 } // namespace
 
@@ -78,7 +68,7 @@ util::Result<SecureSessionBootstrap::AuthenticateRequest> SecureSessionBootstrap
 
     const uint64_t seq48 = (initialSequence & kSeq48Mask);
     std::array<uint8_t, SecureWrapper::kSeqLen> seqBytes{};
-    encodeSeq48BE(seq48, seqBytes);
+    knx::security::writeSecureU48BE(seqBytes, seq48);
 
     const std::array<uint8_t, SecureWrapper::kTagLen> tag{0x00, 0x00};
     const std::array<uint8_t, 4> counterSuffix{0x00, 0x00, 0xFF, 0x00};

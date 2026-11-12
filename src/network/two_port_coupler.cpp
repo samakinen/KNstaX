@@ -18,7 +18,6 @@ TwoPortCoupler::TwoPortCoupler(datalink::Tp1DataLinkLayer& primary,
     , initialized_(false)
     , routingEnabled_(true)
     , policy_()
-    , routingTable_()
     , filterTable_()
     , recentPrimary_()
     , recentSecondary_()

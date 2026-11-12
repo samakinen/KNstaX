@@ -722,11 +722,6 @@ UartInterface* VirtualPlatform::uart()
     return nullptr;
 }
 
-SpiInterface* VirtualPlatform::spi()
-{
-    return nullptr;
-}
-
 void VirtualPlatform::log(const char* level, const char* tag, const char* format, ...)
 {
     std::fprintf(stderr, "[%s] %s: ", level ? level : "LOG", tag ? tag : "VirtualPlatform");

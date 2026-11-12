@@ -63,10 +63,7 @@ public:
 
     util::Result<void> load(std::vector<std::unique_ptr<application::GroupObject>> objects);
 
-    application::GroupObject* findByAddress(const GroupAddress& address);
-    const application::GroupObject* findByAddress(const GroupAddress& address) const;
     util::Result<size_t> findAllByAddress(const GroupAddress& address, std::span<GroupObjectIndex> out) const;
-    bool hasAddress(const GroupAddress& address) const;
 
     util::Result<size_t> getAllAddresses(std::span<GroupAddress> out) const;
     bool isValid() const;
@@ -174,24 +171,11 @@ public:
     // === Address-Based Access ===
     
     /**
-     * @brief Find object by group address
-     * @param address Group address to find
-     * @return Pointer to object or nullptr
-     */
-    application::GroupObject* findByAddress(const GroupAddress& address);
-    const application::GroupObject* findByAddress(const GroupAddress& address) const;
-    
-    /**
      * @brief Find all objects with given address
      * @param address Group address
      * @return Vector of indices
      */
     util::Result<size_t> findAllByAddress(const GroupAddress& address, std::span<GroupObjectIndex> out) const;
-    
-    /**
-     * @brief Check if address is registered
-     */
-    bool hasAddress(const GroupAddress& address) const;
 
     // === Bulk Operations ===
     

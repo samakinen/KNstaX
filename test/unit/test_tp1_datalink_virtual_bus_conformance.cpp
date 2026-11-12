@@ -706,27 +706,6 @@ LDataFrame makeInboundTransportControlFrame(const IndividualAddress& source,
     return frame;
 }
 
-LDataFrame makeInboundTransportDataFrame(const IndividualAddress& source,
-                                         uint8_t sequenceNumber,
-                                         std::span<const uint8_t> payload)
-{
-    LDataFrame frame;
-    frame.standardFrame = true;
-    frame.repeated = false;
-    frame.priority = Priority::Low;
-    frame.ackRequested = true;
-    frame.confirmation = false;
-    frame.source = source;
-    frame.setDestination(kOwnAddress);
-    frame.hopCount = 6;
-    frame.tpdu = {};
-    frame.setTpdu(
-        protocol::TPCIField::create(protocol::TPCI::NumberedData, sequenceNumber & 0x0Fu),
-        application::APCIField(0),
-        payload);
-    return frame;
-}
-
 util::Result<ConnectionIndex> connectTransportWithLowLevelAck(const IndividualAddress& remote) {
     const size_t initialSentCount = driver->sentFrameCount();
     auto beginResult = tpLayer->beginConnect(remote);
@@ -907,39 +886,6 @@ void captureNextTransportNetworkFrame() {
     nwLayer->setReceiveCallback([](const network::NDataFrame& frame) {
         capturedNetworkFrame = frame;
     });
-}
-
-transport::TransportLayer::ControlSendProgressState
-processInboundTransportFrameWithLowLevelAck(const network::NDataFrame& frame,
-                                            VirtualTp1PeerResponse response,
-                                            size_t expectedSentFrameCount)
-{
-    auto beginResult = tpLayer->beginReceive(frame);
-    TEST_ASSERT_TRUE(beginResult.isOk());
-
-    bool droveTxOutcome = (expectedSentFrameCount == 0u);
-    for (uint32_t i = 0u; i < 150u; ++i) {
-        auto progress = tpLayer->pollReceive();
-        TEST_ASSERT_TRUE(progress.isOk());
-        switch (progress.value()) {
-            case transport::TransportLayer::ControlSendProgressState::Pending:
-                if (!droveTxOutcome && driver->sentFrameCount() >= expectedSentFrameCount) {
-                    TEST_ASSERT_TRUE(scheduler->driveTxOutcomeForSentFrame(expectedSentFrameCount - 1u,
-                                                                           response));
-                    droveTxOutcome = true;
-                }
-                runtime.advanceTimeMs(1u);
-                continue;
-            case transport::TransportLayer::ControlSendProgressState::Success:
-            case transport::TransportLayer::ControlSendProgressState::Busy:
-            case transport::TransportLayer::ControlSendProgressState::TransmissionFailed:
-            case transport::TransportLayer::ControlSendProgressState::Timeout:
-                return progress.value();
-        }
-    }
-
-    TEST_FAIL_MESSAGE("Timed out completing transport inbound RX progression");
-    return transport::TransportLayer::ControlSendProgressState::Timeout;
 }
 
 } // namespace
@@ -1340,55 +1286,6 @@ void test_VDLBUS_302_transport_matching_ack_prevents_timeout_retransmit_over_vir
     TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(driver->sentFrameCount()));
 }
 
-void test_VDLBUS_303_transport_numbered_data_can_be_explicitly_progressed_and_queued() {
-    initTransportStack();
-
-    const IndividualAddress remote(1, 1, 22);
-    auto connRes = connectTransportWithLowLevelAck(remote);
-    TEST_ASSERT_TRUE(connRes.isOk());
-    const ConnectionIndex connIdx = connRes.value();
-
-    tpLayer->processRetransmissions(1000u);
-    injectInboundLDataFrame(makeInboundTransportControlFrame(
-        remote,
-        protocol::TPCIField::create(protocol::TPCIControl::Connect)));
-    // The inbound T_Connect is answered with an echoed T_Connect response
-    // (03.03.04 §5.1 Table 5 E00/A1) — drive its DL-ACK so the driver
-    // returns to idle before the next send.
-    TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(processRxAvailableWithTxOutcome(VirtualTp1PeerResponse::Ack, 1u)));
-    TEST_ASSERT_TRUE(tpLayer->isConnected(connIdx));
-
-    tpLayer->setReceiveCallback(nullptr);
-    captureNextTransportNetworkFrame();
-    driver->clearSentFrames();
-
-    injectInboundLDataFrame(makeInboundTransportDataFrame(remote, 0u, std::array<uint8_t,2>{0xA1u, 0xB2u}));
-    TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(processRxAvailableWithTxOutcome(VirtualTp1PeerResponse::Silent, 1u)));
-    TEST_ASSERT_TRUE(capturedNetworkFrame.has_value());
-    TEST_ASSERT_EQUAL_UINT32(0u, static_cast<uint32_t>(tpLayer->queuedReceiveCount()));
-
-    driver->clearSentFrames();
-    const auto progress = processInboundTransportFrameWithLowLevelAck(capturedNetworkFrame.value(),
-                                                                      VirtualTp1PeerResponse::Ack,
-                                                                      1u);
-    TEST_ASSERT_EQUAL(transport::TransportLayer::ControlSendProgressState::Success, progress);
-
-    TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(driver->sentFrameCount()));
-    const auto ackFrame = decodeTp1OrFail(driver->sentFrame(0u));
-    const auto ackHeader = protocol::unpackTpduHeader(ackFrame.tpdu[0], ackFrame.tpdu[1]);
-    TEST_ASSERT_TRUE(ackHeader.tpci.isAck());
-    TEST_ASSERT_EQUAL_UINT8(0u, ackHeader.tpci.seqNum());
-
-    TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(tpLayer->queuedReceiveCount()));
-    transport::TDataFrame queued;
-    TEST_ASSERT_TRUE(tpLayer->popReceivedFrame(queued));
-    TEST_ASSERT_EQUAL_UINT16(remote.raw, queued.source.raw);
-    TEST_ASSERT_EQUAL_UINT8(0u, queued.sequenceNumber);
-    TEST_ASSERT_EQUAL_UINT32(2u, static_cast<uint32_t>(queued.payload().size()));
-    TEST_ASSERT_EQUAL_UINT8(0xA1u, queued.payload()[0]);
-    TEST_ASSERT_EQUAL_UINT8(0xB2u, queued.payload()[1]);
-}
-
 int main() {
     UNITY_BEGIN();
     RUN_TEST(test_VDLBUS_001_targeted_individual_rx_is_delivered_without_dl_frames);
@@ -1407,6 +1304,5 @@ int main() {
     RUN_TEST(test_VDLBUS_207_close_clears_isr_notify_before_deleting_rx_task);
     RUN_TEST(test_VDLBUS_301_transport_matching_nak_retransmits_same_sequence_over_virtual_bus);
     RUN_TEST(test_VDLBUS_302_transport_matching_ack_prevents_timeout_retransmit_over_virtual_bus);
-    RUN_TEST(test_VDLBUS_303_transport_numbered_data_can_be_explicitly_progressed_and_queued);
     return UNITY_END();
 }

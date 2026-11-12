@@ -297,7 +297,6 @@ public:
     util::Result<application::DptValue> groupObjectValue(GroupObjectIndex index) const;
     util::Result<void> setGroupObjectValue(GroupObjectIndex index, const application::DptValue& value);
     util::Result<void> requestGroupObjectValue(GroupObjectIndex index);
-    util::Result<void> beginRequestGroupObjectValue(GroupObjectIndex index);
 
     // Callbacks (communication-object-index-based, preferred for ETS-commissioned devices)
     // Invoked from loop() owner context after the inbound event has been marshaled

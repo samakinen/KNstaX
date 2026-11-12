@@ -166,33 +166,6 @@ void test_GroupObjectTable_ClearObjects() {
 
 // === Address-Based Access Tests ===
 
-void test_GroupObjectTable_FindByAddress() {
-    GroupObjectTableObject table;
-    
-    GroupAddress target(1, 2, 3);
-    
-    GroupObjectConfig config{};
-    config.address = target;
-    auto obj = std::make_unique<GroupObject>(config);
-    table.addGroupObject(std::move(obj));
-    
-    auto* found = table.findByAddress(target);
-    TEST_ASSERT_NOT_NULL(found);
-    TEST_ASSERT_EQUAL_UINT16(target.raw, found->getAddress().raw);
-}
-
-void test_GroupObjectTable_FindByAddressNotFound() {
-    GroupObjectTableObject table;
-    
-    GroupObjectConfig config{};
-    config.address = GroupAddress(1, 2, 3);
-    auto obj = std::make_unique<GroupObject>(config);
-    table.addGroupObject(std::move(obj));
-    
-    auto* found = table.findByAddress(GroupAddress(5, 6, 7));
-    TEST_ASSERT_NULL(found);
-}
-
 void test_GroupObjectTable_FindAllByAddress() {
     GroupObjectTableObject table;
     
@@ -228,22 +201,6 @@ void test_GroupObjectTable_FindAllByAddress() {
     TEST_ASSERT_EQUAL_UINT16(0, indices[0].value());
     TEST_ASSERT_EQUAL_UINT16(1, indices[1].value());
     TEST_ASSERT_EQUAL_UINT16(2, indices[2].value());
-}
-
-void test_GroupObjectTable_HasAddress() {
-    GroupObjectTableObject table;
-    
-    GroupAddress addr(1, 2, 3);
-    
-    TEST_ASSERT_FALSE(table.hasAddress(addr));
-    
-    GroupObjectConfig config{};
-    config.address = addr;
-    auto obj = std::make_unique<GroupObject>(config);
-    table.addGroupObject(std::move(obj));
-    
-    TEST_ASSERT_TRUE(table.hasAddress(addr));
-    TEST_ASSERT_FALSE(table.hasAddress(GroupAddress(5, 6, 7)));
 }
 
 // === Bulk Operations Tests ===
@@ -683,8 +640,11 @@ void test_GroupObjectTable_FullWorkflow() {
     TEST_ASSERT_EQUAL_UINT16(5, table.objectCount());
     
     // 3. Find by address
-    auto* obj = table.findByAddress(GroupAddress(1, 2, 2));
-    TEST_ASSERT_NOT_NULL(obj);
+    GroupObjectIndex found[2]{};
+    auto foundCount = table.findAllByAddress(GroupAddress(1, 2, 2), found);
+    TEST_ASSERT_TRUE(foundCount.isOk());
+    TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(foundCount.value()));
+    TEST_ASSERT_EQUAL_UINT16(2u, found[0].value());
     
     // 4. Get statistics
     auto stats = table.getStatistics();
@@ -718,10 +678,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_GroupObjectTable_ClearObjects);
     
     // Address-based access
-    RUN_TEST(test_GroupObjectTable_FindByAddress);
-    RUN_TEST(test_GroupObjectTable_FindByAddressNotFound);
     RUN_TEST(test_GroupObjectTable_FindAllByAddress);
-    RUN_TEST(test_GroupObjectTable_HasAddress);
     
     // Bulk operations
     RUN_TEST(test_GroupObjectTable_LoadTable);

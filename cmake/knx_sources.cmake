@@ -17,7 +17,6 @@ set(KNX_SOURCES_CORE
 
     # Network Layer
     "src/network/network_layer.cpp"
-    "src/network/routing_table.cpp"
     "src/network/filter_table.cpp"
     "src/network/routing_table_control.cpp"
     "src/network/coupler_routing.cpp"
@@ -76,8 +75,6 @@ set(KNX_SOURCES_CORE
 set(KNX_SOURCES_TP1
     "src/physical/tp1_mac_physical.cpp"
     "src/physical/tp1_mac_controller.cpp"
-    "src/physical/tp1_frame_codec.cpp"
-    "src/physical/manchester_codec.cpp"
     "src/physical/bitbang_driver_timer_isr.cpp"
     "src/physical/bitbang_driver_timer_isr_espidf.cpp"
     "src/physical/bitbang_medium_backend_adapter.cpp"
@@ -196,10 +193,8 @@ set(KNX_SOURCES_VIRTUAL
 # --- Platform backends ---------------------------------------------------
 set(KNX_SOURCES_PLATFORM_ESPIDF
     "src/platform/esp32_platform.cpp"
-    "src/platform/esp32_memory.cpp"
     "src/platform/esp32_network.cpp"
     "src/platform/esp32_uart.cpp"
-    "src/platform/esp32_spi.cpp"
 )
 
 set(KNX_SOURCES_PLATFORM_LINUX

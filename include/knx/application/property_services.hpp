@@ -12,7 +12,6 @@
 #pragma once
 
 #include "knx/application/property.hpp"
-#include "knx/application/property_store.hpp"
 #include "knx/application/apci_services.hpp"
 #include "knx/types.hpp"
 #include "knx/util/result.hpp"
@@ -51,10 +50,12 @@ using PropertyDescriptionResponseCallback = std::function<void(
 )>;
 
 /**
- * @brief Optional backend provider for property reads
+ * @brief Backend provider for property reads
  *
- * If set and it returns a value, it overrides the store read.
- * Returning nullopt defers to the property store.
+ * The interface objects own the property values; the BAU answers from them.
+ * Returning nullopt means the provider cannot answer: the classic services then
+ * send the negative response, the extended ones still fall back to the
+ * property store.
  */
 using PropertyReadProvider = util::InplaceFunction<std::optional<util::Result<size_t>>(
     const IndividualAddress& source,
@@ -63,19 +64,10 @@ using PropertyReadProvider = util::InplaceFunction<std::optional<util::Result<si
 ), 32>;
 
 /**
- * @brief Optional backend consumer for property writes
+ * @brief Backend provider for property writes
  *
- * If set, it is invoked before writing to the store; returning an error rejects the write.
- */
-using PropertyWriteConsumer = util::InplaceFunction<util::Result<void>(
-    const IndividualAddress& source,
-    const PropertyValueWriteRequest& request
-), 32>;
-
-/**
- * @brief Optional backend provider for property writes
- *
- * If set, it fully handles the write and bypasses the store.
+ * Performs the write on the interface objects. Without one the classic
+ * services refuse every write.
  */
 using PropertyWriteProvider = util::InplaceFunction<util::Result<void>(
     const IndividualAddress& source,
@@ -124,9 +116,11 @@ struct PropertyDescriptionInfo {
 };
 
 /**
- * @brief Optional backend provider for property descriptions
+ * @brief Backend provider for property descriptions
  *
- * If set and it returns a value, it bypasses the store-based descriptor lookup.
+ * The descriptions of the interface objects. Besides answering
+ * A_PropertyDescription_Read, it supplies the write level a property write is
+ * checked against. Returning nullopt means "no such object or property".
  */
 using PropertyDescriptionProvider = util::InplaceFunction<std::optional<PropertyDescriptionInfo>(
     const IndividualAddress& source,
@@ -142,18 +136,6 @@ using PropertyDescriptionProvider = util::InplaceFunction<std::optional<Property
  */
 class PropertyServices {
 public:
-    static constexpr size_t kEncodedValueReadRequestLength = 6;
-    static constexpr size_t kEncodedValueResponseHeaderLength = 6;
-    static constexpr size_t kEncodedValueWriteRequestHeaderLength = 6;
-    static constexpr size_t kEncodedDescriptionReadRequestLength = 5;
-    static constexpr size_t kEncodedDescriptionResponseLength = 9;
-
-    /**
-     * @brief Constructor
-     * @param storeManager Property store manager
-     */
-    explicit PropertyServices(PropertyStoreManager& storeManager);
-    
     /**
      * @brief Set property value response callback
      */
@@ -165,22 +147,17 @@ public:
     void setDescriptionResponseCallback(PropertyDescriptionResponseCallback callback);
 
     /**
-     * @brief Set optional backend read provider
+     * @brief Set the backend read provider
      */
     void setReadProvider(PropertyReadProvider provider);
 
     /**
-     * @brief Set optional backend write consumer
-     */
-    void setWriteConsumer(PropertyWriteConsumer consumer);
-
-    /**
-     * @brief Set optional backend write provider (bypasses store)
+     * @brief Set the backend write provider
      */
     void setWriteProvider(PropertyWriteProvider provider);
 
     /**
-     * @brief Set optional backend description provider (bypasses store)
+     * @brief Set the backend description provider
      */
     void setDescriptionProvider(PropertyDescriptionProvider provider);
 
@@ -234,85 +211,11 @@ public:
         PropertyIndex propertyIndex
     );
     
-    // Encoding/decoding helpers
-    
-    /**
-     * @brief Encode property value read request
-     */
-    static util::Result<void> encodeValueReadRequest(
-        const PropertyValueReadRequest& request,
-        std::span<uint8_t, kEncodedValueReadRequestLength> out
-    );
-    
-    /**
-     * @brief Decode property value read request
-     */
-    static PropertyValueReadRequest decodeValueReadRequest(
-        std::span<const uint8_t> data
-    );
-    
-    /**
-     * @brief Encode property value response
-     */
-    static util::Result<size_t> encodeValueResponse(
-        const PropertyValueResponse& response,
-        std::span<uint8_t> out
-    );
-    
-    /**
-     * @brief Decode property value response
-     */
-    static PropertyValueResponse decodeValueResponse(
-        std::span<const uint8_t> data
-    );
-    
-    /**
-     * @brief Encode property value write request
-     */
-    static util::Result<size_t> encodeValueWriteRequest(
-        const PropertyValueWriteRequest& request,
-        std::span<uint8_t> out
-    );
-    
-    /**
-     * @brief Decode property value write request
-     */
-    static PropertyValueWriteRequest decodeValueWriteRequest(
-        std::span<const uint8_t> data
-    );
-    
-    /**
-     * @brief Encode property description read request
-     */
-    static util::Result<void> encodeDescriptionReadRequest(
-        InterfaceObjectIndex objectIndex,
-        PropertyID propertyId,
-        PropertyIndex propertyIndex,
-        std::span<uint8_t, kEncodedDescriptionReadRequestLength> out
-    );
-    
-    /**
-     * @brief Encode property description response
-     */
-    static util::Result<void> encodeDescriptionResponse(
-        InterfaceObjectIndex objectIndex,
-        PropertyID propertyId,
-        PropertyIndex propertyIndex,
-        PropertyWriteAccess writeAccess,
-        PropertyDataType type,
-        uint16_t maxElements,
-        uint8_t readLevel,
-        uint8_t writeLevel,
-        std::span<uint8_t, kEncodedDescriptionResponseLength> out
-    );
-
 private:
-    PropertyStoreManager& _storeManager;
     PropertyValueResponseCallback _valueResponseCallback;
     PropertyDescriptionResponseCallback _descriptionResponseCallback;
 
     PropertyReadProvider _readProvider;
-    PropertyWriteConsumer _writeConsumer;
     PropertyWriteProvider _writeProvider;
     PropertyDescriptionProvider _descriptionProvider;
     PropertyAccessCheck _accessCheck;

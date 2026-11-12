@@ -5,19 +5,17 @@
  * @file network_layer.hpp
  * @brief KNX network layer (layer 3)
  * 
- * Handles routing, hop count management, and address filtering.
+ * Handles hop count management and address filtering.
  */
 
 #pragma once
 
 #include "knx/types.hpp"
 #include "knx/datalink/tp1_data_link_layer.hpp"
-#include "knx/network/routing_table.hpp"
 #include "knx/network/filter_table.hpp"
 #include "knx/util/inplace_function.hpp"
 #include "knx/util/operation_progress.hpp"
 #include <atomic>
-#include <array>
 #include <functional>
 #include <vector>
 
@@ -30,15 +28,6 @@ namespace network {
 enum class NDataService {
     Request,      // N_Data.req - send frame
     Indicate,     // N_Data.ind - receive frame
-};
-
-/**
- * @brief Network layer operating mode
- */
-enum class NetworkMode {
-    Device,       // Normal device mode (no routing)
-    LineCoupler,  // Line coupler mode (route between lines)
-    AreaCoupler,  // Area coupler mode (route between areas)
 };
 
 /**
@@ -59,27 +48,18 @@ using NDataCallback = util::InplaceFunction<void(const NDataFrame&), 64>;
 /**
  * @brief Network layer
  * 
- * Handles routing, hop count management, and address filtering.
+ * Handles hop count management and address filtering.
  * 
  * @thread_safety Most methods are NOT thread-safe. sendFrame() should be called from 
- * the same thread that processes the data link layer. Configuration methods (setNetworkMode, 
- * setRoutingEnabled, etc.) should be called during initialization or with external 
- * synchronization. Read-only methods (isOnSameArea, getNetworkMode) are safe to call 
+ * the same thread that processes the data link layer. Configuration methods
+ * (setFilteringEnabled, etc.) should be called during initialization or with external 
+ * synchronization. Read-only methods (isOnSameArea) are safe to call 
  * concurrently.
  */
 class NetworkLayer {
 public:
     using ProgressState = util::OperationProgressState;
     using TxProgressState = util::OperationProgressState;
-
-    enum class ForwardProgressState : uint8_t {
-        Idle = 0,
-        Pending,
-        Success,
-        Busy,
-        TransmissionFailed,
-        Timeout,
-    };
 
     explicit NetworkLayer(datalink::Tp1DataLinkLayer& datalink);
     virtual ~NetworkLayer();
@@ -106,15 +86,6 @@ public:
     util::Result<void> sendFrame(const NDataFrame& frame);
     util::Result<void> beginTransmit(const NDataFrame& frame);
     util::Result<ProgressState> pollTransmit();
-
-    /**
-     * @brief Advance deferred forwarding outside receive-callback context
-     * @thread_safety NOT thread-safe - call from the same stack maintenance context as send/poll methods
-     */
-    util::Result<ForwardProgressState> pollForwarding();
-    bool hasPendingForwarding() const { return _forwardOperation.active || _forwardQueueCount > 0u; }
-    size_t queuedForwardFrameCount() const { return _forwardQueueCount; }
-    size_t droppedForwardFrameCount() const { return _droppedForwardFrames; }
     
     /**
      * @brief Set receive callback
@@ -151,34 +122,9 @@ public:
     bool isOnSameLine(const IndividualAddress& addr) const;
     
     /**
-     * @brief Set network operating mode
-     */
-    void setNetworkMode(NetworkMode mode);
-    
-    /**
-     * @brief Get network operating mode
-     */
-    NetworkMode getNetworkMode() const { return _mode; }
-    
-    /**
-     * @brief Get routing table (for configuration)
-     */
-    RoutingTable& getRoutingTable() { return _routingTable; }
-    
-    /**
      * @brief Get filter table (for configuration)
      */
     FilterTable& getFilterTable() { return _filterTable; }
-    
-    /**
-     * @brief Enable/disable routing
-     */
-    void setRoutingEnabled(Toggle enabled) { _routingEnabled = isEnabled(enabled); }
-    
-    /**
-     * @brief Check if routing is enabled
-     */
-    bool isRoutingEnabled() const { return _routingEnabled; }
     
     /**
      * @brief Enable/disable filtering
@@ -197,11 +143,8 @@ private:
     NDataCallback _rxCallbackStorage;
     bool _initialized;
     
-    // Routing and filtering
-    NetworkMode _mode;
-    RoutingTable _routingTable;
+    // Filtering
     FilterTable _filterTable;
-    bool _routingEnabled;
     bool _filteringEnabled;
 
     struct TxOperationState {
@@ -211,28 +154,12 @@ private:
     };
     TxOperationState _txOperation{};
 
-    struct ForwardOperationState {
-        bool active{false};
-        bool started{false};
-        datalink::LDataFrame dlFrame;
-    };
-
-    static constexpr size_t FORWARD_QUEUE_CAPACITY = 8u;
-    std::array<datalink::LDataFrame, FORWARD_QUEUE_CAPACITY> _forwardQueue{};
-    size_t _forwardQueueHead{0};
-    size_t _forwardQueueCount{0};
-    size_t _droppedForwardFrames{0};
-    ForwardOperationState _forwardOperation{};
-
     void finishTxOperation();
-    void finishForwardOperation();
-    util::Result<void> enqueueForwardFrame(const NDataFrame& frame);
     
     // Data link callback handler
     void handleDlRx(const datalink::LDataFrame& frame);
     
-    // Routing decision logic
-    bool shouldForwardFrame(const datalink::LDataFrame& frame, uint8_t hopCount);
+    // Filtering decision logic
     bool shouldFilterFrame(const datalink::LDataFrame& frame);
 };
 

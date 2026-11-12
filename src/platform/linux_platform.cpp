@@ -12,7 +12,6 @@
 #include "knx/platform/memory_interface.hpp"
 #include "knx/platform/network_interface.hpp"
 #include "knx/platform/uart_interface.hpp"
-#include "knx/platform/spi_interface.hpp"
 #include <iostream>
 #include <cstring>
 #include <cstdio>
@@ -35,7 +34,6 @@
 #include <fcntl.h>
 #include <termios.h>
 #include <sys/ioctl.h>
-#include <linux/spi/spidev.h>
 #include <array>
 #include <bit>
 
@@ -949,293 +947,6 @@ private:
 };
 
 // ============================================================================
-// Linux SPI Interface (Real spidev implementation)
-// ============================================================================
-
-class LinuxSpi : public SpiInterface {
-public:
-    LinuxSpi() : _fd(-1), _csPin(-1), _csActiveHigh(false) {}
-    
-    ~LinuxSpi() {
-        close();
-    }
-    
-    util::Result<void> init(const SpiConfig& config) override {
-        if (_fd >= 0) {
-            KNX_LOGW("KNX.Platform", "SPI already initialized");
-            return util::ErrorCode::AlreadyInitialized;
-        }
-        
-        // Save configuration
-        _config = config;
-        _csPin = config.csPin;
-        _csActiveHigh = config.csActiveHigh;
-
-        if (_csPin >= 0) {
-            if (!_csGpio.init(_csPin)) {
-                KNX_LOGE("KNX.Platform", "SPI manual CS requested (GPIO %d) but sysfs GPIO is unavailable", _csPin);
-                return util::ErrorCode::ResourceUnavailable;
-            }
-            // Deassert CS by default
-            setCs(ChipSelectLevel::Deassert);
-        }
-        
-        // Try common SPI device paths
-        const char* devices[] = {
-            "/dev/spidev0.0",
-            "/dev/spidev0.1",
-            "/dev/spidev1.0",
-            "/dev/spidev1.1",
-            nullptr
-        };
-        
-        for (int i = 0; devices[i] != nullptr; i++) {
-            _fd = ::open(devices[i], O_RDWR);
-            if (_fd >= 0) {
-                KNX_LOGD("KNX.Platform", "Opened SPI device: %s", devices[i]);
-                break;
-            }
-        }
-        
-        if (_fd < 0) {
-            KNX_LOGE("KNX.Platform", "No SPI device found");
-            return util::ErrorCode::ResourceUnavailable;
-        }
-        
-        // Set SPI mode
-        uint8_t spiMode = static_cast<uint8_t>(config.mode);
-        if (::ioctl(_fd, SPI_IOC_WR_MODE, &spiMode) < 0) {
-            KNX_LOGE("KNX.Platform", "Failed to set SPI mode: %s", strerror(errno));
-            ::close(_fd);
-            _fd = -1;
-            return util::ErrorCode::OperationFailed;
-        }
-        
-        // Set bits per word (8 bits)
-        uint8_t bits = 8;
-        if (::ioctl(_fd, SPI_IOC_WR_BITS_PER_WORD, &bits) < 0) {
-            KNX_LOGE("KNX.Platform", "Failed to set SPI bits per word: %s", strerror(errno));
-            ::close(_fd);
-            _fd = -1;
-            return util::ErrorCode::OperationFailed;
-        }
-        
-        // Set max speed
-        uint32_t speed = config.clockHz;
-        if (::ioctl(_fd, SPI_IOC_WR_MAX_SPEED_HZ, &speed) < 0) {
-            KNX_LOGE("KNX.Platform", "Failed to set SPI speed: %s", strerror(errno));
-            ::close(_fd);
-            _fd = -1;
-            return util::ErrorCode::OperationFailed;
-        }
-        
-        // Set bit order (LSB first if needed)
-        uint8_t lsb = (config.bitOrder == SpiBitOrder::LsbFirst) ? 1 : 0;
-        if (::ioctl(_fd, SPI_IOC_WR_LSB_FIRST, &lsb) < 0) {
-            KNX_LOGW("KNX.Platform", "Failed to set SPI bit order (may not be supported)");
-            // Not critical, continue
-        }
-        
-        KNX_LOGD("KNX.Platform", "SPI configured: %u Hz, mode %u, %s first", 
-                 config.clockHz, spiMode,
-                 config.bitOrder == SpiBitOrder::MsbFirst ? "MSB" : "LSB");
-        return util::Result<void>::ok();
-    }
-    
-    void close() override {
-        if (_fd >= 0) {
-            ::close(_fd);
-            _fd = -1;
-            KNX_LOGD("KNX.Platform", "SPI closed");
-        }
-
-        _csGpio.close();
-    }
-    
-    bool isOpen() const override {
-        return _fd >= 0;
-    }
-    
-    void beginTransaction() override {
-        if (_csPin >= 0) {
-            setCs(ChipSelectLevel::Assert);
-        }
-    }
-    
-    void endTransaction() override {
-        if (_csPin >= 0) {
-            setCs(ChipSelectLevel::Deassert);
-        }
-    }
-    
-    uint8_t transfer(uint8_t data) override {
-        if (_fd < 0) return 0;
-        
-        uint8_t rxData = 0;
-        struct spi_ioc_transfer spi_transfer;
-        std::memset(&spi_transfer, 0, sizeof(spi_transfer));
-        
-        spi_transfer.tx_buf = reinterpret_cast<__u64>(&data);
-        spi_transfer.rx_buf = reinterpret_cast<__u64>(&rxData);
-        spi_transfer.len = 1;
-        spi_transfer.speed_hz = _config.clockHz;
-        spi_transfer.bits_per_word = 8;
-        
-        if (::ioctl(_fd, SPI_IOC_MESSAGE(1), &spi_transfer) < 0) {
-            KNX_LOGE("KNX.Platform", "SPI transfer failed: %s", strerror(errno));
-            return 0;
-        }
-        
-        return rxData;
-    }
-    
-    size_t transfer(std::span<const uint8_t> tx, std::span<uint8_t> rx) override {
-        if (_fd < 0) return 0;
-        const size_t length = tx.size() ? tx.size() : rx.size();
-        if (length == 0) return 0;
-
-        // Prepare buffers
-        std::vector<uint8_t> txTemp, rxTemp;
-        const uint8_t* txPtr = tx.data();
-        uint8_t* rxPtr = rx.data();
-
-        if (tx.empty()) {
-            txTemp.resize(length, 0x00);
-            txPtr = txTemp.data();
-        }
-        if (rx.empty()) {
-            rxTemp.resize(length);
-            rxPtr = rxTemp.data();
-        }
-
-        struct spi_ioc_transfer spi_transfer;
-        std::memset(&spi_transfer, 0, sizeof(spi_transfer));
-
-        spi_transfer.tx_buf = reinterpret_cast<__u64>(txPtr);
-        spi_transfer.rx_buf = reinterpret_cast<__u64>(rxPtr);
-        if (length > std::numeric_limits<__u32>::max()) {
-            KNX_LOGE("KNX.Platform", "SPI transfer length too large: %zu", length);
-            return 0;
-        }
-        spi_transfer.len = static_cast<__u32>(length);
-        spi_transfer.speed_hz = _config.clockHz;
-        spi_transfer.bits_per_word = 8;
-
-        int ret = ::ioctl(_fd, SPI_IOC_MESSAGE(1), &spi_transfer);
-        if (ret < 0) {
-            KNX_LOGE("KNX.Platform", "SPI transfer failed: %s", strerror(errno));
-            return 0;
-        }
-
-        return length;
-    }
-    
-    size_t transfer(std::span<uint8_t> buffer) override {
-        if (buffer.size() == 0) return 0;
-        return transfer(buffer, buffer);
-    }
-    
-    void setCs(ChipSelectLevel level) override {
-        if (_csPin < 0) {
-            return;
-        }
-
-        const bool asserted = (level == ChipSelectLevel::Assert);
-        const bool assertLevel = _csActiveHigh ? asserted : !asserted;
-        if (!_csGpio.set(assertLevel)) {
-            KNX_LOGE("KNX.Platform", "Failed to set sysfs GPIO CS%d", _csPin);
-        }
-    }
-    
-private:
-    struct SysfsGpioOut {
-        int pin{-1};
-        int valueFd{-1};
-
-        static bool writeFile(const std::string& path, const std::string& content) {
-            const int fd = ::open(path.c_str(), O_WRONLY);
-            if (fd < 0) {
-                return false;
-            }
-            const ssize_t rc = ::write(fd, content.c_str(), content.size());
-            ::close(fd);
-            return rc == static_cast<ssize_t>(content.size());
-        }
-
-        bool init(int gpioPin) {
-            close();
-            pin = gpioPin;
-
-            // sysfs GPIO may not exist on all kernels/distros, but it's a reasonable
-            // dependency-free option when available.
-            if (::access("/sys/class/gpio", F_OK) != 0) {
-                return false;
-            }
-
-            const std::string gpioDir = "/sys/class/gpio/gpio" + std::to_string(pin);
-            if (::access(gpioDir.c_str(), F_OK) != 0) {
-                // Export
-                if (!writeFile("/sys/class/gpio/export", std::to_string(pin))) {
-                    // If export fails because it's already exported, continue.
-                    if (errno != EBUSY) {
-                        return false;
-                    }
-                }
-
-                // Wait briefly for sysfs to create the directory
-                for (int i = 0; i < 50; i++) {
-                    if (::access(gpioDir.c_str(), F_OK) == 0) {
-                        break;
-                    }
-                    ::usleep(1000);
-                }
-            }
-
-            if (::access(gpioDir.c_str(), F_OK) != 0) {
-                return false;
-            }
-
-            if (!writeFile(gpioDir + "/direction", "out")) {
-                return false;
-            }
-
-            valueFd = ::open((gpioDir + "/value").c_str(), O_WRONLY);
-            if (valueFd < 0) {
-                return false;
-            }
-
-            return true;
-        }
-
-        bool set(bool high) {
-            if (valueFd < 0) {
-                return false;
-            }
-            const char c = high ? '1' : '0';
-            if (::lseek(valueFd, 0, SEEK_SET) < 0) {
-                return false;
-            }
-            const ssize_t rc = ::write(valueFd, &c, 1);
-            return rc == 1;
-        }
-
-        void close() {
-            if (valueFd >= 0) {
-                ::close(valueFd);
-                valueFd = -1;
-            }
-            pin = -1;
-        }
-    };
-
-    int _fd;
-    SpiConfig _config;
-    int _csPin;
-    bool _csActiveHigh;
-    SysfsGpioOut _csGpio;
-};
-
-// ============================================================================
 // Linux Platform Implementation
 // ============================================================================
 
@@ -1247,7 +958,6 @@ LinuxPlatform::LinuxPlatform() {
     _network = std::make_unique<LinuxNetwork>();
     initSystemInfo();
     _uart = std::make_unique<LinuxUart>();
-    _spi = std::make_unique<LinuxSpi>();
 }
 
 LinuxPlatform::~LinuxPlatform() {
@@ -1793,10 +1503,6 @@ NetworkInterface* LinuxPlatform::network() {
 
 UartInterface* LinuxPlatform::uart() {
     return _uart.get();
-}
-
-SpiInterface* LinuxPlatform::spi() {
-    return _spi.get();
 }
 
 // ========================================================================

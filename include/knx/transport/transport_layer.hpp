@@ -183,7 +183,7 @@ public:
     util::Result<ProgressState> pollTransmit();
 
     /**
-     * @brief Progress background network-layer maintenance work such as deferred forwarding
+     * @brief Run the connection timers, when a clock is installed
      * @thread_safety NOT thread-safe - call from the same maintenance context as other poll/process methods
      */
     void processBackgroundWork();
@@ -294,11 +294,6 @@ public:
     util::Result<void> beginProcessRetransmissions(uint32_t currentTimeMs);
     util::Result<ControlSendProgressState> pollProcessRetransmissions();
 
-    util::Result<void> beginHandleNetworkRx(const network::NDataFrame& frame);
-    util::Result<ControlSendProgressState> pollHandleNetworkRx();
-    util::Result<void> beginReceive(const network::NDataFrame& frame) { return beginHandleNetworkRx(frame); }
-    util::Result<ProgressState> pollReceive() { return pollHandleNetworkRx(); }
-
     bool popReceivedFrame(TDataFrame& frame);
     size_t queuedReceiveCount() const { return _rxQueueCount; }
     size_t droppedReceiveFrameCount() const { return _droppedReceiveFrames; }
@@ -374,17 +369,6 @@ private:
     };
     RetransmissionOperationState _retransmissionOperation{};
 
-    struct ReceiveOperationState {
-        bool active{false};
-        bool waitingResponse{false};
-        bool deliverFrame{false};
-        bool advanceExpectedSequence{false};
-        ControlSendProgressState terminalState{ControlSendProgressState::Success};
-        ConnectionIndex connectionIndex{ConnectionIndex::invalid()};
-        TDataFrame receivedFrame{};
-    };
-    ReceiveOperationState _receiveOperation{};
-
     static constexpr size_t RX_QUEUE_CAPACITY = 8u;
     std::array<TDataFrame, RX_QUEUE_CAPACITY> _rxQueue{};
     size_t _rxQueueHead{0};
@@ -402,9 +386,6 @@ private:
 
     /// Advance SeqNoSend for a staged frame that reached the network layer.
     void commitConnectedSeqNoSend(const ConnectedTxCommit& commit);
-
-    /// Drain whatever the network layer has queued. No connection timers.
-    void pumpNetwork();
 
     /// Retransmit unacknowledged data and reap timed-out connections.
     void runConnectionTimers(uint32_t currentTimeMs);
@@ -441,16 +422,6 @@ private:
     void finishConnectOperation();
     void finishRetransmissionOperation();
     void finishSendOperation();
-    void finishReceiveOperation();
-    void finalizeReceiveOperation();
-    ControlSendProgressState mapTxErrorToProgressState(util::ErrorCode error) const;
-    util::Result<void> beginControlResponse(const IndividualAddress& remoteAddress,
-                                            const protocol::TPCIField& tpci,
-                                            Priority priority);
-    void beginHandleNumberedData(const IndividualAddress& remoteAddress,
-                                 uint8_t seqNum,
-                                 std::span<const uint8_t> tpdu,
-                                 Priority priority);
     void enqueueReceivedFrame(const TDataFrame& frame);
 };
 

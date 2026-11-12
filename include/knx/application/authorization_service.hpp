@@ -194,42 +194,6 @@ public:
     void clearAllAuthorizations();
     
     /**
-     * @brief Encode A_Authorize_Request
-     * @param key Authorization key (4 bytes)
-        * @param out Caller-managed output storage for the 6-byte TPDU
-         * @return Result<void> indicating success or error
-     */
-        static constexpr size_t kEncodedRequestLength = 6;
-        static constexpr size_t kEncodedResponseLength = 3;
-        static util::Result<void> encodeRequest(const AuthorizationKey& key,
-                                        std::span<uint8_t, kEncodedRequestLength> out);
-    
-    /**
-     * @brief Encode A_Authorize_Response
-     * @param level Authorization level granted
-        * @param out Caller-managed output storage for the 3-byte TPDU
-         * @return Result<void> indicating success or error
-     */
-        static util::Result<void> encodeResponse(AuthorizationLevel level,
-                                        std::span<uint8_t, kEncodedResponseLength> out);
-    
-    /**
-     * @brief Decode authorization request
-     * @param data Encoded request
-     * @param key Output authorization key
-        * @return Result<void> indicating success or error
-     */
-        static util::Result<void> decodeRequest(std::span<const uint8_t> data, AuthorizationKey& key);
-    
-    /**
-     * @brief Decode authorization response
-     * @param data Encoded response
-     * @param level Output authorization level
-        * @return Result<void> indicating success or error
-     */
-        static util::Result<void> decodeResponse(std::span<const uint8_t> data, AuthorizationLevel& level);
-    
-    /**
      * @brief Validate authorization key
      * @param key Key to validate
      * @param level Output authorization level if valid

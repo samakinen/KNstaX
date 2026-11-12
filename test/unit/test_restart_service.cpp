@@ -166,68 +166,6 @@ void test_RestartService_NoRestartCallback(void) {
     TEST_ASSERT_FALSE(service.isRestartPending());
 }
 
-void test_RestartService_EncodeBasicRestart(void) {
-    std::array<uint8_t, RestartService::kEncodedRequestLength> encoded{};
-    auto result = RestartService::encodeRequest(RestartType::Basic, encoded);
-
-    TEST_ASSERT_TRUE(result.isOk());
-    TEST_ASSERT_EQUAL(3, encoded.size());
-    
-    // Check APCI (A_Restart = 0x380)
-    TEST_ASSERT_EQUAL(0x03, encoded[0]);
-    TEST_ASSERT_EQUAL(0x80, encoded[1]);
-    
-    // Check restart type
-    TEST_ASSERT_EQUAL(static_cast<uint8_t>(RestartType::Basic), encoded[2]);
-}
-
-void test_RestartService_EncodeMasterReset(void) {
-    std::array<uint8_t, RestartService::kEncodedRequestLength> encoded{};
-    auto result = RestartService::encodeRequest(RestartType::MasterReset, encoded);
-
-    TEST_ASSERT_TRUE(result.isOk());
-    TEST_ASSERT_EQUAL(3, encoded.size());
-    TEST_ASSERT_EQUAL(static_cast<uint8_t>(RestartType::MasterReset), encoded[2]);
-}
-
-void test_RestartService_DecodeBasicRestart(void) {
-    std::vector<uint8_t> encoded = {0x03, 0x80, 0x00};
-    
-    RestartType type;
-    auto result = RestartService::decodeRequest(encoded, type);
-    
-    TEST_ASSERT_TRUE(result.isOk());
-    TEST_ASSERT_EQUAL(static_cast<int>(RestartType::Basic), static_cast<int>(type));
-}
-
-void test_RestartService_DecodeMasterReset(void) {
-    std::vector<uint8_t> encoded = {0x03, 0x80, 0x01};
-    
-    RestartType type;
-    auto result = RestartService::decodeRequest(encoded, type);
-    
-    TEST_ASSERT_TRUE(result.isOk());
-    TEST_ASSERT_EQUAL(static_cast<int>(RestartType::MasterReset), static_cast<int>(type));
-}
-
-void test_RestartService_DecodeInvalidType(void) {
-    std::vector<uint8_t> encoded = {0x03, 0x80, 0xFF};
-    
-    RestartType type;
-    auto result = RestartService::decodeRequest(encoded, type);
-    
-    TEST_ASSERT_TRUE(result.isError());
-}
-
-void test_RestartService_DecodeInvalidLength(void) {
-    std::vector<uint8_t> encoded = {0x03, 0x80};
-    
-    RestartType type;
-    auto result = RestartService::decodeRequest(encoded, type);
-    
-    TEST_ASSERT_TRUE(result.isError());
-}
-
 void test_RestartService_CleanupOnly(void) {
     RestartService service;
     service.setRestartCallback(mockRestartCallback);
@@ -336,12 +274,6 @@ int main(void) {
     RUN_TEST(test_RestartService_AuthorizationCheck);
     RUN_TEST(test_RestartService_AuthorizationDenied);
     RUN_TEST(test_RestartService_NoRestartCallback);
-    RUN_TEST(test_RestartService_EncodeBasicRestart);
-    RUN_TEST(test_RestartService_EncodeMasterReset);
-    RUN_TEST(test_RestartService_DecodeBasicRestart);
-    RUN_TEST(test_RestartService_DecodeMasterReset);
-    RUN_TEST(test_RestartService_DecodeInvalidType);
-    RUN_TEST(test_RestartService_DecodeInvalidLength);
     RUN_TEST(test_RestartService_CleanupOnly);
     
     return UNITY_END();

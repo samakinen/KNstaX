@@ -287,61 +287,6 @@ void test_ReceiveQueueDeliversNumberedDataWithoutCallback(void) {
     TEST_ASSERT_EQUAL_UINT32(0, tl->queuedReceiveCount());
 }
 
-void test_ExplicitInboundReceiveProgressQueuesNumberedDataAfterPolledAck(void) {
-    const IndividualAddress remote(0x1114);
-    auto connRes = tl->connect(remote);
-    TEST_ASSERT_TRUE(connRes.isOk());
-    const ConnectionIndex idx = connRes.value();
-    tl->processRetransmissions(100);
-
-    const auto connTpdu = knx::protocol::buildTpdu(
-        knx::protocol::TPCIField::create(knx::protocol::TPCIControl::Connect),
-        application::APCIField(0),
-        {}
-    );
-    tl->handleNetworkRx(makeNFrame(remote.raw, 0x110A, connTpdu));
-    TEST_ASSERT_TRUE(tl->isConnected(idx));
-
-    tl->setReceiveCallback(nullptr);
-    rx.clear();
-    nw->clearSentFrames();
-
-    const auto dataTpdu = knx::protocol::buildTpdu(
-        knx::protocol::TPCIField::create(knx::protocol::TPCI::NumberedData, 0),
-        application::APCIField(0),
-        {0xBA, 0xAD}
-    );
-
-    auto beginRes = tl->beginReceive(makeNFrame(remote.raw, 0x110A, dataTpdu));
-    TEST_ASSERT_TRUE(beginRes.isOk());
-    TEST_ASSERT_EQUAL_UINT32(0, tl->queuedReceiveCount());
-    TEST_ASSERT_EQUAL_UINT32(0, nw->getSentFrameCount());
-
-    auto progress = tl->pollReceive();
-    TEST_ASSERT_TRUE(progress.isOk());
-    TEST_ASSERT_EQUAL(TransportLayer::ControlSendProgressState::Success, progress.value());
-
-    TEST_ASSERT_EQUAL_UINT32(0, rx.size());
-    TEST_ASSERT_EQUAL_UINT32(1, nw->getSentFrameCount());
-    TEST_ASSERT_EQUAL_UINT32(1, tl->queuedReceiveCount());
-
-    const auto sent = nw->getLastSentFrame();
-    // Control TPDUs (T_ACK) are exactly 1 byte on the wire.
-    TEST_ASSERT_TRUE(sent.dlFrame.tpdu.size() >= 1);
-    const auto sentHdr = knx::protocol::unpackTpduHeader(sent.dlFrame.tpdu[0],
-                                                         sent.dlFrame.tpdu.size() > 1u ? sent.dlFrame.tpdu[1] : 0u);
-    TEST_ASSERT_TRUE(sentHdr.tpci.isAck());
-    TEST_ASSERT_EQUAL_UINT8(0, sentHdr.tpci.seqNum());
-
-    TDataFrame queued;
-    TEST_ASSERT_TRUE(tl->popReceivedFrame(queued));
-    TEST_ASSERT_EQUAL_UINT16(remote.raw, queued.source.raw);
-    TEST_ASSERT_EQUAL_UINT8(0, queued.sequenceNumber);
-    TEST_ASSERT_EQUAL_UINT32(2, static_cast<uint32_t>(queued.payload().size()));
-    TEST_ASSERT_EQUAL_UINT8(0xBA, queued.payload()[0]);
-    TEST_ASSERT_EQUAL_UINT8(0xAD, queued.payload()[1]);
-}
-
 void test_ReceiveQueueDropsNewestWhenFull(void) {
     tl->setReceiveCallback(nullptr);
     rx.clear();
@@ -957,7 +902,6 @@ int main(void) {
     RUN_TEST(test_SeqMismatchSendsNakAndDoesNotDeliver);
     RUN_TEST(test_DuplicateSuppressionAcksOnly);
     RUN_TEST(test_ReceiveQueueDeliversNumberedDataWithoutCallback);
-    RUN_TEST(test_ExplicitInboundReceiveProgressQueuesNumberedDataAfterPolledAck);
     RUN_TEST(test_ReceiveQueueDropsNewestWhenFull);
     RUN_TEST(test_RetransmitAfterTimeoutResendsSameSeq);
     RUN_TEST(test_MatchingNakSchedulesImmediateRetransmitWithSameSeq);

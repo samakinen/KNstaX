@@ -191,64 +191,6 @@ public:
                      MemoryAddress address, std::span<const uint8_t> data);
     
     /**
-     * @brief Encode A_Memory_Read request
-     * @param count Number of bytes (1-63)
-     * @param address Memory address
-      * @param out Caller-managed output storage for the 4-byte TPDU
-      * @return Result<void> indicating success or error
-     */
-        static constexpr size_t kEncodedReadRequestLength = 4;
-        static util::Result<void> encodeReadRequest(uint8_t count,
-                         MemoryAddress address,
-                         std::span<uint8_t, kEncodedReadRequestLength> out);
-    
-    /**
-     * @brief Encode A_Memory_Write request
-     * @param count Number of bytes
-     * @param address Memory address
-     * @param data Write data
-      * @param out Caller-managed output storage
-      * @return Encoded TPDU length or error
-     */
-        static util::Result<size_t> encodeWriteRequest(uint8_t count,
-                         MemoryAddress address,
-                         std::span<const uint8_t> data,
-                         std::span<uint8_t> out);
-    
-    /**
-     * @brief Encode A_Memory_Response
-     * @param count Number of bytes
-     * @param address Memory address
-     * @param data Response data (for reads)
-      * @param out Caller-managed output storage
-      * @return Encoded TPDU length or error
-     */
-        static util::Result<size_t> encodeResponse(uint8_t count,
-                        MemoryAddress address,
-                        std::span<const uint8_t> data,
-                        std::span<uint8_t> out);
-    
-    /**
-     * @brief Decode memory request
-     * @param data Encoded request
-     * @param count Output byte count
-     * @param address Output address
-        * @return Result<void> indicating success or error
-     */
-      static util::Result<void> decodeRequest(std::span<const uint8_t> data, uint8_t& count, MemoryAddress& address);
-    
-    /**
-     * @brief Decode memory write data
-     * @param data Encoded write request
-     * @param count Output byte count
-     * @param address Output address
-     * @param writeData Output write data
-        * @return Result<void> indicating success or error
-     */
-      static util::Result<void> decodeWriteRequest(std::span<const uint8_t> data, uint8_t& count,
-            MemoryAddress& address, std::span<uint8_t> writeData);
-    
-    /**
      * @brief Validate memory access
      * @param address Starting address
      * @param length Number of bytes

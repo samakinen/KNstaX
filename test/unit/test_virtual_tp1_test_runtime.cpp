@@ -78,6 +78,11 @@ void test_VTRUN_002_runtime_platform_delay_releases_on_shared_bus_time()
     });
 
     armed.wait();
+    // The worker takes its deadline from the clock when it enters delay(),
+    // which can be after armed.notify(): advancing before then would push the
+    // deadline out to 7 ms and the worker would never wake. Wait until it is
+    // actually blocked in the delay.
+    TEST_ASSERT_TRUE(runtime.platform().waitUntilActiveDelayCalls(1u));
     TEST_ASSERT_FALSE(completed.load());
 
     runtime.advanceTimeMs(3u);

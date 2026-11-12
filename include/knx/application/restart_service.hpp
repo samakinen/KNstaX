@@ -169,23 +169,6 @@ public:
     bool isEraseCodeSupported(uint8_t eraseCode) const;
 
     /**
-     * @brief Encode A_Restart request
-     * @param type Restart type
-        * @param out Caller-managed output storage for the 3-byte TPDU
-         * @return Result<void> indicating success or error
-     */
-        static constexpr size_t kEncodedRequestLength = 3;
-        static util::Result<void> encodeRequest(RestartType type, std::span<uint8_t, kEncodedRequestLength> out);
-    
-    /**
-     * @brief Decode A_Restart request
-     * @param data Encoded request
-     * @param type Output restart type
-        * @return Result<void> indicating success or error
-     */
-        static util::Result<void> decodeRequest(std::span<const uint8_t> data, RestartType& type);
-    
-    /**
      * @brief Check if restart is pending
      * @return true if restart has been requested and is pending
      */

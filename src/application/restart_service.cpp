@@ -8,7 +8,6 @@
 
 #include "knx/application/restart_service.hpp"
 #include "knx/util/log.hpp"
-#include "knx/protocol/tpdu_codec.hpp"
 #include "knx/util/result.hpp"
 #include <span>
 
@@ -151,39 +150,6 @@ void RestartService::executePendingRestart() {
             KNX_LOGE(TAG, "Restart callback failed");
         }
     }
-}
-
-util::Result<void> RestartService::encodeRequest(RestartType type, std::span<uint8_t, kEncodedRequestLength> out) {
-    auto result = knx::protocol::buildTpdu(
-        knx::protocol::TPCIField::create(knx::protocol::TPCI::UnnumberedData),
-        APCIField::create(APCIService::Restart),
-        {static_cast<uint8_t>(type)},
-        out
-    );
-    if (result.isError()) return result.error();
-    return util::Result<void>::ok();
-}
-
-util::Result<void> RestartService::decodeRequest(std::span<const uint8_t> data, RestartType& type) {
-    if (data.size() < 3) {
-        return util::Result<void>::err(util::ErrorCode::DecodeFailed);
-    }
-
-    const auto hdr = knx::protocol::unpackTpduHeader(data[0], data[1]);
-        if (hdr.apci.service() != APCIService::Restart) {
-        return util::Result<void>::err(util::ErrorCode::DecodeFailed);
-    }
-
-    // TPDU payload starts at offset 2
-    uint8_t typeValue = data[2];
-    
-    // Validate restart type
-    if (typeValue > static_cast<uint8_t>(RestartType::MasterReset)) {
-        return util::Result<void>::err(util::ErrorCode::InvalidParameter);
-    }
-    
-    type = static_cast<RestartType>(typeValue);
-    return util::Result<void>::ok();
 }
 
 } // namespace application

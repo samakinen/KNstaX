@@ -214,54 +214,6 @@ void test_AuthorizationService_ClearAllAuthorizations(void) {
                      static_cast<int>(service.getCurrentLevel(addr2)));
 }
 
-void test_AuthorizationService_EncodeRequest(void) {
-    AuthorizationKey key = {0x11, 0x22, 0x33, 0x44};
-    std::array<uint8_t, AuthorizationService::kEncodedRequestLength> encoded{};
-    auto result = AuthorizationService::encodeRequest(key, encoded);
-
-    TEST_ASSERT_TRUE(result.isOk());
-    TEST_ASSERT_EQUAL(6, encoded.size());
-    
-    // Check key bytes
-    TEST_ASSERT_EQUAL(0x11, encoded[2]);
-    TEST_ASSERT_EQUAL(0x22, encoded[3]);
-    TEST_ASSERT_EQUAL(0x33, encoded[4]);
-    TEST_ASSERT_EQUAL(0x44, encoded[5]);
-}
-
-void test_AuthorizationService_EncodeResponse(void) {
-    std::array<uint8_t, AuthorizationService::kEncodedResponseLength> encoded{};
-    auto result = AuthorizationService::encodeResponse(AuthorizationLevel::Configuration, encoded);
-
-    TEST_ASSERT_TRUE(result.isOk());
-    TEST_ASSERT_EQUAL(3, encoded.size());
-    TEST_ASSERT_EQUAL(static_cast<uint8_t>(AuthorizationLevel::Configuration), encoded[2]);
-}
-
-void test_AuthorizationService_DecodeRequest(void) {
-    std::vector<uint8_t> encoded = {0x03, 0xD1, 0xAA, 0xBB, 0xCC, 0xDD};
-    
-    AuthorizationKey key;
-    auto result = AuthorizationService::decodeRequest(encoded, key);
-    
-    TEST_ASSERT_TRUE(result.isOk());
-    TEST_ASSERT_EQUAL(0xAA, key[0]);
-    TEST_ASSERT_EQUAL(0xBB, key[1]);
-    TEST_ASSERT_EQUAL(0xCC, key[2]);
-    TEST_ASSERT_EQUAL(0xDD, key[3]);
-}
-
-void test_AuthorizationService_DecodeResponse(void) {
-    std::vector<uint8_t> encoded = {0x03, 0xD2, 0x02};
-    
-    AuthorizationLevel level;
-    auto result = AuthorizationService::decodeResponse(encoded, level);
-    
-    TEST_ASSERT_TRUE(result.isOk());
-    TEST_ASSERT_EQUAL(static_cast<int>(AuthorizationLevel::Configuration), 
-                     static_cast<int>(level));
-}
-
 void test_AuthorizationService_CustomValidationCallback(void) {
     AuthorizationService service;
     
@@ -447,10 +399,6 @@ int main(void) {
     RUN_TEST(test_AuthorizationService_StoreAuthorization);
     RUN_TEST(test_AuthorizationService_ClearAuthorization);
     RUN_TEST(test_AuthorizationService_ClearAllAuthorizations);
-    RUN_TEST(test_AuthorizationService_EncodeRequest);
-    RUN_TEST(test_AuthorizationService_EncodeResponse);
-    RUN_TEST(test_AuthorizationService_DecodeRequest);
-    RUN_TEST(test_AuthorizationService_DecodeResponse);
     RUN_TEST(test_AuthorizationService_CustomValidationCallback);
     RUN_TEST(test_AuthorizationService_UpdateExistingAuthorization);
     RUN_TEST(test_AuthorizationService_ExpiresAuthorizations);

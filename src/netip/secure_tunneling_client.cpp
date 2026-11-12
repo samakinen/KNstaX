@@ -6,6 +6,7 @@
 #include "knx/netip/header_codec.hpp"
 #include "knx/netip/detail/polling.hpp"
 #include "knx/netip/tunneling_control_builder.hpp"
+#include "knx/security/data_secure.hpp"
 
 #if KNX_SECURE_ENABLED
 
@@ -39,24 +40,13 @@ SecureTunnelingSecurity::SecureTunnelingSecurity(
 {
 }
 
-inline constexpr void SecureTunnelingSecurity::encodeSeq48BE_(uint64_t seq48, std::span<uint8_t, SecureWrapper::kSeqLen> out) noexcept
-{
-    seq48 &= 0xFFFFFFFFFFFFULL;
-    out[0] = static_cast<uint8_t>((seq48 >> 40) & 0xFF);
-    out[1] = static_cast<uint8_t>((seq48 >> 32) & 0xFF);
-    out[2] = static_cast<uint8_t>((seq48 >> 24) & 0xFF);
-    out[3] = static_cast<uint8_t>((seq48 >> 16) & 0xFF);
-    out[4] = static_cast<uint8_t>((seq48 >> 8) & 0xFF);
-    out[5] = static_cast<uint8_t>(seq48 & 0xFF);
-}
-
 util::Result<size_t> SecureTunnelingSecurity::protect(std::span<const uint8_t> in, std::span<uint8_t> out)
 {
     if (!sessionId_.isValid()) return util::ErrorCode::NotInitialized;
 
     const uint64_t seq = (seq48_++ & 0xFFFFFFFFFFFFULL);
     std::array<uint8_t, SecureWrapper::kSeqLen> seqBytes{};
-    encodeSeq48BE_(seq, seqBytes);
+    knx::security::writeSecureU48BE(seqBytes, seq);
 
     const std::array<uint8_t, SecureWrapper::kTagLen> tag{0x00, 0x00};
     const std::array<uint8_t, 4> counterSuffix{0x00, 0x00, 0xFF, 0x00};

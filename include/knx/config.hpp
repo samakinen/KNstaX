@@ -21,46 +21,8 @@ namespace knx {
 namespace config {
 
 // ============================================================================
-// Medium Configuration
-// ============================================================================
-
-#if defined(CONFIG_KNX_MEDIUM_TP1)
-    constexpr bool MEDIUM_TP1 = true;
-    constexpr bool MEDIUM_IP = false;
-#elif defined(CONFIG_KNX_MEDIUM_IP)
-    constexpr bool MEDIUM_TP1 = false;
-    constexpr bool MEDIUM_IP = true;
-#else
-    // Default to TP1 if not specified
-    constexpr bool MEDIUM_TP1 = true;
-    constexpr bool MEDIUM_IP = false;
-#endif
-
-// ============================================================================
-// Security Configuration
-// ============================================================================
-
-#ifdef CONFIG_KNX_ENABLE_SECURITY
-    constexpr bool ENABLE_SECURITY = CONFIG_KNX_ENABLE_SECURITY;
-#else
-    constexpr bool ENABLE_SECURITY = false;
-#endif
-
-// ============================================================================
 // Task Configuration
 // ============================================================================
-
-#ifdef CONFIG_KNX_TASK_STACK_SIZE
-    constexpr uint32_t TASK_STACK_SIZE = CONFIG_KNX_TASK_STACK_SIZE;
-#else
-    constexpr uint32_t TASK_STACK_SIZE = 4096;
-#endif
-
-#ifdef CONFIG_KNX_TASK_PRIORITY
-    constexpr uint32_t TASK_PRIORITY = CONFIG_KNX_TASK_PRIORITY;
-#else
-    constexpr uint32_t TASK_PRIORITY = 5;
-#endif
 
 #ifdef CONFIG_KNX_RX_TASK_STACK_SIZE
     constexpr uint32_t RX_TASK_STACK_SIZE = CONFIG_KNX_RX_TASK_STACK_SIZE;
@@ -68,20 +30,11 @@ namespace config {
     constexpr uint32_t RX_TASK_STACK_SIZE = 3072;
 #endif
 
-#ifdef CONFIG_KNX_RX_TASK_PRIORITY
-    constexpr uint32_t RX_TASK_PRIORITY = CONFIG_KNX_RX_TASK_PRIORITY;
-#else
-    constexpr uint32_t RX_TASK_PRIORITY = 10;  // Higher priority for RX
-#endif
-
 // ============================================================================
 // Buffer Sizes
 // ============================================================================
 
-constexpr size_t MAX_KNX_TELEGRAM_SIZE = 263;  // Max APDU size + overhead
-constexpr size_t MAX_CEMI_FRAME_SIZE = 64;     // Typical CEMI frame
 constexpr size_t MAX_APDU_LENGTH = 254;        // Maximum APDU length
-constexpr size_t MAX_TPDU_LENGTH = 255;        // Maximum TPDU length
 
 /**
  * @brief Payload capacity reserved per group object, in octets.
@@ -110,23 +63,6 @@ static_assert(MAX_GROUP_OBJECT_PAYLOAD_BYTES <= MAX_APDU_LENGTH,
               "A group object payload cannot exceed the maximum APDU");
 
 /**
- * @brief Live KNX Data Secure sessions held at once, one per secured group address.
- *
- * Each session is roughly 48 bytes (key, sequence counters, replay window), so
- * the default costs about 1.5 KB and only in a `KNX_SECURE_ENABLED` build.
- *
- * A device that secures more group addresses than this will reject telegrams
- * for the excess ones rather than evicting a live session — dropping a session
- * would discard its replay window. Size this at or above the number of secured
- * group addresses the product declares.
- */
-#ifdef CONFIG_KNX_MAX_DATA_SECURE_SESSIONS
-constexpr size_t MAX_DATA_SECURE_SESSIONS = CONFIG_KNX_MAX_DATA_SECURE_SESSIONS;
-#else
-constexpr size_t MAX_DATA_SECURE_SESSIONS = 32;
-#endif
-
-/**
  * @brief Seconds a management client should wait after a master reset.
  *
  * Reported in the Process_Time field of A_Restart_Response (03/03/07 §3.4.2.2,
@@ -148,28 +84,6 @@ constexpr uint16_t RESTART_PROCESS_TIME_S = CONFIG_KNX_RESTART_PROCESS_TIME_S;
 #else
 constexpr uint16_t RESTART_PROCESS_TIME_S = 0;
 #endif
-
-#ifdef CONFIG_KNX_RX_QUEUE_SIZE
-    constexpr size_t RX_QUEUE_SIZE = CONFIG_KNX_RX_QUEUE_SIZE;
-#else
-    constexpr size_t RX_QUEUE_SIZE = 10;
-#endif
-
-#ifdef CONFIG_KNX_TX_QUEUE_SIZE
-    constexpr size_t TX_QUEUE_SIZE = CONFIG_KNX_TX_QUEUE_SIZE;
-#else
-    constexpr size_t TX_QUEUE_SIZE = 5;
-#endif
-
-// ============================================================================
-// Timing Configuration (microseconds)
-// ============================================================================
-
-constexpr uint32_t TP1_BIT_TIME_US = 104;
-constexpr uint32_t TP1_CHAR_TIME_US = TP1_BIT_TIME_US * 11;  // Start + 8 data + parity + stop
-constexpr uint32_t TP1_ACK_TIMEOUT_US = TP1_BIT_TIME_US * 35;
-
-constexpr uint32_t IP_ROUTING_INDICATION_INTERVAL_MS = 100;
 
 #ifdef CONFIG_KNX_IP_PORT
     constexpr uint16_t IP_PORT = CONFIG_KNX_IP_PORT;
@@ -199,38 +113,6 @@ constexpr uint32_t IP_ROUTING_INDICATION_INTERVAL_MS = 100;
     constexpr uint32_t NETIP_TUNNELING_KEEPALIVE_INTERVAL_MS = CONFIG_KNX_NETIP_TUNNELING_KEEPALIVE_INTERVAL_MS;
 #else
     constexpr uint32_t NETIP_TUNNELING_KEEPALIVE_INTERVAL_MS = 60000;
-#endif
-
-// ============================================================================
-// Memory Configuration
-// ============================================================================
-
-#ifdef CONFIG_KNX_FLASH_SIZE
-    constexpr size_t FLASH_SIZE = CONFIG_KNX_FLASH_SIZE;
-#else
-    constexpr size_t FLASH_SIZE = 4096;  // 4KB default
-#endif
-
-#ifdef CONFIG_KNX_FLASH_PAGE_SIZE
-    constexpr size_t FLASH_PAGE_SIZE = CONFIG_KNX_FLASH_PAGE_SIZE;
-#else
-    constexpr size_t FLASH_PAGE_SIZE = 256;
-#endif
-
-// ============================================================================
-// Debug Configuration
-// ============================================================================
-
-#ifdef CONFIG_KNX_DEBUG_ENABLED
-    constexpr bool DEBUG_ENABLED = CONFIG_KNX_DEBUG_ENABLED;
-#else
-    constexpr bool DEBUG_ENABLED = false;
-#endif
-
-#ifdef CONFIG_KNX_VERBOSE_LOGGING
-    constexpr bool VERBOSE_LOGGING = CONFIG_KNX_VERBOSE_LOGGING;
-#else
-    constexpr bool VERBOSE_LOGGING = false;
 #endif
 
 // ============================================================================
@@ -297,29 +179,9 @@ constexpr uint32_t IP_ROUTING_INDICATION_INTERVAL_MS = 100;
 namespace feature {
 /// True when the KNXnet/IP medium is compiled into this build.
 constexpr bool NETIP = (KNX_FEATURE_NETIP != 0);
-/// True when IP Secure tunnelling sessions are compiled in.
-constexpr bool SECURE_IP_TUNNELING = (KNX_SECURE_IP_TUNNELING != 0);
 /// True when the TP1 medium is compiled into this build.
 constexpr bool TP1 = (KNX_FEATURE_TP1 != 0);
 } // namespace feature
-
-#ifdef CONFIG_KNX_ENABLE_ROUTING
-    constexpr bool ENABLE_ROUTING = CONFIG_KNX_ENABLE_ROUTING;
-#else
-    constexpr bool ENABLE_ROUTING = false;
-#endif
-
-#ifdef CONFIG_KNX_ENABLE_TUNNELING
-    constexpr bool ENABLE_TUNNELING = CONFIG_KNX_ENABLE_TUNNELING;
-#else
-    constexpr bool ENABLE_TUNNELING = false;
-#endif
-
-#ifdef CONFIG_KNX_ENABLE_GROUP_ADDRESS_FILTER
-    constexpr bool ENABLE_GROUP_ADDRESS_FILTER = CONFIG_KNX_ENABLE_GROUP_ADDRESS_FILTER;
-#else
-    constexpr bool ENABLE_GROUP_ADDRESS_FILTER = true;
-#endif
 
 } // namespace config
 } // namespace knx

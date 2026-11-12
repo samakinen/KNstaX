@@ -26,10 +26,10 @@ namespace knx {
 namespace platform {
 
 // Forward declarations
+class MemoryInterface;
 class LinuxMemory;
 class LinuxNetwork;
 class LinuxUart;
-class LinuxSpi;
 
 /**
  * @brief Linux platform implementation using POSIX threads
@@ -111,10 +111,9 @@ public:
     // Hardware Interfaces
     // ========================================================================
     
-    MemoryInterface& memory() override;
+    MemoryInterface& memory();
     NetworkInterface* network() override;
     UartInterface* uart() override;
-    SpiInterface* spi() override;
     
     // ========================================================================
     // Logging
@@ -189,7 +188,6 @@ private:
     std::unique_ptr<LinuxMemory> _memory;
     std::unique_ptr<LinuxNetwork> _network;
     std::unique_ptr<LinuxUart> _uart;
-    std::unique_ptr<LinuxSpi> _spi;
     
     // System info
     uint32_t _serialNumber;

@@ -70,20 +70,6 @@ void TransportLayer::finishRetransmissionOperation() {
     _retransmissionOperation = RetransmissionOperationState{};
 }
 
-void TransportLayer::finishReceiveOperation() {
-    _receiveOperation = ReceiveOperationState{};
-}
-
-TransportLayer::ControlSendProgressState TransportLayer::mapTxErrorToProgressState(util::ErrorCode error) const {
-    if (error == util::ErrorCode::Busy) {
-        return ControlSendProgressState::Busy;
-    }
-    if (error == util::ErrorCode::Timeout) {
-        return ControlSendProgressState::Timeout;
-    }
-    return ControlSendProgressState::TransmissionFailed;
-}
-
 util::Result<void> TransportLayer::init(const IndividualAddress& ownAddress) {
     if (_initialized) {
         KNX_LOGW(TAG, "Already initialized");
@@ -137,7 +123,6 @@ void TransportLayer::close() {
         finishConnectedSendOperation();
         finishConnectOperation();
         finishRetransmissionOperation();
-        finishReceiveOperation();
         _initialized = false;
     }
 }

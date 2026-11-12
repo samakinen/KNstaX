@@ -190,27 +190,6 @@ public:
     util::Result<void> handleNetworkParameterRead(const NetworkParameterRequest& request);
     util::Result<void> handleNetworkParameterWrite(const NetworkParameterRequest& request);
 
-    // --- Codecs -----------------------------------------------------------
-    // `apdu` always includes the 2-octet TPCI/APCI header.
-
-    static util::Result<KnxSerialNumber> decodeSerialNumberRead(std::span<const uint8_t> apdu);
-    static util::Result<IndividualAddressSerialNumberWrite> decodeSerialNumberWrite(
-        std::span<const uint8_t> apdu);
-    static util::Result<NetworkParameterRequest> decodeNetworkParameter(std::span<const uint8_t> apdu);
-
-    static util::Result<size_t> encodeSerialNumberResponse(const KnxSerialNumber& serialNumber,
-                                                           uint16_t domainAddress,
-                                                           std::span<uint8_t> out);
-    static util::Result<size_t> encodeSerialNumberRead(const KnxSerialNumber& serialNumber,
-                                                       std::span<uint8_t> out);
-    static util::Result<size_t> encodeSerialNumberWrite(const KnxSerialNumber& serialNumber,
-                                                        const IndividualAddress& newAddress,
-                                                        std::span<uint8_t> out);
-    static util::Result<size_t> encodeNetworkParameterResponse(InterfaceObjectType objectType,
-                                                               PropertyID propertyId,
-                                                               std::span<const uint8_t> value,
-                                                               std::span<uint8_t> out);
-
 private:
     KnxSerialNumber _serialNumber{};
     DomainAddressBuffer _domainAddress{};

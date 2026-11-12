@@ -21,8 +21,6 @@ NetworkLayer::NetworkLayer(datalink::Tp1DataLinkLayer& datalink)
     , _rxCallback(nullptr)
     , _rxCallbackStorage()
     , _initialized(false)
-    , _mode(NetworkMode::Device)
-    , _routingEnabled(false)
     , _filteringEnabled(false)
 {
 }
@@ -33,22 +31,6 @@ NetworkLayer::~NetworkLayer() {
 
 void NetworkLayer::finishTxOperation() {
     _txOperation = TxOperationState{};
-}
-
-void NetworkLayer::finishForwardOperation() {
-    _forwardOperation = ForwardOperationState{};
-}
-
-util::Result<void> NetworkLayer::enqueueForwardFrame(const NDataFrame& frame) {
-    if (_forwardQueueCount >= FORWARD_QUEUE_CAPACITY) {
-        ++_droppedForwardFrames;
-        return util::ErrorCode::QueueFull;
-    }
-
-    const size_t index = (_forwardQueueHead + _forwardQueueCount) % FORWARD_QUEUE_CAPACITY;
-    _forwardQueue[index] = frame.dlFrame;
-    ++_forwardQueueCount;
-    return util::Result<void>::ok();
 }
 
 util::Result<void> NetworkLayer::init(const IndividualAddress& ownAddress) {
@@ -81,35 +63,14 @@ void NetworkLayer::close() {
         _rxCallback.store(nullptr, std::memory_order_release);
 
         finishTxOperation();
-        finishForwardOperation();
-        _forwardQueueHead = 0u;
-        _forwardQueueCount = 0u;
         _initialized = false;
     }
-}
-
-void NetworkLayer::setNetworkMode(NetworkMode mode) {
-    _mode = mode;
-    
-    // Enable routing for coupler modes
-    if (mode == NetworkMode::LineCoupler || mode == NetworkMode::AreaCoupler) {
-        _routingEnabled = true;
-    } else {
-        _routingEnabled = false;
-    }
-    
-    KNX_LOGI(TAG, "Network mode set to: %s",
-             mode == NetworkMode::Device ? "Device" :
-             mode == NetworkMode::LineCoupler ? "LineCoupler" : "AreaCoupler");
 }
 
 util::Result<void> NetworkLayer::sendFrame(const NDataFrame& frame) {
     if (!_initialized) {
         KNX_LOGE(TAG, "Not initialized");
         return util::ErrorCode::NotInitialized;
-    }
-    if (_forwardOperation.active) {
-        return util::ErrorCode::Busy;
     }
     
     // Check hop count
@@ -130,9 +91,6 @@ util::Result<void> NetworkLayer::beginTransmit(const NDataFrame& frame) {
     if (!_initialized) {
         KNX_LOGE(TAG, "Not initialized");
         return util::ErrorCode::NotInitialized;
-    }
-    if (_forwardOperation.active) {
-        return util::ErrorCode::Busy;
     }
     if (_txOperation.active) {
         return util::ErrorCode::Busy;
@@ -200,80 +158,6 @@ util::Result<NetworkLayer::TxProgressState> NetworkLayer::pollTransmit() {
     return util::ErrorCode::OperationFailed;
 }
 
-util::Result<NetworkLayer::ForwardProgressState> NetworkLayer::pollForwarding() {
-    if (!_initialized) {
-        return util::ErrorCode::NotInitialized;
-    }
-
-    if (_txOperation.active) {
-        return hasPendingForwarding() ? ForwardProgressState::Pending
-                                      : ForwardProgressState::Idle;
-    }
-
-    if (_forwardOperation.active) {
-        if (!_forwardOperation.started) {
-            auto beginResult = _datalink.beginTransmit(_forwardOperation.dlFrame);
-            if (beginResult.isError()) {
-                if (beginResult.error() == util::ErrorCode::Busy) {
-                    return ForwardProgressState::Pending;
-                }
-
-                const auto error = beginResult.error();
-                KNX_LOGW(TAG, "Deferred forwarding begin failed: %s",
-                         util::errorCodeToString(error));
-                finishForwardOperation();
-                if (error == util::ErrorCode::Timeout) {
-                    return ForwardProgressState::Timeout;
-                }
-                return ForwardProgressState::TransmissionFailed;
-            }
-
-            _forwardOperation.started = true;
-            return ForwardProgressState::Pending;
-        }
-
-        auto progress = _datalink.pollTransmit();
-        if (progress.isError()) {
-            const auto error = progress.error();
-            KNX_LOGW(TAG, "Deferred forwarding failed: %s",
-                     util::errorCodeToString(error));
-            finishForwardOperation();
-            return error;
-        }
-
-        switch (progress.value()) {
-            case datalink::Tp1DataLinkLayer::TxProgressState::Pending:
-                return ForwardProgressState::Pending;
-            case datalink::Tp1DataLinkLayer::TxProgressState::Success:
-                finishForwardOperation();
-                return ForwardProgressState::Success;
-            case datalink::Tp1DataLinkLayer::TxProgressState::Busy:
-                finishForwardOperation();
-                return ForwardProgressState::Busy;
-            case datalink::Tp1DataLinkLayer::TxProgressState::TransmissionFailed:
-                finishForwardOperation();
-                return ForwardProgressState::TransmissionFailed;
-            case datalink::Tp1DataLinkLayer::TxProgressState::Timeout:
-                finishForwardOperation();
-                return ForwardProgressState::Timeout;
-        }
-
-        finishForwardOperation();
-        return util::ErrorCode::OperationFailed;
-    }
-
-    if (_forwardQueueCount == 0u) {
-        return ForwardProgressState::Idle;
-    }
-
-    _forwardOperation.active = true;
-    _forwardOperation.started = false;
-    _forwardOperation.dlFrame = std::move(_forwardQueue[_forwardQueueHead]);
-    _forwardQueueHead = (_forwardQueueHead + 1u) % FORWARD_QUEUE_CAPACITY;
-    --_forwardQueueCount;
-    return pollForwarding();
-}
-
 void NetworkLayer::setReceiveCallback(NDataCallback callback) {
     if (callback) {
         _rxCallbackStorage = std::move(callback);
@@ -309,27 +193,6 @@ void NetworkLayer::handleDlRx(const datalink::LDataFrame& frame) {
         return;
     }
     
-    // Check if frame should be forwarded (for coupler modes)
-    bool shouldForward = false;
-    if (_routingEnabled) {
-        shouldForward = shouldForwardFrame(frame, nFrame.hopCount);
-        
-        // Decrement hop count for forwarding
-        if (shouldForward && nFrame.hopCount > 0) {
-            nFrame.hopCount--;
-            
-            // Forward the frame outside the receive callback context.
-            if (nFrame.hopCount > 0) {
-                NDataFrame fwdFrame = nFrame;
-                auto enqueueResult = enqueueForwardFrame(fwdFrame);
-                if (enqueueResult.isError()) {
-                    KNX_LOGW(TAG, "Dropping forwarded frame: %s",
-                             util::errorCodeToString(enqueueResult.error()));
-                }
-            }
-        }
-    }
-    
     // Always deliver to local application if addressed to us or broadcast
     bool forLocalDelivery = false;
     if (isGroupAddress(frame.destinationType)) {
@@ -346,34 +209,6 @@ void NetworkLayer::handleDlRx(const datalink::LDataFrame& frame) {
         if (cb) {
             (*cb)(nFrame);
         }
-    }
-}
-
-bool NetworkLayer::shouldForwardFrame(const datalink::LDataFrame& frame, uint8_t hopCount) {
-    // Don't forward if hop count exhausted
-    if (hopCount == 0) {
-        return false;
-    }
-    
-    // Get routing decision from routing table
-    RoutingDecision decision = _routingTable.route(
-        frame.source,
-        frame.destination,
-        frame.destinationType,
-        hopCount,
-        _ownAddress
-    );
-    
-    // Forward based on decision
-    switch (decision) {
-        case RoutingDecision::Forward:
-        case RoutingDecision::ForwardLocal:
-            return true;
-            
-        case RoutingDecision::Block:
-        case RoutingDecision::Drop:
-        default:
-            return false;
     }
 }
 

@@ -17,6 +17,7 @@
 #include "unity.h"
 #include "knx/types.hpp"
 #include "knx/objects/device_object.hpp"
+#include "knx/objects/interface_object_manager.hpp"
 #include "knx/application/application_layer.hpp"
 #include "knx/application/apci_services.hpp"
 #include "knx/application/memory_service.hpp"
@@ -24,9 +25,12 @@
 #include "knx/application/device_descriptor_service.hpp"
 #include "knx/application/device_descriptor.hpp"
 
+#include <algorithm>
 #include <array>
 #include <vector>
 #include <memory>
+#include <optional>
+#include <span>
 
 using namespace knx;
 using namespace knx::application;
@@ -410,36 +414,91 @@ void test_memory_write_verification(void) {
 // Per KNX Spec 03/06/03 Section 3.9
 // ============================
 
+namespace {
+
+/// Property services answered by a live Device Object at index 0, wired the
+/// way the BAU wires them to its InterfaceObjectManager.
+struct DeviceObjectBackend {
+    InterfaceObjectManager manager;
+    PropertyServices services;
+
+    DeviceObjectBackend() {
+        TEST_ASSERT_TRUE(manager.init(false).isOk());
+
+        services.setReadProvider(
+            [this](const IndividualAddress&, const PropertyValueReadRequest& request, std::span<uint8_t> out)
+                -> std::optional<knx::util::Result<size_t>> {
+                if (request.objectIndex.value() != 0) {
+                    return std::nullopt;
+                }
+                PropertyServiceDataBuffer data;
+                if (manager.readProperty(InterfaceObjectType::device(), InterfaceObjectInstance(1),
+                                         request.propertyId, request.startIndex, request.elementCount,
+                                         data) != PropertyAccessResult::Success) {
+                    return std::nullopt;
+                }
+                std::copy(data.begin(), data.end(), out.begin());
+                return knx::util::Result<size_t>(data.size());
+            });
+
+        services.setWriteProvider(
+            [this](const IndividualAddress&, const PropertyValueWriteRequest& request) {
+                if (request.objectIndex.value() != 0
+                        || manager.writeProperty(InterfaceObjectType::device(), InterfaceObjectInstance(1),
+                                                 request.propertyId, request.startIndex,
+                                                 request.data.span()) != PropertyAccessResult::Success) {
+                    return knx::util::Result<void>::err(knx::util::ErrorCode::OperationNotSupported);
+                }
+                return knx::util::Result<void>::ok();
+            });
+
+        services.setDescriptionProvider(
+            [this](const IndividualAddress&, InterfaceObjectIndex objectIndex, PropertyID propertyId,
+                   PropertyIndex propertyIndex) -> std::optional<PropertyDescriptionInfo> {
+                if (objectIndex.value() != 0) {
+                    return std::nullopt;
+                }
+                PropertyDescriptionInfo info;
+                uint8_t access = 0;
+                if (manager.describeProperty(InterfaceObjectType::device(), InterfaceObjectInstance(1),
+                                             propertyId, propertyIndex, info.propertyId, info.type,
+                                             info.maxElements, access, info.readLevel,
+                                             info.writeLevel) != PropertyAccessResult::Success) {
+                    return std::nullopt;
+                }
+                info.objectIndex = objectIndex;
+                info.propertyIndex = propertyIndex;
+                info.writeAccess = (access & 0x02) != 0 ? PropertyWriteAccess::Allowed
+                                                        : PropertyWriteAccess::Denied;
+                return info;
+            });
+    }
+};
+
+} // namespace
+
 void test_property_value_read_manufacturer_id(void) {
     // Test reading standard property: Manufacturer ID (PID 12)
     // All devices must implement this
-    
-    PropertyStoreManager storeMgr;
-    auto* deviceStore = storeMgr.addObject(InterfaceObjectType::device(), InterfaceObjectIndex(0));  // Device object
-    TEST_ASSERT_NOT_NULL(deviceStore);
-    
+
+    DeviceObjectBackend backend;
     uint16_t manufacturerId = 0x1234;
-    PropertyDescriptor desc{PropertyID::ManufacturerId, PropertyDataType::UnsignedInt, PropertyAccess::ReadOnly, 1, 0, 0};
-    PropertyValue value = PropertyValue::create(PropertyID::ManufacturerId, PropertyDataType::UnsignedInt, 
-                                                std::to_array<uint8_t>({static_cast<uint8_t>(manufacturerId >> 8), static_cast<uint8_t>(manufacturerId & 0xFF)}));
-    TEST_ASSERT_TRUE(deviceStore->registerProperty(desc, value).isOk());
-    
-    PropertyServices propServices(storeMgr);
-    
+    backend.manager.deviceObject().setManufacturerId(ManufacturerId(manufacturerId));
+
     PropertyValueResponse response;
-    propServices.setValueResponseCallback([&](const IndividualAddress& dest, const PropertyValueResponse& resp) {
+    backend.services.setValueResponseCallback([&](const IndividualAddress& dest, const PropertyValueResponse& resp) {
         response = resp;
     });
-    
+
     PropertyValueReadRequest request;
     request.objectIndex = InterfaceObjectIndex(0);
     request.propertyId = PropertyID::ManufacturerId;
     request.elementCount = 1;
     request.startIndex = 1;  // 1-based indexing per KNX spec
-    
+
     IndividualAddress source(1, 1, 1);
-    auto result = propServices.handleValueRead(source, request);
-    
+    auto result = backend.services.handleValueRead(source, request);
+
     TEST_ASSERT_TRUE(result.isOk());
     TEST_ASSERT_EQUAL(2, response.data.size());
     TEST_ASSERT_EQUAL(manufacturerId >> 8, response.data[0]);
@@ -447,34 +506,25 @@ void test_property_value_read_manufacturer_id(void) {
 }
 
 void test_property_value_read_device_control(void) {
-    // Test reading Device Control property (PID 5)
+    // Test reading Device Control property (PID 14)
     // Contains programming mode state and other control flags
-    
-    PropertyStoreManager storeMgr;
-    auto* deviceStore = storeMgr.addObject(InterfaceObjectType::device(), InterfaceObjectIndex(0));
-    TEST_ASSERT_NOT_NULL(deviceStore);
-    
-    uint8_t deviceControl = 0x00;  // Bit 0 = prog mode
-    PropertyDescriptor desc{PropertyID::LoadStateControl, PropertyDataType::Control, PropertyAccess::ReadWrite, 1, 0, 0};
-    PropertyValue value = PropertyValue::create(PropertyID::LoadStateControl, PropertyDataType::Control, std::to_array<uint8_t>({deviceControl}));
-    TEST_ASSERT_TRUE(deviceStore->registerProperty(desc, value).isOk());
-    
-    PropertyServices propServices(storeMgr);
-    
+
+    DeviceObjectBackend backend;
+
     PropertyValueResponse response;
-    propServices.setValueResponseCallback([&](const IndividualAddress& dest, const PropertyValueResponse& resp) {
+    backend.services.setValueResponseCallback([&](const IndividualAddress& dest, const PropertyValueResponse& resp) {
         response = resp;
     });
-    
+
     PropertyValueReadRequest request;
     request.objectIndex = InterfaceObjectIndex(0);
-    request.propertyId = PropertyID::LoadStateControl;
+    request.propertyId = static_cast<PropertyID>(DeviceProperty::DeviceControl);
     request.elementCount = 1;
     request.startIndex = 1;  // 1-based indexing per KNX spec
-    
+
     IndividualAddress source(1, 1, 1);
-    auto result = propServices.handleValueRead(source, request);
-    
+    auto result = backend.services.handleValueRead(source, request);
+
     TEST_ASSERT_TRUE(result.isOk());
     TEST_ASSERT_EQUAL(1, response.data.size());
 }
@@ -482,56 +532,38 @@ void test_property_value_read_device_control(void) {
 void test_property_value_write_programming_mode(void) {
     // Test setting programming mode via property write
     // Alternative to physical button
-    
-    PropertyStoreManager storeMgr;
-    auto* deviceStore = storeMgr.addObject(InterfaceObjectType::device(), InterfaceObjectIndex(0));
-    TEST_ASSERT_NOT_NULL(deviceStore);
-    
-    PropertyDescriptor desc{PropertyID::ProgMode, PropertyDataType::Bitset8, PropertyAccess::ReadWrite, 1, 0, 0};
-    PropertyValue value = PropertyValue::create(PropertyID::ProgMode, PropertyDataType::Bitset8, std::to_array<uint8_t>({0x00}));
-    TEST_ASSERT_TRUE(deviceStore->registerProperty(desc, value).isOk());
-    
-    PropertyServices propServices(storeMgr);
-    
+
+    DeviceObjectBackend backend;
+    TEST_ASSERT_FALSE(backend.manager.deviceObject().isProgrammingMode());
+
     PropertyValueWriteRequest request;
     request.objectIndex = InterfaceObjectIndex(0);
     request.propertyId = PropertyID::ProgMode;
     request.elementCount = 1;
     request.startIndex = 1;  // 1-based indexing per KNX spec
     request.data = {0x01};  // Enable programming mode
-    
+
     IndividualAddress source(1, 1, 1);
-    auto result = propServices.handleValueWrite(source, request);
-    
+    auto result = backend.services.handleValueWrite(source, request);
+
     TEST_ASSERT_TRUE(result.isOk());
-    
+
     // Verify value was written
-    std::vector<uint8_t> readData(1);
-    auto readRes = deviceStore->readProperty(PropertyID::ProgMode, 1, 1, readData);  // 1-based indexing
-    TEST_ASSERT_TRUE(readRes.isOk());
-    TEST_ASSERT_EQUAL(1, readRes.value());
-    TEST_ASSERT_EQUAL(0x01, readData[0]);
+    TEST_ASSERT_TRUE(backend.manager.deviceObject().isProgrammingMode());
 }
 
 void test_property_description_read(void) {
     // Test A_PropertyDescription_Read service
     // Returns property metadata: type, max elements, access rights
-    
-    PropertyStoreManager storeMgr;
-    auto* deviceStore = storeMgr.addObject(InterfaceObjectType::device(), InterfaceObjectIndex(0));
-    TEST_ASSERT_NOT_NULL(deviceStore);
-    
-    PropertyDescriptor desc{PropertyID::ManufacturerId, PropertyDataType::UnsignedInt, PropertyAccess::ReadOnly, 1, 0, 0};
-    PropertyValue value = PropertyValue::create(PropertyID::ManufacturerId, PropertyDataType::UnsignedInt, std::to_array<uint8_t>({0x12, 0x34}));
-    TEST_ASSERT_TRUE(deviceStore->registerProperty(desc, value).isOk());
-    
-    PropertyServices propServices(storeMgr);
-    
+
+    DeviceObjectBackend backend;
+
     bool callbackCalled = false;
     PropertyDataType receivedType = PropertyDataType::Control;
     uint16_t receivedMaxElements = 0;
-    
-    propServices.setDescriptionResponseCallback([&](
+    knx::PropertyWriteAccess receivedWriteAccess = knx::PropertyWriteAccess::Allowed;
+
+    backend.services.setDescriptionResponseCallback([&](
         const IndividualAddress& dest,
         InterfaceObjectIndex objectIndex,
         PropertyID propertyId,
@@ -546,87 +578,77 @@ void test_property_description_read(void) {
         (void)objectIndex;
         (void)propertyId;
         (void)propertyIndex;
-        (void)writeAccess;
         (void)readLevel;
         (void)writeLevel;
         callbackCalled = true;
         receivedType = type;
         receivedMaxElements = maxElements;
+        receivedWriteAccess = writeAccess;
     });
-    
+
     IndividualAddress source(1, 1, 1);
-    auto result = propServices.handleDescriptionRead(
+    auto result = backend.services.handleDescriptionRead(
         source,
         InterfaceObjectIndex(0),  // object index
         PropertyID::ManufacturerId,
         PropertyIndex(0)   // property index
     );
-    
+
     TEST_ASSERT_TRUE(result.isOk());
     TEST_ASSERT_TRUE(callbackCalled);
     TEST_ASSERT_EQUAL(static_cast<uint8_t>(PropertyDataType::UnsignedInt), static_cast<uint8_t>(receivedType));
     TEST_ASSERT_EQUAL(1, receivedMaxElements);
+    TEST_ASSERT_TRUE(receivedWriteAccess == knx::PropertyWriteAccess::Denied);
 }
 
 void test_property_invalid_id(void) {
     // Request for non-existent property should return error
-    
-    PropertyStoreManager storeMgr;
-    auto* deviceStore = storeMgr.addObject(InterfaceObjectType::device(), InterfaceObjectIndex(0));
-    TEST_ASSERT_NOT_NULL(deviceStore);
-    
-    PropertyServices propServices(storeMgr);
-    
+
+    DeviceObjectBackend backend;
+
     bool callbackCalled = false;
-    propServices.setValueResponseCallback([&](const IndividualAddress& dest, const PropertyValueResponse& resp) {
+    PropertyValueResponse response;
+    backend.services.setValueResponseCallback([&](const IndividualAddress& dest, const PropertyValueResponse& resp) {
         callbackCalled = true;
+        response = resp;
     });
-    
+
     PropertyValueReadRequest request;
     request.objectIndex = InterfaceObjectIndex(0);
     request.propertyId = static_cast<PropertyID>(250);  // Invalid property
     request.elementCount = 1;
     request.startIndex = 1;  // 1-based indexing per KNX spec
-    
+
     IndividualAddress source(1, 1, 1);
-    auto result = propServices.handleValueRead(source, request);
-    
+    auto result = backend.services.handleValueRead(source, request);
+
     TEST_ASSERT_FALSE(result.isOk());  // Should reject invalid property
+    // ...and still answer, with no elements.
+    TEST_ASSERT_TRUE(callbackCalled);
+    TEST_ASSERT_EQUAL(0, response.elementCount);
 }
 
 void test_property_read_only_enforcement(void) {
     // Attempting to write read-only property should fail
     // E.g., Manufacturer ID is read-only
-    
-    PropertyStoreManager storeMgr;
-    auto* deviceStore = storeMgr.addObject(InterfaceObjectType::device(), InterfaceObjectIndex(0));
-    TEST_ASSERT_NOT_NULL(deviceStore);
-    
-    PropertyDescriptor desc{PropertyID::ManufacturerId, PropertyDataType::UnsignedInt, PropertyAccess::ReadOnly, 1, 0, 0};
-    PropertyValue value = PropertyValue::create(PropertyID::ManufacturerId, PropertyDataType::UnsignedInt, std::to_array<uint8_t>({0x12, 0x34}));
-    TEST_ASSERT_TRUE(deviceStore->registerProperty(desc, value).isOk());
-    
-    PropertyServices propServices(storeMgr);
-    
+
+    DeviceObjectBackend backend;
+    backend.manager.deviceObject().setManufacturerId(ManufacturerId(0x1234));
+
     PropertyValueWriteRequest request;
     request.objectIndex = InterfaceObjectIndex(0);
     request.propertyId = PropertyID::ManufacturerId;
     request.elementCount = 1;
     request.startIndex = 1;  // 1-based indexing per KNX spec
     request.data = {0x56, 0x78};  // Try to change manufacturer ID
-    
+
     IndividualAddress source(1, 1, 1);
-    auto result = propServices.handleValueWrite(source, request);
-    
+    auto result = backend.services.handleValueWrite(source, request);
+
     TEST_ASSERT_FALSE(result.isOk());  // Should reject write to read-only property
-    
+
     // Verify value unchanged
-    std::vector<uint8_t> readData(2);
-    auto readRes = deviceStore->readProperty(PropertyID::ManufacturerId, 1, 1, readData);  // 1-based indexing
-    TEST_ASSERT_TRUE(readRes.isOk());
-    TEST_ASSERT_EQUAL(2, readRes.value());
-    TEST_ASSERT_EQUAL(0x12, readData[0]);
-    TEST_ASSERT_EQUAL(0x34, readData[1]);
+    TEST_ASSERT_EQUAL(0x1234, backend.manager.deviceObject().getManufacturerId().value());
 }
 
 // ============================
@@ -994,8 +1016,6 @@ void test_ets_download_simulation(void) {
     TEST_ASSERT_TRUE(addressSpace.addRegion(region1).isOk());
     
     MemoryService memoryService(addressSpace);
-    PropertyStoreManager propertyManager;
-    PropertyServices propertyServices(propertyManager);
     
     IndividualAddress source(1, 1, 1);
     

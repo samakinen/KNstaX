@@ -21,10 +21,8 @@ namespace knx {
 namespace platform {
 
 // Forward declarations
-class Esp32Memory;
 class Esp32Network;
 class Esp32Uart;
-class Esp32Spi;
 
 /**
  * @brief ESP32 platform implementation
@@ -41,22 +39,16 @@ public:
     void macAddress(std::span<uint8_t, 6> mac) const override;
     void randomBytes(std::span<uint8_t> out) override;
     
-    // Memory
-    MemoryInterface& memory() override;
-    
     // Hardware Interfaces
     NetworkInterface* network() override;
     UartInterface* uart() override;
-    SpiInterface* spi() override;
     
     // Logging
     void log(const char* level, const char* tag, const char* format, ...) override;
     
 private:
-    std::unique_ptr<Esp32Memory> _memory;
     std::unique_ptr<Esp32Network> _network;
     std::unique_ptr<Esp32Uart> _uart;
-    std::unique_ptr<Esp32Spi> _spi;
     
     uint32_t _serialNumber;
     uint8_t _macAddress[6];

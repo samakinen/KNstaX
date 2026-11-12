@@ -176,20 +176,10 @@ util::Result<void> TransportLayer::beginTransmit(const TDataFrame& frame) {
     return util::Result<void>::ok();
 }
 
-void TransportLayer::pumpNetwork() {
-    auto progress = _network.pollForwarding();
-    if (progress.isError()) {
-        KNX_LOGW(TAG, "Background network maintenance failed: %s",
-                 util::errorCodeToString(progress.error()));
-    }
-}
-
 void TransportLayer::processBackgroundWork() {
     if (!_initialized) {
         return;
     }
-
-    pumpNetwork();
 
     // The connection timers are background maintenance like any other: without
     // a periodic tick an unacknowledged frame is never retransmitted and a
@@ -599,7 +589,6 @@ void TransportLayer::processRetransmissions(uint32_t currentTimeMs) {
         return;
     }
 
-    pumpNetwork();
     runConnectionTimers(currentTimeMs);
 }
 

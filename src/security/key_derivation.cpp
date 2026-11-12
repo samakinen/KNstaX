@@ -3,7 +3,6 @@
 
 #include "knx/security/key_derivation.hpp"
 
-#include <array>
 #include <limits>
 
 // Key derivation backend: mbedTLS PBKDF2-SHA256 only (KNX-compliant)
@@ -15,7 +14,6 @@ namespace security {
 
 namespace {
 
-constexpr uint32_t kKnxPbkdf2Iterations = 10000;
 constexpr mbedtls_md_type_t kPbkdf2DigestType = MBEDTLS_MD_SHA256;
 
 util::Result<void> pbkdf2Sha256(std::span<const uint8_t> password,
@@ -78,47 +76,6 @@ util::Result<void> KeyDerivation::pbkdf2(std::span<const uint8_t> password,
                            uint32_t iterations,
                            std::span<uint8_t> output) {
     return pbkdf2Sha256(password, salt, iterations, output);
-}
-
-util::Result<void> KeyDerivation::deriveSessionKey(const MasterKey& master_key,
-                                     const DeviceId& device_id,
-                                     Key& output_key) {
-    std::array<uint8_t, 2> salt{device_id[1], device_id[0]};
-    std::span<const uint8_t> password(master_key);
-
-    return pbkdf2(password,
-                  salt,
-                  kKnxPbkdf2Iterations,
-                  output_key);
-}
-
-util::Result<void> KeyDerivation::deriveBilateralKeys(const MasterKey& master_key,
-                                        const DeviceId& device_id,
-                                        const DeviceId& coupler_id,
-                                        Key& device_tx_key,
-                                        Key& device_rx_key) {
-    std::array<uint8_t, 4> tx_salt{device_id[1], device_id[0], coupler_id[1], coupler_id[0]};
-    std::array<uint8_t, 4> rx_salt{coupler_id[1], coupler_id[0], device_id[1], device_id[0]};
-
-    std::span<const uint8_t> password(master_key);
-
-    auto txResult = pbkdf2(password,
-                           tx_salt,
-                           kKnxPbkdf2Iterations,
-                           device_tx_key);
-    if (txResult.isError()) {
-        return txResult.error();
-    }
-
-    auto rxResult = pbkdf2(password,
-                           rx_salt,
-                           kKnxPbkdf2Iterations,
-                           device_rx_key);
-    if (rxResult.isError()) {
-        return rxResult.error();
-    }
-
-    return util::Result<void>::ok();
 }
 
 }  // namespace security

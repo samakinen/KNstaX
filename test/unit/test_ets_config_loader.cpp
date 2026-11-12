@@ -291,6 +291,31 @@ void test_LoadV1FormatWithFullValidation(void) {
     TEST_ASSERT_TRUE(loader.isValid());
 }
 
+// The file entry points the host tooling uses: what saveToFile() writes,
+// loadFromFile() reads back unchanged.
+void test_SaveToFileAndLoadFromFile(void) {
+    EtsConfigLoader original;
+    auto buffer = createSampleConfig();
+    TEST_ASSERT_TRUE(original.loadFromBuffer(std::span<const uint8_t>(buffer.data(), buffer.size())).isOk());
+    TEST_ASSERT_TRUE(original.saveToFile("/tmp/test_ets_config.bin").isOk());
+
+    EtsConfigLoader reloaded;
+    TEST_ASSERT_TRUE(reloaded.loadFromFile("/tmp/test_ets_config.bin").isOk());
+    TEST_ASSERT_TRUE(reloaded.isValid());
+    TEST_ASSERT_EQUAL_UINT16(original.deviceConfig().individualAddress.raw,
+                             reloaded.deviceConfig().individualAddress.raw);
+    TEST_ASSERT_EQUAL_UINT32(original.addressTableSize(), reloaded.addressTableSize());
+    TEST_ASSERT_EQUAL_UINT32(original.associationTableSize(), reloaded.associationTableSize());
+    TEST_ASSERT_EQUAL_UINT32(original.groupObjectCount(), reloaded.groupObjectCount());
+    TEST_ASSERT_EQUAL_INT(1, reloaded.findAsapByAddress(knx::GroupAddress(0x0102)));
+}
+
+void test_LoadFromMissingFileFails(void) {
+    EtsConfigLoader loader;
+    TEST_ASSERT_FALSE(loader.loadFromFile("/tmp/test_ets_config_does_not_exist.bin").isOk());
+    TEST_ASSERT_FALSE(loader.isValid());
+}
+
 int main(void) {
     UNITY_BEGIN();
     
@@ -309,6 +334,8 @@ int main(void) {
     RUN_TEST(test_LoadWithDiagnostics);
     RUN_TEST(test_FormatVersionDetection);
     RUN_TEST(test_LoadV1FormatWithFullValidation);
+    RUN_TEST(test_SaveToFileAndLoadFromFile);
+    RUN_TEST(test_LoadFromMissingFileFails);
     
     return UNITY_END();
 }

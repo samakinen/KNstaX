@@ -422,6 +422,13 @@ public:
             objects::InterfaceObject* object = interfaceObjects[i];
             const InterfaceObjectIndex objectIndex(static_cast<uint8_t>(i));
 
+            // The classic property services and the Access Policy answer from
+            // the interface objects through the providers below. The copy into
+            // the property store is still what the extended property services
+            // run on: moving them changes the property-index order and the
+            // Group Object Table PID_TABLE access they report, which is pending
+            // a decision (habinari-firmware docs/code-review-2026-10-fix-design.md,
+            // section 8).
             stackPort.registerPropertyObject(object->objectType(), objectIndex, [object](application::PropertyStore& store) {
                 object->registerProperties(store);
             });
@@ -454,79 +461,8 @@ public:
             });
 
         stackPort.setPropertyWriteProvider(
-            [this](const IndividualAddress& /*source*/, const application::PropertyValueWriteRequest& request) -> util::Result<void> {
-                const auto objectType = resolveObjectType(request.objectIndex);
-                if (!objectType.has_value()) {
-                    return util::Result<void>::err(util::ErrorCode::InvalidParameter);
-                }
-                const auto res = _interfaceObjectManager->writeProperty(
-                    *objectType,
-                    InterfaceObjectInstance(1),
-                    request.propertyId,
-                    request.startIndex,
-                    request.data.span());
-                if (res != objects::PropertyAccessResult::Success) {
-                    return util::Result<void>::err(util::ErrorCode::OperationNotSupported);
-                }
-                // The Security Interface Object holds the credentials for every
-                // later conversation: ETS installs its own Tool Key and the
-                // Sequence Number Sending here and then immediately restarts the
-                // device. Losing them across that restart leaves the device
-                // answering with the factory key, and ETS reports "no
-                // SyncResponse was received; probably the key did not match".
-                // The restart path flushes what is marked dirty, so marking is
-                // enough — no synchronous write in the middle of the download.
-                if (*objectType == InterfaceObjectType::security()) {
-                    markPersistenceDirty();
-                    // PID_GRP_KEY_TABLE and PID_P2P_KEY_TABLE are stored as
-                    // opaque arrays; the Secure Application Layer looks keys up
-                    // by address, so the download only takes effect once they
-                    // are resolved against the address tables. Doing it on every
-                    // write to this object keeps it correct whichever order ETS
-                    // writes the tables in.
-                    syncSecurityKeyTables();
-                }
-
-                // Persist table objects after every successful ETS write so
-                // the KNX tables survive reboot without explicit user action.
-                const bool isTableObject = (*objectType == InterfaceObjectType::addressTable())
-                    || (*objectType == InterfaceObjectType::associationTable())
-                    || (*objectType == InterfaceObjectType::groupObjectTable())
-                    || (*objectType == InterfaceObjectType::applicationProgram());
-                if (isTableObject) {
-                    // ETS SystemB streams table content into the memory-mapped
-                    // segment and signals the end with a LoadCompleted event on
-                    // PID_LOAD_STATE_CONTROL — apply the segment to the table
-                    // domain before persisting.
-                    const bool isLoadControlWrite =
-                        request.propertyId == static_cast<application::PropertyID>(5)
-                        && !request.data.empty();
-                    const bool isLoadCompleted = isLoadControlWrite
-                        && request.data.span()[0] == objects::loadstate::kEventLoadCompleted;
-                    if (isLoadCompleted) {
-                        applyLoadedTableSegment(*objectType);
-                    }
-                    // Persist only when table content can actually have changed:
-                    // a completed load or a direct table-data write. Intermediate
-                    // load-control events (unload/start/segment alloc) would
-                    // otherwise trigger a full NVS save each — flash wear and
-                    // latency in the middle of the ETS download.
-                    if (!isLoadControlWrite || isLoadCompleted) {
-                        markPersistenceDirty();
-                        // If the address table was updated, subscribe newly added
-                        // GAs to the data link layer immediately so they work
-                        // this session.
-                        if (*objectType == InterfaceObjectType::addressTable()) {
-                            if (_groupAddressSubscriber) {
-                                resubscribeGroupAddresses();
-                            }
-                            // Group keys are held against the GA_Index, so a new
-                            // address table re-points every one of them.
-                            syncSecurityKeyTables();
-                        }
-                    }
-                }
-                return util::Result<void>::ok();
+            [this](const IndividualAddress& /*source*/, const application::PropertyValueWriteRequest& request) {
+                return writeProperty(request);
             });
 
         // Memory-mapped table load segments (ETS SystemB DefaultProcedure):
@@ -604,6 +540,92 @@ public:
     }
 
 private:
+    util::Result<void> writeProperty(const application::PropertyValueWriteRequest& request) {
+        const auto objectType = resolveObjectType(request.objectIndex);
+        if (!objectType.has_value()) {
+            return util::Result<void>::err(util::ErrorCode::InvalidParameter);
+        }
+        const auto res = _interfaceObjectManager->writeProperty(
+            *objectType,
+            InterfaceObjectInstance(1),
+            request.propertyId,
+            request.startIndex,
+            request.data.span());
+        if (res != objects::PropertyAccessResult::Success) {
+            return util::Result<void>::err(util::ErrorCode::OperationNotSupported);
+        }
+        if (*objectType == InterfaceObjectType::security()) {
+            afterSecurityObjectWrite();
+        }
+        if (isTableObject(*objectType)) {
+            afterTableObjectWrite(*objectType, request);
+        }
+        return util::Result<void>::ok();
+    }
+
+    // The Security Interface Object holds the credentials for every
+    // later conversation: ETS installs its own Tool Key and the
+    // Sequence Number Sending here and then immediately restarts the
+    // device. Losing them across that restart leaves the device
+    // answering with the factory key, and ETS reports "no
+    // SyncResponse was received; probably the key did not match".
+    // The restart path flushes what is marked dirty, so marking is
+    // enough — no synchronous write in the middle of the download.
+    void afterSecurityObjectWrite() {
+        markPersistenceDirty();
+        // PID_GRP_KEY_TABLE and PID_P2P_KEY_TABLE are stored as
+        // opaque arrays; the Secure Application Layer looks keys up
+        // by address, so the download only takes effect once they
+        // are resolved against the address tables. Doing it on every
+        // write to this object keeps it correct whichever order ETS
+        // writes the tables in.
+        syncSecurityKeyTables();
+    }
+
+    static bool isTableObject(InterfaceObjectType objectType) {
+        return objectType == InterfaceObjectType::addressTable()
+            || objectType == InterfaceObjectType::associationTable()
+            || objectType == InterfaceObjectType::groupObjectTable()
+            || objectType == InterfaceObjectType::applicationProgram();
+    }
+
+    // Persist table objects after every successful ETS write so
+    // the KNX tables survive reboot without explicit user action.
+    void afterTableObjectWrite(InterfaceObjectType objectType,
+                               const application::PropertyValueWriteRequest& request) {
+        // ETS SystemB streams table content into the memory-mapped
+        // segment and signals the end with a LoadCompleted event on
+        // PID_LOAD_STATE_CONTROL — apply the segment to the table
+        // domain before persisting.
+        const bool isLoadControlWrite =
+            request.propertyId == static_cast<application::PropertyID>(5)
+            && !request.data.empty();
+        const bool isLoadCompleted = isLoadControlWrite
+            && request.data.span()[0] == objects::loadstate::kEventLoadCompleted;
+        if (isLoadCompleted) {
+            applyLoadedTableSegment(objectType);
+        }
+        // Persist only when table content can actually have changed:
+        // a completed load or a direct table-data write. Intermediate
+        // load-control events (unload/start/segment alloc) would
+        // otherwise trigger a full NVS save each — flash wear and
+        // latency in the middle of the ETS download.
+        if (!isLoadControlWrite || isLoadCompleted) {
+            markPersistenceDirty();
+            // If the address table was updated, subscribe newly added
+            // GAs to the data link layer immediately so they work
+            // this session.
+            if (objectType == InterfaceObjectType::addressTable()) {
+                if (_groupAddressSubscriber) {
+                    resubscribeGroupAddresses();
+                }
+                // Group keys are held against the GA_Index, so a new
+                // address table re-points every one of them.
+                syncSecurityKeyTables();
+            }
+        }
+    }
+
     std::optional<InterfaceObjectType> resolveObjectType(InterfaceObjectIndex objectIndex) const {
         if (objectIndex.value() >= _indexToTypeMap.size()) {
             return std::nullopt;

@@ -196,6 +196,39 @@ void test_module_level_clear_all() {
     TEST_ASSERT_EQUAL(0, capturedLogs.size());
 }
 
+// A level resolved once is cached per tag; later changes must still apply,
+// including after more tags have been seen than the cache holds.
+void test_module_level_changes_after_cache_fills() {
+    static const char* const kTags[] = {"T0", "T1", "T2", "T3", "T4", "T5",
+                                        "T6", "T7", "T8", "T9", "T10", "T11"};
+    log::setLevel(log::Level::Error);
+    log::setModuleLevel("T0", log::Level::Debug);
+    for (const char* tag : kTags) {
+        KNX_LOGD(tag, "fill");
+    }
+    TEST_ASSERT_EQUAL(1, capturedLogs.size());
+
+    capturedLogs.clear();
+    log::setModuleLevel("T5", log::Level::Debug);   // T5 was cached as "no override"
+    log::setModuleLevel("T0", log::Level::Error);   // T0 was cached as Debug
+    KNX_LOGD(kTags[5], "now enabled");
+    KNX_LOGD(kTags[0], "now disabled");
+    TEST_ASSERT_EQUAL(1, capturedLogs.size());
+    TEST_ASSERT_EQUAL_STRING("T5", capturedLogs[0].tag.c_str());
+
+    capturedLogs.clear();
+    log::setLevel(log::Level::Debug);               // global change, no module-level call
+    KNX_LOGD(kTags[7], "global applies to a cached tag");
+    TEST_ASSERT_EQUAL(1, capturedLogs.size());
+    TEST_ASSERT_EQUAL(log::Level::Error, log::getModuleLevel(kTags[0]));
+
+    log::clearModuleLevel("T5");
+    log::setLevel(log::Level::Error);
+    capturedLogs.clear();
+    KNX_LOGD(kTags[5], "override cleared");
+    TEST_ASSERT_EQUAL(0, capturedLogs.size());
+}
+
 // ============================================================================
 // Log Tag and Message Tests
 // ============================================================================
@@ -272,6 +305,7 @@ int main(int argc, char** argv) {
     RUN_TEST(test_module_level_get);
     RUN_TEST(test_module_level_clear);
     RUN_TEST(test_module_level_clear_all);
+    RUN_TEST(test_module_level_changes_after_cache_fills);
     
     // Tag and message tests
     RUN_TEST(test_log_captures_tag);

@@ -153,67 +153,6 @@ void test_serial_write_rejects_invalid_address(void) {
     TEST_ASSERT_EQUAL(0, g_captured.addressWrites);
 }
 
-// --- Codecs ----------------------------------------------------------------
-
-void test_serial_read_codec_round_trip(void) {
-    std::vector<uint8_t> apdu(16);
-    const auto encoded = NetworkParameterService::encodeSerialNumberRead(kOurSerial, apdu);
-    TEST_ASSERT_TRUE(encoded.isOk());
-    apdu.resize(encoded.value());
-
-    const auto decoded = NetworkParameterService::decodeSerialNumberRead(apdu);
-    TEST_ASSERT_TRUE(decoded.isOk());
-    for (size_t i = 0; i < kKnxSerialNumberBytes; ++i) {
-        TEST_ASSERT_EQUAL_UINT8(kOurSerial[i], decoded.value()[i]);
-    }
-}
-
-void test_serial_write_codec_round_trip(void) {
-    std::vector<uint8_t> apdu(24);
-    const auto encoded = NetworkParameterService::encodeSerialNumberWrite(
-        kOurSerial, IndividualAddress(1, 1, 5), apdu);
-    TEST_ASSERT_TRUE(encoded.isOk());
-    // header(2) + serial(6) + address(2) + reserved(4)
-    TEST_ASSERT_EQUAL(14u, encoded.value());
-    apdu.resize(encoded.value());
-
-    const auto decoded = NetworkParameterService::decodeSerialNumberWrite(apdu);
-    TEST_ASSERT_TRUE(decoded.isOk());
-    for (size_t i = 0; i < kKnxSerialNumberBytes; ++i) {
-        TEST_ASSERT_EQUAL_UINT8(kOurSerial[i], decoded.value().serialNumber[i]);
-    }
-    TEST_ASSERT_EQUAL(IndividualAddress(1, 1, 5).raw, decoded.value().newAddress.raw);
-}
-
-void test_serial_write_decodes_without_reserved_octets(void) {
-    // Some tools omit the 4 reserved octets.  The payload is unambiguous
-    // without them, so rejecting it would break interop for no benefit.
-    std::vector<uint8_t> apdu(24);
-    const auto encoded = NetworkParameterService::encodeSerialNumberWrite(
-        kOurSerial, IndividualAddress(1, 1, 5), apdu);
-    TEST_ASSERT_TRUE(encoded.isOk());
-    apdu.resize(encoded.value() - 4);  // drop the reserved tail
-
-    const auto decoded = NetworkParameterService::decodeSerialNumberWrite(apdu);
-    TEST_ASSERT_TRUE(decoded.isOk());
-    TEST_ASSERT_EQUAL(IndividualAddress(1, 1, 5).raw, decoded.value().newAddress.raw);
-}
-
-void test_serial_response_carries_domain_address(void) {
-    std::vector<uint8_t> apdu(24);
-    const auto encoded =
-        NetworkParameterService::encodeSerialNumberResponse(kOurSerial, 0x1234, apdu);
-    TEST_ASSERT_TRUE(encoded.isOk());
-    // header(2) + serial(6) + domain(2) + reserved(2)
-    TEST_ASSERT_EQUAL(12u, encoded.value());
-
-    const auto header = knx::protocol::unpackTpduHeader(apdu[0], apdu[1]);
-    TEST_ASSERT_EQUAL(static_cast<int>(APCIService::IndividualAddressSerialNumberResponse),
-                      static_cast<int>(header.apci.service()));
-    TEST_ASSERT_EQUAL(0x12, apdu[8]);
-    TEST_ASSERT_EQUAL(0x34, apdu[9]);
-}
-
 // --- Network parameter -----------------------------------------------------
 
 void test_network_parameter_read_stays_silent_when_unsupported(void) {
@@ -272,22 +211,6 @@ void test_network_parameter_handler_error_is_silence_not_failure(void) {
     NetworkParameterRequest request{};
     TEST_ASSERT_TRUE(service.handleNetworkParameterRead(request).isOk());
     TEST_ASSERT_EQUAL(0, g_captured.parameterResponses);
-}
-
-void test_network_parameter_codec_round_trip(void) {
-    std::vector<uint8_t> apdu(24);
-    const uint8_t value[] = {0xDE, 0xAD};
-    const auto encoded = NetworkParameterService::encodeNetworkParameterResponse(
-        InterfaceObjectType::device(), static_cast<PropertyID>(12), value, apdu);
-    TEST_ASSERT_TRUE(encoded.isOk());
-    apdu.resize(encoded.value());
-
-    const auto decoded = NetworkParameterService::decodeNetworkParameter(apdu);
-    TEST_ASSERT_TRUE(decoded.isOk());
-    TEST_ASSERT_EQUAL(InterfaceObjectType::device().value(), decoded.value().objectType.value());
-    TEST_ASSERT_EQUAL(12u, static_cast<uint8_t>(decoded.value().propertyId));
-    TEST_ASSERT_EQUAL(2u, decoded.value().value.size());
-    TEST_ASSERT_EQUAL(0xDE, decoded.value().value[0]);
 }
 
 
@@ -402,13 +325,8 @@ int main(void) {
     RUN_TEST(test_serial_write_applies_address_for_own_serial);
     RUN_TEST(test_serial_write_ignores_other_serial);
     RUN_TEST(test_serial_write_rejects_invalid_address);
-    RUN_TEST(test_serial_read_codec_round_trip);
-    RUN_TEST(test_serial_write_codec_round_trip);
-    RUN_TEST(test_serial_write_decodes_without_reserved_octets);
-    RUN_TEST(test_serial_response_carries_domain_address);
     RUN_TEST(test_network_parameter_read_stays_silent_when_unsupported);
     RUN_TEST(test_network_parameter_read_answers_when_supported);
     RUN_TEST(test_network_parameter_handler_error_is_silence_not_failure);
-    RUN_TEST(test_network_parameter_codec_round_trip);
     return UNITY_END();
 }

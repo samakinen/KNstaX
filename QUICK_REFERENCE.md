@@ -93,11 +93,9 @@ Most-adjusted values, with defaults:
 | Option | Default | Notes |
 |---|---|---|
 | `KNX_MAX_GROUP_OBJECT_PAYLOAD_BYTES` | 16 | Costs ~2× per object; 16 covers every catalogued DPT |
-| `KNX_TASK_STACK_SIZE` / `_PRIORITY` | 4096 / 5 | Main processing task |
-| `KNX_RX_TASK_STACK_SIZE` / `_PRIORITY` | 3072 / 10 | Frame reception; keep it high |
+| `KNX_RX_TASK_STACK_SIZE` | 3072 | Frame reception task |
 | `KNX_ENABLE_SECURITY` | n | KNX Secure components |
-| `KNX_DEBUG_ENABLED` | n | Verbose frame-level logging switch |
-| `KNX_LOG_LEVEL` | 3 | Compile-time ceiling, 0=None … 5=Verbose; independent of debug |
+| `KNX_LOG_LEVEL` | 3 | Compile-time ceiling, 0=None … 5=Verbose |
 
 `KNX_MAX_GROUP_OBJECTS`, `KNX_MAX_ASSOCIATIONS` and
 `KNX_MAX_ADDRESS_TABLE_ENTRIES` appear in menuconfig but **are not read by any

@@ -45,7 +45,6 @@
 #include "knx/platform/memory_interface.hpp"
 #include "knx/platform/network_interface.hpp"
 #include "knx/platform/uart_interface.hpp"
-#include "knx/platform/spi_interface.hpp"
 
 // Commissioned endpoint product surface — the primary firmware authoring API.
 // Pulls in endpoint definition, bindings, runtime, policies, semantics, and

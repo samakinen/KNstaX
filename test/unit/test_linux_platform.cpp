@@ -1,313 +1,383 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2025-2026 Sami Mäkinen
 
-#include <gtest/gtest.h>
+/**
+ * @file test_linux_platform.cpp
+ * @brief LinuxPlatform: file-backed EEPROM, timing, tasks and the
+ *        synchronisation primitives, plus UartConfig validation
+ *
+ * Nothing here needs hardware. The UART itself is not exercised: LinuxUart
+ * opens whichever serial device the host happens to have, so its behaviour is
+ * not something a host test can pin down.
+ */
+
+#include "unity.h"
+
 #include "knx/platform/linux_platform.hpp"
-#include <fstream>
+#include "knx/platform/memory_interface.hpp"
+#include "knx/platform/network_interface.hpp"
+#include "knx/platform/uart_interface.hpp"
+
+#include <array>
+#include <atomic>
+#include <cstdint>
 #include <cstdio>
 #include <span>
 
 using namespace knx::platform;
 
-/**
- * Test suite for Linux platform with file-backed EEPROM
- */
-class LinuxPlatformTest : public ::testing::Test {
-protected:
-    void SetUp() override {
-        // Clean up any leftover EEPROM file before each test
-        std::remove("/tmp/knx_eeprom.bin");
-    }
-    
-    void TearDown() override {
-        // Clean up after each test
-        std::remove("/tmp/knx_eeprom.bin");
-    }
-};
+namespace {
 
-TEST_F(LinuxPlatformTest, PlatformInitialization) {
+// LinuxMemory persists here; nothing else in the test suite uses it.
+constexpr const char* kEepromFile = "/tmp/knx_eeprom.bin";
+
+} // namespace
+
+void setUp(void)
+{
+    std::remove(kEepromFile);
+}
+
+void tearDown(void)
+{
+    std::remove(kEepromFile);
+}
+
+// ============================================================================
+// System information
+// ============================================================================
+
+void test_serial_and_mac_are_set(void)
+{
     LinuxPlatform platform;
-    
-    // Verify basic properties
-    EXPECT_NE(platform.uniqueSerialNumber(), 0);
-    
-    uint8_t mac[6];
+
+    TEST_ASSERT_NOT_EQUAL(0u, platform.uniqueSerialNumber());
+
+    std::array<uint8_t, 6> mac{};
     platform.macAddress(mac);
-    EXPECT_EQ(mac[0], 0x02);  // Locally administered
-}
-
-TEST_F(LinuxPlatformTest, MemoryRead) {
-    LinuxPlatform platform;
-    auto& memory = platform.memory();
-    
-    // Write some data
-    uint8_t writeData[] = {0x01, 0x02, 0x03, 0x04};
-    ASSERT_TRUE(memory.write(0, std::span<const uint8_t>(writeData, sizeof(writeData))));
-    
-    // Read it back
-    uint8_t readData[sizeof(writeData)];
-    ASSERT_TRUE(memory.read(0, std::span<uint8_t>(readData, sizeof(readData))));
-    
-    for (size_t i = 0; i < sizeof(writeData); ++i) {
-        EXPECT_EQ(readData[i], writeData[i]);
+    bool allZero = true;
+    for (uint8_t b : mac) {
+        allZero = allZero && (b == 0u);
     }
+    TEST_ASSERT_FALSE(allZero);
 }
 
-TEST_F(LinuxPlatformTest, MemoryWrite) {
+void test_random_bytes_fill_the_buffer(void)
+{
     LinuxPlatform platform;
-    auto& memory = platform.memory();
-    
-    uint8_t data[] = {0xAA, 0xBB, 0xCC, 0xDD};
-    ASSERT_TRUE(memory.write(100, std::span<const uint8_t>(data, sizeof(data))));
+
+    std::array<uint8_t, 32> a{};
+    std::array<uint8_t, 32> b{};
+    platform.randomBytes(a);
+    platform.randomBytes(b);
+    TEST_ASSERT_FALSE(a == b);
 }
 
-TEST_F(LinuxPlatformTest, MemoryErase) {
+// ============================================================================
+// File-backed EEPROM
+// ============================================================================
+
+void test_memory_write_then_read(void)
+{
     LinuxPlatform platform;
-    auto& memory = platform.memory();
-    
-    uint8_t writeData[] = {0xFF, 0xFF, 0xFF, 0xFF};
-    memory.write(50, std::span<const uint8_t>(writeData, sizeof(writeData)));
+    MemoryInterface& memory = platform.memory();
+    TEST_ASSERT_TRUE(memory.init().isOk());
 
-    uint8_t readData[sizeof(writeData)];
-    memory.read(50, std::span<uint8_t>(readData, sizeof(readData)));
-    
-    for (size_t i = 0; i < sizeof(writeData); ++i) {
-        EXPECT_EQ(readData[i], 0xFF);
-    }
-    
-    // Erase the region
-    ASSERT_TRUE(memory.erase(50, sizeof(writeData)).isOk());
-    
-    // Verify erasure
-    memory.read(50, std::span<uint8_t>(readData, sizeof(readData)));
-    for (size_t i = 0; i < sizeof(writeData); ++i) {
-        EXPECT_EQ(readData[i], 0x00);
-    }
+    const uint8_t data[] = {0x01, 0x02, 0x03, 0x04};
+    TEST_ASSERT_EQUAL_UINT32(sizeof(data), memory.write(100, std::span<const uint8_t>(data)));
+
+    uint8_t readBack[sizeof(data)] = {};
+    TEST_ASSERT_EQUAL_UINT32(sizeof(data), memory.read(100, std::span<uint8_t>(readBack)));
+    TEST_ASSERT_EQUAL_MEMORY(data, readBack, sizeof(data));
 }
 
-TEST_F(LinuxPlatformTest, MemoryCommit) {
+void test_memory_fill_and_erase(void)
+{
+    LinuxPlatform platform;
+    MemoryInterface& memory = platform.memory();
+    TEST_ASSERT_TRUE(memory.init().isOk());
+
+    TEST_ASSERT_EQUAL_UINT32(4u, memory.write(50, 0xFF, 4));
+    uint8_t readBack[4] = {};
+    memory.read(50, std::span<uint8_t>(readBack));
+    const uint8_t ones[4] = {0xFF, 0xFF, 0xFF, 0xFF};
+    TEST_ASSERT_EQUAL_MEMORY(ones, readBack, sizeof(ones));
+
+    TEST_ASSERT_TRUE(memory.erase(50, 4).isOk());
+    memory.read(50, std::span<uint8_t>(readBack));
+    const uint8_t zeros[4] = {};
+    TEST_ASSERT_EQUAL_MEMORY(zeros, readBack, sizeof(zeros));
+}
+
+void test_memory_clamps_at_the_end(void)
+{
+    LinuxPlatform platform;
+    MemoryInterface& memory = platform.memory();
+    TEST_ASSERT_TRUE(memory.init().isOk());
+
+    const auto size = static_cast<uint32_t>(memory.size());
+    uint8_t buf[10] = {};
+
+    // A transfer that runs past the end is cut short; one that starts past
+    // it does nothing.
+    TEST_ASSERT_EQUAL_UINT32(5u, memory.read(size - 5u, std::span<uint8_t>(buf)));
+    TEST_ASSERT_EQUAL_UINT32(5u, memory.write(size - 5u, std::span<const uint8_t>(buf)));
+    TEST_ASSERT_EQUAL_UINT32(0u, memory.read(size, std::span<uint8_t>(buf)));
+    TEST_ASSERT_EQUAL_UINT32(0u, memory.write(size, std::span<const uint8_t>(buf, 1)));
+    TEST_ASSERT_FALSE(memory.erase(size, 1).isOk());
+    TEST_ASSERT_FALSE(memory.erase(0, 0).isOk());
+}
+
+void test_memory_commit_persists_across_instances(void)
+{
+    const uint8_t pattern[] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88};
     {
         LinuxPlatform platform;
-        auto& memory = platform.memory();
-        
-        uint8_t data[] = {0x12, 0x34, 0x56, 0x78};
-        memory.write(200, std::span<const uint8_t>(data, sizeof(data)));
-        
+        MemoryInterface& memory = platform.memory();
+        TEST_ASSERT_TRUE(memory.init().isOk());
+        TEST_ASSERT_EQUAL_UINT32(sizeof(pattern), memory.write(10, std::span<const uint8_t>(pattern)));
         memory.commit();
     }
-    
-    // Create a new platform and verify data persisted
     {
-        LinuxPlatform platform2;
-        auto& memory2 = platform2.memory();
-        
-        uint8_t readData[4];
-        ASSERT_TRUE(memory2.read(200, std::span<uint8_t>(readData, sizeof(readData))));
-        
-        EXPECT_EQ(readData[0], 0x12);
-        EXPECT_EQ(readData[1], 0x34);
-        EXPECT_EQ(readData[2], 0x56);
-        EXPECT_EQ(readData[3], 0x78);
+        LinuxPlatform platform;
+        MemoryInterface& memory = platform.memory();
+        TEST_ASSERT_TRUE(memory.init().isOk());
+        uint8_t readBack[sizeof(pattern)] = {};
+        TEST_ASSERT_EQUAL_UINT32(sizeof(pattern), memory.read(10, std::span<uint8_t>(readBack)));
+        TEST_ASSERT_EQUAL_MEMORY(pattern, readBack, sizeof(pattern));
     }
 }
 
-TEST_F(LinuxPlatformTest, MemoryPersistence) {
-    // First instance: write and commit data
-    {
-        LinuxPlatform platform1;
-        auto& memory1 = platform1.memory();
-        
-        uint8_t testPattern[] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88};
-        ASSERT_TRUE(memory1.write(10, testPattern, sizeof(testPattern)));
-        ASSERT_TRUE(memory1.commit());
-    }
-    
-    // Second instance: verify persistence
-    {
-        LinuxPlatform platform2;
-        auto& memory2 = platform2.memory();
-        
-        uint8_t readData[8];
-        ASSERT_TRUE(memory2.read(10, std::span<uint8_t>(readData, sizeof(readData))));
-        
-        uint8_t expected[] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88};
-        for (size_t i = 0; i < sizeof(expected); ++i) {
-            EXPECT_EQ(readData[i], expected[i]) << "Mismatch at index " << i;
-        }
-    }
-}
+// ============================================================================
+// Timing
+// ============================================================================
 
-TEST_F(LinuxPlatformTest, MemoryOutOfBounds) {
+void test_delay_advances_millis_and_micros(void)
+{
     LinuxPlatform platform;
-    auto& memory = platform.memory();
-    
-    uint32_t memSize = memory.size();
-    uint8_t buf[10];
 
-    // Try to read beyond buffer size
-    EXPECT_EQ(memory.read(memSize - 5, std::span<uint8_t>(buf, 10)), 0u);
-
-    // Try to write beyond buffer size
-    EXPECT_EQ(memory.write(memSize, std::span<const uint8_t>(buf, 1)), 0u);
-    
-    // Try to erase beyond buffer size
-    EXPECT_FALSE(memory.erase(memSize - 5, 10));
-}
-
-TEST_F(LinuxPlatformTest, TimeKeeping) {
-    LinuxPlatform platform;
-    
-    uint32_t start = platform.millis();
-    uint64_t startMicros = platform.micros();
-    
+    const uint32_t startMs = platform.millis();
+    const uint64_t startUs = platform.micros();
     platform.delay(10);
-    
-    uint32_t end = platform.millis();
-    uint64_t endMicros = platform.micros();
-    
-    // Time should have elapsed (allowing 5ms tolerance)
-    EXPECT_GE(end - start, 5);
-    EXPECT_GE(endMicros - startMicros, 5000);
+
+    // Only lower bounds: a loaded host may sleep longer, never shorter.
+    TEST_ASSERT_GREATER_OR_EQUAL(10u, platform.millis() - startMs);
+    TEST_ASSERT_GREATER_OR_EQUAL(10000u, platform.micros() - startUs);
 }
 
-TEST_F(LinuxPlatformTest, TaskCreationAndDeletion) {
+// ============================================================================
+// Tasks
+// ============================================================================
+
+void test_task_runs_and_is_joined(void)
+{
     LinuxPlatform platform;
-    
-    bool taskExecuted = false;
-    
-    TaskConfig config;
-    config.function = [&taskExecuted]() {
-        taskExecuted = true;
+    const SemaphoreHandle done = platform.createBinarySemaphore();
+    std::atomic<bool> ran{false};
+    std::atomic<TaskHandle> seenHandle{nullptr};
+
+    TaskConfig config{};
+    config.name = "test";
+    config.function = [&]() {
+        seenHandle = platform.currentTask();
+        ran = true;
+        (void)platform.semaphoreGive(done);
     };
-    
-    auto task = platform.createTask(config);
-    EXPECT_NE(task, nullptr);
-    
-    // Give the task time to execute
-    platform.delay(50);
-    
-    EXPECT_TRUE(taskExecuted);
+
+    const TaskHandle task = platform.createTask(config);
+    TEST_ASSERT_NOT_NULL(task);
+    TEST_ASSERT_TRUE(platform.semaphoreTake(done, UINT32_MAX).isOk());
     platform.deleteTask(task);
+
+    TEST_ASSERT_TRUE(ran.load());
+    TEST_ASSERT_TRUE(seenHandle.load() == task);
+    TEST_ASSERT_NULL(platform.currentTask());
+    platform.deleteSemaphore(done);
 }
 
-TEST_F(LinuxPlatformTest, MutexCreationAndUsage) {
+void test_task_notification_wakes_the_task(void)
+{
     LinuxPlatform platform;
-    
-    auto mutex = platform.createMutex();
-    EXPECT_NE(mutex, nullptr);
-    
-    // Lock and unlock
-    EXPECT_TRUE(platform.mutexLock(mutex, 0));
-    platform.mutexUnlock(mutex);
-    
-    // Lock with timeout
-    EXPECT_TRUE(platform.mutexLock(mutex, 100));
-    platform.mutexUnlock(mutex);
-    
+    const SemaphoreHandle done = platform.createBinarySemaphore();
+    std::atomic<uint32_t> taken{0};
+
+    TaskConfig config{};
+    config.name = "notify";
+    config.function = [&]() {
+        taken = platform.taskNotifyTake(TaskNotifyClearMode::Clear, UINT32_MAX);
+        (void)platform.semaphoreGive(done);
+    };
+
+    const TaskHandle task = platform.createTask(config);
+    TEST_ASSERT_NOT_NULL(task);
+    TEST_ASSERT_TRUE(platform.taskNotifyGive(task).isOk());
+    TEST_ASSERT_TRUE(platform.semaphoreTake(done, UINT32_MAX).isOk());
+    platform.deleteTask(task);
+
+    TEST_ASSERT_GREATER_OR_EQUAL(1u, taken.load());
+    platform.deleteSemaphore(done);
+}
+
+// ============================================================================
+// Synchronisation primitives
+// ============================================================================
+
+void test_mutex_lock_unlock(void)
+{
+    LinuxPlatform platform;
+    const MutexHandle mutex = platform.createMutex();
+    TEST_ASSERT_NOT_NULL(mutex);
+
+    TEST_ASSERT_TRUE(platform.lockMutex(mutex, 0).isOk());
+    platform.unlockMutex(mutex);
+    TEST_ASSERT_TRUE(platform.lockMutex(mutex, 100).isOk());
+    platform.unlockMutex(mutex);
+
     platform.deleteMutex(mutex);
 }
 
-TEST_F(LinuxPlatformTest, SemaphoreOperations) {
+void test_binary_semaphore(void)
+{
     LinuxPlatform platform;
-    
-    auto sem = platform.createSemaphore(1);
-    EXPECT_NE(sem, nullptr);
-    
-    // Take available semaphore
-    EXPECT_TRUE(platform.semaphoreTake(sem, 0));
-    
-    // Try to take unavailable semaphore with timeout
-    EXPECT_FALSE(platform.semaphoreTake(sem, 10));
-    
-    // Give semaphore
-    platform.semaphoreGive(sem);
-    
-    // Now we should be able to take it
-    EXPECT_TRUE(platform.semaphoreTake(sem, 0));
-    
+    const SemaphoreHandle sem = platform.createBinarySemaphore();
+    TEST_ASSERT_NOT_NULL(sem);
+
+    // Created empty.
+    TEST_ASSERT_FALSE(platform.semaphoreTake(sem, 0).isOk());
+    TEST_ASSERT_TRUE(platform.semaphoreGive(sem).isOk());
+    // Binary: a second give does not count up.
+    TEST_ASSERT_TRUE(platform.semaphoreGive(sem).isOk());
+    TEST_ASSERT_TRUE(platform.semaphoreTake(sem, 0).isOk());
+    TEST_ASSERT_FALSE(platform.semaphoreTake(sem, 10).isOk());
+
     platform.deleteSemaphore(sem);
 }
 
-TEST_F(LinuxPlatformTest, QueueOperations) {
+void test_queue_is_fifo_and_bounded(void)
+{
     LinuxPlatform platform;
-    
-    auto queue = platform.createQueue(sizeof(uint32_t), 5);
-    EXPECT_NE(queue, nullptr);
-    
-    uint32_t sendData = 0x12345678;
-    ASSERT_TRUE(platform.queueSend(queue, &sendData, 0).isOk());
-    
-    uint32_t receiveData = 0;
-    ASSERT_TRUE(platform.queueReceive(queue, &receiveData, 0).isOk());
-    
-    EXPECT_EQ(receiveData, sendData);
-    
+    const QueueHandle queue = platform.createQueue(sizeof(uint32_t), 2);
+    TEST_ASSERT_NOT_NULL(queue);
+
+    const uint32_t first = 0x12345678u;
+    const uint32_t second = 0x9ABCDEF0u;
+    TEST_ASSERT_TRUE(platform.queueSend(queue, &first, 0).isOk());
+    TEST_ASSERT_TRUE(platform.queueSend(queue, &second, 0).isOk());
+    TEST_ASSERT_FALSE(platform.queueSend(queue, &first, 0).isOk());
+    TEST_ASSERT_EQUAL_UINT32(2u, static_cast<uint32_t>(platform.queueCount(queue)));
+
+    uint32_t received = 0;
+    TEST_ASSERT_TRUE(platform.queueReceive(queue, &received, 0).isOk());
+    TEST_ASSERT_EQUAL_HEX32(first, received);
+    TEST_ASSERT_TRUE(platform.queueReceive(queue, &received, 0).isOk());
+    TEST_ASSERT_EQUAL_HEX32(second, received);
+    TEST_ASSERT_FALSE(platform.queueReceive(queue, &received, 0).isOk());
+
     platform.deleteQueue(queue);
 }
 
-TEST_F(LinuxPlatformTest, EventGroupOperations) {
+void test_event_group_bits(void)
+{
     LinuxPlatform platform;
-    
-    auto eventGroup = platform.createEventGroup();
-    EXPECT_NE(eventGroup, nullptr);
-    
-    platform.eventGroupSetBits(eventGroup, 0x01);
-    
-    uint32_t waitResult = platform.eventGroupWaitBits(
-        eventGroup,
-        0x01,
-        knx::platform::EventGroupClearMode::Keep,
-        knx::platform::EventGroupWaitMode::Any,
-        0);
-    EXPECT_EQ(waitResult & 0x01, 0x01);
-    
-    platform.eventGroupClearBits(eventGroup, 0x01);
-    
-    platform.deleteEventGroup(eventGroup);
+    const EventGroupHandle group = platform.createEventGroup();
+    TEST_ASSERT_NOT_NULL(group);
+
+    platform.eventGroupSetBits(group, 0x01);
+    uint32_t bits = platform.eventGroupWaitBits(group, 0x03, EventGroupClearMode::Keep,
+                                                EventGroupWaitMode::Any, 0);
+    TEST_ASSERT_EQUAL_HEX32(0x01u, bits & 0x03u);
+
+    // Waiting for all of 0x03 with only 0x01 set times out.
+    bits = platform.eventGroupWaitBits(group, 0x03, EventGroupClearMode::Keep,
+                                       EventGroupWaitMode::All, 0);
+    TEST_ASSERT_EQUAL_HEX32(0u, bits & 0x02u);
+
+    platform.eventGroupSetBits(group, 0x02);
+    bits = platform.eventGroupWaitBits(group, 0x03, EventGroupClearMode::Clear,
+                                       EventGroupWaitMode::All, 0);
+    TEST_ASSERT_EQUAL_HEX32(0x03u, bits & 0x03u);
+
+    // Cleared on exit.
+    bits = platform.eventGroupWaitBits(group, 0x03, EventGroupClearMode::Keep,
+                                       EventGroupWaitMode::Any, 0);
+    TEST_ASSERT_EQUAL_HEX32(0u, bits & 0x03u);
+
+    platform.deleteEventGroup(group);
 }
 
-TEST_F(LinuxPlatformTest, NetworkInterfaceStub) {
+// ============================================================================
+// Interfaces
+// ============================================================================
+
+void test_network_and_uart_are_provided(void)
+{
     LinuxPlatform platform;
-    auto* network = platform.network();
-    
-    ASSERT_NE(network, nullptr);
-    EXPECT_TRUE(network->init().isOk());
-    
-    uint8_t mac[6];
-    network->macAddress(mac);
-    EXPECT_EQ(mac[0], 0x02);  // Locally administered
+    TEST_ASSERT_NOT_NULL(platform.network());
+    TEST_ASSERT_NOT_NULL(platform.uart());
+    TEST_ASSERT_FALSE(platform.uart()->isOpen());
 }
 
-TEST_F(LinuxPlatformTest, UartInterfaceStub) {
-    LinuxPlatform platform;
-    auto* uart = platform.uart();
-    
-    ASSERT_NE(uart, nullptr);
-    UartConfig uartConfig;
-    uartConfig.baudRate = 115200;
-    uartConfig.dataBits = 8;
-    uartConfig.stopBits = 1;
-    uartConfig.parity = UartConfig::Parity::Even;
-    EXPECT_TRUE(uart->init(uartConfig).isOk());
-    
-    uint8_t data[] = {0x01, 0x02, 0x03};
-    EXPECT_EQ(uart->write(std::span<const uint8_t>(data, sizeof(data))), sizeof(data));
-    
-    uart->close();
+void test_uart_config_validation(void)
+{
+    UartConfig config;
+    TEST_ASSERT_TRUE(config.validate().isOk());  // 19200 8E1, the TPUART default
+
+    config.baudRate = 100;
+    TEST_ASSERT_FALSE(config.validate().isOk());
+    config.baudRate = 10000000;
+    TEST_ASSERT_FALSE(config.validate().isOk());
+    config.baudRate = 9600;
+    TEST_ASSERT_TRUE(config.validate().isOk());
+    config.baudRate = 115200;
+    TEST_ASSERT_TRUE(config.validate().isOk());
+
+    config.dataBits = 4;
+    TEST_ASSERT_FALSE(config.validate().isOk());
+    config.dataBits = 9;
+    TEST_ASSERT_FALSE(config.validate().isOk());
+    config.dataBits = 7;
+    TEST_ASSERT_TRUE(config.validate().isOk());
+    config.dataBits = 8;
+
+    config.stopBits = 0;
+    TEST_ASSERT_FALSE(config.validate().isOk());
+    config.stopBits = 3;
+    TEST_ASSERT_FALSE(config.validate().isOk());
+    config.stopBits = 2;
+    TEST_ASSERT_TRUE(config.validate().isOk());
+    config.stopBits = 1;
+
+    config.rxBufferSize = 0;
+    TEST_ASSERT_FALSE(config.validate().isOk());
+    config.rxBufferSize = 256;
+    config.txBufferSize = 65537;
+    TEST_ASSERT_FALSE(config.validate().isOk());
 }
 
-TEST_F(LinuxPlatformTest, SpiInterfaceStub) {
-    LinuxPlatform platform;
-    auto* spi = platform.spi();
-    
-    ASSERT_NE(spi, nullptr);
-    SpiConfig spiConfig;
-    spiConfig.clockHz = 1000000;
-    spiConfig.mode = SpiMode::Mode0;
-    spiConfig.bitOrder = SpiBitOrder::MsbFirst;
-    EXPECT_TRUE(spi->init(spiConfig).isOk());
-    
-    uint8_t txData[] = {0xAA, 0xBB};
-    uint8_t rxData[2];
-    EXPECT_EQ(spi->transfer(std::span<const uint8_t>(txData, sizeof(txData)), std::span<uint8_t>(rxData, sizeof(rxData))), sizeof(txData));
+int main(void)
+{
+    UNITY_BEGIN();
+
+    RUN_TEST(test_serial_and_mac_are_set);
+    RUN_TEST(test_random_bytes_fill_the_buffer);
+
+    RUN_TEST(test_memory_write_then_read);
+    RUN_TEST(test_memory_fill_and_erase);
+    RUN_TEST(test_memory_clamps_at_the_end);
+    RUN_TEST(test_memory_commit_persists_across_instances);
+
+    RUN_TEST(test_delay_advances_millis_and_micros);
+
+    RUN_TEST(test_task_runs_and_is_joined);
+    RUN_TEST(test_task_notification_wakes_the_task);
+
+    RUN_TEST(test_mutex_lock_unlock);
+    RUN_TEST(test_binary_semaphore);
+    RUN_TEST(test_queue_is_fifo_and_bounded);
+    RUN_TEST(test_event_group_bits);
+
+    RUN_TEST(test_network_and_uart_are_provided);
+    RUN_TEST(test_uart_config_validation);
+
+    return UNITY_END();
 }

@@ -15,6 +15,7 @@
 #include "knx/protocol/tpdu_codec.hpp"
 #include "../mocks/mock_physical_layer.hpp"
 #include "unity.h"
+#include <algorithm>
 #include <memory>
 
 using knx::IndividualAddress;
@@ -196,61 +197,6 @@ void test_GroupValueReceiveCallback() {
     // Verify callback was set (can't easily test invocation without mocking transport layer)
     // The fact that setReceiveCallback() doesn't crash means it works
     TEST_ASSERT_FALSE(callbackInvoked); // Not invoked yet, but callback is set
-}
-
-void test_GroupValueReceiveQueueWithoutCallback() {
-    appLayer->setReceiveCallback(nullptr);
-
-    knx::network::NDataFrame frame;
-    frame.dlFrame.source = IndividualAddress(2, 2, 2);
-    frame.dlFrame.destination = GroupAddress(1, 2, 3);
-    frame.dlFrame.destinationType = knx::AddressType::Group;
-    frame.dlFrame.hopCount = 6;
-    frame.dlFrame.setTpdu(
-        knx::protocol::TPCIField::create(knx::protocol::TPCI::UnnumberedData),
-        knx::application::APCIField::create(APCIService::GroupValueWrite, 0x01),
-        std::span<const uint8_t>{});
-
-    tpLayer->handleNetworkRx(frame);
-
-    TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(appLayer->queuedReceiveCount()));
-
-    knx::application::ADataFrame queued;
-    TEST_ASSERT_TRUE(appLayer->popReceivedFrame(queued));
-    TEST_ASSERT_EQUAL_UINT16(IndividualAddress(2, 2, 2).raw, queued.source.raw);
-    TEST_ASSERT_EQUAL_UINT16(GroupAddress(1, 2, 3).raw, queued.destination.raw);
-    TEST_ASSERT_EQUAL(static_cast<uint16_t>(APCIService::GroupValueWrite), static_cast<uint16_t>(queued.service));
-    TEST_ASSERT_TRUE(queued.destinationType == knx::AddressType::Group);
-    TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(queued.data.size()));
-    TEST_ASSERT_EQUAL_UINT8(0x01u, queued.data[0]);
-    TEST_ASSERT_EQUAL_UINT32(0u, static_cast<uint32_t>(appLayer->queuedReceiveCount()));
-}
-
-void test_GroupValueReceiveQueueDropsNewestWhenFull() {
-    appLayer->setReceiveCallback(nullptr);
-
-    for (uint8_t value = 0u; value < 9u; ++value) {
-        knx::network::NDataFrame frame;
-        frame.dlFrame.source = IndividualAddress(2, 2, static_cast<uint8_t>(10u + value));
-        frame.dlFrame.destination = GroupAddress(1, 2, 3);
-        frame.dlFrame.destinationType = knx::AddressType::Group;
-        frame.dlFrame.hopCount = 6;
-        frame.dlFrame.setTpdu(
-            knx::protocol::TPCIField::create(knx::protocol::TPCI::UnnumberedData),
-            knx::application::APCIField::create(APCIService::GroupValueWrite, value),
-            std::span<const uint8_t>{});
-
-        tpLayer->handleNetworkRx(frame);
-    }
-
-    TEST_ASSERT_EQUAL_UINT32(8u, static_cast<uint32_t>(appLayer->queuedReceiveCount()));
-    TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(appLayer->droppedReceiveFrameCount()));
-
-    knx::application::ADataFrame queued;
-    TEST_ASSERT_TRUE(appLayer->popReceivedFrame(queued));
-    TEST_ASSERT_EQUAL_UINT16(IndividualAddress(2, 2, 10).raw, queued.source.raw);
-    TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(queued.data.size()));
-    TEST_ASSERT_EQUAL_UINT8(0x00u, queued.data[0]);
 }
 
 void test_IndividualAddressReadResponseBroadcast() {
@@ -1493,6 +1439,90 @@ void test_AccessLevelEndsWithTheConnection() {
     (void)anythingSent();
 }
 
+// A_IndividualAddressSerialNumber_Write (03/03/07 Figure 14). Some tools omit
+// the four reserved octets; the payload is unambiguous without them, so
+// rejecting it would break interoperability for no benefit.
+void test_SerialNumberWriteWithoutReservedOctetsIsApplied() {
+    appLayer->networkParameterService().setSerialNumber(kTestSerial);
+    IndividualAddress updatedAddress;
+    appLayer->setIndividualAddressUpdateCallback([&](const IndividualAddress& address) {
+        updatedAddress = address;
+    });
+
+    std::array<uint8_t, 8> payload{};
+    std::copy(kTestSerial.begin(), kTestSerial.end(), payload.begin());
+    payload[6] = 0x11;  // new address 1.1.5
+    payload[7] = 0x05;
+    auto frame = makeRequest(0x0000, knx::AddressType::Group,
+                             APCIService::IndividualAddressSerialNumberWrite, 0, payload);
+    tpLayer->handleNetworkRx(frame);
+
+    TEST_ASSERT_EQUAL_HEX16(IndividualAddress(1, 1, 5).raw, updatedAddress.raw);
+    (void)anythingSent();
+}
+
+// A_FunctionPropertyCommand (03/03/07 §3.4.5). The response carries
+// object_index, property_id, the return code and the function's output.
+void test_FunctionPropertyCommandIsAnsweredWithReturnCodeAndData() {
+    knx::application::FunctionPropertyInvocation invocation{};
+    appLayer->functionPropertyServices().setHandler(
+        [&](const IndividualAddress&, const knx::application::FunctionPropertyRequest& request)
+            -> knx::util::Result<knx::application::FunctionPropertyResult> {
+            invocation = request.invocation;
+            knx::application::FunctionPropertyResult result{};
+            result.returnCode = knx::application::FunctionPropertyReturnCode::Success;
+            (void)result.data.push_back(request.data.empty() ? 0u : request.data[0]);
+            return result;
+        });
+
+    const std::array<uint8_t, 3> command = {0x05, 0x33, 0x01};  // object 5, PID 51, input 1
+    auto frame = makeRequest(kOwn, knx::AddressType::Individual,
+                             APCIService::FunctionPropertyCommand, 0, command);
+    tpLayer->handleNetworkRx(frame);
+
+    std::vector<uint8_t> sentFrame;
+    TEST_ASSERT_TRUE(physicalLayer->getSentFrame(sentFrame));
+    const auto tpdu = extractTpduFromTp1Frame(sentFrame);
+    // A_FunctionPropertyState_Response (0x2C9) + object + PID + return code + data
+    TEST_ASSERT_EQUAL_UINT32(6u, static_cast<uint32_t>(tpdu.size()));
+    TEST_ASSERT_EQUAL_HEX8(0x02, tpdu[0] & 0x03);
+    TEST_ASSERT_EQUAL_HEX8(0xC9, tpdu[1]);
+    TEST_ASSERT_EQUAL_HEX8(0x05, tpdu[2]);
+    TEST_ASSERT_EQUAL_HEX8(0x33, tpdu[3]);
+    TEST_ASSERT_EQUAL_HEX8(0x00, tpdu[4]);
+    TEST_ASSERT_EQUAL_HEX8(0x01, tpdu[5]);
+    TEST_ASSERT_EQUAL(static_cast<int>(knx::application::FunctionPropertyInvocation::Command),
+                      static_cast<int>(invocation));
+}
+
+// §3.4.5.3: without a function behind the property the answer omits both the
+// return code and the data. A client tells "not a function property" apart
+// from success with return code 0 purely by this length.
+void test_FunctionPropertyStateReadWithoutHandlerGetsTheShortResponse() {
+    const std::array<uint8_t, 2> stateRead = {0x05, 0x33};
+    auto frame = makeRequest(kOwn, knx::AddressType::Individual,
+                             APCIService::FunctionPropertyStateRead, 0, stateRead);
+    tpLayer->handleNetworkRx(frame);
+
+    std::vector<uint8_t> sentFrame;
+    TEST_ASSERT_TRUE(physicalLayer->getSentFrame(sentFrame));
+    const auto tpdu = extractTpduFromTp1Frame(sentFrame);
+    TEST_ASSERT_EQUAL_UINT32(4u, static_cast<uint32_t>(tpdu.size()));
+    TEST_ASSERT_EQUAL_HEX8(0xC9, tpdu[1]);
+    TEST_ASSERT_EQUAL_HEX8(0x05, tpdu[2]);
+    TEST_ASSERT_EQUAL_HEX8(0x33, tpdu[3]);
+}
+
+// A request too short to carry object_index and property_id is not answered.
+void test_FunctionPropertyCommandTooShortIsIgnored() {
+    const std::array<uint8_t, 1> tooShort = {0x05};
+    auto frame = makeRequest(kOwn, knx::AddressType::Individual,
+                             APCIService::FunctionPropertyCommand, 0, tooShort);
+    tpLayer->handleNetworkRx(frame);
+
+    TEST_ASSERT_FALSE(anythingSent());
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(test_AccessLevelEndsWithTheConnection);
@@ -1513,8 +1543,6 @@ int main() {
     RUN_TEST(test_GroupValueRead);
     RUN_TEST(test_GroupValueResponse);
     RUN_TEST(test_GroupValueReceiveCallback);
-    RUN_TEST(test_GroupValueReceiveQueueWithoutCallback);
-    RUN_TEST(test_GroupValueReceiveQueueDropsNewestWhenFull);
     RUN_TEST(test_SendOutcomeQueueRecordsDirectSendSuccess);
     RUN_TEST(test_SendOutcomeQueueRecordsLowerLayerFailure);
     RUN_TEST(test_SendOutcomeQueueOverwritesOldestWhenFull);
@@ -1550,5 +1578,9 @@ int main() {
     RUN_TEST(test_ConnectionlessRequestIsAnsweredConnectionlessWhileConnected);
     RUN_TEST(test_AdcReadWithoutProviderIsAnsweredWithReadCountZero);
     RUN_TEST(test_AdcReadAnswersInstalledProviderValue);
+    RUN_TEST(test_SerialNumberWriteWithoutReservedOctetsIsApplied);
+    RUN_TEST(test_FunctionPropertyCommandIsAnsweredWithReturnCodeAndData);
+    RUN_TEST(test_FunctionPropertyStateReadWithoutHandlerGetsTheShortResponse);
+    RUN_TEST(test_FunctionPropertyCommandTooShortIsIgnored);
     return UNITY_END();
 }

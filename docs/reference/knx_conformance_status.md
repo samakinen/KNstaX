@@ -250,17 +250,15 @@ device:
    §9.1.2.3.2. It is device-initiated, so nothing rejects a device that never
    sends one, but a strict profile review would flag it.
 5. **Property access levels are not populated from the profile tables.** The
-   manifest carries `readLevel` / `writeLevel` per property, they are reported in
-   `A_PropertyDescription_Response` and enforced by `PropertyStore`, but nearly
-   every entry leaves them at 0. Profiles §9.1.2.6.2 specifies real values —
-   PID_PROGMODE is 3/2, for example. Nothing is blocked today because an
-   unsecured device grants Maximum, so this is latent rather than broken.
-   Resolve the ordering convention before populating them: KNX wire levels are
-   inverted (0 = maximum access), the internal `AuthorizationLevel` enum is
-   privilege-ordered, and `PropertyStore` compares with `accessLevel >=
-   descriptor.writeLevel` — filling in wire-order numbers without checking which
-   convention the descriptors use would invert access control rather than
-   implement it.
+   manifest carries `readLevel` / `writeLevel` per property, but every entry
+   leaves them at 0, and `InterfaceObjectManager::describeProperty` reports 0
+   for the built-in objects whatever the manifest says. Profiles §9.1.2.6.2
+   specifies real values — PID_PROGMODE is 3/2, for example. The property write
+   services compare the partner's current level with the described write level
+   in wire numbering (0 = maximum access; refused when the partner's level is
+   numerically higher), so populating the levels means carrying wire-order
+   numbers through `describeProperty` as well as the manifest. The internal
+   `AuthorizationLevel` enum is privilege-ordered; do not mix the two.
 6. **Coupler profile is implemented, untested, and not complete.** None of the
    routing actions below has been exercised against real hardware or a real
    two-line installation; what follows describes implemented code and host

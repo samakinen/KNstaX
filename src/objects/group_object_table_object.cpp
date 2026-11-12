@@ -308,24 +308,6 @@ util::Result<void> GroupObjectTableDomain::load(std::vector<std::unique_ptr<appl
     return util::Result<void>::ok();
 }
 
-application::GroupObject* GroupObjectTableDomain::findByAddress(const GroupAddress& address) {
-    for (auto& obj : _objects) {
-        if (obj && obj->getAddress() == address) {
-            return obj.get();
-        }
-    }
-    return nullptr;
-}
-
-const application::GroupObject* GroupObjectTableDomain::findByAddress(const GroupAddress& address) const {
-    for (const auto& obj : _objects) {
-        if (obj && obj->getAddress() == address) {
-            return obj.get();
-        }
-    }
-    return nullptr;
-}
-
 util::Result<size_t> GroupObjectTableDomain::findAllByAddress(const GroupAddress& address, std::span<GroupObjectIndex> out) const {
     size_t required = 0;
     for (size_t i = 0; i < _objects.size(); ++i) {
@@ -349,10 +331,6 @@ util::Result<size_t> GroupObjectTableDomain::findAllByAddress(const GroupAddress
         }
     }
     return written;
-}
-
-bool GroupObjectTableDomain::hasAddress(const GroupAddress& address) const {
-    return findByAddress(address) != nullptr;
 }
 
 util::Result<size_t> GroupObjectTableDomain::getAllAddresses(std::span<GroupAddress> out) const {
@@ -469,21 +447,9 @@ void GroupObjectTableObject::clear() {
     _table.clear();
 }
 
-application::GroupObject* GroupObjectTableObject::findByAddress(const GroupAddress& address) {
-    return _table.findByAddress(address);
-}
-
-const application::GroupObject* GroupObjectTableObject::findByAddress(const GroupAddress& address) const {
-    return _table.findByAddress(address);
-}
-
 util::Result<size_t> GroupObjectTableObject::findAllByAddress(const GroupAddress& address,
                                                               std::span<GroupObjectIndex> out) const {
     return _table.findAllByAddress(address, out);
-}
-
-bool GroupObjectTableObject::hasAddress(const GroupAddress& address) const {
-    return _table.hasAddress(address);
 }
 
 util::Result<void> GroupObjectTableObject::loadTable(std::vector<std::unique_ptr<application::GroupObject>> objects) {

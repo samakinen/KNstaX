@@ -6,7 +6,6 @@
 #include "knx/platform/memory_interface.hpp"
 #include "knx/platform/network_interface.hpp"
 #include "knx/platform/platform.hpp"
-#include "knx/platform/spi_interface.hpp"
 #include "knx/platform/uart_interface.hpp"
 #include "knx/platform/virtual_test_clock.hpp"
 
@@ -113,10 +112,9 @@ public:
     util::Result<void> taskNotifyGiveFromISR(TaskHandle task) override;
     uint32_t taskNotifyTake(TaskNotifyClearMode clearMode, uint32_t timeout_ms = UINT32_MAX) override;
 
-    MemoryInterface& memory() override;
+    MemoryInterface& memory();
     NetworkInterface* network() override;
     UartInterface* uart() override;
-    SpiInterface* spi() override;
 
     void log(const char* level, const char* tag, const char* format, ...) override;
 

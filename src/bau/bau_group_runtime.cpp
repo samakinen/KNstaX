@@ -192,10 +192,6 @@ util::Result<void> BusAccessUnit::requestGroupObjectValue(GroupObjectIndex index
     return obj->requestValue();
 }
 
-util::Result<void> BusAccessUnit::beginRequestGroupObjectValue(GroupObjectIndex index) {
-    return requestGroupObjectValue(index);
-}
-
 void BusAccessUnit::setGroupObjectWriteCallback(GroupObjectWriteCallback callback) {
     _groupObjectWriteCallback = std::move(callback);
 }
@@ -698,8 +694,8 @@ void BusAccessUnit::handleApplicationFrame(const IndividualAddress& /*source*/,
     }
 
     // Route via the KNX three-table chain so ETS-programmed associations are
-    // honoured.  The legacy findByAddress() path bypasses the tables entirely
-    // and must not be used for ETS-commissioned devices.
+    // honoured.  Matching a group object by its own address would bypass the
+    // tables entirely and must not be used for ETS-commissioned devices.
     //
     //   GroupAddress  →  AddressTableIndex (ASAP)
     //   AddressTableIndex  →  GroupObjectIndex[]  (via AssociationTable)

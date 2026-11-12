@@ -50,8 +50,6 @@ public:
     SessionId sessionId() const { return sessionId_; }
 
 private:
-    static inline constexpr void encodeSeq48BE_(uint64_t seq48, std::span<uint8_t, SecureWrapper::kSeqLen> out) noexcept;
-
     Key sessionKey_{};
     SessionId sessionId_{SessionId::invalid()};
     std::array<uint8_t, SecureWrapper::kSerialLen> serial_{};

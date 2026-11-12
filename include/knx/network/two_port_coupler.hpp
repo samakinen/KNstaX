@@ -16,7 +16,6 @@
 #include "knx/datalink/tp1_data_link_layer.hpp"
 #include "knx/network/coupler_routing.hpp"
 #include "knx/network/filter_table.hpp"
-#include "knx/network/routing_table.hpp"
 #include "knx/types.hpp"
 #include "knx/util/inplace_function.hpp"
 #include "knx/util/result.hpp"
@@ -79,7 +78,6 @@ public:
     void setFilteringEnabled(Toggle enabled) { policy_.setFilterTableInUse(isEnabled(enabled)); }
     bool isFilteringEnabled() const { return policy_.isFilterTableInUse(); }
 
-    RoutingTable& routingTable() { return routingTable_; }
     FilterTable& filterTable() { return filterTable_; }
 
     // -------------------------------------------------------------------------
@@ -145,7 +143,6 @@ private:
     std::atomic<bool> routingEnabled_;
 
     CouplerRoutingPolicy policy_;
-    RoutingTable routingTable_;
     FilterTable filterTable_;
 
     PortCallback onFrameForwarded_;

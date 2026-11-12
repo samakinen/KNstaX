@@ -8,7 +8,6 @@
 
 #include "knx/application/authorization_service.hpp"
 #include "knx/util/log.hpp"
-#include "knx/protocol/tpdu_codec.hpp"
 #include "knx/application/apci_services.hpp"
 #include "knx/util/result.hpp"
 #include <algorithm>
@@ -137,69 +136,6 @@ void AuthorizationService::clearAllAuthorizations() {
     _authorizedCount = 0;
     std::fill_n(_authorizedDevices, MAX_AUTHORIZED_DEVICES, AuthorizedDevice{});
     KNX_LOGD(TAG, "Cleared all authorizations");
-}
-
-util::Result<void> AuthorizationService::encodeRequest(const AuthorizationKey& key,
-                                                       std::span<uint8_t, kEncodedRequestLength> out) {
-    auto result = knx::protocol::buildTpdu(
-        knx::protocol::TPCIField::create(knx::protocol::TPCI::UnnumberedData),
-        APCIField::create(APCIService::AuthorizeRequest),
-        key,
-        out
-    );
-    if (result.isError()) return result.error();
-    return util::Result<void>::ok();
-}
-
-util::Result<void> AuthorizationService::encodeResponse(AuthorizationLevel level,
-                                                        std::span<uint8_t, kEncodedResponseLength> out) {
-    auto result = knx::protocol::buildTpdu(
-        knx::protocol::TPCIField::create(knx::protocol::TPCI::UnnumberedData),
-        APCIField::create(APCIService::AuthorizeResponse),
-        {static_cast<uint8_t>(level)},
-        out
-    );
-    if (result.isError()) return result.error();
-    return util::Result<void>::ok();
-}
-
-util::Result<void> AuthorizationService::decodeRequest(std::span<const uint8_t> data, 
-                                         AuthorizationKey& key) {
-    if (data.size() < 6) {
-        return util::Result<void>::err(util::ErrorCode::DecodeFailed);
-    }
-
-    const auto hdr = knx::protocol::unpackTpduHeader(data[0], data[1]);
-        if (hdr.apci.service() != APCIService::AuthorizeRequest) {
-        return util::Result<void>::err(util::ErrorCode::DecodeFailed);
-    }
-    
-    // Extract key (4 bytes starting at offset 2)
-    std::copy(data.begin() + 2, data.begin() + 6, key.begin());
-    
-    return util::Result<void>::ok();
-}
-
-util::Result<void> AuthorizationService::decodeResponse(std::span<const uint8_t> data, 
-                                          AuthorizationLevel& level) {
-    if (data.size() < 3) {
-        return util::Result<void>::err(util::ErrorCode::DecodeFailed);
-    }
-
-    const auto hdr = knx::protocol::unpackTpduHeader(data[0], data[1]);
-        if (hdr.apci.service() != APCIService::AuthorizeResponse) {
-        return util::Result<void>::err(util::ErrorCode::DecodeFailed);
-    }
-    
-    // Extract level (1 byte at offset 2)
-    level = static_cast<AuthorizationLevel>(data[2]);
-    
-    // Validate level
-    if (level > AuthorizationLevel::Maximum) {
-        return util::Result<void>::err(util::ErrorCode::InvalidParameter);
-    }
-    
-    return util::Result<void>::ok();
 }
 
 AuthorizationResult AuthorizationService::validateKey(const AuthorizationKey& key, 

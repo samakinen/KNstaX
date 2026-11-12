@@ -51,7 +51,6 @@ const char* objectTypeName(uint16_t type) {
 
 PropertyStore::PropertyStore(InterfaceObjectType objectType, InterfaceObjectIndex objectIndex)
     : _objectType(objectType)
-    , _objectIndex(objectIndex)
 {
     KNX_LOGD(TAG, "Created property store for object type=%d, index=%d",
              static_cast<uint16_t>(objectType.value()), objectIndex.value());
@@ -216,33 +215,6 @@ util::Result<size_t> PropertyStore::getAllPropertyIds(std::span<PropertyID> out)
     }
     return written;
 }
-
-bool PropertyStore::hasProperty(PropertyID propertyId) const {
-    return _properties.find(propertyId) != _properties.end();
-}
-
-util::Result<void> PropertyStore::validateAccess(PropertyID propertyId, AccessType accessType, uint8_t accessLevel) const {
-    auto it = _descriptors.find(propertyId);
-    if (it == _descriptors.end()) {
-        return util::ErrorCode::InvalidParameter;
-    }
-    
-    const auto& descriptor = it->second;
-    
-    if (accessType == AccessType::Write) {
-        if (descriptor.access == PropertyAccess::ReadOnly) {
-            return util::ErrorCode::OperationNotSupported;
-        }
-        return (accessLevel >= descriptor.writeLevel)
-            ? util::Result<void>::ok()
-            : util::Result<void>::err(util::ErrorCode::OperationNotSupported);
-    } else {
-        return (accessLevel >= descriptor.readLevel)
-            ? util::Result<void>::ok()
-            : util::Result<void>::err(util::ErrorCode::OperationNotSupported);
-    }
-}
-
 
 // ============================================================================
 // PropertyStoreManager Implementation

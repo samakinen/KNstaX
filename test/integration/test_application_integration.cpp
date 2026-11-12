@@ -365,33 +365,6 @@ void test_FullStack_CompleteCoverage() {
     TEST_ASSERT_TRUE(got);
 }
 
-void test_FullStack_ApplicationReceiveQueueWithoutCallback() {
-    appLayer->setReceiveCallback(nullptr);
-    dlLayer->setPromiscuousMode(knx::datalink::PromiscuousMode::Enable);
-
-    datalink::LDataFrame rx;
-    rx.source = IndividualAddress(2, 2, 2);
-    rx.destination = GroupAddress(1, 2, 3);
-    rx.destinationType = AddressType::Group;
-    rx.ackRequested = false;
-    rx.setTpdu(knx::protocol::TPCI::UnnumberedData,
-               application::APCIField::create(APCIService::GroupValueWrite, 0x01),
-               {});
-    physLayer->injectFrame(encodeTp1(rx));
-
-    TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(appLayer->queuedReceiveCount()));
-
-    ADataFrame queued;
-    TEST_ASSERT_TRUE(appLayer->popReceivedFrame(queued));
-    TEST_ASSERT_EQUAL(IndividualAddress(2, 2, 2).raw, queued.source.raw);
-    TEST_ASSERT_EQUAL(GroupAddress(1, 2, 3).raw, queued.destination.raw);
-    TEST_ASSERT_EQUAL(static_cast<uint16_t>(APCIService::GroupValueWrite), static_cast<uint16_t>(queued.service));
-    TEST_ASSERT_TRUE(queued.destinationType == AddressType::Group);
-    TEST_ASSERT_EQUAL(1, static_cast<int>(queued.data.size()));
-    TEST_ASSERT_EQUAL(0x01, queued.data[0]);
-    TEST_ASSERT_EQUAL_UINT32(0u, static_cast<uint32_t>(appLayer->queuedReceiveCount()));
-}
-
 void test_FullStack_InternalResponseSendFailureIsQueued() {
     const uint8_t requestedCount = 3;
     const uint16_t requestedAddr = 0x1234;
@@ -606,7 +579,6 @@ int main() {
     RUN_TEST(test_FullStack_AuthorizationLevels);
     RUN_TEST(test_FullStack_RestartTypes);
     RUN_TEST(test_FullStack_CompleteCoverage);
-    RUN_TEST(test_FullStack_ApplicationReceiveQueueWithoutCallback);
     RUN_TEST(test_FullStack_InternalResponseSendFailureIsQueued);
     RUN_TEST(test_FullStack_InternalResponseRetriesTransmissionFailureThenSucceeds);
     RUN_TEST(test_FullStack_SendDataProgressionSeam);

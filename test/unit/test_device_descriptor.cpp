@@ -189,57 +189,6 @@ void test_DeviceDescriptorService_SupportMatrix(void) {
     TEST_ASSERT_EQUAL_UINT32(0u, DeviceDescriptorService::encodedDescriptorSize(99));
 }
 
-void test_DeviceDescriptorService_EncodeReadRequest(void) {
-    std::array<uint8_t, 2> data{};
-    auto result = DeviceDescriptorService::encodeReadRequest(2, data);
-    TEST_ASSERT_TRUE(result.isOk());
-    TEST_ASSERT_EQUAL(2, result.value());
-
-    const auto hdr = knx::protocol::unpackTpduHeader(data[0], data[1]);
-    TEST_ASSERT_EQUAL(APCIService::DeviceDescriptorRead, hdr.apci.service());
-    TEST_ASSERT_EQUAL(2, hdr.apci.data6());
-}
-
-void test_DeviceDescriptorService_DecodeReadRequest(void) {
-    std::vector<uint8_t> data = {0x03, 0x02}; // APCI + type 2
-
-    uint8_t descType = DeviceDescriptorService::decodeReadRequest(data);
-    TEST_ASSERT_EQUAL(2, descType);
-}
-
-void test_DeviceDescriptorService_EncodeResponse(void) {
-    std::array<uint8_t, 4> descData = {0x00, 0x05, 0xAA, 0xBB};
-    std::array<uint8_t, 6> data{};
-
-    auto result = DeviceDescriptorService::encodeResponse(2, descData, data);
-    TEST_ASSERT_TRUE(result.isOk());
-    TEST_ASSERT_EQUAL(6, result.value());
-
-    const auto hdr = knx::protocol::unpackTpduHeader(data[0], data[1]);
-    TEST_ASSERT_EQUAL(APCIService::DeviceDescriptorResponse, hdr.apci.service());
-    TEST_ASSERT_EQUAL(2, hdr.apci.data6());
-
-    // Payload is descriptor data
-    TEST_ASSERT_EQUAL(0x00, data[2]);
-    TEST_ASSERT_EQUAL(0x05, data[3]);
-    TEST_ASSERT_EQUAL(0xAA, data[4]);
-    TEST_ASSERT_EQUAL(0xBB, data[5]);
-}
-
-void test_DeviceDescriptorService_DecodeResponse(void) {
-    std::vector<uint8_t> data = {0x03, 0x42, 0x11, 0x22, 0x33}; // APCI + type 2 + data
-
-    uint8_t descType = 0;
-    std::array<uint8_t, 3> descData{};
-    auto result = DeviceDescriptorService::decodeResponse(data, descType, descData);
-    TEST_ASSERT_TRUE(result.isOk());
-    TEST_ASSERT_EQUAL(3, result.value());
-    TEST_ASSERT_EQUAL(2, descType);
-    TEST_ASSERT_EQUAL(0x11, descData[0]);
-    TEST_ASSERT_EQUAL(0x22, descData[1]);
-    TEST_ASSERT_EQUAL(0x33, descData[2]);
-}
-
 // ============================================================================
 // APCI Service Tests
 // ============================================================================
@@ -278,10 +227,6 @@ int main(int, char**) {
     RUN_TEST(test_DeviceDescriptorService_ReadType2);
     RUN_TEST(test_DeviceDescriptorService_InvalidType);
     RUN_TEST(test_DeviceDescriptorService_SupportMatrix);
-    RUN_TEST(test_DeviceDescriptorService_EncodeReadRequest);
-    RUN_TEST(test_DeviceDescriptorService_DecodeReadRequest);
-    RUN_TEST(test_DeviceDescriptorService_EncodeResponse);
-    RUN_TEST(test_DeviceDescriptorService_DecodeResponse);
 
     RUN_TEST(test_APCI_ExtractService);
     RUN_TEST(test_APCI_CreateAPCI);

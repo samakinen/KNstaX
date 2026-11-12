@@ -91,82 +91,6 @@ void test_function_property_does_not_shadow_neighbouring_apcis(void) {
     TEST_ASSERT_TRUE(APCIField(0x2C7).isFunctionProperty());
 }
 
-// --- Codec round trip ------------------------------------------------------
-
-void test_decode_command_request(void) {
-    // TPCI/APCI header for A_FunctionPropertyCommand, then obj/prop/data.
-    std::vector<uint8_t> apdu(6);
-    const auto built = knx::protocol::buildTpdu(
-        knx::protocol::TPCIField::create(knx::protocol::TPCI::UnnumberedData),
-        APCIField::create(APCIService::FunctionPropertyCommand),
-        std::vector<uint8_t>{5, 51, 1},
-        apdu);
-    TEST_ASSERT_TRUE(built.isOk());
-    apdu.resize(built.value());
-
-    const auto decoded = FunctionPropertyServices::decodeRequest(apdu);
-    TEST_ASSERT_TRUE(decoded.isOk());
-    TEST_ASSERT_EQUAL(5u, decoded.value().objectIndex.value());
-    TEST_ASSERT_EQUAL(51u, static_cast<uint8_t>(decoded.value().propertyId));
-    TEST_ASSERT_EQUAL(static_cast<int>(FunctionPropertyInvocation::Command),
-                      static_cast<int>(decoded.value().invocation));
-    TEST_ASSERT_EQUAL(1u, decoded.value().data.size());
-    TEST_ASSERT_EQUAL(1u, decoded.value().data[0]);
-}
-
-void test_decode_state_read_marks_invocation(void) {
-    std::vector<uint8_t> apdu(6);
-    const auto built = knx::protocol::buildTpdu(
-        knx::protocol::TPCIField::create(knx::protocol::TPCI::UnnumberedData),
-        APCIField::create(APCIService::FunctionPropertyStateRead),
-        std::vector<uint8_t>{5, 51},
-        apdu);
-    TEST_ASSERT_TRUE(built.isOk());
-    apdu.resize(built.value());
-
-    const auto decoded = FunctionPropertyServices::decodeRequest(apdu);
-    TEST_ASSERT_TRUE(decoded.isOk());
-    TEST_ASSERT_EQUAL(static_cast<int>(FunctionPropertyInvocation::StateRead),
-                      static_cast<int>(decoded.value().invocation));
-    TEST_ASSERT_TRUE(decoded.value().data.empty());
-}
-
-void test_decode_rejects_short_apdu(void) {
-    const std::vector<uint8_t> tooShort = {0x00, 0xC7, 0x05};
-    TEST_ASSERT_TRUE(FunctionPropertyServices::decodeRequest(tooShort).isError());
-}
-
-void test_encode_response_with_return_code(void) {
-    std::vector<uint8_t> out(16);
-    const uint8_t payload[] = {0x01};
-    const auto encoded = FunctionPropertyServices::encodeResponse(
-        InterfaceObjectIndex(5), static_cast<PropertyID>(51), true,
-        FunctionPropertyReturnCode::Success, payload, out);
-    TEST_ASSERT_TRUE(encoded.isOk());
-    // header(2) + object_index + property_id + return_code + data
-    TEST_ASSERT_EQUAL(6u, encoded.value());
-
-    const auto header = knx::protocol::unpackTpduHeader(out[0], out[1]);
-    TEST_ASSERT_EQUAL(static_cast<int>(APCIService::FunctionPropertyStateResponse),
-                      static_cast<int>(header.apci.service()));
-    TEST_ASSERT_EQUAL(5u, out[2]);
-    TEST_ASSERT_EQUAL(51u, out[3]);
-    TEST_ASSERT_EQUAL(0u, out[4]);
-    TEST_ASSERT_EQUAL(1u, out[5]);
-}
-
-void test_encode_response_without_return_code(void) {
-    // §3.4.5.3: the error response omits both return_code and data, so the
-    // whole PDU is 4 octets.  A client tells success-with-code-0 apart from
-    // "not a function property" purely by this length.
-    std::vector<uint8_t> out(16);
-    const auto encoded = FunctionPropertyServices::encodeResponse(
-        InterfaceObjectIndex(5), static_cast<PropertyID>(51), false,
-        FunctionPropertyReturnCode::Success, {}, out);
-    TEST_ASSERT_TRUE(encoded.isOk());
-    TEST_ASSERT_EQUAL(4u, encoded.value());
-}
-
 // --- Dispatch behaviour ----------------------------------------------------
 
 void test_handler_result_is_forwarded(void) {
@@ -242,11 +166,6 @@ int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_function_property_apci_is_full_ten_bits);
     RUN_TEST(test_function_property_does_not_shadow_neighbouring_apcis);
-    RUN_TEST(test_decode_command_request);
-    RUN_TEST(test_decode_state_read_marks_invocation);
-    RUN_TEST(test_decode_rejects_short_apdu);
-    RUN_TEST(test_encode_response_with_return_code);
-    RUN_TEST(test_encode_response_without_return_code);
     RUN_TEST(test_handler_result_is_forwarded);
     RUN_TEST(test_handler_error_produces_degenerate_response);
     RUN_TEST(test_missing_handler_still_answers);

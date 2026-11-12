@@ -3,14 +3,16 @@
 
 #include "knx/util/log.hpp"
 
-#include <cstdarg>
+#include <array>
 #include <atomic>
+#include <cstdarg>
 #include <cinttypes>
 #include <cstdio>
 #include <cstring>
 #include <string>
 #include <map>
 #include <mutex>
+#include <string_view>
 
 #if __has_include("esp_log.h")
 #include "esp_log.h"
@@ -84,10 +86,31 @@ void defaultSink(Level level, const char* tag, const char* fmt, va_list args) {
 Sink currentSink = &defaultSink;
 Level minLevel = Level::Info;  // Default runtime level
 
-// Per-module log levels
-std::map<std::string, Level> g_moduleLevels;
+// Per-module log levels. std::less<> lets a lookup take the tag as a
+// string_view, so resolving a level never builds a std::string.
+std::map<std::string, Level, std::less<>> g_moduleLevels;
 std::mutex g_moduleLevelsMutex;
 std::atomic<bool> g_hasModuleLevels{false};
+
+// Every log call resolves its tag, twice with KNX_LOGx (isLevelEnabled, then
+// write), so the result of the map lookup is kept per tag pointer. Tags are
+// static strings, as with ESP_LOGx; a tag with the same text at another
+// address simply gets its own entry. The cache stores whether the tag has an
+// override rather than the global level, so setLevel() needs no invalidation;
+// every change to the module levels clears it. Guarded by g_moduleLevelsMutex.
+struct TagCacheEntry {
+    const char* tag = nullptr;
+    bool hasOverride = false;
+    Level level = Level::Info;
+};
+constexpr size_t kTagCacheSize = 8;
+std::array<TagCacheEntry, kTagCacheSize> g_tagCache{};
+size_t g_tagCacheNext = 0;
+
+void clearTagCacheLocked() {
+    g_tagCache.fill(TagCacheEntry{});
+    g_tagCacheNext = 0;
+}
 
 Level resolveEffectiveLevel(const char* tag) {
     if (!tag || tag[0] == '\0') {
@@ -99,8 +122,19 @@ Level resolveEffectiveLevel(const char* tag) {
     }
 
     std::lock_guard<std::mutex> lock(g_moduleLevelsMutex);
-    auto it = g_moduleLevels.find(tag);
-    return (it != g_moduleLevels.end()) ? it->second : minLevel;
+    for (const TagCacheEntry& entry : g_tagCache) {
+        if (entry.tag == tag) {
+            return entry.hasOverride ? entry.level : minLevel;
+        }
+    }
+
+    auto it = g_moduleLevels.find(std::string_view(tag));
+    TagCacheEntry& slot = g_tagCache[g_tagCacheNext];
+    g_tagCacheNext = (g_tagCacheNext + 1) % kTagCacheSize;
+    slot.tag = tag;
+    slot.hasOverride = (it != g_moduleLevels.end());
+    slot.level = slot.hasOverride ? it->second : Level::Info;
+    return slot.hasOverride ? slot.level : minLevel;
 }
 
 } // namespace
@@ -121,6 +155,7 @@ void setModuleLevel(const char* tag, Level level) {
     if (!tag || tag[0] == '\0') return;  // Ignore null or empty tags
     std::lock_guard<std::mutex> lock(g_moduleLevelsMutex);
     g_moduleLevels[tag] = level;
+    clearTagCacheLocked();
     g_hasModuleLevels.store(true, std::memory_order_release);
 }
 
@@ -131,13 +166,16 @@ Level getModuleLevel(const char* tag) {
 void clearModuleLevel(const char* tag) {
     if (!tag || tag[0] == '\0') return;  // Ignore null or empty tags
     std::lock_guard<std::mutex> lock(g_moduleLevelsMutex);
-    g_moduleLevels.erase(tag);
+    auto it = g_moduleLevels.find(std::string_view(tag));
+    if (it != g_moduleLevels.end()) g_moduleLevels.erase(it);
+    clearTagCacheLocked();
     g_hasModuleLevels.store(!g_moduleLevels.empty(), std::memory_order_release);
 }
 
 void clearAllModuleLevels() {
     std::lock_guard<std::mutex> lock(g_moduleLevelsMutex);
     g_moduleLevels.clear();
+    clearTagCacheLocked();
     g_hasModuleLevels.store(false, std::memory_order_release);
 }
 

@@ -23,10 +23,8 @@ namespace knx {
 namespace platform {
 
 // Forward declarations
-class MemoryInterface;
 class NetworkInterface;
 class UartInterface;
-class SpiInterface;
 
 // ============================================================================
 // Threading Primitives
@@ -292,15 +290,6 @@ public:
     }
     
     // ========================================================================
-    // Memory Access
-    // ========================================================================
-    
-    /**
-     * @brief Get memory interface
-     */
-    virtual MemoryInterface& memory() = 0;
-    
-    // ========================================================================
     // Hardware Interfaces
     // ========================================================================
     
@@ -315,12 +304,6 @@ public:
      * @return nullptr if UART not available
      */
     virtual UartInterface* uart() = 0;
-    
-    /**
-     * @brief Get SPI interface (for RF platforms)
-     * @return nullptr if SPI not available
-     */
-    virtual SpiInterface* spi() = 0;
     
     // ========================================================================
     // Threading

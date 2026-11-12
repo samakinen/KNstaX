@@ -147,6 +147,16 @@ void ApplicationLayer::registerPropertyObject(InterfaceObjectType objectType,
                                               InterfaceObjectIndex objectIndex,
                                               PropertyRegistration registration)
 {
+    // The first announcement of an index wins, as it does in the store.
+    bool known = false;
+    for (const auto& object : _registeredObjects) {
+        known = known || object.index == objectIndex;
+    }
+    if (!known && !_registeredObjects.push_back(RegisteredObject{objectIndex, objectType})) {
+        KNX_LOGW(TAG, "Interface object %d not recorded: more than %zu objects",
+                 objectIndex.value(), kMaxInterfaceObjects);
+    }
+
     auto* store = _propertyStoreManager ? _propertyStoreManager->addObject(objectType, objectIndex) : nullptr;
     if (store) {
         registration(*store);
@@ -213,13 +223,6 @@ void ApplicationLayer::setPropertyReadProvider(PropertyReadProvider provider)
     }
     if (_propertyServices) {
         _propertyServices->setReadProvider(std::move(provider));
-    }
-}
-
-void ApplicationLayer::setPropertyWriteConsumer(PropertyWriteConsumer consumer)
-{
-    if (_propertyServices) {
-        _propertyServices->setWriteConsumer(std::move(consumer));
     }
 }
 
@@ -290,18 +293,6 @@ ApplicationLayer::SendProgressState ApplicationLayer::mapSendErrorToProgressStat
     }
 }
 
-void ApplicationLayer::enqueueReceivedFrame(const ADataFrame& frame) {
-    if (_rxQueueCount >= RX_QUEUE_CAPACITY) {
-        ++_droppedReceiveFrames;
-        KNX_LOGW(TAG, "Dropping application RX frame: queue full (%zu dropped)", _droppedReceiveFrames);
-        return;
-    }
-
-    const size_t index = (_rxQueueHead + _rxQueueCount) % RX_QUEUE_CAPACITY;
-    _rxQueue[index] = frame;
-    ++_rxQueueCount;
-}
-
 void ApplicationLayer::enqueueSendOutcome(const ASendOutcome& outcome) {
     // Send outcomes are a diagnostic feed. EndpointRuntime::loop() drains it,
     // but during an ETS download outcomes are produced faster than the owner
@@ -320,17 +311,6 @@ void ApplicationLayer::enqueueSendOutcome(const ASendOutcome& outcome) {
     const size_t index = (_txOutcomeQueueHead + _txOutcomeQueueCount) % TX_OUTCOME_QUEUE_CAPACITY;
     _txOutcomeQueue[index] = outcome;
     ++_txOutcomeQueueCount;
-}
-
-bool ApplicationLayer::popReceivedFrame(ADataFrame& frame) {
-    if (_rxQueueCount == 0u) {
-        return false;
-    }
-
-    frame = _rxQueue[_rxQueueHead];
-    _rxQueueHead = (_rxQueueHead + 1u) % RX_QUEUE_CAPACITY;
-    --_rxQueueCount;
-    return true;
 }
 
 bool ApplicationLayer::popSendOutcome(ASendOutcome& outcome) {
@@ -354,12 +334,14 @@ util::Result<void> ApplicationLayer::init(const IndividualAddress& ownAddress) {
 
     // Initialize dependencies
     _deviceDescriptor = std::make_unique<DeviceDescriptor>(DeviceDescriptor::createDefault());
+    // Only the extended property services still read the store; see the
+    // registration in the BAU.
     _propertyStoreManager = std::make_unique<PropertyStoreManager>();
     _addressSpace = std::make_unique<AddressSpace>();
 
     // Initialize service handlers
     _deviceDescriptorService = std::make_unique<DeviceDescriptorService>(*_deviceDescriptor);
-    _propertyServices = std::make_unique<PropertyServices>(*_propertyStoreManager);
+    _propertyServices = std::make_unique<PropertyServices>();
     _propertyExtServices = std::make_unique<PropertyExtServices>(*_propertyStoreManager);
     _memoryService = std::make_unique<MemoryService>(*_addressSpace);
     _authorizationService = std::make_unique<AuthorizationService>();
@@ -393,9 +375,6 @@ void ApplicationLayer::close() {
         // Prevent transport from calling back into a destroyed ApplicationLayer.
         _transport.setReceiveCallback(nullptr);
         _transport.setConnectionClosedCallback(nullptr);
-        _rxQueueHead = 0u;
-        _rxQueueCount = 0u;
-        _droppedReceiveFrames = 0u;
         _txOutcomeQueueHead = 0u;
         _txOutcomeQueueCount = 0u;
         _droppedSendOutcomes = 0u;
@@ -858,13 +837,6 @@ util::Result<void> ApplicationLayer::sendToIndividual(IndividualAddress destinat
                                                       std::span<const uint8_t> data,
                                                       const SendOptions& options) {
     return sendData(GroupAddress(destination.raw), service, data, AddressType::Individual, options);
-}
-
-util::Result<void> ApplicationLayer::sendToGroup(GroupAddress destination,
-                                                 APCIService service,
-                                                 std::span<const uint8_t> data,
-                                                 const SendOptions& options) {
-    return sendData(destination, service, data, AddressType::Group, options);
 }
 
 util::Result<void> ApplicationLayer::sendBroadcast(APCIService service,
@@ -1408,8 +1380,6 @@ void ApplicationLayer::forwardToUser(const ADataFrame& frame) {
         if (_receiveWorkAvailableCallback) {
             _receiveWorkAvailableCallback();
         }
-    } else {
-        enqueueReceivedFrame(frame);
     }
 }
 
@@ -1690,14 +1660,12 @@ bool ApplicationLayer::isRequestPermitted(const ADataFrame& aFrame) const {
 }
 
 std::optional<uint16_t> ApplicationLayer::objectTypeForIndex(InterfaceObjectIndex objectIndex) const {
-    if (!_propertyStoreManager) {
-        return std::nullopt;
+    for (const auto& object : _registeredObjects) {
+        if (object.index == objectIndex) {
+            return object.type.value();
+        }
     }
-    const auto* store = _propertyStoreManager->getObject(objectIndex);
-    if (store == nullptr) {
-        return std::nullopt;
-    }
-    return store->getObjectType().value();
+    return std::nullopt;
 }
 
 bool ApplicationLayer::isPropertyAccessPermitted(uint16_t objectType,

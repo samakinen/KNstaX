@@ -6,6 +6,7 @@
 #if KNX_SECURE_ENABLED
 
 #include "knx/netip/ip_secure/secure_wrapper.hpp"
+#include "knx/security/data_secure.hpp"
 #include "knx/security/secure_memory.hpp"
 #include "knx/util/log.hpp"
 #include "knx/util/timing_utils.hpp"
@@ -23,19 +24,13 @@ namespace {
 std::array<uint8_t, SecureWrapper::kSeqLen> encodeTimer(uint64_t timer)
 {
     std::array<uint8_t, SecureWrapper::kSeqLen> out{};
-    for (size_t i = 0; i < out.size(); ++i) {
-        out[i] = static_cast<uint8_t>((timer >> (8u * (out.size() - 1u - i))) & 0xFFu);
-    }
+    knx::security::writeSecureU48BE(out, timer);
     return out;
 }
 
 uint64_t decodeTimer(const std::array<uint8_t, SecureWrapper::kSeqLen>& in)
 {
-    uint64_t timer = 0;
-    for (const uint8_t octet : in) {
-        timer = (timer << 8) | octet;
-    }
-    return timer;
+    return knx::security::readSecureU48BE(in);
 }
 
 } // namespace

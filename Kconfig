@@ -298,13 +298,6 @@ menu "KNX Stack Configuration"
     menu "IP Configuration"
         depends on KNX_MEDIUM_IP
         
-        config KNX_ENABLE_ROUTING
-            bool "Enable Routing"
-            default n
-            help
-                Enable KNXnet/IP Routing (multicast).
-                Note: routing support is not currently shipped as part of the standalone/host build.
-        
         config KNX_ENABLE_TUNNELING
             bool "Enable Tunneling"
             depends on !(KNX_ENABLE_SECURITY && MBEDTLS_VER_4_X_SUPPORT)
@@ -391,33 +384,12 @@ menu "KNX Stack Configuration"
 
     menu "Task Configuration"
         
-        config KNX_TASK_STACK_SIZE
-            int "Main Task Stack Size (bytes)"
-            default 4096
-            range 2048 16384
-            help
-                Stack size for main KNX processing task
-        
-        config KNX_TASK_PRIORITY
-            int "Main Task Priority"
-            default 5
-            range 1 24
-            help
-                Priority for main KNX processing task
-        
         config KNX_RX_TASK_STACK_SIZE
             int "RX Task Stack Size (bytes)"
             default 3072
             range 2048 8192
             help
                 Stack size for frame reception task
-        
-        config KNX_RX_TASK_PRIORITY
-            int "RX Task Priority"
-            default 10
-            range 1 24
-            help
-                Priority for frame reception task (should be high)
     endmenu
 
     menu "Management"
@@ -442,61 +414,7 @@ menu "KNX Stack Configuration"
 
     endmenu
 
-    menu "Buffer Configuration"
-        
-        config KNX_RX_QUEUE_SIZE
-            int "RX Queue Size"
-            default 10
-            range 1 50
-            help
-                Number of frames that can be queued for reception
-        
-        config KNX_TX_QUEUE_SIZE
-            int "TX Queue Size"
-            default 5
-            range 1 20
-            help
-                Number of frames that can be queued for transmission
-    endmenu
-
-    menu "Memory Configuration"
-        
-        config KNX_FLASH_SIZE
-            int "Flash Size (bytes)"
-            default 4096
-            help
-                Size of non-volatile memory for KNX configuration
-        
-        config KNX_FLASH_PAGE_SIZE
-            int "Flash Page Size (bytes)"
-            default 256
-            help
-                Flash page/sector size
-    endmenu
-
-    menu "Feature Flags"
-        
-        config KNX_ENABLE_GROUP_ADDRESS_FILTER
-            bool "Enable Group Address Filtering"
-            default y
-            help
-                Filter incoming group telegrams based on address table
-    endmenu
-
-    menu "Debug Configuration"
-        
-        config KNX_DEBUG_ENABLED
-            bool "Enable Debug Output"
-            default n
-            help
-                Enable debug logging
-        
-        config KNX_VERBOSE_LOGGING
-            bool "Verbose Logging"
-            depends on KNX_DEBUG_ENABLED
-            default n
-            help
-                Enable verbose frame-level logging
+    menu "Logging"
         
         config KNX_LOG_LEVEL
             int "Log Level (compile-time ceiling)"
@@ -506,9 +424,8 @@ menu "KNX Stack Configuration"
                 0=None, 1=Error, 2=Warning, 3=Info, 4=Debug, 5=Verbose
 
                 The most verbose KNstaX log level compiled into the image.
-                Calls above it expand to nothing, so their format strings cost
-                no flash. Independent of KNX_DEBUG_ENABLED: the level applies
-                with debug output off too.
+                Calls above it are compiled out, so their format strings cost
+                no flash.
     endmenu
 
 endmenu

@@ -88,59 +88,6 @@ public:
     util::Result<void> handleReadRequest(const IndividualAddress& source, uint8_t descriptorType);
     
     /**
-     * @brief Encode descriptor read request
-     * 
-     * Creates APCI data for A_DeviceDescriptor_Read service.
-     * 
-     * @param descriptorType Descriptor type to request
-        * @param out Caller-managed TPDU buffer
-        * @return Number of bytes written, or an error code
-     */
-        static util::Result<size_t> encodeReadRequest(uint8_t descriptorType, std::span<uint8_t, 2> out);
-    
-    /**
-     * @brief Decode descriptor read request
-     * 
-     * Extracts descriptor type from A_DeviceDescriptor_Read APCI data.
-     * 
-     * @param apciData APCI data bytes
-     * @return Descriptor type
-     */
-    static uint8_t decodeReadRequest(std::span<const uint8_t> apciData);
-    
-    /**
-     * @brief Encode descriptor response
-     * 
-     * Creates APCI data for A_DeviceDescriptor_Response service.
-     * 
-     * @param descriptorType Descriptor type
-     * @param descriptorData Encoded descriptor
-     * @param out Caller-managed TPDU buffer
-     * @return Number of bytes written, or an error code
-     */
-    static util::Result<size_t> encodeResponse(
-        uint8_t descriptorType,
-        std::span<const uint8_t> descriptorData,
-        std::span<uint8_t> out
-    );
-    
-    /**
-     * @brief Decode descriptor response
-     * 
-     * Extracts descriptor data from A_DeviceDescriptor_Response APCI data.
-     * 
-     * @param apciData APCI data bytes
-     * @param descriptorType Output: descriptor type
-     * @param out Caller-managed descriptor buffer
-     * @return Number of bytes written, or an error code
-     */
-    static util::Result<size_t> decodeResponse(
-        std::span<const uint8_t> apciData,
-        uint8_t& descriptorType,
-        std::span<uint8_t> out
-    );
-    
-    /**
      * @brief Update device descriptor
      * @param descriptor New descriptor data
      */

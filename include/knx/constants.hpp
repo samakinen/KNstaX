@@ -82,10 +82,6 @@ namespace timing {
     //   connection_timeout_timer      6 s  — breaks down an idle connection
     //   acknowledgment_timeout_timer  3 s  — waits for T_ACK
     //   repetitions                   3    — before giving up and disconnecting
-    //
-    // CONNECTION_TIMEOUT_MS previously said 10 s, which is why call sites wrote
-    // the literal 6000 instead of using it. Corrected here; the literals are
-    // gone.
     constexpr uint32_t CONNECTION_TIMEOUT_MS = 6000;        // 03/03/04 §5.5.1
     constexpr uint32_t ACK_TIMEOUT_MS = 3000;               // 03/03/04 §5.5.1
     constexpr uint8_t  CONNECTION_MAX_REPETITIONS = 3;      // 03/03/04 §5.4.3
