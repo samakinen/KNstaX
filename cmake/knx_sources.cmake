@@ -185,7 +185,6 @@ set(KNX_SOURCES_VIRTUAL
 set(KNX_SOURCES_PLATFORM_ESPIDF
     "src/platform/esp32_platform.cpp"
     "src/platform/esp32_network.cpp"
-    "src/platform/esp32_uart.cpp"
 )
 
 set(KNX_SOURCES_PLATFORM_LINUX

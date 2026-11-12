@@ -7,8 +7,6 @@
  */
 
 #include "unity.h"
-#include "knx/platform/esp32_uart_build_config.hpp"
-#include "knx/platform/uart_interface.hpp"
 #include "knx/datalink/tp1_data_link_layer.hpp"
 #include "knx/physical/bitbang_board_profile.hpp"
 #include "knx/physical/bitbang_driver_interface.hpp"
@@ -21,158 +19,6 @@ void setUp(void) {
 
 void tearDown(void) {
     // Clean up test fixtures
-}
-
-// ============================================================================
-// UartConfig Validation Tests
-// ============================================================================
-
-void test_uart_config_defaults_valid() {
-    platform::UartConfig config;
-    auto result = config.validate();
-    TEST_ASSERT_TRUE(result.isOk());
-}
-
-void test_uart_config_invalid_baud_rate_too_low() {
-    platform::UartConfig config;
-    config.baudRate = 100;  // Too low
-    auto result = config.validate();
-    TEST_ASSERT_TRUE(result.isError());
-    TEST_ASSERT_EQUAL(util::ErrorCode::InvalidParameter, result.error());
-}
-
-void test_uart_config_invalid_baud_rate_too_high() {
-    platform::UartConfig config;
-    config.baudRate = 1000000;  // Too high
-    auto result = config.validate();
-    TEST_ASSERT_TRUE(result.isError());
-    TEST_ASSERT_EQUAL(util::ErrorCode::InvalidParameter, result.error());
-}
-
-void test_uart_config_valid_baud_rates() {
-    uint32_t validRates[] = {300, 1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200, 921600};
-    
-    for (uint32_t rate : validRates) {
-        platform::UartConfig config;
-        config.baudRate = rate;
-        auto result = config.validate();
-        TEST_ASSERT_TRUE(result.isOk());
-    }
-}
-
-void test_uart_config_invalid_data_bits_too_low() {
-    platform::UartConfig config;
-    config.dataBits = 4;  // Too low
-    auto result = config.validate();
-    TEST_ASSERT_TRUE(result.isError());
-}
-
-void test_uart_config_invalid_data_bits_too_high() {
-    platform::UartConfig config;
-    config.dataBits = 9;  // Too high
-    auto result = config.validate();
-    TEST_ASSERT_TRUE(result.isError());
-}
-
-void test_uart_config_valid_data_bits() {
-    for (uint8_t bits = 5; bits <= 8; bits++) {
-        platform::UartConfig config;
-        config.dataBits = bits;
-        auto result = config.validate();
-        TEST_ASSERT_TRUE(result.isOk());
-    }
-}
-
-void test_uart_config_invalid_stop_bits_zero() {
-    platform::UartConfig config;
-    config.stopBits = 0;  // Invalid
-    auto result = config.validate();
-    TEST_ASSERT_TRUE(result.isError());
-}
-
-void test_uart_config_invalid_stop_bits_too_high() {
-    platform::UartConfig config;
-    config.stopBits = 3;  // Too high
-    auto result = config.validate();
-    TEST_ASSERT_TRUE(result.isError());
-}
-
-void test_uart_config_invalid_rx_buffer_size_zero() {
-    platform::UartConfig config;
-    config.rxBufferSize = 0;  // Invalid
-    auto result = config.validate();
-    TEST_ASSERT_TRUE(result.isError());
-}
-
-void test_uart_config_invalid_rx_buffer_size_too_large() {
-    platform::UartConfig config;
-    config.rxBufferSize = 70000;  // Too large
-    auto result = config.validate();
-    TEST_ASSERT_TRUE(result.isError());
-}
-
-void test_uart_config_invalid_tx_buffer_size_zero() {
-    platform::UartConfig config;
-    config.txBufferSize = 0;  // Invalid
-    auto result = config.validate();
-    TEST_ASSERT_TRUE(result.isError());
-}
-
-void test_uart_config_invalid_tx_buffer_size_too_large() {
-    platform::UartConfig config;
-    config.txBufferSize = 70000;  // Too large
-    auto result = config.validate();
-    TEST_ASSERT_TRUE(result.isError());
-}
-
-void test_esp32_uart_build_config_defaults_allow_no_flow_control() {
-    platform::Esp32UartBuildConfig config{
-        .txPin = 17,
-        .rxPin = 16,
-    };
-
-    auto result = platform::validateEsp32UartBuildConfig(config, false);
-    TEST_ASSERT_TRUE(result.isOk());
-    TEST_ASSERT_FALSE(platform::shouldEnableEsp32UartHardwareFlowControl(config, false));
-}
-
-void test_esp32_uart_build_config_requires_both_flow_control_pins() {
-    platform::Esp32UartBuildConfig config{
-        .txPin = 17,
-        .rxPin = 16,
-        .rtsPin = 18,
-    };
-
-    auto result = platform::validateEsp32UartBuildConfig(config, true);
-    TEST_ASSERT_TRUE(result.isError());
-    TEST_ASSERT_EQUAL(util::ErrorCode::InvalidParameter, result.error());
-}
-
-void test_esp32_uart_build_config_rejects_duplicate_flow_control_pins() {
-    platform::Esp32UartBuildConfig config{
-        .txPin = 17,
-        .rxPin = 16,
-        .rtsPin = 17,
-        .ctsPin = 19,
-    };
-
-    auto result = platform::validateEsp32UartBuildConfig(config, true);
-    TEST_ASSERT_TRUE(result.isError());
-    TEST_ASSERT_EQUAL(util::ErrorCode::InvalidParameter, result.error());
-}
-
-void test_esp32_uart_build_config_enables_flow_control_when_pins_are_present() {
-    platform::Esp32UartBuildConfig config{
-        .txPin = 17,
-        .rxPin = 16,
-        .rtsPin = 18,
-        .ctsPin = 19,
-    };
-
-    auto result = platform::validateEsp32UartBuildConfig(config, true);
-    TEST_ASSERT_TRUE(result.isOk());
-    TEST_ASSERT_TRUE(platform::shouldEnableEsp32UartHardwareFlowControl(config, false));
-    TEST_ASSERT_TRUE(platform::shouldEnableEsp32UartHardwareFlowControl(config, true));
 }
 
 // ============================================================================
@@ -365,25 +211,6 @@ void test_apply_bitbang_board_profile_applies_transceiver_traits() {
 
 int main(int argc, char** argv) {
     UNITY_BEGIN();
-    
-    // UartConfig tests
-    RUN_TEST(test_uart_config_defaults_valid);
-    RUN_TEST(test_uart_config_invalid_baud_rate_too_low);
-    RUN_TEST(test_uart_config_invalid_baud_rate_too_high);
-    RUN_TEST(test_uart_config_valid_baud_rates);
-    RUN_TEST(test_uart_config_invalid_data_bits_too_low);
-    RUN_TEST(test_uart_config_invalid_data_bits_too_high);
-    RUN_TEST(test_uart_config_valid_data_bits);
-    RUN_TEST(test_uart_config_invalid_stop_bits_zero);
-    RUN_TEST(test_uart_config_invalid_stop_bits_too_high);
-    RUN_TEST(test_uart_config_invalid_rx_buffer_size_zero);
-    RUN_TEST(test_uart_config_invalid_rx_buffer_size_too_large);
-    RUN_TEST(test_uart_config_invalid_tx_buffer_size_zero);
-    RUN_TEST(test_uart_config_invalid_tx_buffer_size_too_large);
-    RUN_TEST(test_esp32_uart_build_config_defaults_allow_no_flow_control);
-    RUN_TEST(test_esp32_uart_build_config_requires_both_flow_control_pins);
-    RUN_TEST(test_esp32_uart_build_config_rejects_duplicate_flow_control_pins);
-    RUN_TEST(test_esp32_uart_build_config_enables_flow_control_when_pins_are_present);
     
     // Tp1DataLinkConfig tests
     RUN_TEST(test_tp1_config_defaults_valid);

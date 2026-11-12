@@ -6,83 +6,47 @@
 #include "knx/platform/virtual_platform.hpp"
 #include "knx/platform/virtual_test_clock.hpp"
 
-#include <atomic>
-#include <chrono>
 #include <cstring>
 #include <span>
-#include <thread>
 #include <utility>
 
 namespace knx::testsupport {
 
 /**
- * @brief Owns a worker thread that blocks on virtual time.
+ * @brief Runs a test body as a VirtualPlatform task, deleted on scope exit.
  *
- * A failing TEST_ASSERT unwinds the test body, and ~thread() on a still-joinable
- * thread calls std::terminate() — aborting the process and losing every
- * remaining test in the binary. Such a worker cannot finish on its own either:
- * it is parked on a virtual deadline, and the main thread that would have
- * advanced the clock is busy unwinding.
- *
- * So on scope exit, advance virtual time until the worker observes its deadline
- * and returns, then join. A clock advance updates the platform's observed time
- * and notifies every waiter, which releases both delayMicroseconds() and
- * waitForPredicate(). Repeating covers a worker that had not latched its
- * deadline yet. The loop is bounded by a wall-clock budget so a genuinely
- * wedged worker cannot spin forever.
+ * The body runs at once, up to its first blocking call, and from then on
+ * whenever virtual time or a wake-up makes it runnable. Deleting it on scope
+ * exit matters when an assertion fails while the body is still blocked: the
+ * task is discarded instead of being left for the next test's platform.
  */
-class VirtualTimeWorker {
+class ScopedVirtualTask {
 public:
-    static constexpr auto kDrainBudget = std::chrono::seconds(5);
-    static constexpr uint32_t kDrainStepMs = 1000u;
-
     template <typename Fn>
-    VirtualTimeWorker(platform::VirtualTestClock& clock, Fn&& body)
-        : _clock(clock)
+    ScopedVirtualTask(platform::VirtualPlatform& platform, const char* name, Fn&& body)
+        : _platform(platform)
     {
-        _thread = std::thread([this, body = std::forward<Fn>(body)]() mutable {
-            body();
-            _done.store(true, std::memory_order_release);
-        });
+        platform::TaskConfig config{};
+        config.name = name;
+        config.function = std::forward<Fn>(body);
+        _handle = _platform.createTask(config);
     }
 
-    VirtualTimeWorker(const VirtualTimeWorker&) = delete;
-    VirtualTimeWorker& operator=(const VirtualTimeWorker&) = delete;
+    ScopedVirtualTask(const ScopedVirtualTask&) = delete;
+    ScopedVirtualTask& operator=(const ScopedVirtualTask&) = delete;
 
-    /// Safety net: only reached when join() did not run, i.e. an assertion threw.
-    ~VirtualTimeWorker() { drainAndJoin(); }
-
-    /// Success path. A plain join, deliberately without draining: the test has
-    /// already observed the worker finish, and the completion flag is set after
-    /// the body returns, so draining here would race that window and jump the
-    /// clock a full step out from under assertions that follow the join.
-    void join()
+    ~ScopedVirtualTask()
     {
-        if (_thread.joinable()) {
-            _thread.join();
+        if (_handle) {
+            _platform.deleteTask(_handle);
         }
     }
+
+    platform::TaskHandle handle() const noexcept { return _handle; }
 
 private:
-    void drainAndJoin()
-    {
-        if (!_thread.joinable()) {
-            return;
-        }
-
-        const auto limit = std::chrono::steady_clock::now() + kDrainBudget;
-        while (!_done.load(std::memory_order_acquire)
-               && std::chrono::steady_clock::now() < limit) {
-            _clock.advanceMs(kDrainStepMs);
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-
-        _thread.join();
-    }
-
-    platform::VirtualTestClock& _clock;
-    std::atomic<bool> _done{false};
-    std::thread _thread;
+    platform::VirtualPlatform& _platform;
+    platform::TaskHandle _handle{nullptr};
 };
 
 constexpr bool isSchedulerQuiescent(const platform::VirtualPlatform::SchedulerSnapshot& snapshot) noexcept

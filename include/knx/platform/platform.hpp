@@ -24,7 +24,6 @@ namespace platform {
 
 // Forward declarations
 class NetworkInterface;
-class UartInterface;
 
 // ============================================================================
 // Threading Primitives
@@ -298,12 +297,6 @@ public:
      * @return nullptr if network not available
      */
     virtual NetworkInterface* network() = 0;
-    
-    /**
-     * @brief Get UART interface (for TP1 platforms)
-     * @return nullptr if UART not available
-     */
-    virtual UartInterface* uart() = 0;
     
     // ========================================================================
     // Threading

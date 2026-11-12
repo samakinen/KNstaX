@@ -21,7 +21,7 @@
 # for the Python and shell tests.
 #
 # Every test built from SOURCES is also recorded per label, so a target that
-# runs a label (the flake lane, the release gate) can depend on exactly the
+# runs a label (the release gate) can depend on exactly the
 # executables that carry it:
 #
 #   knx_tests_with_label(<out-var> <label>)

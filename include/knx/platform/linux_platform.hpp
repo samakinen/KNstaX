@@ -29,7 +29,6 @@ namespace platform {
 class MemoryInterface;
 class LinuxMemory;
 class LinuxNetwork;
-class LinuxUart;
 
 /**
  * @brief Linux platform implementation using POSIX threads
@@ -113,7 +112,6 @@ public:
     
     MemoryInterface& memory();
     NetworkInterface* network() override;
-    UartInterface* uart() override;
     
     // ========================================================================
     // Logging
@@ -187,7 +185,6 @@ private:
     // Hardware interfaces
     std::unique_ptr<LinuxMemory> _memory;
     std::unique_ptr<LinuxNetwork> _network;
-    std::unique_ptr<LinuxUart> _uart;
     
     // System info
     uint32_t _serialNumber;

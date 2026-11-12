@@ -16,14 +16,10 @@
 #include "knx/platform/virtual_platform.hpp"
 #include "../common/virtual_platform_test_utils.hpp"
 
-#include <atomic>
-#include <condition_variable>
+#include <cstdint>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <span>
-#include <thread>
-#include <chrono>
 #include <vector>
 
 using namespace knx;
@@ -33,8 +29,6 @@ namespace {
 
 class MockBitBangTp1Driver : public BitBangDriverInterface, public BitBangDriverTp1Interface {
 public:
-    static constexpr auto kWaitTimeout = std::chrono::seconds(5);
-
     void setVirtualClock(platform::VirtualTestClock* clock) {
         _virtualClock = clock;
     }
@@ -56,8 +50,7 @@ public:
         if (!_initialized) {
             return util::ErrorCode::NotInitialized;
         }
-        _sendCalls.fetch_add(1u, std::memory_order_relaxed);
-        _sendCv.notify_all();
+        ++_sendCalls;
         if (_sendError.has_value()) {
             return _sendError.value();
         }
@@ -181,14 +174,7 @@ public:
     }
 
     uint32_t sendCalls() const {
-        return _sendCalls.load(std::memory_order_relaxed);
-    }
-
-    bool waitForSendCall() {
-        std::unique_lock<std::mutex> lock(_sendMutex);
-        return _sendCv.wait_for(lock, kWaitTimeout, [this]() {
-            return _sendCalls.load(std::memory_order_relaxed) > 0u;
-        });
+        return _sendCalls;
     }
 
 protected:
@@ -207,9 +193,7 @@ private:
     uint16_t _ownAddressRaw{0};
     bool _busMonitorMode{false};
     int _monitorCalls{0};
-    std::atomic<uint32_t> _sendCalls{0};
-    mutable std::mutex _sendMutex{};
-    std::condition_variable _sendCv{};
+    uint32_t _sendCalls{0};
     platform::VirtualTestClock* _virtualClock{nullptr};
     std::optional<uint64_t> _pendingTxDeadlineUs{};
     std::vector<uint16_t> _ackGroupAddresses{};
@@ -224,29 +208,6 @@ std::unique_ptr<MockBitBangTp1Driver> mockDriver;
 std::unique_ptr<Tp1MacPhysical> macPhysical;
 std::unique_ptr<platform::VirtualTestClock> virtualClock;
 std::unique_ptr<platform::VirtualPlatform> virtualPlatform;
-
-class ThreadSignal {
-public:
-    static constexpr auto kWaitTimeout = std::chrono::seconds(5);
-
-    void notify() {
-        {
-            std::lock_guard<std::mutex> lock(_mutex);
-            _signaled = true;
-        }
-        _cv.notify_all();
-    }
-
-    bool wait() {
-        std::unique_lock<std::mutex> lock(_mutex);
-        return _cv.wait_for(lock, kWaitTimeout, [this]() { return _signaled; });
-    }
-
-private:
-    std::mutex _mutex;
-    std::condition_variable _cv;
-    bool _signaled{false};
-};
 
 std::vector<uint8_t> buildValidFrame() {
     datalink::LDataFrame frame;
@@ -407,31 +368,23 @@ void test_receive_timeout_can_follow_virtual_time() {
     TEST_ASSERT_TRUE(macPhysical->init().isOk());
     macPhysical->setTimingPlatform(virtualPlatform.get());
 
-    ThreadSignal finishedSignal;
-    std::atomic<bool> finished{false};
+    bool finished = false;
     util::Result<std::vector<uint8_t>> result = util::ErrorCode::Timeout;
 
-    knx::testsupport::VirtualTimeWorker worker(*virtualClock, [&]() {
+    knx::testsupport::ScopedVirtualTask worker(*virtualPlatform, "rx_worker", [&]() {
         result = macPhysical->receiveFrame(5u);
-        finished.store(true);
-        finishedSignal.notify();
+        finished = true;
     });
 
-    // Wait until the worker is actually blocked inside delayMicroseconds.
-    // This eliminates the lost-wakeup race: previously started.notify() fired
-    // before beginReceive(), so the main thread could advance virtual time
-    // before the deadline was computed, pushing it out of reach.
+    // The worker polls in 1 ms delays until its 5 ms deadline.
     TEST_ASSERT_TRUE(virtualPlatform->waitUntilActiveDelayCalls(1u));
-    TEST_ASSERT_FALSE(finished.load());
+    TEST_ASSERT_FALSE(finished);
 
     virtualClock->advanceMs(4u);
-    TEST_ASSERT_FALSE(finished.load());
+    TEST_ASSERT_FALSE(finished);
 
     virtualClock->advanceMs(1u);
-    TEST_ASSERT_TRUE(finishedSignal.wait());
-    worker.join();
-
-    TEST_ASSERT_TRUE(finished.load());
+    TEST_ASSERT_TRUE(finished);
     TEST_ASSERT_TRUE(result.isError());
     TEST_ASSERT_EQUAL(static_cast<int>(util::ErrorCode::Timeout), static_cast<int>(result.error()));
 }
@@ -442,33 +395,21 @@ void test_receive_success_can_follow_virtual_time_without_wall_clock_sleep() {
 
     const auto frame = buildValidFrame();
 
-    ThreadSignal started;
-    ThreadSignal finishedSignal;
-    std::atomic<bool> finished{false};
+    bool finished = false;
     util::Result<std::vector<uint8_t>> result = util::ErrorCode::Timeout;
 
-    knx::testsupport::VirtualTimeWorker worker(*virtualClock, [&]() {
-        started.notify();
+    knx::testsupport::ScopedVirtualTask worker(*virtualPlatform, "rx_worker", [&]() {
         result = macPhysical->receiveFrame(20u);
-        finished.store(true);
-        finishedSignal.notify();
+        finished = true;
     });
 
-    TEST_ASSERT_TRUE(started.wait());
-
-    // started.notify() only proves the worker was spawned, not that it reached
-    // receiveFrame(). Park it in its 1 ms poll delay first, then buffer the
-    // frame, then advance the clock to wake it. Simulating the receive while
-    // the worker is running (rather than parked) loses the race: it re-enters
-    // the delay afterwards and nothing advances virtual time again, so it
-    // sleeps until the ThreadSignal times out.
+    // Parked in its poll delay; the frame arrives, and the next poll finds it.
     TEST_ASSERT_TRUE(virtualPlatform->waitUntilActiveDelayCalls(1u));
     mockDriver->simulateReceive(frame);
+    TEST_ASSERT_FALSE(finished);
     virtualClock->advanceMs(2u);
 
-    TEST_ASSERT_TRUE(finishedSignal.wait());
-    worker.join();
-
+    TEST_ASSERT_TRUE(finished);
     TEST_ASSERT_TRUE(result.isOk());
     TEST_ASSERT_EQUAL(frame.size(), result.value().size());
     TEST_ASSERT_EQUAL_UINT8(frame[1], result.value()[1]);
@@ -492,40 +433,25 @@ void test_send_timeout_can_follow_virtual_time_without_wall_clock_sleep() {
 
     const auto frame = buildValidFrame();
 
-    ThreadSignal started;
-    ThreadSignal finishedSignal;
-    std::atomic<bool> finished{false};
+    bool finished = false;
     util::Result<size_t> result = util::ErrorCode::Timeout;
 
-    knx::testsupport::VirtualTimeWorker worker(*virtualClock, [&]() {
-        started.notify();
+    knx::testsupport::ScopedVirtualTask worker(*virtualPlatform, "tx_worker", [&]() {
         result = macPhysical->sendFrame(frame);
-        finished.store(true);
-        finishedSignal.notify();
+        finished = true;
     });
 
-    TEST_ASSERT_TRUE(started.wait());
-
-    TEST_ASSERT_TRUE(mockDriver->waitForSendCall());
+    // The frame went out, and the worker is polling for an outcome that never
+    // comes until the 20 ms TX-outcome deadline.
     TEST_ASSERT_TRUE(mockDriver->sendCalls() > 0u);
-
-    // waitForSendCall() only proves the driver's send() ran, which happens in
-    // beginTransmit() — waitForTxOutcome() samples the clock for its deadline
-    // *after* that. Advancing virtual time in between would compute the
-    // deadline from the already-advanced clock, putting it 20 ms beyond any
-    // value the clock will ever reach and hanging the worker. Sync on the
-    // worker actually being parked in its poll delay instead.
     TEST_ASSERT_TRUE(virtualPlatform->waitUntilActiveDelayCalls(1u));
-    TEST_ASSERT_FALSE(finished.load());
+    TEST_ASSERT_FALSE(finished);
 
     virtualClock->advanceMs(19u);
-    TEST_ASSERT_FALSE(finished.load());
+    TEST_ASSERT_FALSE(finished);
 
     virtualClock->advanceMs(1u);
-    TEST_ASSERT_TRUE(finishedSignal.wait());
-    worker.join();
-
-    TEST_ASSERT_TRUE(finished.load());
+    TEST_ASSERT_TRUE(finished);
     TEST_ASSERT_TRUE(result.isError());
     TEST_ASSERT_EQUAL(static_cast<int>(util::ErrorCode::Timeout), static_cast<int>(result.error()));
 }
@@ -539,34 +465,22 @@ void test_send_timeout_uses_configured_tx_outcome_timeout() {
 
     const auto frame = buildValidFrame();
 
-    ThreadSignal started;
-    ThreadSignal finishedSignal;
-    std::atomic<bool> finished{false};
+    bool finished = false;
     util::Result<size_t> result = util::ErrorCode::Timeout;
 
-    knx::testsupport::VirtualTimeWorker worker(*virtualClock, [&]() {
-        started.notify();
+    knx::testsupport::ScopedVirtualTask worker(*virtualPlatform, "tx_worker", [&]() {
         result = macPhysical->sendFrame(frame);
-        finished.store(true);
-        finishedSignal.notify();
+        finished = true;
     });
 
-    TEST_ASSERT_TRUE(started.wait());
-    TEST_ASSERT_TRUE(mockDriver->waitForSendCall());
-
-    // See the note in the test above: the TX-outcome deadline is only computed
-    // once the worker is inside waitForTxOutcome(), so wait for it to park in
-    // the poll delay before touching the clock.
+    TEST_ASSERT_TRUE(mockDriver->sendCalls() > 0u);
     TEST_ASSERT_TRUE(virtualPlatform->waitUntilActiveDelayCalls(1u));
 
     virtualClock->advanceMs(6u);
-    TEST_ASSERT_FALSE(finished.load());
+    TEST_ASSERT_FALSE(finished);
 
     virtualClock->advanceMs(1u);
-    TEST_ASSERT_TRUE(finishedSignal.wait());
-    worker.join();
-
-    TEST_ASSERT_TRUE(finished.load());
+    TEST_ASSERT_TRUE(finished);
     TEST_ASSERT_TRUE(result.isError());
     TEST_ASSERT_EQUAL(static_cast<int>(util::ErrorCode::Timeout), static_cast<int>(result.error()));
 }

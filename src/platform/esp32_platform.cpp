@@ -8,7 +8,6 @@
 
 #include "knx/platform/esp32_platform.hpp"
 #include "esp32_network.hpp"
-#include "esp32_uart.hpp"
 #include "esp_system.h"
 #include "esp_random.h"
 #include "esp_mac.h"
@@ -25,7 +24,6 @@ namespace platform {
 Esp32Platform::Esp32Platform()
     : FreeRtosPlatform()
     , _network(nullptr)
-    , _uart(nullptr)
     , _serialNumber(0)
 {
     std::memset(_macAddress, 0, sizeof(_macAddress));
@@ -75,13 +73,6 @@ NetworkInterface* Esp32Platform::network() {
         _network = std::make_unique<Esp32Network>();
     }
     return _network.get();
-}
-
-UartInterface* Esp32Platform::uart() {
-    if (!_uart) {
-        _uart = std::make_unique<Esp32Uart>();
-    }
-    return _uart.get();
 }
 
 void Esp32Platform::log(const char* level, const char* tag, const char* format, ...) {

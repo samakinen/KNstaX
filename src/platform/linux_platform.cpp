@@ -11,7 +11,6 @@
 #include <random>
 #include "knx/platform/memory_interface.hpp"
 #include "knx/platform/network_interface.hpp"
-#include "knx/platform/uart_interface.hpp"
 #include <iostream>
 #include <cstring>
 #include <cstdio>
@@ -31,8 +30,6 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <errno.h>
-#include <fcntl.h>
-#include <termios.h>
 #include <sys/ioctl.h>
 #include <array>
 #include <bit>
@@ -703,250 +700,6 @@ public:
 };
 
 // ============================================================================
-// Linux UART Interface (Real termios implementation)
-// ============================================================================
-
-class LinuxUart : public UartInterface {
-public:
-    LinuxUart() : _fd(-1), _rxCallback(nullptr), _rxCallbackContext(nullptr), _overflowFlag(false) {}
-    
-    ~LinuxUart() {
-        close();
-    }
-    
-    util::Result<void> init(const UartConfig& config) override {
-        if (_fd >= 0) {
-            KNX_LOGW("KNX.Platform", "UART already initialized");
-            return util::ErrorCode::AlreadyInitialized;
-        }
-        
-        // Try common serial device paths
-        const char* devices[] = {
-            "/dev/ttyUSB0",
-            "/dev/ttyACM0",
-            "/dev/ttyS0",
-            "/dev/serial0",
-            nullptr
-        };
-        
-        for (int i = 0; devices[i] != nullptr; i++) {
-            _fd = ::open(devices[i], O_RDWR | O_NOCTTY | O_NONBLOCK);
-            if (_fd >= 0) {
-                KNX_LOGD("KNX.Platform", "Opened UART device: %s", devices[i]);
-                break;
-            }
-        }
-        
-        if (_fd < 0) {
-            KNX_LOGE("KNX.Platform", "No UART device found");
-            return util::ErrorCode::ResourceUnavailable;
-        }
-        
-        // Configure termios
-        struct termios tty;
-        if (tcgetattr(_fd, &tty) != 0) {
-            KNX_LOGE("KNX.Platform", "tcgetattr failed: %s", strerror(errno));
-            ::close(_fd);
-            _fd = -1;
-            return util::ErrorCode::OperationFailed;
-        }
-        
-        // Set baud rate
-        speed_t speed = _baudToSpeed(config.baudRate);
-        cfsetospeed(&tty, speed);
-        cfsetispeed(&tty, speed);
-        
-        // Clear existing settings
-        tty.c_cflag &= ~(CSIZE | PARENB | PARODD | CSTOPB);
-        
-        // Set data bits
-        switch (config.dataBits) {
-            case 5: tty.c_cflag |= CS5; break;
-            case 6: tty.c_cflag |= CS6; break;
-            case 7: tty.c_cflag |= CS7; break;
-            case 8: default: tty.c_cflag |= CS8; break;
-        }
-        
-        // Set parity
-        switch (config.parity) {
-            case UartConfig::Parity::None:
-                break;  // Already cleared above
-            case UartConfig::Parity::Odd:
-                tty.c_cflag |= PARENB | PARODD;
-                break;
-            case UartConfig::Parity::Even:
-                tty.c_cflag |= PARENB;
-                break;
-        }
-        
-        // Set stop bits
-        if (config.stopBits == 2) {
-            tty.c_cflag |= CSTOPB;
-        }
-        
-        // Enable receiver, ignore modem control lines
-        tty.c_cflag |= CREAD | CLOCAL;
-        
-        // Disable canonical mode, echo, signals
-        tty.c_lflag &= ~(ICANON | ECHO | ECHOE | ISIG);
-        
-        // Disable software flow control
-        tty.c_iflag &= ~(IXON | IXOFF | IXANY);
-        
-        // Raw output
-        tty.c_oflag &= ~OPOST;
-        
-        // Set read timeout (non-blocking)
-        tty.c_cc[VMIN] = 0;
-        tty.c_cc[VTIME] = 0;
-        
-        // Apply settings
-        if (tcsetattr(_fd, TCSANOW, &tty) != 0) {
-            KNX_LOGE("KNX.Platform", "tcsetattr failed: %s", strerror(errno));
-            ::close(_fd);
-            _fd = -1;
-            return util::ErrorCode::OperationFailed;
-        }
-        
-        // Flush buffers
-        tcflush(_fd, TCIOFLUSH);
-        
-        const char* parityStr = config.parity == UartConfig::Parity::None ? "N" :
-                                (config.parity == UartConfig::Parity::Even ? "E" : "O");
-        KNX_LOGD("KNX.Platform", "UART configured: %u baud, %u%s%u", 
-                 config.baudRate, config.dataBits, parityStr, config.stopBits);
-        return util::Result<void>::ok();
-    }
-    
-    void close() override {
-        if (_fd >= 0) {
-            ::close(_fd);
-            _fd = -1;
-            KNX_LOGD("KNX.Platform", "UART closed");
-        }
-    }
-    
-    bool isOpen() const override {
-        return _fd >= 0;
-    }
-    
-    size_t available() const override {
-        if (_fd < 0) return 0;
-        
-        int bytes = 0;
-        if (::ioctl(_fd, FIONREAD, &bytes) < 0) {
-            return 0;
-        }
-        
-        return static_cast<size_t>(bytes);
-    }
-    
-    int read() override {
-        if (_fd < 0) return -1;
-        
-        uint8_t byte;
-        ssize_t result = ::read(_fd, &byte, 1);
-        if (result == 1) {
-            return byte;
-        }
-        return -1;
-    }
-    
-    size_t read(std::span<uint8_t> buffer) override {
-        if (_fd < 0 || buffer.size() == 0) return 0;
-
-        ssize_t bytesRead = ::read(_fd, buffer.data(), buffer.size());
-        if (bytesRead < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                return 0;  // No data available
-            }
-            KNX_LOGE("KNX.Platform", "UART read failed: %s", strerror(errno));
-            return 0;
-        }
-
-        return static_cast<size_t>(bytesRead);
-    }
-    
-    size_t write(uint8_t byte) override {
-        if (_fd < 0) return 0;
-        
-        ssize_t written = ::write(_fd, &byte, 1);
-        if (written < 0) {
-            KNX_LOGE("KNX.Platform", "UART write failed: %s", strerror(errno));
-            return 0;
-        }
-        
-        return static_cast<size_t>(written);
-    }
-    
-    size_t write(std::span<const uint8_t> data) override {
-        if (_fd < 0 || data.size() == 0) return 0;
-
-        ssize_t written = ::write(_fd, data.data(), data.size());
-        if (written < 0) {
-            KNX_LOGE("KNX.Platform", "UART write failed: %s", strerror(errno));
-            return 0;
-        }
-
-        return static_cast<size_t>(written);
-    }
-    
-    void flush() override {
-        if (_fd >= 0) {
-            tcdrain(_fd);  // Wait for all output to be transmitted
-        }
-    }
-    
-    void clear() override {
-        if (_fd >= 0) {
-            tcflush(_fd, TCIFLUSH);  // Flush input buffer
-            _overflowFlag = false;
-        }
-    }
-    
-    bool overflow() const override {
-        return _overflowFlag;
-    }
-    
-    void setRxCallback(RxCallback callback, void* context) override {
-        _rxCallback = callback;
-        _rxCallbackContext = context;
-    }
-    
-private:
-    int _fd;
-    RxCallback _rxCallback;
-    void* _rxCallbackContext;
-    bool _overflowFlag;
-    
-    speed_t _baudToSpeed(uint32_t baudrate) const {
-        switch (baudrate) {
-            case 9600: return B9600;
-            case 19200: return B19200;
-            case 38400: return B38400;
-            case 57600: return B57600;
-            case 115200: return B115200;
-            case 230400: return B230400;
-            case 460800: return B460800;
-            case 500000: return B500000;
-            case 576000: return B576000;
-            case 921600: return B921600;
-            case 1000000: return B1000000;
-            case 1152000: return B1152000;
-            case 1500000: return B1500000;
-            case 2000000: return B2000000;
-            case 2500000: return B2500000;
-            case 3000000: return B3000000;
-            case 3500000: return B3500000;
-            case 4000000: return B4000000;
-            default:
-                KNX_LOGW("KNX.Platform", "Unsupported baud rate %u, using 115200", baudrate);
-                return B115200;
-        }
-    }
-};
-
-// ============================================================================
 // Linux Platform Implementation
 // ============================================================================
 
@@ -957,7 +710,6 @@ LinuxPlatform::LinuxPlatform() {
     _memory = std::make_unique<LinuxMemory>();
     _network = std::make_unique<LinuxNetwork>();
     initSystemInfo();
-    _uart = std::make_unique<LinuxUart>();
 }
 
 LinuxPlatform::~LinuxPlatform() {
@@ -1499,10 +1251,6 @@ MemoryInterface& LinuxPlatform::memory() {
 
 NetworkInterface* LinuxPlatform::network() {
     return _network.get();
-}
-
-UartInterface* LinuxPlatform::uart() {
-    return _uart.get();
 }
 
 // ========================================================================

@@ -6,30 +6,71 @@
 #include "knx/platform/memory_interface.hpp"
 #include "knx/platform/network_interface.hpp"
 #include "knx/platform/platform.hpp"
-#include "knx/platform/uart_interface.hpp"
 #include "knx/platform/virtual_test_clock.hpp"
 
-#include <atomic>
-#include <chrono>
-#include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <exception>
 #include <map>
 #include <memory>
-#include <mutex>
 #include <thread>
 #include <vector>
 
 namespace knx {
 namespace platform {
 
+/**
+ * @brief Deterministic host platform driven by virtual time.
+ *
+ * Everything runs on one OS thread, the one that constructed the platform.
+ *
+ * Tasks are fibres: createTask() gives each its own stack, and every blocking
+ * call a task makes (delay, taskDelay, taskYield, queue, semaphore, mutex,
+ * event group and notification waits) suspends the fibre and returns control
+ * to the scheduler instead of blocking the thread. A task only ever stops
+ * running at such a call; there is no preemption.
+ *
+ * The code that is not inside a task -- the test body, or whatever owns the
+ * platform -- is the "driver context", and drives the scheduler:
+ *
+ *  - Every call from the driver context that can make a task runnable
+ *    (createTask, a give, send, set bits or notify, a clock advance, and the
+ *    run/wait helpers below) runs every runnable task to its next blocking
+ *    point before it returns. The same calls made from a task only mark the
+ *    other task runnable; it runs once the calling task blocks.
+ *  - Runnable tasks run highest priority first, and among equal priorities
+ *    the one that has been suspended longest first. Nothing about the order
+ *    depends on the host.
+ *  - advanceTimeUs()/advanceTimeMs() step the clock from one task deadline to
+ *    the next, so a task that sleeps 1 ms in a loop runs once per millisecond
+ *    and sees the time it asked for. Advancing the VirtualTestClock directly
+ *    jumps straight to the target and runs whatever is due there.
+ *  - delay(), delayMicroseconds() and taskDelay() from the driver context
+ *    advance virtual time by that amount (running tasks on the way): the
+ *    driver is the only thing that can make time pass, and that is what it
+ *    asked for.
+ *  - A queue, semaphore, mutex, event group or notification wait from the
+ *    driver context first runs the tasks; if the wait is still not satisfied
+ *    and its timeout is not zero, it would have to wait for virtual time that
+ *    nothing else will advance. That is a bug in the caller, and the call
+ *    throws std::logic_error instead of hanging.
+ *  - taskNotifyTake() from the driver context returns 0: only tasks have a
+ *    notification value.
+ *
+ * An exception escaping a task function (a failed test assertion, restart(),
+ * fatalError()) ends that task and is rethrown in the driver context, from
+ * the call that was running the scheduler.
+ *
+ * deleteTask() on a task that has not returned discards it the way FreeRTOS
+ * does: it never runs again, and objects on its stack are not destroyed.
+ * Deleting a queue, semaphore, mutex or event group a task is still waiting
+ * on is undefined, as on FreeRTOS.
+ *
+ * Calling into the platform from any other thread is a bug and aborts.
+ */
 class VirtualPlatform : public Platform {
 public:
-    enum class TaskModel : uint8_t {
-        Deterministic = 0,
-        HostThreaded,
-    };
-
     enum class TaskState : uint8_t {
         Ready = 0,
         Running,
@@ -54,7 +95,6 @@ public:
     };
 
     struct SchedulerSnapshot {
-        TaskModel taskModel{TaskModel::Deterministic};
         TaskHandle scheduledTask{nullptr};
         size_t taskCount{0};
         size_t readyTaskCount{0};
@@ -64,8 +104,15 @@ public:
         uint64_t nowUs{0};
     };
 
-    explicit VirtualPlatform(VirtualTestClock& clock, TaskModel taskModel = TaskModel::Deterministic);
+    /// Smallest fibre stack. TaskConfig::stackSize is sized for the target;
+    /// host frames are larger, and much larger under AddressSanitizer.
+    static constexpr size_t kMinTaskStackBytes = 256u * 1024u;
+
+    explicit VirtualPlatform(VirtualTestClock& clock);
     ~VirtualPlatform() override;
+
+    VirtualPlatform(const VirtualPlatform&) = delete;
+    VirtualPlatform& operator=(const VirtualPlatform&) = delete;
 
     void restart() override;
     void fatalError() override;
@@ -114,252 +161,116 @@ public:
 
     MemoryInterface& memory();
     NetworkInterface* network() override;
-    UartInterface* uart() override;
 
     void log(const char* level, const char* tag, const char* format, ...) override;
 
+    /// Advance virtual time, stopping at every task deadline on the way and
+    /// running what became due there. From a task, only moves the clock.
     void advanceTimeUs(uint64_t deltaUs);
     void advanceTimeMs(uint32_t deltaMs);
-    void pumpTasks();
+
+    /// Run every runnable task to its next blocking point, until none is left,
+    /// without moving time. No-op from a task.
+    void runUntilQuiescent();
+
     std::vector<TaskSnapshot> taskSnapshots() const;
     SchedulerSnapshot schedulerSnapshot() const noexcept;
     VirtualTestClock& clock() { return _clock; }
     const VirtualTestClock& clock() const { return _clock; }
-    TaskModel taskModel() const noexcept { return _taskModel; }
 
     /**
-     * Block until at least @p n calls to delayMicroseconds() are concurrently
-     * blocked inside the condition-variable wait.  Use this in tests to
-     * synchronise on the moment a worker thread is actually sleeping before
-     * advancing virtual time, eliminating the lost-wakeup race.
+     * Run the tasks until quiescent, then report whether at least @p n of them
+     * are blocked in delay()/delayMicroseconds()/taskDelay().
      *
-     * @return true if the count was reached, false if @p timeout expired first.
-     *         Assert on the result: a silent timeout puts the caller straight
-     *         back into the race it was trying to avoid.
+     * Nothing runs concurrently with the caller, so there is nothing to wait
+     * for: false means the tasks did not get there, and asserting on it is
+     * what the call is for.
      */
-    [[nodiscard]] bool waitUntilActiveDelayCalls(
-        size_t n,
-        std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
+    [[nodiscard]] bool waitUntilActiveDelayCalls(size_t n);
 
     /**
-     * Block until at least @p n threads are concurrently parked inside
-     * waitForPredicate() — the blocking path behind queueSend/queueReceive,
-     * semaphoreTake, lockMutex and eventGroupWaitBits.
-     *
-     * Those calls latch their virtual deadline on entry, so a test that
-     * advances the clock before the worker gets that far leaves it waiting for
-     * a deadline that will never arrive; the underlying condition variable has
-     * no wall-clock timeout, so the worker hangs forever. Sync on this first.
-     *
-     * @return true if the count was reached, false if @p timeout expired.
+     * As waitUntilActiveDelayCalls(), for tasks blocked in a queue, semaphore,
+     * mutex, event group or notification wait.
      */
-    [[nodiscard]] bool waitUntilActiveWaiters(
-        size_t n,
-        std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
+    [[nodiscard]] bool waitUntilActiveWaiters(size_t n);
 
 private:
+    struct Fibre;
+
     struct VirtualMutex {
-        std::mutex mutex;
         bool locked{false};
-        std::thread::id owner;
+        TaskHandle owner{nullptr};
     };
 
     struct VirtualQueue {
-        std::mutex mutex;
         std::deque<std::vector<uint8_t>> items;
         size_t itemSize{0};
         size_t capacity{0};
     };
 
     struct VirtualSemaphore {
-        std::mutex mutex;
         uint32_t count{0};
     };
 
     struct VirtualEventGroup {
-        std::mutex mutex;
         uint32_t bits{0};
     };
 
-    struct TaskNotification {
-        mutable std::mutex mutex;
-        uint32_t value{0};
-    };
-
-    struct TaskWrapper {
-        std::thread thread;
-        const char* name{nullptr};
-        TaskFunction function;
-        std::atomic<bool> running{true};
-        TaskNotification notification;
-        std::mutex gateMutex;
-        std::condition_variable gateCv;
-        bool executionPermit{false};
-        uint64_t wakeDeadlineUs{0};
-
-        enum class State : uint8_t {
-            Ready = 0,
-            Running,
-            Sleeping,
-            Completed,
-        };
-
-        enum class SleepReason : uint8_t {
-            None = 0,
-            Delay,
-            PredicateWait,
-        };
-
-        State state{State::Ready};
-        SleepReason sleepReason{SleepReason::None};
-
-        explicit TaskWrapper(const char* taskName, TaskFunction fn) noexcept
-            : name(taskName)
-            , function(std::move(fn))
-        {
-        }
+    /// Non-owning view of the condition a blocked task waits for. It points
+    /// into the waiting task's own stack frame, which outlives the wait.
+    struct WaitCondition {
+        const void* object{nullptr};
+        bool (*test)(const void*){nullptr};
+        bool operator()() const { return test(object); }
     };
 
     VirtualTestClock& _clock;
-    TaskModel _taskModel;
-    VirtualTestClock::ObserverId _clockObserverId;
-    std::atomic<uint64_t> _observedNowUs;
-    mutable std::mutex _waitMutex;
-    std::condition_variable _waitCv;
-    std::atomic<size_t> _activeDelayCount{0};
-    std::mutex _activeDelayMutex;
-    std::condition_variable _activeDelayCv;
+    VirtualTestClock::ObserverId _clockObserverId{0};
+    const std::thread::id _ownerThread;
 
-    std::atomic<size_t> _activeWaiterCount{0};
-    std::mutex _activeWaiterMutex;
-    std::condition_variable _activeWaiterCv;
-    mutable std::mutex _schedulerMutex;
-    std::condition_variable _schedulerCv;
-    TaskHandle _scheduledTask;
-    bool _pumpActive;
+    std::map<TaskHandle, std::unique_ptr<Fibre>> _tasks;
+    Fibre* _current{nullptr};
+    bool _dispatching{false};
+    uint64_t _suspendSequence{0};
+    std::exception_ptr _pendingException;
 
-    mutable std::mutex _tasksMutex;
-    std::map<TaskHandle, std::unique_ptr<TaskWrapper>> _tasks;
-    std::mutex _syncMutex;
+    // The driver context's saved registers, and (under ASan) its stack.
+    struct DriverContext;
+    std::unique_ptr<DriverContext> _driver;
+
     std::map<MutexHandle, std::unique_ptr<VirtualMutex>> _mutexes;
     std::map<QueueHandle, std::unique_ptr<VirtualQueue>> _queues;
     std::map<SemaphoreHandle, std::unique_ptr<VirtualSemaphore>> _semaphores;
     std::map<EventGroupHandle, std::unique_ptr<VirtualEventGroup>> _eventGroups;
-    uint64_t _nextHandleId;
+    uint64_t _nextHandleId{1};
 
     std::unique_ptr<MemoryInterface> _memory;
     uint32_t _serialNumber;
     uint8_t _macAddress[6];
 
-    TaskHandle generateHandleLocked();
-    uint64_t deadlineUsFromTimeoutMs(uint32_t timeoutMs) const;
-    void notifyAllWaiters();
-    void onClockAdvanced(uint64_t nowUs);
-    bool usesDeterministicTaskModel_() const noexcept;
-    TaskWrapper* currentTaskWrapper_();
-    static constexpr TaskState toPublicTaskState_(TaskWrapper::State state) noexcept
-    {
-        switch (state) {
-            case TaskWrapper::State::Ready:
-                return TaskState::Ready;
-            case TaskWrapper::State::Running:
-                return TaskState::Running;
-            case TaskWrapper::State::Sleeping:
-                return TaskState::Sleeping;
-            case TaskWrapper::State::Completed:
-                return TaskState::Completed;
-        }
-
-        return TaskState::Completed;
-    }
-
-    static constexpr TaskSleepReason toPublicTaskSleepReason_(TaskWrapper::SleepReason reason) noexcept
-    {
-        switch (reason) {
-            case TaskWrapper::SleepReason::None:
-                return TaskSleepReason::None;
-            case TaskWrapper::SleepReason::Delay:
-                return TaskSleepReason::Delay;
-            case TaskWrapper::SleepReason::PredicateWait:
-                return TaskSleepReason::PredicateWait;
-        }
-
-        return TaskSleepReason::None;
-    }
-
-    void waitForExecutionPermit_(TaskWrapper& task);
-    void yieldCurrentTaskUntil_(uint64_t wakeDeadlineUs, TaskWrapper::SleepReason reason);
-    void markTaskCompleted_(TaskHandle task);
-    void pumpTasks_();
+    void requireOwnerThread_() const;
+    bool inDriverContext_() const noexcept { return _current == nullptr; }
+    void* generateHandle_();
+    uint64_t deadlineAfterUs_(uint64_t delayUs) const;
+    void onClockAdvanced_(uint64_t nowUs);
 
     template <typename Predicate>
-    bool waitForPredicate(std::unique_lock<std::mutex>& lock, uint32_t timeoutMs, Predicate predicate) {
-        if (predicate()) {
-            return true;
-        }
+    bool waitFor_(uint32_t timeoutMs, const Predicate& predicate);
+    bool waitForCondition_(uint32_t timeoutMs, WaitCondition condition);
+    void sleepCurrentUntil_(uint64_t deadlineUs);
+    void yieldCurrent_();
+    void suspendCurrent_();
+    void wakeTasks_();
+    void advanceTo_(uint64_t targetUs);
+    bool isRunnable_(const Fibre& fibre, uint64_t nowUs) const;
+    Fibre* pickRunnable_();
+    void runFibre_(Fibre& fibre);
+    void releaseFibre_(Fibre& fibre) noexcept;
+    Fibre* findTask_(TaskHandle task) const;
+    size_t countBlocked_(TaskSleepReason reason) const;
 
-        if (timeoutMs == 0) {
-            return false;
-        }
-
-        const bool waitForever = (timeoutMs == UINT32_MAX);
-        const uint64_t deadlineUs = waitForever ? 0u : deadlineUsFromTimeoutMs(timeoutMs);
-
-        if (usesDeterministicTaskModel_() && currentTask() != nullptr) {
-            while (true) {
-                if (predicate()) {
-                    return true;
-                }
-                if (!waitForever && _observedNowUs.load(std::memory_order_acquire) >= deadlineUs) {
-                    return predicate();
-                }
-
-                lock.unlock();
-                yieldCurrentTaskUntil_(waitForever ? std::numeric_limits<uint64_t>::max() : deadlineUs,
-                                       TaskWrapper::SleepReason::PredicateWait);
-                lock.lock();
-            }
-        }
-
-        // Publish that this thread is parked on virtual time, so a test can
-        // synchronise on it before advancing the clock (see
-        // waitUntilActiveWaiters). The deadline above is already fixed at this
-        // point, which is precisely what the test needs to guarantee.
-        ActiveWaiterScope waiterScope(*this);
-
-        while (true) {
-            if (predicate()) {
-                return true;
-            }
-            if (!waitForever && _observedNowUs.load(std::memory_order_acquire) >= deadlineUs) {
-                return predicate();
-            }
-            _waitCv.wait(lock, [&]() {
-                return predicate()
-                       || (!waitForever
-                           && _observedNowUs.load(std::memory_order_acquire) >= deadlineUs);
-            });
-        }
-    }
-
-    /// RAII counter for threads blocked inside waitForPredicate().
-    class ActiveWaiterScope {
-    public:
-        explicit ActiveWaiterScope(VirtualPlatform& platform) : _platform(platform) {
-            std::lock_guard<std::mutex> lock(_platform._activeWaiterMutex);
-            _platform._activeWaiterCount.fetch_add(1u, std::memory_order_release);
-            _platform._activeWaiterCv.notify_all();
-        }
-        ~ActiveWaiterScope() {
-            std::lock_guard<std::mutex> lock(_platform._activeWaiterMutex);
-            _platform._activeWaiterCount.fetch_sub(1u, std::memory_order_release);
-        }
-        ActiveWaiterScope(const ActiveWaiterScope&) = delete;
-        ActiveWaiterScope& operator=(const ActiveWaiterScope&) = delete;
-
-    private:
-        VirtualPlatform& _platform;
-    };
+    static void fibreEntry_(unsigned int platformLo, unsigned int platformHi);
+    [[noreturn]] void fibreMain_();
 };
 
 } // namespace platform

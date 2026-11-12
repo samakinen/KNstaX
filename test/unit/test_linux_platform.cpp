@@ -4,11 +4,9 @@
 /**
  * @file test_linux_platform.cpp
  * @brief LinuxPlatform: file-backed EEPROM, timing, tasks and the
- *        synchronisation primitives, plus UartConfig validation
+ *        synchronisation primitives
  *
- * Nothing here needs hardware. The UART itself is not exercised: LinuxUart
- * opens whichever serial device the host happens to have, so its behaviour is
- * not something a host test can pin down.
+ * Nothing here needs hardware.
  */
 
 #include "unity.h"
@@ -16,7 +14,6 @@
 #include "knx/platform/linux_platform.hpp"
 #include "knx/platform/memory_interface.hpp"
 #include "knx/platform/network_interface.hpp"
-#include "knx/platform/uart_interface.hpp"
 
 #include <array>
 #include <atomic>
@@ -309,49 +306,10 @@ void test_event_group_bits(void)
 // Interfaces
 // ============================================================================
 
-void test_network_and_uart_are_provided(void)
+void test_network_is_provided(void)
 {
     LinuxPlatform platform;
     TEST_ASSERT_NOT_NULL(platform.network());
-    TEST_ASSERT_NOT_NULL(platform.uart());
-    TEST_ASSERT_FALSE(platform.uart()->isOpen());
-}
-
-void test_uart_config_validation(void)
-{
-    UartConfig config;
-    TEST_ASSERT_TRUE(config.validate().isOk());  // 19200 8E1, the TPUART default
-
-    config.baudRate = 100;
-    TEST_ASSERT_FALSE(config.validate().isOk());
-    config.baudRate = 10000000;
-    TEST_ASSERT_FALSE(config.validate().isOk());
-    config.baudRate = 9600;
-    TEST_ASSERT_TRUE(config.validate().isOk());
-    config.baudRate = 115200;
-    TEST_ASSERT_TRUE(config.validate().isOk());
-
-    config.dataBits = 4;
-    TEST_ASSERT_FALSE(config.validate().isOk());
-    config.dataBits = 9;
-    TEST_ASSERT_FALSE(config.validate().isOk());
-    config.dataBits = 7;
-    TEST_ASSERT_TRUE(config.validate().isOk());
-    config.dataBits = 8;
-
-    config.stopBits = 0;
-    TEST_ASSERT_FALSE(config.validate().isOk());
-    config.stopBits = 3;
-    TEST_ASSERT_FALSE(config.validate().isOk());
-    config.stopBits = 2;
-    TEST_ASSERT_TRUE(config.validate().isOk());
-    config.stopBits = 1;
-
-    config.rxBufferSize = 0;
-    TEST_ASSERT_FALSE(config.validate().isOk());
-    config.rxBufferSize = 256;
-    config.txBufferSize = 65537;
-    TEST_ASSERT_FALSE(config.validate().isOk());
 }
 
 int main(void)
@@ -376,8 +334,7 @@ int main(void)
     RUN_TEST(test_queue_is_fifo_and_bounded);
     RUN_TEST(test_event_group_bits);
 
-    RUN_TEST(test_network_and_uart_are_provided);
-    RUN_TEST(test_uart_config_validation);
+    RUN_TEST(test_network_is_provided);
 
     return UNITY_END();
 }

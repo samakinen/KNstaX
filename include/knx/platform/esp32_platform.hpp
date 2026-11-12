@@ -22,7 +22,6 @@ namespace platform {
 
 // Forward declarations
 class Esp32Network;
-class Esp32Uart;
 
 /**
  * @brief ESP32 platform implementation
@@ -41,14 +40,12 @@ public:
     
     // Hardware Interfaces
     NetworkInterface* network() override;
-    UartInterface* uart() override;
     
     // Logging
     void log(const char* level, const char* tag, const char* format, ...) override;
     
 private:
     std::unique_ptr<Esp32Network> _network;
-    std::unique_ptr<Esp32Uart> _uart;
     
     uint32_t _serialNumber;
     uint8_t _macAddress[6];

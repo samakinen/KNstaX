@@ -99,7 +99,6 @@ if(DEFINED IDF_PATH OR COMMAND idf_component_register)
         REQUIRES
             driver
             esp_driver_gpio
-            esp_driver_uart
             esp_driver_gptimer
             esp_timer
             esp_event
@@ -456,8 +455,7 @@ else()
 
         # Labels are what `ctest -L` selects on: unit, integration,
         # conformance, script, tp1, tp1-virtual, virtual, physical, secure,
-        # Long, benchmark, sdk-public-surface (the release gate) and
-        # sdk-flake-candidate (the virtual-time tests the flake lane repeats).
+        # Long, benchmark and sdk-public-surface (the release gate).
         # Tests without a label run only in the full suite.
 
         knx_add_test(test_types SOURCES test/unit/test_types.cpp LABELS unit)
@@ -544,21 +542,15 @@ else()
         knx_add_test(test_tp1_mac_controller SOURCES test/unit/test_tp1_mac_controller.cpp LABELS tp1 unit)
         knx_add_test(test_bitbang_driver_timer_isr SOURCES test/unit/test_bitbang_driver_timer_isr.cpp LABELS tp1 unit)
 
-        # Virtual TP1 bus and virtual time. sdk-flake-candidate marks the
-        # tests whose VirtualPlatform tasks or worker threads are real OS
-        # threads: virtual time decides when they may run, but the hand-off
-        # between threads, and the waits that synchronise with them, still
-        # depend on the host scheduler (bounded by wall-clock timeouts). The
-        # flake lane and the release gate repeat them (--repeat until-fail:3).
-        # The bit-bang bus tests are single-threaded and need no label.
+        # Virtual TP1 bus and virtual time.
         knx_add_test(test_virtual_time_engine SOURCES test/unit/test_virtual_time_engine.cpp
             LABELS ${TP1_VIRTUAL_UNIT})
         knx_add_test(test_virtual_test_clock SOURCES test/unit/test_virtual_test_clock.cpp
             LABELS ${TP1_VIRTUAL_UNIT})
         knx_add_test(test_virtual_platform SOURCES test/unit/test_virtual_platform.cpp
-            LABELS ${TP1_VIRTUAL_UNIT} sdk-flake-candidate TIMEOUT 20)
+            LABELS ${TP1_VIRTUAL_UNIT} TIMEOUT 20)
         knx_add_test(test_virtual_tp1_test_runtime SOURCES test/unit/test_virtual_tp1_test_runtime.cpp
-            LABELS ${TP1_VIRTUAL_UNIT} sdk-flake-candidate TIMEOUT 20)
+            LABELS ${TP1_VIRTUAL_UNIT} TIMEOUT 20)
         knx_add_test(test_timer_gpio_hal_virtual SOURCES test/unit/test_timer_gpio_hal_virtual.cpp
             LABELS ${TP1_VIRTUAL_UNIT})
         knx_add_test(test_tp1_bitbang_virtual_bus SOURCES test/unit/test_tp1_bitbang_virtual_bus.cpp
@@ -568,7 +560,7 @@ else()
         knx_add_test(test_tp1_virtual_trace_replay SOURCES test/unit/test_tp1_virtual_trace_replay.cpp
             LABELS ${TP1_VIRTUAL_UNIT} TIMEOUT 20)
         knx_add_test(test_tp1_datalink_virtual_timing SOURCES test/unit/test_tp1_datalink_virtual_timing.cpp
-            LABELS ${TP1_VIRTUAL_UNIT} sdk-flake-candidate TIMEOUT 20)
+            LABELS ${TP1_VIRTUAL_UNIT} TIMEOUT 20)
         knx_add_test(test_tp1_datalink_virtual_bus_conformance SOURCES test/unit/test_tp1_datalink_virtual_bus_conformance.cpp
             LABELS ${TP1_VIRTUAL_UNIT} TIMEOUT 30)
 
@@ -818,16 +810,6 @@ else()
         if(KNX_PLATFORM STREQUAL "linux")
             knx_add_test(test_linux_platform SOURCES test/unit/test_linux_platform.cpp LABELS unit)
         endif()
-
-        # The virtual-time tests that run on real threads, repeated to catch
-        # an intermittent failure (see the sdk-flake-candidate note above).
-        knx_tests_with_label(KNX_SDK_FLAKE_TEST_TARGETS sdk-flake-candidate)
-        add_custom_target(knx_sdk_virtual_flake_lane
-            COMMAND ${CMAKE_CTEST_COMMAND} --test-dir ${CMAKE_CURRENT_BINARY_DIR} --output-on-failure --repeat until-fail:3 -L sdk-flake-candidate
-            USES_TERMINAL
-            COMMENT "Running KNstaX virtual-platform flake lane"
-        )
-        add_dependencies(knx_sdk_virtual_flake_lane ${KNX_SDK_FLAKE_TEST_TARGETS})
     endif()  # BUILD_TESTS: end of the test-only section
 
     if(KNX_BUILD_EXAMPLES)
@@ -914,7 +896,6 @@ else()
         if(BUILD_TESTS)
             add_custom_target(knx_sdk_release_gate
                 COMMAND ${CMAKE_CTEST_COMMAND} --test-dir ${CMAKE_CURRENT_BINARY_DIR} --output-on-failure -L sdk-public-surface
-                COMMAND ${CMAKE_CTEST_COMMAND} --test-dir ${CMAKE_CURRENT_BINARY_DIR} --output-on-failure --repeat until-fail:3 -L sdk-flake-candidate
                 USES_TERMINAL
                 COMMENT "Running KNstaX SDK release gate"
             )
@@ -926,7 +907,6 @@ else()
                 knx_sdk_public_header_contracts
                 knx_sdk_example_contracts
                 ${KNX_SDK_PUBLIC_SURFACE_TEST_TARGETS}
-                ${KNX_SDK_FLAKE_TEST_TARGETS}
             )
         endif()
     endif()

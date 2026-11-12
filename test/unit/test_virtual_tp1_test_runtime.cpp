@@ -5,40 +5,13 @@
 
 #include "knx/physical/timer_gpio_hal_virtual.hpp"
 #include "knx/physical/virtual_tp1_test_runtime.hpp"
-
-#include <atomic>
-#include <condition_variable>
-#include <mutex>
-#include <thread>
+#include "../common/virtual_platform_test_utils.hpp"
 
 using knx::physical::VirtualTp1TestRuntime;
 
 namespace {
 
 VirtualTp1TestRuntime runtime;
-
-class ThreadSignal {
-public:
-    void notify()
-    {
-        {
-            std::lock_guard<std::mutex> lock(_mutex);
-            _signaled = true;
-        }
-        _cv.notify_all();
-    }
-
-    void wait()
-    {
-        std::unique_lock<std::mutex> lock(_mutex);
-        _cv.wait(lock, [this]() { return _signaled; });
-    }
-
-private:
-    std::mutex _mutex;
-    std::condition_variable _cv;
-    bool _signaled{false};
-};
 
 } // namespace
 
@@ -65,35 +38,22 @@ void test_VTRUN_001_runtime_advances_bus_and_platform_together()
 
 void test_VTRUN_002_runtime_platform_delay_releases_on_shared_bus_time()
 {
-    ThreadSignal armed;
-    ThreadSignal finishedSignal;
-    std::atomic<bool> completed{false};
+    bool completed = false;
 
-    std::thread worker([&]() {
-        (void)(runtime.platform().micros() + 4000u);
-        armed.notify();
+    knx::testsupport::ScopedVirtualTask worker(runtime.platform(), "delay_worker", [&]() {
         runtime.platform().delay(4u);
-        completed.store(true);
-        finishedSignal.notify();
+        completed = true;
     });
 
-    armed.wait();
-    // The worker takes its deadline from the clock when it enters delay(),
-    // which can be after armed.notify(): advancing before then would push the
-    // deadline out to 7 ms and the worker would never wake. Wait until it is
-    // actually blocked in the delay.
     TEST_ASSERT_TRUE(runtime.platform().waitUntilActiveDelayCalls(1u));
-    TEST_ASSERT_FALSE(completed.load());
+    TEST_ASSERT_FALSE(completed);
 
     runtime.advanceTimeMs(3u);
-    TEST_ASSERT_FALSE(completed.load());
+    TEST_ASSERT_FALSE(completed);
     TEST_ASSERT_EQUAL_UINT64(3000u, runtime.bus().nowUs());
 
     runtime.advanceTimeMs(1u);
-    finishedSignal.wait();
-    worker.join();
-
-    TEST_ASSERT_TRUE(completed.load());
+    TEST_ASSERT_TRUE(completed);
     TEST_ASSERT_EQUAL_UINT64(4000u, runtime.bus().nowUs());
     TEST_ASSERT_EQUAL_UINT64(4000u, runtime.platform().micros());
 }
