@@ -2,15 +2,18 @@
 // Copyright (C) 2025-2026 Sami Mäkinen
 
 /**
- * @file bau_management.cpp
- * @brief BAU wiring for KNX management services that are not property access.
+ * @file device_management.cpp
+ * @brief DeviceManagement: KNX management services that are not property
+ *        access, and the ManagementControl facet over them.
  *
- * Split out of bau.cpp: the Function Property and serial-number-addressed
- * commissioning services are a self-contained concern with no overlap with the
- * group-object runtime or the medium plumbing that dominates bau.cpp.
+ * PID_GO_DIAGNOSTICS, the one management service that reaches into the
+ * group-object runtime, is in go_diagnostics.cpp.
  */
 
-#include "knx/bau/bau.hpp"
+#include "device_management.hpp"
+
+#include "device_model.hpp"
+#include "group_runtime.hpp"
 
 #include "knx/application/function_property_services.hpp"
 #include "knx/application/network_parameter_service.hpp"
@@ -257,14 +260,211 @@ IpAddress ipAddressFromOctets(std::span<const uint8_t> value)
 
 }  // namespace
 
-void BusAccessUnit::publishMediumInterfaceObjects()
+DeviceManagement::DeviceManagement(platform::Platform& platform,
+                                   BusAccessStackPort* stackPort,
+                                   DeviceModel& model,
+                                   GroupRuntime& groups)
+    : _platform(platform)
+    , _stackPort(stackPort)
+    , _model(model)
+    , _groups(groups)
+{
+}
+
+// ─── Device object ↔ stack port ──────────────────────────────────────────────
+
+void DeviceManagement::applyDeviceMedium()
+{
+    // Applied here as well as in setDeviceMedium(): a product declares its
+    // medium before start(), when there is no stack port yet to tell.
+    if (_stackPort != nullptr) {
+        _stackPort->setDeviceMedium(_deviceMedium);
+    }
+}
+
+void DeviceManagement::wireDeviceObject()
+{
+    if (_stackPort == nullptr) {
+        return;
+    }
+    auto& deviceObject = _model.deviceObject();
+
+    _stackPort->setProgrammingModeEnabled(deviceObject.getProgMode());
+    deviceObject.registerProgModeCallback([this](Toggle mode) {
+        _stackPort->setProgrammingModeEnabled(mode == Toggle::Enable);
+    });
+    // Firmware sets the real serial number (MAC-derived here) after start(),
+    // which is after wireManagementServices() cached it.  Re-push it so the
+    // serial-number-addressed services and the programming-mode scan answer
+    // with the device's actual identity instead of the all-zero placeholder.
+    deviceObject.registerSerialNumberCallback([this](std::span<const uint8_t> serial) {
+        if (serial.size() < application::kKnxSerialNumberBytes) {
+            return;
+        }
+        application::KnxSerialNumber knxSerial{};
+        std::copy_n(serial.begin(), application::kKnxSerialNumberBytes, knxSerial.begin());
+        _stackPort->setCommissioningSerialNumber(knxSerial);
+    });
+    deviceObject.registerIndividualAddressCallback([this](const IndividualAddress& newAddress) {
+        // The address is stored as two independent properties (PID_SUBNET_ADDRESS
+        // and PID_DEVICE_ADDRESS), so restoring it from persistence necessarily
+        // arrives in two steps. Propagating the intermediate value would put a
+        // half-restored address on the stack — e.g. 1.1.255 between restoring
+        // the subnet and the device octet. init() pushes the final address to
+        // the stack once the restore completes, so stay quiet until then.
+        if (_model.restoring()) {
+            return;
+        }
+        auto res = _stackPort->setOwnAddress(newAddress);
+        if (res.isError()) {
+            KNX_LOGW(TAG, "Failed to propagate new own address to stack: %s",
+                     util::errorCodeToString(res.error()));
+        }
+        // A failure is logged there and left dirty for the next pump to retry.
+        (void)_model.saveToPersistence();
+    });
+    _stackPort->setIndividualAddressUpdateCallback([this](const IndividualAddress& newAddress) {
+        // This fires *after* the application layer has already accepted the new
+        // address, so the programming-mode question was settled there and must
+        // not be asked a second time: A_IndividualAddress_Write is refused
+        // outside programming mode by handleIndividualAddressWrite, while
+        // A_IndividualAddressSerialNumber_Write is deliberately not — the serial
+        // number already identified the device, which is the whole reason
+        // 03/05/03 §1.5.4.3.2 uses it to re-address a device nobody can reach a
+        // button on. Routing this through writeIndividualAddress() re-applied
+        // the programming-mode gate and dropped the serial-number assignment on
+        // the floor: the stack answered from the new address, but the Device
+        // Object kept the old one and nothing was persisted, so the Confirmed
+        // Restart that ends the commissioning procedure undid the address.
+        if (_model.deviceObject().applyIndividualAddress(newAddress).isError()) {
+            KNX_LOGW(TAG, "Failed to update BAU device object individual address for 0x%04X",
+                     newAddress.raw);
+        }
+    });
+}
+
+util::Result<void> DeviceManagement::setCommissioningMode(bool enabled)
+{
+    _model.deviceObject().setProgMode(enabled ? Toggle::Enable : Toggle::Disable);
+    if (_stackPort != nullptr) {
+        _stackPort->setProgrammingModeEnabled(enabled);
+    }
+    return util::Result<void>::ok();
+}
+
+bool DeviceManagement::commissioningModeEnabled() const
+{
+    return _model.deviceObject().getProgMode();
+}
+
+void DeviceManagement::setDomainAddress(std::span<const uint8_t> domainAddress)
+{
+    if (_stackPort != nullptr) {
+        _stackPort->setDomainAddress(domainAddress);
+    }
+}
+
+// ─── Master Reset ────────────────────────────────────────────────────────────
+
+util::Result<void> DeviceManagement::applyMasterReset(application::EraseCode eraseCode)
+{
+    using application::EraseCode;
+
+    // 03/05/02 Table 4. Which Resources a factory reset covers is
+    // implementation dependent beyond Table 6 and §3.7.1.2.3.2.2; here it is
+    // everything ETS downloads, i.e. everything persisted except the
+    // Sequence Number Sending, which §5 of 03/03/07 ("Sequence Number Sending
+    // and Master Reset") says a Master Reset shall not influence.
+    const bool factoryReset = eraseCode == EraseCode::FactoryReset
+                           || eraseCode == EraseCode::FactoryResetWithoutIndividualAddress;
+    const bool resetAddress = eraseCode == EraseCode::FactoryReset
+                           || eraseCode == EraseCode::ResetIndividualAddress;
+    const bool resetLinks = factoryReset || eraseCode == EraseCode::ResetLinks;
+    // The application program of this stack is firmware; what ETS downloads
+    // into it is the parameter block (PID_PROGRAM_DATA). Resetting the
+    // program to "the default application" and resetting its parameters
+    // therefore come to the same thing.
+    const bool resetParameters = factoryReset
+                              || eraseCode == EraseCode::ResetApplicationProgram
+                              || eraseCode == EraseCode::ResetParameters;
+
+    if (resetLinks) {
+        _model.addressTable().clearEntries();
+        _model.associationTable().clearEntries();
+    }
+
+    if (resetParameters) {
+        // An empty block is not applied: the next boot finds nothing stored
+        // and keeps the firmware defaults, the same as a device that has
+        // never been downloaded.
+        _model.applicationProgram().setProgramData(std::span<const uint8_t>{});
+    }
+
+    if (factoryReset) {
+        // Ex-factory, a Data Secure device has Security Mode off and only its
+        // FDSK as Tool Key (03/05/03 §1.5.4.1). A cleared Tool Key is what a
+        // product's boot path reads as "no key yet" and replaces with the FDSK
+        // (Habinari: installFactoryToolKey). The key tables are dropped whole,
+        // which §3.7.1.2.3.2.2 requires so that the FDSK cannot be used to
+        // read back what a previous owner downloaded.
+        auto& securityObject = _model.securityObject();
+        securityObject.loadControlReset();
+        securityObject.clearAllKeys();
+        securityObject.setSecurityMode(objects::SecurityMode::Disabled);
+#if KNX_FEATURE_NETIP
+        // Table 6 resets the IP Resources with Erase Code 02h and keeps them
+        // with 07h; the backbone key is the KNX IP Secure credential and goes
+        // with the other keys either way.
+        const std::array<uint8_t, 16> noBackboneKey{};
+        (void)_model.setReferenceObjectProperty(InterfaceObjectType::knxNetIpParameter(),
+                                                static_cast<application::PropertyID>(kPidKnxNetIpBackboneKey),
+                                                noBackboneKey);
+        _securedServiceFamilyVersions.fill(0u);
+
+        // 03/05/02 Table 6: the "IP multicast address" "shall be reset" by
+        // Erase Code 02h and "shall NOT be reset" by 07h. Reset means back to
+        // the product's default, which is the group the device then starts on.
+        if (eraseCode == EraseCode::FactoryReset && !_routingMulticastDefault.isZero()) {
+            const auto octets = ipOctets(_routingMulticastDefault);
+            (void)_model.setReferenceObjectProperty(InterfaceObjectType::knxNetIpParameter(),
+                                                    static_cast<application::PropertyID>(
+                                                        kPidKnxNetIpRoutingMulticastAddress),
+                                                    octets);
+            setDomainAddress(octets);
+        }
+#endif
+    }
+
+    if (resetAddress) {
+        // The response has already gone out from the old address (03/05/02
+        // §3.7.1.2.2 NOTE 11). Applying it now persists it; the stack itself
+        // picks it up when the device comes back from the restart.
+        _model.deviceObject().setIndividualAddress(_defaultIndividualAddress);
+    }
+
+    KNX_LOGW(TAG, "Master reset, erase code 0x%02X: links%s, parameters%s, security%s, address%s",
+             static_cast<unsigned>(eraseCode),
+             resetLinks ? " reset" : " kept",
+             resetParameters ? " reset" : " kept",
+             factoryReset ? " reset" : " kept",
+             resetAddress ? " reset" : " kept");
+
+    // Written synchronously: the restart callback runs next. A failure is
+    // logged there and stays dirty, so the restart handler's flush retries it.
+    (void)_model.saveToPersistence();
+    return util::Result<void>::ok();
+}
+
+// ─── Medium interface objects and router role ───────────────────────────────
+
+void DeviceManagement::publishMediumInterfaceObjects()
 {
     // ETS looks for the interface object that matches the medium a device
     // speaks.  Without the object present at all, an IP interface cannot be
     // configured and a coupler's filter table has nowhere to live — so the
     // objects are registered from the transport in use rather than left to
     // every firmware to remember.
-    std::vector<InterfaceObjectType> required = referenceInterfaceObjectTypes();
+    std::vector<InterfaceObjectType> required = _model.referenceObjectTypes();
 
     [[maybe_unused]] const auto require = [&required](InterfaceObjectType type) {
         if (std::find(required.begin(), required.end(), type) == required.end()) {
@@ -278,8 +478,8 @@ void BusAccessUnit::publishMediumInterfaceObjects()
     require(InterfaceObjectType::knxNetIpParameter());
 #endif
 
-    if (required.size() != referenceInterfaceObjectTypes().size()) {
-        setReferenceInterfaceObjectTypes(std::move(required));
+    if (required.size() != _model.referenceObjectTypes().size()) {
+        _model.setReferenceObjectTypes(std::move(required));
     }
 
     // --- Seed the values the device actually knows -------------------------
@@ -287,12 +487,12 @@ void BusAccessUnit::publishMediumInterfaceObjects()
     // to ETS as "device with no address and no name" — worse than useful.
     // Only consumed by the KNXnet/IP seeding below; a TP1-only build has no
     // medium-specific object that carries the address.
-    [[maybe_unused]] const auto address = _deviceObject.getIndividualAddress();
+    [[maybe_unused]] const auto address = _model.deviceObject().getIndividualAddress();
 
 #if KNX_FEATURE_NETIP
     {
         const auto addressBytes = beU16(address.raw);
-        (void)setReferenceObjectProperty(InterfaceObjectType::knxNetIpParameter(),
+        (void)_model.setReferenceObjectProperty(InterfaceObjectType::knxNetIpParameter(),
                                          static_cast<application::PropertyID>(
                                              kPidKnxNetIpIndividualAddress),
                                          addressBytes);
@@ -300,7 +500,7 @@ void BusAccessUnit::publishMediumInterfaceObjects()
         // Project installation id 0 is the documented "not assigned by a
         // project" value, so seeding it explicitly is meaningful, not filler.
         const auto installationId = beU16(0);
-        (void)setReferenceObjectProperty(InterfaceObjectType::knxNetIpParameter(),
+        (void)_model.setReferenceObjectProperty(InterfaceObjectType::knxNetIpParameter(),
                                          static_cast<application::PropertyID>(
                                              kPidKnxNetIpProjectInstallationId),
                                          installationId);
@@ -308,9 +508,9 @@ void BusAccessUnit::publishMediumInterfaceObjects()
         // The friendly name is what ETS shows in its discovery list.  The
         // device object's order info is the closest thing this stack has to a
         // product name that the integrator will recognise.
-        const auto& orderInfo = _deviceObject.getOrderInfo();
+        const auto& orderInfo = _model.deviceObject().getOrderInfo();
         if (!orderInfo.empty()) {
-            (void)setReferenceObjectProperty(
+            (void)_model.setReferenceObjectProperty(
                 InterfaceObjectType::knxNetIpParameter(),
                 static_cast<application::PropertyID>(kPidKnxNetIpFriendlyName),
                 std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(orderInfo.data()),
@@ -319,9 +519,9 @@ void BusAccessUnit::publishMediumInterfaceObjects()
 
         // A KNX serial number is 6 octets, the same width as a MAC address, and
         // this stack derives the serial from the MAC in the first place.
-        const auto serial = _deviceObject.getSerialNumber();
+        const auto serial = _model.deviceObject().getSerialNumber();
         if (serial.size() >= application::kKnxSerialNumberBytes) {
-            (void)setReferenceObjectProperty(
+            (void)_model.setReferenceObjectProperty(
                 InterfaceObjectType::knxNetIpParameter(),
                 static_cast<application::PropertyID>(kPidKnxNetIpMacAddress),
                 serial.first(application::kKnxSerialNumberBytes));
@@ -330,7 +530,7 @@ void BusAccessUnit::publishMediumInterfaceObjects()
         // Device capabilities bit 2 = "Tunnelling", bit 3 = "Object Server".
         // Only claim what the build actually contains.
         const auto capabilities = beU16(0x0004);
-        (void)setReferenceObjectProperty(InterfaceObjectType::knxNetIpParameter(),
+        (void)_model.setReferenceObjectProperty(InterfaceObjectType::knxNetIpParameter(),
                                          static_cast<application::PropertyID>(
                                              kPidKnxNetIpDeviceCapabilities),
                                          capabilities);
@@ -347,7 +547,7 @@ void BusAccessUnit::publishMediumInterfaceObjects()
         // the job (it becomes active after a reset, 03_08_03 §2.5.17), but a
         // new value is E11 for the multicast timer (03_08_09 §2.2.2.3.2.5),
         // and a value that is not a multicast group is refused outright.
-        if (auto* object = referenceInterfaceObject(InterfaceObjectType::knxNetIpParameter())) {
+        if (auto* object = _model.referenceObject(InterfaceObjectType::knxNetIpParameter())) {
             object->setWriteValidator([](application::PropertyID propertyId,
                                          std::span<const uint8_t> value) -> util::Result<void> {
                 if (static_cast<uint8_t>(propertyId) == kPidKnxNetIpRoutingMulticastAddress &&
@@ -379,7 +579,7 @@ void BusAccessUnit::publishMediumInterfaceObjects()
     publishRouterObject();
 }
 
-util::Result<void> BusAccessUnit::configureRouterRole(const RouterRoleConfig& config)
+util::Result<void> DeviceManagement::configureRouterRole(const RouterRoleConfig& config)
 {
     _routerRole = config;
 
@@ -387,7 +587,7 @@ util::Result<void> BusAccessUnit::configureRouterRole(const RouterRoleConfig& co
     // routing policy, and those are the ones the forwarding path consults.
     // Defaulting to them means a coupler product does not have to hand the same
     // two objects to two different APIs and hope they match.
-    if (_stackPort) {
+    if (_stackPort != nullptr) {
         if (auto* coupler = _stackPort->coupler()) {
             if (_routerRole.filterTable == nullptr) {
                 _routerRole.filterTable = &coupler->filterTable();
@@ -408,31 +608,31 @@ util::Result<void> BusAccessUnit::configureRouterRole(const RouterRoleConfig& co
 
     // When called after init(), publish immediately; otherwise init() picks it
     // up through publishMediumInterfaceObjects().
-    if (_initialized) {
+    if (_running) {
         publishRouterObject();
     }
     return util::Result<void>::ok();
 }
 
-void BusAccessUnit::publishRouterObject()
+void DeviceManagement::publishRouterObject()
 {
     if (!hasRouterRole()) {
         return;
     }
 
     // Register the object if it is not already present.
-    std::vector<InterfaceObjectType> required = referenceInterfaceObjectTypes();
+    std::vector<InterfaceObjectType> required = _model.referenceObjectTypes();
     if (std::find(required.begin(), required.end(), InterfaceObjectType::router())
         == required.end()) {
         required.push_back(InterfaceObjectType::router());
-        setReferenceInterfaceObjectTypes(std::move(required));
+        _model.setReferenceObjectTypes(std::move(required));
     }
 
     // Seeding failures are logged, not swallowed. A silently unseeded Router
     // Object answers every read with nothing, which looks to ETS like a coupler
     // that has no configuration rather than a device with a wiring bug.
     const auto seed = [this](uint8_t pid, std::span<const uint8_t> bytes) {
-        const auto result = setReferenceObjectProperty(
+        const auto result = _model.setReferenceObjectProperty(
             InterfaceObjectType::router(), static_cast<application::PropertyID>(pid), bytes);
         if (result.isError()) {
             KNX_LOGE(TAG, "Router Object PID %u could not be seeded: %s",
@@ -484,7 +684,7 @@ void BusAccessUnit::publishRouterObject()
              _routerRole.filterTableInUse ? "in use" : "bypassed");
 }
 
-util::Result<void> BusAccessUnit::syncRouterRoutingConfig()
+util::Result<void> DeviceManagement::syncRouterRoutingConfig()
 {
     if (!hasRouterRole() || _routerRole.routingPolicy == nullptr) {
         return util::Result<void>::ok();
@@ -494,7 +694,7 @@ util::Result<void> BusAccessUnit::syncRouterRoutingConfig()
     // downloaded", and overwriting a working configuration with a zero byte
     // would be worse than ignoring it.
     const auto readByte = [this](uint8_t pid) -> std::optional<uint8_t> {
-        const auto value = referenceObjectPropertyValue(
+        const auto value = _model.referenceObjectPropertyValue(
             InterfaceObjectType::router(), static_cast<application::PropertyID>(pid));
         if (value.empty()) return std::nullopt;
         return value.front();
@@ -541,7 +741,7 @@ util::Result<void> BusAccessUnit::syncRouterRoutingConfig()
  * ETS would show an installation as secured while the frames went out in the
  * clear, and neither side would ever say otherwise.
  */
-util::Result<application::FunctionPropertyResult> BusAccessUnit::handleKnxNetIpFunctionProperty(
+util::Result<application::FunctionPropertyResult> DeviceManagement::handleKnxNetIpFunctionProperty(
     const IndividualAddress& source,
     const application::FunctionPropertyRequest& request)
 {
@@ -623,12 +823,12 @@ util::Result<application::FunctionPropertyResult> BusAccessUnit::handleKnxNetIpF
     return answer(FunctionPropertyReturnCode::Success);
 }
 
-void BusAccessUnit::setSecuredServiceFamilyCallback(SecuredServiceFamilyCallback callback)
+void DeviceManagement::setSecuredServiceFamilyCallback(ManagementControl::SecuredServiceFamilyCallback callback)
 {
     _securedServiceFamilyCallback = std::move(callback);
 }
 
-uint8_t BusAccessUnit::securedServiceFamilyVersion(uint8_t serviceFamilyId) const
+uint8_t DeviceManagement::securedServiceFamilyVersion(uint8_t serviceFamilyId) const
 {
     if (!netip::isSecurableServiceFamily(serviceFamilyId)) {
         return netip::kSecurityVersionPlain;
@@ -636,7 +836,7 @@ uint8_t BusAccessUnit::securedServiceFamilyVersion(uint8_t serviceFamilyId) cons
     return _securedServiceFamilyVersions[netip::securableServiceFamilyIndex(serviceFamilyId)];
 }
 
-void BusAccessUnit::setSecuredServiceFamilyVersion(uint8_t serviceFamilyId, uint8_t version)
+void DeviceManagement::setSecuredServiceFamilyVersion(uint8_t serviceFamilyId, uint8_t version)
 {
     if (!netip::isSecurableServiceFamily(serviceFamilyId)) {
         return;
@@ -646,7 +846,7 @@ void BusAccessUnit::setSecuredServiceFamilyVersion(uint8_t serviceFamilyId, uint
 
 #endif  // KNX_FEATURE_NETIP
 
-util::Result<application::FunctionPropertyResult> BusAccessUnit::handleRouterFunctionProperty(
+util::Result<application::FunctionPropertyResult> DeviceManagement::handleRouterFunctionProperty(
     const application::FunctionPropertyRequest& request)
 {
     // Only PID_ROUTETABLE_CONTROL is a function property on this object.
@@ -664,111 +864,11 @@ util::Result<application::FunctionPropertyResult> BusAccessUnit::handleRouterFun
     return control.invoke(request.invocation, request.data.span());
 }
 
-void BusAccessUnit::applySecurityKeyTables()
-{
-    using objects::SecurityProperty;
-    namespace security_ia_table = objects::security_ia_table;
-
-    // Entry sizes of 03/05/01 §6.3.6 Figure 72, §6.3.7 Figure 74 and §6.3.8
-    // Figure 75. They match the PDT_GENERIC_nn the properties are declared as.
-    constexpr size_t kGroupKeyEntryBytes = 18;   // GA_Index(2) + Key(16)
-    constexpr size_t kP2PKeyEntryBytes = 20;     // IA_Index(2) + Key(16) + Roles(2)
-    constexpr size_t kKeyBytes = 16;
-
-    const auto readIndex = [](const std::vector<uint8_t>& blob, size_t offset) {
-        return static_cast<uint16_t>((static_cast<uint16_t>(blob[offset]) << 8) | blob[offset + 1]);
-    };
-
-    // The maps are a derived view: start empty so an entry ETS deleted in the
-    // project does not linger as a usable key.
-    _securityObject.clearGroupKeys();
-    _securityObject.clearDeviceKeys();
-
-    // §6.3.7: the 2-octet field is the GA_Index — the TSAP, i.e. the 1-based
-    // index into the Group Address Table — and NOT the group address itself.
-    // Resolving it is the whole reason this lives in the BAU rather than in the
-    // Security Interface Object, which cannot see the address table.
-    size_t groupKeys = 0;
-    size_t unresolvedGroupKeys = 0;
-    if (const auto* blob = _securityObject.findExtraProperty(SecurityProperty::GroupKeyTable)) {
-        for (size_t offset = 0; offset + kGroupKeyEntryBytes <= blob->size();
-             offset += kGroupKeyEntryBytes) {
-            const uint16_t gaIndex = readIndex(*blob, offset);
-            const GroupAddress address = _addressTable.getAddress(AddressTableIndex(gaIndex));
-            if (address.raw == 0u) {
-                // The group address table is downloaded as its own load
-                // procedure, so this is expected mid-download and resolves on
-                // the next call; a leftover here means the two tables disagree.
-                ++unresolvedGroupKeys;
-                continue;
-            }
-            std::array<uint8_t, kKeyBytes> key{};
-            std::copy_n(blob->begin() + static_cast<ptrdiff_t>(offset + 2), kKeyBytes, key.begin());
-            _securityObject.setGroupKey(address, key);
-            ++groupKeys;
-        }
-    }
-
-    // §6.3.8: the Security Individual Address Table is the index space the
-    // point-to-point key table refers to, so it has to be read first. Its
-    // second field is each partner's Last Valid SeqNr; adopting those values is
-    // what carries the replay window across a restart, so it happens here too —
-    // this function is the one place called whenever the tables change.
-    _securityObject.syncSequencesFromAddressTable();
-
-    std::vector<IndividualAddress> securityAddresses;
-    if (const auto* blob = _securityObject.findExtraProperty(
-            SecurityProperty::SecurityIndividualAddressTable)) {
-        const std::span<const uint8_t> table(*blob);
-        const size_t entries = security_ia_table::entryCount(table);
-        for (size_t index = 0; index < entries; ++index) {
-            securityAddresses.push_back(security_ia_table::addressAt(table, index));
-        }
-    }
-
-    size_t deviceKeys = 0;
-    size_t unresolvedDeviceKeys = 0;
-    if (const auto* blob = _securityObject.findExtraProperty(SecurityProperty::P2PKeyTable)) {
-        for (size_t offset = 0; offset + kP2PKeyEntryBytes <= blob->size();
-             offset += kP2PKeyEntryBytes) {
-            // IA_Index is 1-based, like every other KNX table index.
-            const uint16_t iaIndex = readIndex(*blob, offset);
-            if (iaIndex == 0u || iaIndex > securityAddresses.size()) {
-                ++unresolvedDeviceKeys;
-                continue;
-            }
-            std::array<uint8_t, kKeyBytes> key{};
-            std::copy_n(blob->begin() + static_cast<ptrdiff_t>(offset + 2), kKeyBytes, key.begin());
-            // The trailing Roles field is deliberately dropped: this stack has
-            // no Role model beyond Tool/Unlisted, and silently honouring a
-            // subset of the 16 configured Roles would be worse than ignoring
-            // them, because the refusals would look arbitrary.
-            _securityObject.setDeviceKey(securityAddresses[iaIndex - 1u], key);
-            ++deviceKeys;
-        }
-    }
-
-    if (groupKeys != 0 || deviceKeys != 0 || unresolvedGroupKeys != 0 || unresolvedDeviceKeys != 0) {
-        KNX_LOGI(TAG,
-                 "Data Secure key tables applied: %zu group key(s), %zu device key(s), "
-                 "%zu security IA entries (%zu group / %zu device entries unresolved)",
-                 groupKeys, deviceKeys, securityAddresses.size(),
-                 unresolvedGroupKeys, unresolvedDeviceKeys);
-    } else if (_securityObject.isSecurityEnabled()) {
-        // Worth saying out loud: with Security Mode on and no group key, every
-        // group telegram this device sends goes out in plain and every secured
-        // one it receives is dropped as "unknown key".
-        KNX_LOGW(TAG,
-                 "Data Secure is enabled but no group or device keys are configured; "
-                 "ETS has not downloaded PID_GRP_KEY_TABLE / PID_P2P_KEY_TABLE");
-    }
-}
-
-void BusAccessUnit::wireManagementServices()
+void DeviceManagement::wireManagementServices()
 {
     publishMediumInterfaceObjects();
 
-    if (!_stackPort) {
+    if (_stackPort == nullptr) {
         return;
     }
 
@@ -776,7 +876,7 @@ void BusAccessUnit::wireManagementServices()
     _stackPort->setFunctionPropertyHandler(
         [this](const IndividualAddress& source,
                const FunctionPropertyRequest& request) -> util::Result<FunctionPropertyResult> {
-            const auto objectType = interfaceObjectTypeForIndex(request.objectIndex);
+            const auto objectType = _model.objectTypeForIndex(request.objectIndex);
             if (!objectType.has_value()) {
                 return util::ErrorCode::InvalidAddress;
             }
@@ -787,7 +887,7 @@ void BusAccessUnit::wireManagementServices()
             }
 #endif
             if (*objectType == InterfaceObjectType::security()) {
-                return handleSecurityFunctionProperty(_securityObject, source, request);
+                return handleSecurityFunctionProperty(_model.securityObject(), source, request);
             }
 
             if (*objectType == InterfaceObjectType::router()) {
@@ -842,7 +942,7 @@ void BusAccessUnit::wireManagementServices()
             } else
 #endif
             if (objectType == InterfaceObjectType::security()) {
-                result = handleSecurityFunctionProperty(_securityObject, source, request);
+                result = handleSecurityFunctionProperty(_model.securityObject(), source, request);
             } else if (objectType == InterfaceObjectType::router()) {
                 result = handleRouterFunctionProperty(request);
             } else if (objectType == InterfaceObjectType::groupObjectTable()) {
@@ -908,7 +1008,7 @@ void BusAccessUnit::wireManagementServices()
             // Property writes only mark persistent state dirty; loop() batches
             // the NVS flush. A restart can arrive mid-burst, so force the
             // pending write out before the device goes down.
-            flushPendingPersistence();
+            _model.flushPersistenceIfDirty();
             KNX_LOGI(TAG, "Restarting on %s request",
                      type == application::RestartType::MasterReset ? "master reset" : "basic restart");
             _platform.restart();
@@ -924,14 +1024,14 @@ void BusAccessUnit::wireManagementServices()
     // 03/05/01 §4.2.14: Verify Mode is bit 2 of PID_DEVICE_CONTROL.
     hooks.verifyMode = [this]() {
         constexpr uint8_t kVerifyModeBit = 0x04u;
-        return (_deviceObject.getDeviceControl() & kVerifyModeBit) != 0u;
+        return (_model.deviceObject().getDeviceControl() & kVerifyModeBit) != 0u;
     };
     // The A_Key_Write key table. Saved on the spot: the A_Key_Response that
     // follows tells the client the key is set, and a key lost to a restart
     // before the next coalesced save would leave the client locked out of the
     // level it believes it protected — or the level open that it closed.
     hooks.authorizationKeysChanged = [this](const application::AuthorizationService::KeyTable& keys) {
-        saveAuthorizationKeyTable(keys);
+        _model.saveAuthorizationKeyTable(keys);
     };
     _stackPort->setManagementServerHooks(std::move(hooks));
 
@@ -943,7 +1043,7 @@ void BusAccessUnit::wireManagementServices()
     // The service only hands over a write whose width matches the Domain
     // Address in force, which is empty until a KNX IP product adopts its
     // group (adoptRoutingMulticastAddress), so a TP1 device never gets here.
-    setStackPortDomainAddressWriteCallback([this](std::span<const uint8_t> domainAddress) {
+    _stackPort->setDomainAddressWriteCallback([this](std::span<const uint8_t> domainAddress) {
         return writeRoutingMulticastAddress(domainAddress);
     });
 #endif
@@ -952,7 +1052,7 @@ void BusAccessUnit::wireManagementServices()
     // PID_SERIAL_NUMBER already carries the device's KNX serial number (this
     // stack derives it from the MAC), so the commissioning service can simply
     // adopt it rather than introducing a second source of truth.
-    const auto serial = _deviceObject.getSerialNumber();
+    const auto serial = _model.deviceObject().getSerialNumber();
     if (serial.size() >= application::kKnxSerialNumberBytes) {
         application::KnxSerialNumber knxSerial{};
         std::copy_n(serial.begin(), application::kKnxSerialNumberBytes, knxSerial.begin());
@@ -966,31 +1066,31 @@ void BusAccessUnit::wireManagementServices()
     }
 }
 
-void BusAccessUnit::setDeviceMedium(MediumType medium)
+void DeviceManagement::setDeviceMedium(MediumType medium)
 {
     _deviceMedium = medium;
-    if (_stackPort) {
+    if (_stackPort != nullptr) {
         _stackPort->setDeviceMedium(medium);
     }
 }
 
 #if KNX_FEATURE_NETIP
-void BusAccessUnit::setBackboneKeyCallback(BackboneKeyCallback callback)
+void DeviceManagement::setBackboneKeyCallback(ManagementControl::BackboneKeyCallback callback)
 {
     _backboneKeyCallback = std::move(callback);
 }
 
-void BusAccessUnit::setRoutingMulticastAddressCallback(RoutingMulticastAddressCallback callback)
+void DeviceManagement::setRoutingMulticastAddressCallback(ManagementControl::RoutingMulticastAddressCallback callback)
 {
     _routingMulticastAddressCallback = std::move(callback);
 }
 
-IpAddress BusAccessUnit::adoptRoutingMulticastAddress(IpAddress productDefault, bool productDefaultWins)
+IpAddress DeviceManagement::adoptRoutingMulticastAddress(IpAddress productDefault, bool productDefaultWins)
 {
     _routingMulticastDefault = productDefault;
 
     const auto pid = static_cast<application::PropertyID>(kPidKnxNetIpRoutingMulticastAddress);
-    const auto stored = referenceObjectPropertyValue(InterfaceObjectType::knxNetIpParameter(), pid);
+    const auto stored = _model.referenceObjectPropertyValue(InterfaceObjectType::knxNetIpParameter(), pid);
     // A stored value that is not a multicast group cannot be here: the write
     // validator refuses it on restore as on any other write, and the
     // property then reads as zeros, which fails this test too.
@@ -1011,9 +1111,9 @@ IpAddress BusAccessUnit::adoptRoutingMulticastAddress(IpAddress productDefault, 
         // that asked for its own group to win clears that request as soon
         // as start-up returns, and a restart before the deferred save would
         // then come back on the old group.
-        if (setReferenceObjectProperty(InterfaceObjectType::knxNetIpParameter(), pid, octets).isOk()) {
-            markPersistenceDirty();
-            flushPendingPersistence();
+        if (_model.setReferenceObjectProperty(InterfaceObjectType::knxNetIpParameter(), pid, octets).isOk()) {
+            _model.markPersistenceDirty();
+            _model.flushPersistenceIfDirty();
         }
     }
 
@@ -1025,37 +1125,37 @@ IpAddress BusAccessUnit::adoptRoutingMulticastAddress(IpAddress productDefault, 
     return inForce;
 }
 
-IpAddress BusAccessUnit::routingMulticastAddress() const
+IpAddress DeviceManagement::routingMulticastAddress() const
 {
-    const auto stored = referenceObjectPropertyValue(
+    const auto stored = _model.referenceObjectPropertyValue(
         InterfaceObjectType::knxNetIpParameter(),
         static_cast<application::PropertyID>(kPidKnxNetIpRoutingMulticastAddress));
     return isRoutingMulticastAddress(stored) ? ipAddressFromOctets(stored) : IpAddress(0);
 }
 
-util::Result<void> BusAccessUnit::writeRoutingMulticastAddress(std::span<const uint8_t> value)
+util::Result<void> DeviceManagement::writeRoutingMulticastAddress(std::span<const uint8_t> value)
 {
     if (!isRoutingMulticastAddress(value)) {
         return util::ErrorCode::InvalidParameter;
     }
     const auto pid = static_cast<application::PropertyID>(kPidKnxNetIpRoutingMulticastAddress);
-    const auto previous = referenceObjectPropertyValue(InterfaceObjectType::knxNetIpParameter(), pid);
-    auto stored = setReferenceObjectProperty(InterfaceObjectType::knxNetIpParameter(), pid, value);
+    const auto previous = _model.referenceObjectPropertyValue(InterfaceObjectType::knxNetIpParameter(), pid);
+    auto stored = _model.setReferenceObjectProperty(InterfaceObjectType::knxNetIpParameter(), pid, value);
     if (stored.isError()) {
         return stored;
     }
-    markPersistenceDirty();
+    _model.markPersistenceDirty();
     onRoutingMulticastAddressWritten(previous, value);
     return util::Result<void>::ok();
 }
 
-void BusAccessUnit::onRoutingMulticastAddressWritten(std::span<const uint8_t> previous,
+void DeviceManagement::onRoutingMulticastAddressWritten(std::span<const uint8_t> previous,
                                                      std::span<const uint8_t> value)
 {
     // Restoring the stored object at start-up writes through the same path,
     // and a restored address is the device's own configuration coming back,
     // not it joining a new domain.
-    if (_restoringPersistentState || !isRoutingMulticastAddress(value)) {
+    if (_model.restoring() || !isRoutingMulticastAddress(value)) {
         return;
     }
 
@@ -1082,12 +1182,12 @@ void BusAccessUnit::onRoutingMulticastAddressWritten(std::span<const uint8_t> pr
     }
 }
 
-util::Result<void> BusAccessUnit::applyKnxNetIpConfiguration(const netip::KnxNetIpConfiguration& config)
+util::Result<void> DeviceManagement::applyKnxNetIpConfiguration(const netip::KnxNetIpConfiguration& config)
 {
     const auto objectType = InterfaceObjectType::knxNetIpParameter();
 
     const auto write = [&](uint8_t propertyId, std::span<const uint8_t> value) {
-        return setReferenceObjectProperty(objectType,
+        return _model.setReferenceObjectProperty(objectType,
                                           static_cast<application::PropertyID>(propertyId),
                                           value);
     };
@@ -1134,6 +1234,77 @@ util::Result<void> BusAccessUnit::applyKnxNetIpConfiguration(const netip::KnxNet
     return firstError;
 }
 #endif  // KNX_FEATURE_NETIP
+
+
+// ─── ManagementControl facet ─────────────────────────────────────────────────
+
+void ManagementControl::setDeviceMedium(MediumType medium) { _management.setDeviceMedium(medium); }
+util::Result<void> ManagementControl::setCommissioningMode(bool enabled) { return _management.setCommissioningMode(enabled); }
+bool ManagementControl::commissioningModeEnabled() const { return _management.commissioningModeEnabled(); }
+util::Result<void> ManagementControl::configureRouterRole(const RouterRoleConfig& config) { return _management.configureRouterRole(config); }
+util::Result<void> ManagementControl::syncRouterRoutingConfig() { return _management.syncRouterRoutingConfig(); }
+bool ManagementControl::hasRouterRole() const { return _management.hasRouterRole(); }
+
+util::Result<void> ManagementControl::setReferenceObjectProperty(InterfaceObjectType objectType,
+                                                                 application::PropertyID propertyId,
+                                                                 std::span<const uint8_t> value)
+{
+    return _management.model().setReferenceObjectProperty(objectType, propertyId, value);
+}
+
+std::vector<uint8_t> ManagementControl::referenceObjectPropertyValue(InterfaceObjectType objectType,
+                                                                     application::PropertyID propertyId) const
+{
+    return _management.model().referenceObjectPropertyValue(objectType, propertyId);
+}
+
+void ManagementControl::setReferenceInterfaceObjectTypes(std::vector<InterfaceObjectType> objectTypes)
+{
+    _management.model().setReferenceObjectTypes(std::move(objectTypes));
+}
+
+const std::vector<InterfaceObjectType>& ManagementControl::referenceInterfaceObjectTypes() const
+{
+    return _management.model().referenceObjectTypes();
+}
+
+#if KNX_FEATURE_NETIP
+util::Result<void> ManagementControl::applyKnxNetIpConfiguration(const netip::KnxNetIpConfiguration& config)
+{
+    return _management.applyKnxNetIpConfiguration(config);
+}
+void ManagementControl::setBackboneKeyCallback(BackboneKeyCallback callback)
+{
+    _management.setBackboneKeyCallback(std::move(callback));
+}
+void ManagementControl::setSecuredServiceFamilyCallback(SecuredServiceFamilyCallback callback)
+{
+    _management.setSecuredServiceFamilyCallback(std::move(callback));
+}
+uint8_t ManagementControl::securedServiceFamilyVersion(uint8_t serviceFamilyId) const
+{
+    return _management.securedServiceFamilyVersion(serviceFamilyId);
+}
+IpAddress ManagementControl::adoptRoutingMulticastAddress(IpAddress productDefault, bool productDefaultWins)
+{
+    return _management.adoptRoutingMulticastAddress(productDefault, productDefaultWins);
+}
+IpAddress ManagementControl::routingMulticastAddress() const { return _management.routingMulticastAddress(); }
+void ManagementControl::setRoutingMulticastAddressCallback(RoutingMulticastAddressCallback callback)
+{
+    _management.setRoutingMulticastAddressCallback(std::move(callback));
+}
+#endif
+
+bool ConstManagementControl::commissioningModeEnabled() const { return _management.commissioningModeEnabled(); }
+bool ConstManagementControl::hasRouterRole() const { return _management.hasRouterRole(); }
+const std::vector<InterfaceObjectType>& ConstManagementControl::referenceInterfaceObjectTypes() const
+{
+    return _management.model().referenceObjectTypes();
+}
+#if KNX_FEATURE_NETIP
+IpAddress ConstManagementControl::routingMulticastAddress() const { return _management.routingMulticastAddress(); }
+#endif
 
 } // namespace bau
 } // namespace knx

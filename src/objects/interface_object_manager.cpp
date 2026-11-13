@@ -406,10 +406,10 @@ void InterfaceObjectManager::eraseAllPersistence(const char* reason) {
     }
 }
 
-size_t InterfaceObjectManager::saveToPersistence() {
+util::Result<size_t> InterfaceObjectManager::saveToPersistence() {
     if (!_persistenceEnabled || !_persistenceManager) {
         KNX_LOGW(TAG, "Persistence not enabled");
-        return 0;
+        return util::ErrorCode::NotInitialized;
     }
 
     size_t saved = 0;
@@ -584,7 +584,7 @@ size_t InterfaceObjectManager::saveToPersistence() {
         // next load.
         KNX_LOGE(TAG, "Saving to persistence bank %u failed; keeping bank %u",
                  static_cast<unsigned>(nextBank), static_cast<unsigned>(_activeBank));
-        return 0;
+        return util::ErrorCode::StorageError;
     }
 
     // The switch: one key, one commit.
@@ -592,7 +592,7 @@ size_t InterfaceObjectManager::saveToPersistence() {
     if (_persistence->saveById(kPersistenceBankMarkerKeyId, marker).isError()) {
         KNX_LOGE(TAG, "Failed to switch persistence bank marker to %u; keeping bank %u",
                  static_cast<unsigned>(nextBank), static_cast<unsigned>(_activeBank));
-        return 0;
+        return util::ErrorCode::StorageError;
     }
     const uint8_t previousBank = _activeBank;
     _activeBank = nextBank;

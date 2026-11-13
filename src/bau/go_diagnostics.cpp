@@ -2,7 +2,7 @@
 // Copyright (C) 2025-2026 Sami Mäkinen
 
 /**
- * @file bau_go_diagnostics.cpp
+ * @file go_diagnostics.cpp
  * @brief PID_GO_DIAGNOSTICS of the Group Object Table Object (03/05/01 §4.8.1).
  *
  * Group Object Diagnostics is how a management client reads or writes a group
@@ -12,11 +12,14 @@
  * ETS group monitor is compiled into a Function Property command on this object
  * and the device is the one that transmits.
  *
- * Split out of bau_management.cpp because it is the only management service that
- * reaches into the group-object runtime.
+ * Kept apart from device_management.cpp because it is the only management
+ * service that reaches into the group-object runtime.
  */
 
-#include "knx/bau/bau.hpp"
+#include "device_management.hpp"
+
+#include "device_model.hpp"
+#include "group_runtime.hpp"
 
 #include "knx/application/function_property_services.hpp"
 #include "knx/objects/security_interface_object.hpp"
@@ -91,7 +94,7 @@ size_t expectedValueOctets(const application::GroupObject& object)
 
 } // namespace
 
-util::Result<FunctionPropertyResult> BusAccessUnit::handleGroupObjectDiagnostics(
+util::Result<FunctionPropertyResult> DeviceManagement::handleGroupObjectDiagnostics(
     const FunctionPropertyRequest& request)
 {
     if (request.propertyId != static_cast<application::PropertyID>(kPidGoDiagnostics)) {
@@ -130,7 +133,7 @@ util::Result<FunctionPropertyResult> BusAccessUnit::handleGroupObjectDiagnostics
         if (serviceInfo.size() < 2u) {
             return false;
         }
-        *out = _groupObjectTable.getGroupObject(GroupObjectIndex(readU16(serviceInfo)));
+        *out = _model.groupObjectTable().getGroupObject(GroupObjectIndex(readU16(serviceInfo)));
         return *out != nullptr;
     };
 
@@ -172,14 +175,14 @@ util::Result<FunctionPropertyResult> BusAccessUnit::handleGroupObjectDiagnostics
                 const uint16_t goNumber = readU16(serviceInfo);
                 uint16_t config = static_cast<uint16_t>(object->descriptor() >> 8);
 
-                const auto* goFlags = _securityObject.findExtraProperty(
+                const auto* goFlags = _model.securityObject().findExtraProperty(
                     objects::SecurityProperty::GoSecurityFlags);
                 if (goFlags != nullptr && goNumber < goFlags->size()) {
                     const uint8_t security = (*goFlags)[goNumber];
                     if ((security & kFlagAuthentication) != 0u) config |= 0x0100u;
                     if ((security & kFlagConfidentiality) != 0u) config |= 0x0200u;
                 }
-                if (isGroupObjectLinked(GroupObjectIndex(goNumber))) {
+                if (_groups.isGroupObjectLinked(GroupObjectIndex(goNumber))) {
                     config |= 0x0400u;
                 }
 
@@ -256,7 +259,7 @@ util::Result<FunctionPropertyResult> BusAccessUnit::handleGroupObjectDiagnostics
             // Step 1: put the telegram on the bus.  The return code is
             // explicitly independent of whether the transmission succeeds
             // (NOTE 42), so only a refusal to even build it is reported.
-            const auto sendResult = sendGroupValue(destination, value);
+            const auto sendResult = _groups.sendGroupValue(destination, value);
             if (sendResult.isError()) {
                 KNX_LOGW(TAG, "GO diagnostics write on %d/%d/%d failed: %s",
                          destination.main(), destination.middle(), destination.sub(),
@@ -267,8 +270,8 @@ util::Result<FunctionPropertyResult> BusAccessUnit::handleGroupObjectDiagnostics
             // Step 2: hand the same service to our own Application Layer, so
             // the local objects linked to that group address are updated just
             // as if the telegram had come from the bus.
-            handleApplicationFrame(_deviceObject.getIndividualAddress(), destination,
-                                   MessageKind::GroupValueWrite, value, AddressType::Group);
+            _groups.handleApplicationFrame(_model.deviceObject().getIndividualAddress(), destination,
+                                   BusAccessUnit::MessageKind::GroupValueWrite, value, AddressType::Group);
             return answer(FunctionPropertyReturnCode::Success);
         }
 
@@ -283,7 +286,7 @@ util::Result<FunctionPropertyResult> BusAccessUnit::handleGroupObjectDiagnostics
             // The raw emit path, not sendGroupValueForObject(): a diagnostic
             // request must not be swallowed by the send-on-change filter or
             // deferred by the min-interval floor.
-            const auto sendResult = emitGroupValueForObject(index, object->getRawValue());
+            const auto sendResult = _groups.emitGroupValueForObject(index, object->getRawValue());
             return answerStatusValue(sendResult.isOk() ? kTransmissionIdleOk
                                                        : kTransmissionIdleError,
                                      *object);
@@ -301,7 +304,7 @@ util::Result<FunctionPropertyResult> BusAccessUnit::handleGroupObjectDiagnostics
                 return answer(flagCheck);
             }
 
-            const auto sendResult = requestGroupValue(destination);
+            const auto sendResult = _groups.requestGroupValue(destination);
             if (sendResult.isError()) {
                 KNX_LOGW(TAG, "GO diagnostics read on %d/%d/%d failed: %s",
                          destination.main(), destination.middle(), destination.sub(),
@@ -313,8 +316,8 @@ util::Result<FunctionPropertyResult> BusAccessUnit::handleGroupObjectDiagnostics
             // Application Layer.  Without it the requesting client would never
             // see this device's own value — a locally originated telegram is
             // not looped back through the receive path.
-            handleApplicationFrame(_deviceObject.getIndividualAddress(), destination,
-                                   MessageKind::GroupValueRead, {}, AddressType::Group);
+            _groups.handleApplicationFrame(_model.deviceObject().getIndividualAddress(), destination,
+                                   BusAccessUnit::MessageKind::GroupValueRead, {}, AddressType::Group);
             return answer(FunctionPropertyReturnCode::Success);
         }
 
@@ -329,7 +332,7 @@ util::Result<FunctionPropertyResult> BusAccessUnit::handleGroupObjectDiagnostics
     }
 }
 
-FunctionPropertyReturnCode BusAccessUnit::validateGroupDiagnosticsFlags(
+FunctionPropertyReturnCode DeviceManagement::validateGroupDiagnosticsFlags(
     uint8_t flags, const GroupAddress& destination, bool allowSelector) const
 {
     // §4.8.1.3.3 / §4.8.1.3.5, Table 37 and Table 39: E_DATA_VOID covers a
@@ -340,12 +343,12 @@ FunctionPropertyReturnCode BusAccessUnit::validateGroupDiagnosticsFlags(
     if ((flags & static_cast<uint8_t>(~allowed)) != 0u) {
         return FunctionPropertyReturnCode::DataVoid;
     }
-    if (destination.raw == 0u || !_addressTable.findIndex(destination).isValid()) {
+    if (destination.raw == 0u || !_model.addressTable().findIndex(destination).isValid()) {
         return FunctionPropertyReturnCode::DataVoid;
     }
     if ((flags & kFlagSecurityMask) != 0u) {
         std::array<uint8_t, 16> key{};
-        if (_securityObject.getGroupKey(destination, key).isError()) {
+        if (_model.securityObject().getGroupKey(destination, key).isError()) {
             return FunctionPropertyReturnCode::DataVoid;
         }
     }

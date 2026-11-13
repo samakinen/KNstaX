@@ -59,9 +59,10 @@ set(KNX_SOURCES_CORE
     # BAU
     "src/bau/bau.cpp"
     "src/bau/bau_stack_port.cpp"
-    "src/bau/bau_group_runtime.cpp"
-    "src/bau/bau_management.cpp"
-    "src/bau/bau_go_diagnostics.cpp"
+    "src/bau/device_model.cpp"
+    "src/bau/group_runtime.cpp"
+    "src/bau/device_management.cpp"
+    "src/bau/go_diagnostics.cpp"
 
     # Utilities
     "src/util/log.cpp"

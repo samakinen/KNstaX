@@ -202,7 +202,7 @@ static const PropertyHandler kGroupObjectTableHandlers[] = {
     },
 
     // PID_GO_DIAGNOSTICS (03/05/01 §4.8.1): the Group Object Diagnostics
-    // function itself lives in the BAU (bau_go_diagnostics.cpp) and is reached
+    // function itself lives in the BAU (src/bau/go_diagnostics.cpp) and is reached
     // through the Function Property services. Declaring it here is what makes
     // A_PropertyDescription_Read answer PDT_FUNCTION for it, which is how ETS
     // decides the device supports Group Object Diagnostics.

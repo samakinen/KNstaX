@@ -56,7 +56,7 @@ void bootAndPersist(uint16_t schemaVersion, uint8_t markerValue) {
                       manager.writeProperty(InterfaceObjectType::device(),
                                                              InterfaceObjectInstance(1),
                                                              kProgModeProperty, 1, value).error());
-    TEST_ASSERT_TRUE(manager.saveToPersistence() > 0u);
+    TEST_ASSERT_TRUE(manager.saveToPersistence().value() > 0u);
 }
 
 /// Boot on `schemaVersion` and report how many properties were restored.

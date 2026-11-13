@@ -22,6 +22,7 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -1120,6 +1121,83 @@ void test_bau_security_object_writes_survive_restart(void) {
     clearPersistenceStore();
 }
 
+// A coalesced save that fails must leave the state dirty and be tried again,
+// or the write is lost the moment the device restarts: the BAU used to clear
+// its dirty flag before saving, so one flash error meant nothing was stored
+// until some unrelated write came along. The retry waits out an interval
+// rather than running on every loop(), so a flash that keeps failing is not
+// hammered.
+void test_bau_failed_persistence_save_is_retried(void) {
+    clearPersistenceStore();
+    namespace fs = std::filesystem;
+
+    const std::array<uint8_t, 16> etsKey{
+        0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+        0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xF0, 0x01};
+    const fs::path store = knx::objects::persistenceNamespaceDir("knx_objects");
+    const fs::path storeAside = store.string() + ".aside";
+
+    const auto countEntries = [&store]() {
+        size_t count = 0;
+        for ([[maybe_unused]] const auto& entry : fs::directory_iterator(store)) {
+            ++count;
+        }
+        return count;
+    };
+
+    {
+        uint32_t nowMs = 1000;
+        auto platform = std::make_unique<knx::platform::LinuxPlatform>();
+        auto stackPort = knx::test::createTp1TestStackPort(*platform, std::make_unique<MockPhysicalLayer>());
+        auto bau = std::make_unique<knx::bau::BusAccessUnit>(*platform, std::move(stackPort));
+        bau->setTimeSource([&nowMs]() { return nowMs; });
+        TEST_ASSERT_TRUE(bau->init(IndividualAddress(1, 1, 3)).isOk());
+
+        // Break the store: the namespace directory moves aside and a plain
+        // file takes its place, so every write into it fails.
+        std::error_code ec;
+        fs::remove_all(storeAside, ec);
+        fs::rename(store, storeAside);
+        { std::ofstream blocker(store); blocker << "not a directory"; }
+
+        TEST_ASSERT_TRUE(bau->writeProperty(
+            knx::InterfaceObjectType::security(),
+            knx::InterfaceObjectInstance(1),
+            static_cast<knx::application::PropertyID>(knx::objects::SecurityProperty::ToolKey),
+            1,
+            std::span<const uint8_t>(etsKey.data(), etsKey.size())).isOk());
+
+        bau->loop();     // the write burst starts
+        nowMs = 1500;
+        bau->loop();     // quiet for 500 ms: the save runs and fails
+
+        // The store works again, with what was in it before.
+        fs::remove(store);
+        fs::rename(storeAside, store);
+        const size_t entriesBefore = countEntries();
+
+        nowMs = 3000;
+        bau->loop();     // inside the retry interval: no attempt
+        TEST_ASSERT_EQUAL_UINT32(entriesBefore, countEntries());
+
+        nowMs = 7000;
+        bau->loop();     // the retry runs and succeeds
+        TEST_ASSERT_TRUE(countEntries() > entriesBefore);
+
+        // No flushPendingPersistence(): the retry alone has to have stored it.
+        bau->close();
+    }
+
+    auto platform = std::make_unique<knx::platform::LinuxPlatform>();
+    auto stackPort = knx::test::createTp1TestStackPort(*platform, std::make_unique<MockPhysicalLayer>());
+    auto bau = std::make_unique<knx::bau::BusAccessUnit>(*platform, std::move(stackPort));
+    TEST_ASSERT_TRUE(bau->init(IndividualAddress(1, 1, 3)).isOk());
+    TEST_ASSERT_TRUE(bau->securityObject().getToolKey() == etsKey);
+
+    bau->close();
+    clearPersistenceStore();
+}
+
 // ETS ends every secure download with a ConfirmedRestart, so a group key table
 // that does not survive the reboot is a key table that is never used: the
 // device comes back up in Security Mode with no key, sends every group
@@ -1841,6 +1919,7 @@ int main(void) {
     RUN_TEST(test_bau_begin_request_group_value_progresses_to_success);
     RUN_TEST(test_bau_restore_does_not_clobber_persisted_individual_address);
     RUN_TEST(test_bau_security_object_writes_survive_restart);
+    RUN_TEST(test_bau_failed_persistence_save_is_retried);
     RUN_TEST(test_bau_group_key_table_survives_restart);
     RUN_TEST(test_bau_security_sequence_numbers_survive_restart);
     RUN_TEST(test_bau_incoming_group_value_write_decodes_to_service_and_payload);

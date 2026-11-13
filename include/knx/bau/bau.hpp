@@ -65,11 +65,14 @@ class TwoPortCoupler;
 
 namespace bau {
 
-class PropertyAccessBridge;
 class BusAccessStackPort;
 
-// Facet views over BusAccessUnit; defined after it, since each holds a
-// reference to one and calls through to it.
+// The three components the BAU is composed of (private headers in src/bau/).
+class DeviceModel;
+class GroupRuntime;
+class DeviceManagement;
+
+// Facet views over those components; defined after BusAccessUnit.
 class TransmissionControl;
 class ConstTransmissionControl;
 class ManagementControl;
@@ -323,13 +326,11 @@ public:
     // min-interval floors, and the telegram rate limiter. Without it (default),
     // those time-based behaviours are inert and every publish is sent at once.
     using TimeSourceFn = util::InplaceFunction<uint32_t(), 32>;
-    void setTimeSource(TimeSourceFn timeSource) { _timeSource = std::move(timeSource); }
+    void setTimeSource(TimeSourceFn timeSource);
 
     /// Configure the global outbound-telegram rate limiter. Shapes only the
     /// device's own unsolicited group sends; read responses are never throttled.
-    void setTelegramRateLimit(const application::TelegramRateLimitConfig& config) {
-        _txRateLimiter.configure(config);
-    }
+    void setTelegramRateLimit(const application::TelegramRateLimitConfig& config);
 
     /// Set the send-on-change / cyclic / min-interval policy for one object.
     util::Result<void> setGroupObjectTransmitPolicy(GroupObjectIndex objectIndex,
@@ -362,9 +363,8 @@ public:
     // than flattened onto the BAU, so the core surface stays about the device
     // and its group objects.
     //
-    // The facets are non-owning views over this BAU — a reference and nothing
-    // else, so `bau.transmission().setDefaultTransmissionOptions(...)` costs
-    // exactly what the direct call did. They must not outlive the BAU.
+    // The facets are non-owning views over the BAU's components — a reference
+    // and nothing else. They must not outlive the BAU.
 
     TransmissionControl transmission();
     ConstTransmissionControl transmission() const;
@@ -431,56 +431,10 @@ public:
     };
 
 private:
-    friend class TransmissionControl;
-    friend class ConstTransmissionControl;
-    friend class ManagementControl;
-    friend class ConstManagementControl;
-    friend class LinkAccess;
-    friend class ConstLinkAccess;
-
-    // Implementation of the facet surfaces. Private so the only way in is
-    // through the facet that names the concern.
-    util::Result<void> requestCommissioningMode(bool enabled);
-    bool commissioningModeEnabled() const;
-    void setDefaultTransmissionOptions(const TransmissionOptions& options);
-    const TransmissionOptions& defaultTransmissionOptions() const;
-    bool popOutboundTransmissionOutcome(TransmissionOutcome& outcome);
-    size_t queuedOutboundTransmissionOutcomeCount() const;
-    void setAutoResponseMode(AutoResponseMode mode) { _autoResponseMode = mode; }
-    AutoResponseMode autoResponseMode() const { return _autoResponseMode; }
-    size_t queuedAutomaticResponseCount() const { return _autoResponseQueueCount; }
-    size_t droppedAutomaticResponseCount() const { return _droppedAutomaticResponses; }
-    size_t droppedInboundGroupEventCount() const { return _droppedInboundGroupEvents; }
-    util::Result<void> beginProcessAutomaticResponse();
-    util::Result<TransmissionProgressState> pollProcessAutomaticResponse();
-
-    bool hasStackPort() const;
-    util::Result<void> sendDataLinkFrame(const datalink::LDataFrame& frame);
-    void setDataLinkPromiscuousMode(datalink::PromiscuousMode mode);
-    network::TwoPortCoupler* stackPortCoupler();
-    util::Result<void> refreshStackPortMulticastMembership();
-    LinkDiagnostics stackPortLinkDiagnostics() const;
-    void setDomainAddress(std::span<const uint8_t> domainAddress);
-    void setStackPortDomainAddressWriteCallback(application::DomainAddressWriteCallback callback);
-    void setReferenceInterfaceObjectTypes(std::vector<InterfaceObjectType> objectTypes);
-    const std::vector<InterfaceObjectType>& referenceInterfaceObjectTypes() const;
-    util::Result<void> configureRouterRole(const RouterRoleConfig& config);
-    bool hasRouterRole() const { return _routerRole.filterTable != nullptr; }
-
-    /**
-     * @brief Read the Router Object's coupler configuration back into the policy.
-     *
-     * ETS writes PID_*_LCCONFIG and PID_*_LCGRPCONFIG as ordinary properties,
-     * which land in the interface object and nowhere else. Call this after a
-     * download so the forwarding path starts obeying what was downloaded.
-     * No-op when no routing policy was supplied.
-     */
-    util::Result<void> syncRouterRoutingConfig();
-
-protected:
     platform::Platform& _platform;
 
-    // Interface objects
+    // The six system interface objects. Owned here so the accessors above can
+    // hand them out; the components hold references.
     objects::DeviceObject _deviceObject;
     objects::AddressTableObject _addressTable;
     objects::AssociationTableObject _associationTable;
@@ -488,168 +442,134 @@ protected:
     objects::GroupObjectTableObject _groupObjectTable;
     objects::SecurityInterfaceObject _securityObject;
 
-    // Callbacks
-    GroupObjectWriteCallback _groupObjectWriteCallback;
-    GroupObjectReadCallback _groupObjectReadCallback;
+    std::unique_ptr<BusAccessStackPort> _stackPort;
+    // Constructed in this order, each from the ones before it; never null.
+    std::unique_ptr<DeviceModel> _model;
+    std::unique_ptr<GroupRuntime> _groups;
+    std::unique_ptr<DeviceManagement> _management;
 
-    bool _initialized;
+    bool _initialized{false};
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Facets
+//
+// Each is a non-owning view holding a single reference to the component that
+// implements its concern. They exist to group a concern, not to add a layer:
+// every method forwards directly, and the const variants exist so a
+// `const BusAccessUnit&` can still be inspected.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * @brief Outbound telegram shaping and delivery bookkeeping.
+ *
+ * Covers the retry/outcome queue and the automatic read-response queue. A
+ * device that simply publishes values never needs any of it — the defaults
+ * are inert.
+ */
+class TransmissionControl {
+public:
+    using ProgressState = BusAccessUnit::TransmissionProgressState;
+    using Options = BusAccessUnit::TransmissionOptions;
+    using Outcome = BusAccessUnit::TransmissionOutcome;
+    using AutoResponseMode = BusAccessUnit::AutoResponseMode;
+
+    explicit TransmissionControl(GroupRuntime& runtime) : _runtime(runtime) {}
+
+    /// Default retry policy applied to sends that do not name their own.
+    void setDefaultOptions(const Options& options);
+    const Options& defaultOptions() const;
+
+    /// Advance an in-flight send. Returns Pending until the medium reports.
+    util::Result<ProgressState> poll();
+
+    /// Drain one completed send outcome; false when the queue is empty.
+    bool popOutcome(Outcome& outcome);
+    size_t queuedOutcomeCount() const;
+
+    /// Whether A_GroupValue_Read is answered inline or from the owner loop.
+    void setAutoResponseMode(AutoResponseMode mode);
+    AutoResponseMode autoResponseMode() const;
+    util::Result<void> beginAutomaticResponse();
+    util::Result<ProgressState> pollAutomaticResponse();
+    size_t queuedAutomaticResponseCount() const;
+
+    /// Drop counters. Non-zero means the device is losing traffic it was asked
+    /// to handle — worth surfacing rather than leaving buried in the BAU.
+    size_t droppedAutomaticResponseCount() const;
+    size_t droppedInboundGroupEventCount() const;
 
 private:
-    struct PendingAutoResponse {
-        GroupAddress destination;
-        std::vector<uint8_t> data;
-    };
+    GroupRuntime& _runtime;
+};
 
-    struct AutoResponseOperationState {
-        bool active{false};
-    };
+/// Read-only view of TransmissionControl, for a const BusAccessUnit.
+class ConstTransmissionControl {
+public:
+    using Options = BusAccessUnit::TransmissionOptions;
+    using AutoResponseMode = BusAccessUnit::AutoResponseMode;
 
-    static constexpr size_t AUTO_RESPONSE_QUEUE_CAPACITY = 4u;
-    static constexpr size_t INBOUND_GROUP_EVENT_QUEUE_CAPACITY = 8u;
+    explicit ConstTransmissionControl(const GroupRuntime& runtime) : _runtime(runtime) {}
 
-    // Application layer callback
-    void handleApplicationFrame(const IndividualAddress& source,
-                                const GroupAddress& destination,
-                                MessageKind kind,
-                                std::span<const uint8_t> data,
-                                AddressType destinationType);
-    bool enqueueInboundGroupEvent(MessageKind kind,
-                                  const GroupAddress& destination,
-                                  std::span<const uint8_t> data);
-    void processInboundGroupEvents();
-    void clearInboundGroupEvents();
-    util::Result<void> sendAutomaticResponseImmediate(const GroupAddress& destination,
-                                                      std::span<const uint8_t> data);
-    void enqueueAutomaticResponse(const GroupAddress& destination, std::span<const uint8_t> data);
-    bool popAutomaticResponse(PendingAutoResponse& response);
-    size_t queuedInboundGroupEventCount() const;
-    void refreshWorkAvailabilityState();
-    void notifyWorkAvailableIfTransitioned();
+    const Options& defaultOptions() const;
+    size_t queuedOutcomeCount() const;
+    AutoResponseMode autoResponseMode() const;
+    size_t queuedAutomaticResponseCount() const;
+    size_t droppedAutomaticResponseCount() const;
+    size_t droppedInboundGroupEventCount() const;
 
-    std::array<PendingAutoResponse, AUTO_RESPONSE_QUEUE_CAPACITY> _autoResponseQueue{};
-    size_t _autoResponseQueueHead{0};
-    size_t _autoResponseQueueCount{0};
-    AutoResponseMode _autoResponseMode{AutoResponseMode::Immediate};
-    AutoResponseOperationState _autoResponseOperation{};
-    size_t _droppedAutomaticResponses{0};
-    size_t _droppedInboundGroupEvents{0};
-    WorkAvailableCallback _workAvailableCallback{};
-    bool _hadImmediateWork{false};
-    bool _restoringPersistentState{false};
-    /// The address init() was given: the medium's default IA that Erase
-    /// Codes 02h and 03h restore (03/05/02 Table 4).
-    IndividualAddress _defaultIndividualAddress{0xFFFFu};
-    /// Reset the Resources @p eraseCode names and persist the result; the
-    /// restart that follows boots into it. See bau_management.cpp.
-    util::Result<void> applyMasterReset(application::EraseCode eraseCode);
-    std::unique_ptr<platform::Queue> _inboundGroupEventQueue;
-    std::unique_ptr<BusAccessStackPort> _stackPort;
-    std::unique_ptr<PropertyAccessBridge> _propertyAccessBridge;
+private:
+    const GroupRuntime& _runtime;
+};
 
-    // Outbound transmit shaping.
-    TimeSourceFn _timeSource{};
-    application::TelegramRateLimiter _txRateLimiter{};
+/**
+ * @brief Commissioning state and device role.
+ *
+ * Programming mode, the coupler role, and which optional interface objects the
+ * device publishes — everything a management client or an integrator changes,
+ * as opposed to what the application does.
+ */
+class ManagementControl {
+public:
+    using RouterRoleConfig = BusAccessUnit::RouterRoleConfig;
 
-    uint32_t nowMs() const { return _timeSource ? _timeSource() : 0u; }
-    /// Unconditional group-value write on all associated addresses (the raw send
-    /// primitive behind sendGroupValueForObject, bypassing policy/rate gates).
-    /// No associated address means no telegram and an ok result.
-    util::Result<void> emitGroupValueForObject(GroupObjectIndex objectIndex, std::span<const uint8_t> data);
-    /// Release cyclic-due and deferred (min-interval/rate-limited) sends, honoring
-    /// the rate limiter. Called from loop().
-    void pumpGroupObjectTransmissions(uint32_t nowMs);
+    explicit ManagementControl(DeviceManagement& management) : _management(management) {}
 
-    // Value-Read-on-Initialisation (group object flag I).  Runs once after the
-    // device reaches a valid individual address, spread across loop() calls so
-    // a whole-installation restart does not turn into a read storm.
-    enum class ReadOnInitState : uint8_t { Pending, Running, Done };
-    static constexpr size_t kMaxReadOnInitPerLoop = 4u;
-    ReadOnInitState _readOnInitState{ReadOnInitState::Pending};
-    uint16_t _readOnInitCursor{0};
-    void pumpReadOnInit();
-
-    /// Interface object type ETS addresses at `objectIndex`, or nullopt when
-    /// the index is out of range.  Defined in bau.cpp, where the property
-    /// bridge that owns the mapping is a complete type.
-    std::optional<InterfaceObjectType> interfaceObjectTypeForIndex(InterfaceObjectIndex objectIndex) const;
-
-    /// Install handlers for the management services that are not property
-    /// access (Function Property, serial-number commissioning), and publish
-    /// the standard interface objects the active medium requires.
-    /// Implemented in bau_management.cpp.
-    void wireManagementServices();
-
-    /// Register and seed the interface objects that ETS expects for the medium
-    /// this device runs on (KNXnet/IP Parameter Object for IP devices, Router
-    /// Object for couplers).  Implemented in bau_management.cpp.
-    void publishMediumInterfaceObjects();
-
-    /// Coupler role, if declared.  A null filterTable means "end device".
-    RouterRoleConfig _routerRole{};
-    /// Remembered so a stack port attached after the declaration still gets it.
-    MediumType _deviceMedium{MediumType::TP1};
-
-    /// Register and seed the Router Object; called from
-    /// publishMediumInterfaceObjects() when a coupler role is declared.
-    void publishRouterObject();
-
-    /// Dispatch a Function Property invocation on the Router Object
-    /// (PID_ROUTETABLE_CONTROL) to the coupler's filter table.
-    util::Result<application::FunctionPropertyResult> handleKnxNetIpFunctionProperty(
-        const IndividualAddress& source,
-        const application::FunctionPropertyRequest& request);
-    void setSecuredServiceFamilyVersion(uint8_t serviceFamilyId, uint8_t version);
-
-    util::Result<application::FunctionPropertyResult> handleRouterFunctionProperty(
-        const application::FunctionPropertyRequest& request);
-
-    /// Dispatch a Function Property invocation on the Group Object Table Object
-    /// (PID_GO_DIAGNOSTICS, 03/05/01 §4.8.1) — the service ETS uses to read or
-    /// write a group address through the device, which is the only way it can
-    /// touch a Data Secure group address it has no sending sequence number for.
-    /// Implemented in bau_go_diagnostics.cpp.
-    util::Result<application::FunctionPropertyResult> handleGroupObjectDiagnostics(
-        const application::FunctionPropertyRequest& request);
-
-    /// Rebuild the live Data Secure key maps from the array properties ETS
-    /// downloads (PID_GRP_KEY_TABLE, PID_P2P_KEY_TABLE, and the Security
-    /// Individual Address Table they index into).  Those properties are stored
-    /// verbatim; the Secure Application Layer looks keys up by address, so
-    /// without this step a downloaded key table has no effect at all.
-    /// Idempotent — safe to call after every write that can change either the
-    /// key tables or the group address table they resolve against.
-    void applySecurityKeyTables();
-
-    /// Validate the Flags + Group Address of the two PID_GO_DIAGNOSTICS
-    /// commands that address the bus rather than a group object number.
-    /// Returns Success, or the E_DATA_VOID the spec prescribes.
-    application::FunctionPropertyReturnCode validateGroupDiagnosticsFlags(
-        uint8_t flags, const GroupAddress& destination, bool allowSelector) const;
-
-    /// Seed a live reference interface object property; no-op when the object
-    /// is not registered.  Defined in bau.cpp where the bridge is complete.
-    /// Current value of a reference object property, empty if never written.
-    std::vector<uint8_t> referenceObjectPropertyValue(
-        InterfaceObjectType objectType, application::PropertyID propertyId) const;
     /**
-     * Declare the medium this device sits on.
-     *
-     * Reaches the Device Descriptor Type 0 that ETS reads before every
-     * download; see BusAccessStackPort::setDeviceMedium. Call it before or
-     * just after start(), and only when the device is not on TP1 — that is the
-     * default, and re-declaring it changes nothing.
+     * Declare the medium this device sits on, so its Device Descriptor Type 0
+     * (read by ETS before every download) reports the right mask version.
+     * Not IP-specific: every device has a medium, and TP1 is only the default.
+     * Call it before or just after start(), and only when not on TP1.
      */
     void setDeviceMedium(MediumType medium);
 
+    /// Programming mode. ETS finds an unaddressed device only while this is on.
+    util::Result<void> setCommissioningMode(bool enabled);
+    bool commissioningModeEnabled() const;
+
+    /// Declare this device a coupler and publish the Router Object. Opt-in:
+    /// see BusAccessUnit::RouterRoleConfig for why it is not automatic.
+    util::Result<void> configureRouterRole(const RouterRoleConfig& config);
+
+    /**
+     * Read the Router Object's coupler configuration back into the policy.
+     *
+     * ETS writes PID_*_LCCONFIG and PID_*_LCGRPCONFIG as ordinary properties,
+     * which land in the interface object and nowhere else. Call this after a
+     * download so the forwarding path starts obeying what was downloaded.
+     * No-op when no routing policy was supplied.
+     */
+    util::Result<void> syncRouterRoutingConfig();
+    bool hasRouterRole() const;
+
 #if KNX_FEATURE_NETIP
     /**
-     * Publish this device's live IP identity into the KNXnet/IP Parameter
-     * Object, where ETS reads it back.
-     *
-     * Separate from publishMediumInterfaceObjects(), which runs at start-up:
-     * none of these values exist yet at that point, and most of them change
-     * again when a lease is renewed. Call it once the interface is up, and
-     * again whenever the address changes.
+     * Publish the device's live IP identity — address, multicast group, MAC,
+     * friendly name — into the KNXnet/IP Parameter Object, where ETS reads it
+     * back. None of these values exist at start-up and most change again when
+     * a lease is renewed: call it once the interface is up, and again whenever
+     * the address changes. See netip::KnxNetIpConfiguration for why leaving it
+     * unset is worse than it looks.
      */
     util::Result<void> applyKnxNetIpConfiguration(const netip::KnxNetIpConfiguration& config);
 
@@ -668,6 +588,29 @@ private:
      */
     using BackboneKeyCallback = util::InplaceFunction<void(std::span<const uint8_t> key), 64>;
     void setBackboneKeyCallback(BackboneKeyCallback callback);
+
+    /**
+     * @brief Accept or refuse a security requirement on a KNXnet/IP service family
+     *
+     * 03/08/09 §2.3.1.5: ETS uses PID_SECURED_SERVICE_FAMILIES to say which of
+     * Device Management (03h), Tunnelling (04h) and Routing (05h) must be
+     * encrypted, with version 00h meaning plain is allowed and 01h meaning KNX
+     * IP Secure is required.
+     *
+     * Only the code that implements a service family knows whether it can
+     * encrypt it, so requiring security is refused outright unless this is set.
+     * Recording the requirement and answering Success would let ETS show an
+     * installation as secured while the frames went out in the clear.
+     *
+     * Return false to refuse; the client is told with E_ERROR.
+     */
+    using SecuredServiceFamilyCallback =
+        util::InplaceFunction<bool(uint8_t serviceFamilyId, uint8_t securityVersion), 64>;
+    void setSecuredServiceFamilyCallback(SecuredServiceFamilyCallback callback);
+
+    /// The security version currently configured for a KNXnet/IP service
+    /// family; 0 when plain communication is allowed. Unknown families read as 0.
+    [[nodiscard]] uint8_t securedServiceFamilyVersion(uint8_t serviceFamilyId) const;
 
     /**
      * Settle the routing multicast group at start-up and return it.
@@ -703,216 +646,6 @@ private:
      */
     using RoutingMulticastAddressCallback = util::InplaceFunction<void(IpAddress address), 32>;
     void setRoutingMulticastAddressCallback(RoutingMulticastAddressCallback callback);
-
-    /**
-     * @brief Accept or refuse a security requirement on a KNXnet/IP service family
-     *
-     * 03/08/09 §2.3.1.5: ETS uses PID_SECURED_SERVICE_FAMILIES to say which of
-     * Device Management (03h), Tunnelling (04h) and Routing (05h) must be
-     * encrypted, with version 00h meaning plain is allowed and 01h meaning KNX
-     * IP Secure is required.
-     *
-     * Only the code that implements a service family knows whether it can
-     * encrypt it, so requiring security is refused outright unless this is set.
-     * Recording the requirement and answering Success would let ETS show an
-     * installation as secured while the frames went out in the clear.
-     *
-     * Return false to refuse; the client is told with E_ERROR.
-     */
-    using SecuredServiceFamilyCallback =
-        util::InplaceFunction<bool(uint8_t serviceFamilyId, uint8_t securityVersion), 64>;
-    void setSecuredServiceFamilyCallback(SecuredServiceFamilyCallback callback);
-
-    /// The security version currently configured for a service family, 0 when
-    /// plain communication is allowed. Unknown families read as 0.
-    [[nodiscard]] uint8_t securedServiceFamilyVersion(uint8_t serviceFamilyId) const;
-
-    BackboneKeyCallback _backboneKeyCallback{};
-    SecuredServiceFamilyCallback _securedServiceFamilyCallback{};
-    RoutingMulticastAddressCallback _routingMulticastAddressCallback{};
-    /// What adoptRoutingMulticastAddress() was given; restored by Factory Reset.
-    IpAddress _routingMulticastDefault{IpAddress(0)};
-
-    /// Store a routing multicast address written by A_DomainAddressSerialNumber_Write.
-    util::Result<void> writeRoutingMulticastAddress(std::span<const uint8_t> value);
-    /// After PID_ROUTING_MULTICAST_ADDRESS has changed by any remote path.
-    void onRoutingMulticastAddressWritten(std::span<const uint8_t> previous,
-                                          std::span<const uint8_t> value);
-
-    /// Indexed by the three securable families; see kSecurableServiceFamilies.
-    std::array<uint8_t, 3> _securedServiceFamilyVersions{};
-#endif
-
-    util::Result<void> setReferenceObjectProperty(InterfaceObjectType objectType,
-                                                  application::PropertyID propertyId,
-                                                  std::span<const uint8_t> value);
-
-    /// The live reference interface object of `objectType`, or nullptr when it
-    /// is not published in this build. Defined in bau.cpp, where the property
-    /// bridge is a complete type.
-    objects::GenericInterfaceObject* referenceInterfaceObject(InterfaceObjectType objectType);
-
-    /// Have the persisted state saved on the next flush. Defined in bau.cpp,
-    /// where the property bridge is a complete type.
-    void markPersistenceDirty();
-
-    /// Store the A_Key_Write key table now. Defined in bau.cpp.
-    void saveAuthorizationKeyTable(const application::AuthorizationService::KeyTable& keys);
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Facets
-//
-// Each is a non-owning view holding a single reference. They exist to group a
-// concern, not to add a layer: every method forwards directly, and the const
-// variants exist so a `const BusAccessUnit&` can still be inspected.
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * @brief Outbound telegram shaping and delivery bookkeeping.
- *
- * Covers the time source that drives cyclic sends and rate limiting, the
- * retry/outcome queue, and the automatic read-response queue. A device that
- * simply publishes values never needs any of it — the defaults are inert.
- */
-class TransmissionControl {
-public:
-    using ProgressState = BusAccessUnit::TransmissionProgressState;
-    using Options = BusAccessUnit::TransmissionOptions;
-    using Outcome = BusAccessUnit::TransmissionOutcome;
-    using AutoResponseMode = BusAccessUnit::AutoResponseMode;
-
-    explicit TransmissionControl(BusAccessUnit& bau) : _bau(bau) {}
-
-    /// Default retry policy applied to sends that do not name their own.
-    void setDefaultOptions(const Options& options) { _bau.setDefaultTransmissionOptions(options); }
-    const Options& defaultOptions() const { return _bau.defaultTransmissionOptions(); }
-
-    /// Advance an in-flight send. Returns Pending until the medium reports.
-    util::Result<ProgressState> poll() { return _bau.pollOutboundTransmission(); }
-
-    /// Drain one completed send outcome; false when the queue is empty.
-    bool popOutcome(Outcome& outcome) { return _bau.popOutboundTransmissionOutcome(outcome); }
-    size_t queuedOutcomeCount() const { return _bau.queuedOutboundTransmissionOutcomeCount(); }
-
-    /// Whether A_GroupValue_Read is answered inline or from the owner loop.
-    void setAutoResponseMode(AutoResponseMode mode) { _bau.setAutoResponseMode(mode); }
-    AutoResponseMode autoResponseMode() const { return _bau.autoResponseMode(); }
-    util::Result<void> beginAutomaticResponse() { return _bau.beginProcessAutomaticResponse(); }
-    util::Result<ProgressState> pollAutomaticResponse() { return _bau.pollProcessAutomaticResponse(); }
-    size_t queuedAutomaticResponseCount() const { return _bau.queuedAutomaticResponseCount(); }
-
-    /// Drop counters. Non-zero means the device is losing traffic it was asked
-    /// to handle — worth surfacing rather than leaving buried in the BAU.
-    size_t droppedAutomaticResponseCount() const { return _bau.droppedAutomaticResponseCount(); }
-    size_t droppedInboundGroupEventCount() const { return _bau.droppedInboundGroupEventCount(); }
-
-private:
-    BusAccessUnit& _bau;
-};
-
-/// Read-only view of TransmissionControl, for a const BusAccessUnit.
-class ConstTransmissionControl {
-public:
-    using Options = BusAccessUnit::TransmissionOptions;
-    using AutoResponseMode = BusAccessUnit::AutoResponseMode;
-
-    explicit ConstTransmissionControl(const BusAccessUnit& bau) : _bau(bau) {}
-
-    const Options& defaultOptions() const { return _bau.defaultTransmissionOptions(); }
-    size_t queuedOutcomeCount() const { return _bau.queuedOutboundTransmissionOutcomeCount(); }
-    AutoResponseMode autoResponseMode() const { return _bau.autoResponseMode(); }
-    size_t queuedAutomaticResponseCount() const { return _bau.queuedAutomaticResponseCount(); }
-    size_t droppedAutomaticResponseCount() const { return _bau.droppedAutomaticResponseCount(); }
-    size_t droppedInboundGroupEventCount() const { return _bau.droppedInboundGroupEventCount(); }
-
-private:
-    const BusAccessUnit& _bau;
-};
-
-/**
- * @brief Commissioning state and device role.
- *
- * Programming mode, the coupler role, and which optional interface objects the
- * device publishes — everything a management client or an integrator changes,
- * as opposed to what the application does.
- */
-class ManagementControl {
-public:
-    using RouterRoleConfig = BusAccessUnit::RouterRoleConfig;
-
-    explicit ManagementControl(BusAccessUnit& bau) : _bau(bau) {}
-
-    /// Declare which medium this device is on, so its Device Descriptor
-    /// reports the right mask version. See BusAccessUnit::setDeviceMedium.
-    /// Not IP-specific: every device has a medium, and TP1 is only the default.
-    void setDeviceMedium(MediumType medium) { _bau.setDeviceMedium(medium); }
-
-    /// Programming mode. ETS finds an unaddressed device only while this is on.
-    util::Result<void> setCommissioningMode(bool enabled) {
-        return _bau.requestCommissioningMode(enabled);
-    }
-    bool commissioningModeEnabled() const { return _bau.commissioningModeEnabled(); }
-
-    /// Declare this device a coupler and publish the Router Object. Opt-in:
-    /// see BusAccessUnit::RouterRoleConfig for why it is not automatic.
-    util::Result<void> configureRouterRole(const RouterRoleConfig& config) {
-        return _bau.configureRouterRole(config);
-    }
-
-    /// Apply a downloaded coupler configuration to the live routing policy.
-    util::Result<void> syncRouterRoutingConfig() { return _bau.syncRouterRoutingConfig(); }
-
-#if KNX_FEATURE_NETIP
-    /// Publish the device's live IP identity — address, multicast group, MAC,
-    /// friendly name — into the KNXnet/IP Parameter Object. Call it once the
-    /// interface is up and again whenever the address changes; see
-    /// netip::KnxNetIpConfiguration for why leaving it unset is worse than it
-    /// looks.
-    util::Result<void> applyKnxNetIpConfiguration(const netip::KnxNetIpConfiguration& config) {
-        return _bau.applyKnxNetIpConfiguration(config);
-    }
-
-    /// See BusAccessUnit::setBackboneKeyCallback. Named here so callers do not
-    /// have to reach into the private section of the unit to spell the type.
-    using BackboneKeyCallback = BusAccessUnit::BackboneKeyCallback;
-
-    /// Observe ETS downloading the KNX/IP Secure Routing backbone key. See
-    /// BusAccessUnit::setBackboneKeyCallback for why storing it is not enough.
-    void setBackboneKeyCallback(BusAccessUnit::BackboneKeyCallback callback) {
-        _bau.setBackboneKeyCallback(std::move(callback));
-    }
-
-    /// See BusAccessUnit::setSecuredServiceFamilyCallback.
-    using SecuredServiceFamilyCallback = BusAccessUnit::SecuredServiceFamilyCallback;
-
-    /// Decide whether this device can encrypt a KNXnet/IP service family ETS
-    /// asks to secure. Without one, requiring security is refused — see
-    /// BusAccessUnit::setSecuredServiceFamilyCallback for why that is the safe
-    /// default rather than the unhelpful one.
-    void setSecuredServiceFamilyCallback(BusAccessUnit::SecuredServiceFamilyCallback callback) {
-        _bau.setSecuredServiceFamilyCallback(std::move(callback));
-    }
-
-    /// The security version currently configured for a KNXnet/IP service
-    /// family; 0 when plain communication is allowed.
-    [[nodiscard]] uint8_t securedServiceFamilyVersion(uint8_t serviceFamilyId) const {
-        return _bau.securedServiceFamilyVersion(serviceFamilyId);
-    }
-
-    /// See BusAccessUnit::adoptRoutingMulticastAddress.
-    IpAddress adoptRoutingMulticastAddress(IpAddress productDefault, bool productDefaultWins) {
-        return _bau.adoptRoutingMulticastAddress(productDefault, productDefaultWins);
-    }
-
-    /// See BusAccessUnit::routingMulticastAddress.
-    [[nodiscard]] IpAddress routingMulticastAddress() const { return _bau.routingMulticastAddress(); }
-
-    /// See BusAccessUnit::RoutingMulticastAddressCallback.
-    using RoutingMulticastAddressCallback = BusAccessUnit::RoutingMulticastAddressCallback;
-    void setRoutingMulticastAddressCallback(RoutingMulticastAddressCallback callback) {
-        _bau.setRoutingMulticastAddressCallback(std::move(callback));
-    }
 #endif
 
     /// Write a property of a reference interface object (Router, KNXnet/IP
@@ -920,46 +653,34 @@ public:
     /// how firmware seeds values ETS will later read back.
     util::Result<void> setReferenceObjectProperty(InterfaceObjectType objectType,
                                                   application::PropertyID propertyId,
-                                                  std::span<const uint8_t> value) {
-        return _bau.setReferenceObjectProperty(objectType, propertyId, value);
-    }
+                                                  std::span<const uint8_t> value);
 
     /// Current value of a reference object property; empty if never written.
     std::vector<uint8_t> referenceObjectPropertyValue(
-        InterfaceObjectType objectType, application::PropertyID propertyId) const {
-        return _bau.referenceObjectPropertyValue(objectType, propertyId);
-    }
-    bool hasRouterRole() const { return _bau.hasRouterRole(); }
+        InterfaceObjectType objectType, application::PropertyID propertyId) const;
 
     /// Optional standard interface objects this device exposes.
-    void setReferenceInterfaceObjectTypes(std::vector<InterfaceObjectType> objectTypes) {
-        _bau.setReferenceInterfaceObjectTypes(std::move(objectTypes));
-    }
-    const std::vector<InterfaceObjectType>& referenceInterfaceObjectTypes() const {
-        return _bau.referenceInterfaceObjectTypes();
-    }
+    void setReferenceInterfaceObjectTypes(std::vector<InterfaceObjectType> objectTypes);
+    const std::vector<InterfaceObjectType>& referenceInterfaceObjectTypes() const;
 
 private:
-    BusAccessUnit& _bau;
+    DeviceManagement& _management;
 };
 
 /// Read-only view of ManagementControl, for a const BusAccessUnit.
 class ConstManagementControl {
 public:
-    explicit ConstManagementControl(const BusAccessUnit& bau) : _bau(bau) {}
+    explicit ConstManagementControl(const DeviceManagement& management) : _management(management) {}
 
-    bool commissioningModeEnabled() const { return _bau.commissioningModeEnabled(); }
-    bool hasRouterRole() const { return _bau.hasRouterRole(); }
-    const std::vector<InterfaceObjectType>& referenceInterfaceObjectTypes() const {
-        return _bau.referenceInterfaceObjectTypes();
-    }
+    bool commissioningModeEnabled() const;
+    bool hasRouterRole() const;
+    const std::vector<InterfaceObjectType>& referenceInterfaceObjectTypes() const;
 #if KNX_FEATURE_NETIP
-    /// See BusAccessUnit::routingMulticastAddress.
-    [[nodiscard]] IpAddress routingMulticastAddress() const { return _bau.routingMulticastAddress(); }
+    [[nodiscard]] IpAddress routingMulticastAddress() const;
 #endif
 
 private:
-    const BusAccessUnit& _bau;
+    const DeviceManagement& _management;
 };
 
 /**
@@ -972,53 +693,37 @@ private:
  */
 class LinkAccess {
 public:
-    explicit LinkAccess(BusAccessUnit& bau) : _bau(bau) {}
+    /// @p stackPort may be null (a BAU constructed without one).
+    explicit LinkAccess(BusAccessStackPort* stackPort) : _stackPort(stackPort) {}
 
-    bool hasStackPort() const { return _bau.hasStackPort(); }
-    util::Result<void> sendFrame(const datalink::LDataFrame& frame) {
-        return _bau.sendDataLinkFrame(frame);
-    }
-    void setPromiscuousMode(datalink::PromiscuousMode mode) {
-        _bau.setDataLinkPromiscuousMode(mode);
-    }
+    bool hasStackPort() const { return _stackPort != nullptr; }
+    util::Result<void> sendFrame(const datalink::LDataFrame& frame);
+    void setPromiscuousMode(datalink::PromiscuousMode mode);
 
     /// The coupler, when this device's stack port was built as one; nullptr
     /// otherwise. Gives access to the filter table and the routing policy.
-    network::TwoPortCoupler* coupler() { return _bau.stackPortCoupler(); }
+    network::TwoPortCoupler* coupler();
 
     /// Re-issue the routing group membership, for a stack port that has one.
     /// OperationNotSupported on any other medium.
-    util::Result<void> refreshMulticastMembership() {
-        return _bau.refreshStackPortMulticastMembership();
-    }
+    util::Result<void> refreshMulticastMembership();
 
     /// Counters for the port. See LinkDiagnostics for what they distinguish.
-    LinkDiagnostics diagnostics() const { return _bau.stackPortLinkDiagnostics(); }
+    LinkDiagnostics diagnostics() const;
 
 private:
-    BusAccessUnit& _bau;
+    BusAccessStackPort* _stackPort;
 };
 
 /// Read-only view of LinkAccess, for a const BusAccessUnit.
 class ConstLinkAccess {
 public:
-    explicit ConstLinkAccess(const BusAccessUnit& bau) : _bau(bau) {}
-    bool hasStackPort() const { return _bau.hasStackPort(); }
+    explicit ConstLinkAccess(const BusAccessStackPort* stackPort) : _stackPort(stackPort) {}
+    bool hasStackPort() const { return _stackPort != nullptr; }
 
 private:
-    const BusAccessUnit& _bau;
+    const BusAccessStackPort* _stackPort;
 };
-
-inline TransmissionControl BusAccessUnit::transmission() { return TransmissionControl(*this); }
-inline ConstTransmissionControl BusAccessUnit::transmission() const {
-    return ConstTransmissionControl(*this);
-}
-inline ManagementControl BusAccessUnit::management() { return ManagementControl(*this); }
-inline ConstManagementControl BusAccessUnit::management() const {
-    return ConstManagementControl(*this);
-}
-inline LinkAccess BusAccessUnit::link() { return LinkAccess(*this); }
-inline ConstLinkAccess BusAccessUnit::link() const { return ConstLinkAccess(*this); }
 
 #if KNX_FEATURE_TP1
 // TP1 entry points. Gated for the mirror of the reason the IP ones are: an

@@ -111,7 +111,7 @@ void test_InterfaceObjectManager_Persistence_SaveLoadRoundtrip(void) {
                   mgr.writeProperty(InterfaceObjectType::security(), InterfaceObjectInstance(1),
                                             static_cast<knx::application::PropertyID>(SecurityProperty::ToolKey), 1, toolKey).error());
 
-        const size_t saved = mgr.saveToPersistence();
+        const size_t saved = mgr.saveToPersistence().value();
         TEST_ASSERT_TRUE(saved > 0);
     }
 
@@ -294,7 +294,7 @@ void test_Persistence_LegacyUnmarkedLayoutIsLoadedAndMigrated(void) {
         TEST_ASSERT_EQUAL_UINT8(0x12, readSubnet(mgr));
         TEST_ASSERT_EQUAL_HEX16(0x0A01, readFirstGroupAddress(mgr));
 
-        TEST_ASSERT_TRUE(mgr.saveToPersistence() > 0u);
+        TEST_ASSERT_TRUE(mgr.saveToPersistence().value() > 0u);
         TEST_ASSERT_EQUAL_UINT8(1, mgr.activePersistenceBank());
     }
 
@@ -337,7 +337,7 @@ void test_Persistence_InterruptedSaveKeepsPreviousDownload(void) {
         TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
                           mgr.writeProperty(InterfaceObjectType::addressTable(), InterfaceObjectInstance(1),
                                             kAddrTablePid, 1, table).error());
-        TEST_ASSERT_TRUE(mgr.saveToPersistence() > 0u);
+        TEST_ASSERT_TRUE(mgr.saveToPersistence().value() > 0u);
         savedBank = mgr.activePersistenceBank();
     }
 
@@ -387,7 +387,7 @@ void test_Persistence_KnxNetIpBackboneKeySurvivesRestart(void) {
         TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
                           mgr.writeProperty(InterfaceObjectType::knxNetIpParameter(), InterfaceObjectInstance(1),
                                             kBackboneKeyPid, 1, key).error());
-        TEST_ASSERT_TRUE(mgr.saveToPersistence() > 0u);
+        TEST_ASSERT_TRUE(mgr.saveToPersistence().value() > 0u);
     }
 
     InterfaceObjectManager mgr;

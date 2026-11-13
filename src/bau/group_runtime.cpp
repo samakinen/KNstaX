@@ -2,37 +2,20 @@
 // Copyright (C) 2025-2026 Sami Mäkinen
 
 /**
- * @file bau_group_runtime.cpp
- * @brief BusAccessUnit group-object runtime.
- *
- * Owns everything about group communication: the object table surface,
- * outbound publish/respond with transmit shaping, and the inbound event queue
- * that marshals telegrams from the lower-layer callback context onto the owner
- * context. Split out of bau.cpp, where it was interleaved with lower-stack
- * assembly and device lifecycle.
- *
- * @thread_safety Owner context only, except enqueueInboundGroupEvent() and
- * handleApplicationFrame(), which are the two entry points called from the
- * lower-layer context and do nothing but copy into the queue.
+ * @file group_runtime.cpp
+ * @brief GroupRuntime: group objects, transmit shaping, inbound queue, and the
+ *        TransmissionControl facet over it.
  */
 
-#include "knx/bau/bau.hpp"
-#include "bau_internal.hpp"
-#include "knx/objects/interface_object.hpp"
-#include "knx/objects/interface_object_manager.hpp"
-#include "knx/util/fixed_vector.hpp"
+#include "group_runtime.hpp"
+
+#include "device_model.hpp"
+#include "knx/config.hpp"
 #include "knx/util/log.hpp"
-#include "knx/util/result.hpp"
-#include "knx/application/apci_services.hpp"
-#include "knx/datalink/tp1_data_link_layer.hpp"
-#include "knx/platform/raii_resources.hpp"
-#include "knx/physical/tp1_mac_physical.hpp"
-#include "knx/security/data_secure.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cstdint>
-#include <map>
 #include <memory>
 #include <span>
 #include <type_traits>
@@ -41,52 +24,143 @@
 namespace knx {
 namespace bau {
 
-using StackPort = BusAccessStackPort;
-
-using detail::kMaxInboundGroupEventsPerLoop;
-using detail::PendingInboundGroupEvent;
-
 namespace {
+
 constexpr const char* TAG = "KNX.BAU";
+
+/// Inbound group events drained per loop() call, so a burst cannot starve the
+/// rest of the owner context.
+constexpr size_t kMaxInboundGroupEventsPerLoop = 32u;
+
+/**
+ * @brief One inbound group telegram, marshalled out of the lower-layer callback
+ *        context onto the BAU owner context.
+ *
+ * Trivially copyable on purpose: it travels through a `platform::Queue`, which
+ * moves raw bytes.
+ *
+ * It carries the group address only. The owner context resolves the
+ * associated group objects from the tables when it processes the event, so
+ * there is no cap on how many objects one address reaches (a fixed array of
+ * 16 here used to drop the whole telegram for the 17th).
+ */
+struct PendingInboundGroupEvent {
+    uint8_t kind{static_cast<uint8_t>(BusAccessUnit::MessageKind::Unknown)};
+    uint16_t destinationRaw{0u};
+    uint16_t dataLength{0u};
+    std::array<uint8_t, config::MAX_APDU_LENGTH> data{};
+};
+
+static_assert(std::is_trivially_copyable_v<PendingInboundGroupEvent>,
+              "PendingInboundGroupEvent travels through a byte queue");
+
+} // namespace
+
+GroupRuntime::GroupRuntime(platform::Platform& platform, BusAccessStackPort* stackPort, DeviceModel& model)
+    : _stackPort(stackPort)
+    , _deviceObject(model.deviceObject())
+    , _addressTable(model.addressTable())
+    , _associationTable(model.associationTable())
+    , _groupObjectTable(model.groupObjectTable())
+    , _inboundGroupEventQueue(std::make_unique<platform::Queue>(
+          platform,
+          sizeof(PendingInboundGroupEvent),
+          INBOUND_GROUP_EVENT_QUEUE_CAPACITY))
+{
 }
 
-application::GroupObject* BusAccessUnit::groupObject(GroupObjectIndex index) {
+// ─── Lifecycle ───────────────────────────────────────────────────────────────
+
+bool GroupRuntime::inboundQueueReady() const
+{
+    return _inboundGroupEventQueue && _inboundGroupEventQueue->handle();
+}
+
+void GroupRuntime::resetQueues()
+{
+    clearInboundGroupEvents();
+    _droppedInboundGroupEvents = 0u;
+    _droppedAutomaticResponses = 0u;
+    _autoResponseQueueHead = 0u;
+    _autoResponseQueueCount = 0u;
+    _autoResponseActive = false;
+}
+
+void GroupRuntime::attachToStackPort()
+{
+    if (_stackPort == nullptr) {
+        return;
+    }
+    // Route group value services back into the group objects.
+    _stackPort->setInboundCallback([this](const IndividualAddress& source,
+                                          const GroupAddress& destination,
+                                          MessageKind kind,
+                                          std::span<const uint8_t> data,
+                                          AddressType destinationType) {
+        handleApplicationFrame(source, destination, kind, data, destinationType);
+    });
+    _stackPort->setWorkAvailableCallback([this]() {
+        notifyWorkAvailableIfTransitioned();
+    });
+}
+
+BusAccessUnit::OwnerWorkHint GroupRuntime::ownerWorkHint() const
+{
+    OwnerWorkHint hint;
+    hint.pendingLoopWorkItems = queuedInboundGroupEventCount();
+    hint.pendingDeferredWorkItems = _autoResponseQueueCount;
+    return hint;
+}
+
+void GroupRuntime::setWorkAvailableCallback(BusAccessUnit::WorkAvailableCallback callback)
+{
+    _workAvailableCallback = std::move(callback);
+    if (_stackPort != nullptr) {
+        _stackPort->setWorkAvailableCallback([this]() {
+            notifyWorkAvailableIfTransitioned();
+        });
+    }
+    refreshWorkAvailabilityState();
+}
+
+void GroupRuntime::refreshWorkAvailabilityState()
+{
+    _hadImmediateWork = ownerWorkHint().hasImmediateWork();
+}
+
+void GroupRuntime::notifyWorkAvailableIfTransitioned()
+{
+    const bool hasImmediateWork = ownerWorkHint().hasImmediateWork();
+    if (!_hadImmediateWork && hasImmediateWork && _workAvailableCallback) {
+        _workAvailableCallback();
+    }
+    _hadImmediateWork = hasImmediateWork;
+}
+
+// ─── Group objects ───────────────────────────────────────────────────────────
+
+application::GroupObject* GroupRuntime::groupObject(GroupObjectIndex index)
+{
     return _groupObjectTable.getGroupObject(index);
 }
 
-const application::GroupObject* BusAccessUnit::groupObject(GroupObjectIndex index) const {
+const application::GroupObject* GroupRuntime::groupObject(GroupObjectIndex index) const
+{
     return _groupObjectTable.getGroupObject(index);
 }
 
-GroupObjectIndex BusAccessUnit::addGroupObject(const GroupAddress& address,
-                                               application::DptId dpt,
-                                               bool readable,
-                                               bool writable,
-                                               bool transmit,
-                                               bool receivable) {
-    application::GroupObjectFlags flags{};
-    flags.communication = true;
-    flags.read = readable;
-    flags.write = writable;
-    flags.transmit = transmit;
-    flags.update = receivable;
-    flags.readOnInit = false;
-    flags.priority = Priority::Low;
-    return addGroupObject(address, dpt, flags);
-}
-
-GroupObjectIndex BusAccessUnit::addGroupObject(const GroupAddress& address,
-                                               application::DptId dpt,
-                                               const application::GroupObjectFlags& flags) {
+GroupObjectIndex GroupRuntime::addGroupObject(const GroupAddress& address,
+                                              application::DptId dpt,
+                                              const application::GroupObjectFlags& flags)
+{
     application::GroupObjectConfig config{};
     config.address = address;
     config.dpt = dpt;
     config.flags = flags;
 
     auto obj = std::make_unique<application::GroupObject>(config);
-    // Wire read request sender to BAU
     obj->setReadRequestSender([this](const GroupAddress& addr) {
-        return this->requestGroupValue(addr);
+        return requestGroupValue(addr);
     });
 
     GroupObjectIndex index = _groupObjectTable.addGroupObject(std::move(obj));
@@ -95,7 +169,7 @@ GroupObjectIndex BusAccessUnit::addGroupObject(const GroupAddress& address,
     }
 
     // Subscribe to group address in data link layer
-    if (_stackPort) {
+    if (_stackPort != nullptr) {
         (void)_stackPort->addGroupAddress(config.address);
     }
 
@@ -114,8 +188,9 @@ GroupObjectIndex BusAccessUnit::addGroupObject(const GroupAddress& address,
     return index;
 }
 
-util::Result<void> BusAccessUnit::bindGroupObjectToAddress(GroupObjectIndex index,
-                                                           const GroupAddress& address) {
+util::Result<void> GroupRuntime::bindGroupObjectToAddress(GroupObjectIndex index,
+                                                          const GroupAddress& address)
+{
     if (!address.isValid()) {
         return util::ErrorCode::InvalidAddress;
     }
@@ -139,7 +214,7 @@ util::Result<void> BusAccessUnit::bindGroupObjectToAddress(GroupObjectIndex inde
         }
     }
 
-    if (_stackPort) {
+    if (_stackPort != nullptr) {
         const auto addGroupAddress = _stackPort->addGroupAddress(address);
         if (addGroupAddress.isError()) {
             return addGroupAddress.error();
@@ -149,7 +224,8 @@ util::Result<void> BusAccessUnit::bindGroupObjectToAddress(GroupObjectIndex inde
     return util::Result<void>::ok();
 }
 
-util::Result<void> BusAccessUnit::setGroupObjectValue(GroupObjectIndex index, const application::DptValue& value) {
+util::Result<void> GroupRuntime::setGroupObjectValue(GroupObjectIndex index, const application::DptValue& value)
+{
     auto* obj = groupObject(index);
     if (!obj) {
         return util::ErrorCode::InvalidAddress;
@@ -158,22 +234,26 @@ util::Result<void> BusAccessUnit::setGroupObjectValue(GroupObjectIndex index, co
     return obj->setValue(value);
 }
 
-bool BusAccessUnit::isGroupObjectValid(GroupObjectIndex index) const {
+bool GroupRuntime::isGroupObjectValid(GroupObjectIndex index) const
+{
     const auto* obj = groupObject(index);
     return obj && obj->isValid();
 }
 
-size_t BusAccessUnit::groupObjectAssociationCount(GroupObjectIndex index) const {
+size_t GroupRuntime::groupObjectAssociationCount(GroupObjectIndex index) const
+{
     // An empty out-span asks findAddressIndices for the required count only.
     const auto countRes = _associationTable.findAddressIndices(index, std::span<AddressTableIndex>{});
     return countRes.isOk() ? countRes.value() : 0u;
 }
 
-bool BusAccessUnit::isGroupObjectLinked(GroupObjectIndex index) const {
+bool GroupRuntime::isGroupObjectLinked(GroupObjectIndex index) const
+{
     return groupObjectAssociationCount(index) > 0u;
 }
 
-util::Result<application::DptValue> BusAccessUnit::groupObjectValue(GroupObjectIndex index) const {
+util::Result<application::DptValue> GroupRuntime::groupObjectValue(GroupObjectIndex index) const
+{
     const auto* obj = groupObject(index);
     if (!obj) {
         return util::ErrorCode::InvalidAddress;
@@ -182,7 +262,8 @@ util::Result<application::DptValue> BusAccessUnit::groupObjectValue(GroupObjectI
     return obj->value();
 }
 
-util::Result<void> BusAccessUnit::requestGroupObjectValue(GroupObjectIndex index) {
+util::Result<void> GroupRuntime::requestGroupObjectValue(GroupObjectIndex index)
+{
     auto* obj = groupObject(index);
     if (!obj) {
         return util::ErrorCode::InvalidAddress;
@@ -191,30 +272,37 @@ util::Result<void> BusAccessUnit::requestGroupObjectValue(GroupObjectIndex index
     return obj->requestValue();
 }
 
-void BusAccessUnit::setGroupObjectWriteCallback(GroupObjectWriteCallback callback) {
+void GroupRuntime::setGroupObjectWriteCallback(GroupObjectWriteCallback callback)
+{
     _groupObjectWriteCallback = std::move(callback);
 }
 
-void BusAccessUnit::setGroupObjectReadCallback(GroupObjectReadCallback callback) {
+void GroupRuntime::setGroupObjectReadCallback(GroupObjectReadCallback callback)
+{
     _groupObjectReadCallback = std::move(callback);
 }
 
-util::Result<void> BusAccessUnit::sendGroupValue(const GroupAddress& address, std::span<const uint8_t> data) {
-    if (!_initialized || !_stackPort) {
+// ─── Outbound ────────────────────────────────────────────────────────────────
+
+util::Result<void> GroupRuntime::sendGroupValue(const GroupAddress& address, std::span<const uint8_t> data)
+{
+    if (!_running || _stackPort == nullptr) {
         return util::ErrorCode::NotInitialized;
     }
     return _stackPort->sendGroupValueWrite(address, data);
 }
 
-util::Result<void> BusAccessUnit::beginSendGroupValue(const GroupAddress& address, std::span<const uint8_t> data) {
-    if (!_initialized || !_stackPort) {
+util::Result<void> GroupRuntime::beginSendGroupValue(const GroupAddress& address, std::span<const uint8_t> data)
+{
+    if (!_running || _stackPort == nullptr) {
         return util::ErrorCode::NotInitialized;
     }
     return _stackPort->beginSendGroupValueWrite(address, data);
 }
 
-util::Result<void> BusAccessUnit::sendGroupValueForObject(GroupObjectIndex objectIndex, std::span<const uint8_t> data) {
-    if (!_initialized || !_stackPort) {
+util::Result<void> GroupRuntime::sendGroupValueForObject(GroupObjectIndex objectIndex, std::span<const uint8_t> data)
+{
+    if (!_running || _stackPort == nullptr) {
         return util::ErrorCode::NotInitialized;
     }
 
@@ -267,8 +355,9 @@ util::Result<void> BusAccessUnit::sendGroupValueForObject(GroupObjectIndex objec
     return emitGroupValueForObject(objectIndex, data);
 }
 
-util::Result<void> BusAccessUnit::emitGroupValueForObject(GroupObjectIndex objectIndex, std::span<const uint8_t> data) {
-    if (!_initialized || !_stackPort) {
+util::Result<void> GroupRuntime::emitGroupValueForObject(GroupObjectIndex objectIndex, std::span<const uint8_t> data)
+{
+    if (!_running || _stackPort == nullptr) {
         return util::ErrorCode::NotInitialized;
     }
 
@@ -305,9 +394,10 @@ util::Result<void> BusAccessUnit::emitGroupValueForObject(GroupObjectIndex objec
     return lastResult;
 }
 
-util::Result<void> BusAccessUnit::setGroupObjectTransmitPolicy(
+util::Result<void> GroupRuntime::setGroupObjectTransmitPolicy(
     GroupObjectIndex objectIndex,
-    const application::GroupObjectTransmitPolicy& policy) {
+    const application::GroupObjectTransmitPolicy& policy)
+{
     auto* object = _groupObjectTable.getGroupObject(objectIndex);
     if (object == nullptr) {
         return util::ErrorCode::InvalidParameter;
@@ -317,7 +407,8 @@ util::Result<void> BusAccessUnit::setGroupObjectTransmitPolicy(
 }
 
 util::Result<application::GroupObjectTransmitPolicy>
-BusAccessUnit::groupObjectTransmitPolicy(GroupObjectIndex objectIndex) const {
+GroupRuntime::groupObjectTransmitPolicy(GroupObjectIndex objectIndex) const
+{
     const auto* object = _groupObjectTable.getGroupObject(objectIndex);
     if (object == nullptr) {
         return util::ErrorCode::InvalidParameter;
@@ -325,7 +416,8 @@ BusAccessUnit::groupObjectTransmitPolicy(GroupObjectIndex objectIndex) const {
     return object->transmitPolicy();
 }
 
-void BusAccessUnit::pumpGroupObjectTransmissions(uint32_t now) {
+void GroupRuntime::pumpGroupObjectTransmissions(uint32_t now)
+{
     // Cyclic heartbeats and deferred releases are time-based, so they only run
     // with a monotonic clock (see sendGroupValueForObject).
     if (!_timeSource) {
@@ -363,8 +455,9 @@ void BusAccessUnit::pumpGroupObjectTransmissions(uint32_t now) {
     }
 }
 
-util::Result<void> BusAccessUnit::respondGroupValueForObject(GroupObjectIndex objectIndex, std::span<const uint8_t> data) {
-    if (!_initialized || !_stackPort) {
+util::Result<void> GroupRuntime::respondGroupValueForObject(GroupObjectIndex objectIndex, std::span<const uint8_t> data)
+{
+    if (!_running || _stackPort == nullptr) {
         return util::ErrorCode::NotInitialized;
     }
 
@@ -396,41 +489,115 @@ util::Result<void> BusAccessUnit::respondGroupValueForObject(GroupObjectIndex ob
     return lastResult;
 }
 
-util::Result<void> BusAccessUnit::requestGroupValue(const GroupAddress& address) {
-    if (!_initialized || !_stackPort) {
+util::Result<void> GroupRuntime::requestGroupValue(const GroupAddress& address)
+{
+    if (!_running || _stackPort == nullptr) {
         return util::ErrorCode::NotInitialized;
     }
     return _stackPort->sendGroupValueRead(address);
 }
 
-util::Result<void> BusAccessUnit::beginRequestGroupValue(const GroupAddress& address) {
-    if (!_initialized || !_stackPort) {
+util::Result<void> GroupRuntime::beginRequestGroupValue(const GroupAddress& address)
+{
+    if (!_running || _stackPort == nullptr) {
         return util::ErrorCode::NotInitialized;
     }
     return _stackPort->beginSendGroupValueRead(address);
 }
 
-util::Result<BusAccessUnit::TransmissionProgressState> BusAccessUnit::pollOutboundTransmission() {
-    if (!_initialized || !_stackPort) {
+util::Result<GroupRuntime::TransmissionProgressState> GroupRuntime::pollOutboundTransmission()
+{
+    if (!_running || _stackPort == nullptr) {
         return util::ErrorCode::NotInitialized;
     }
     return _stackPort->pollTransmissionProgress();
 }
 
+void GroupRuntime::pumpReadOnInit()
+{
+    if (_readOnInitState == ReadOnInitState::Done) {
+        return;
+    }
 
-bool BusAccessUnit::popOutboundTransmissionOutcome(TransmissionOutcome& outcome) {
-    return _stackPort ? _stackPort->popTransmissionOutcome(outcome) : false;
+    // Value-Read-on-Initialisation is only meaningful once the device has an
+    // individual address and can actually be answered.  Before that the reads
+    // would be emitted from the unprogrammed address and thrown away.
+    if (!_running || !_deviceObject.getIndividualAddress().isValid()) {
+        return;
+    }
+
+    if (_readOnInitState == ReadOnInitState::Pending) {
+        _readOnInitState = ReadOnInitState::Running;
+        _readOnInitCursor = 0u;
+    }
+
+    // 03/05/01 §4.12.5.2.4.1.3 warns that this feature multiplies bus load
+    // after a whole-installation restart, so the reads are spread over
+    // successive loop() calls and pushed through the same rate limiter as any
+    // other transmission instead of being burst out in one pass.
+    const uint16_t count = _groupObjectTable.objectCount();
+    size_t issuedThisPass = 0u;
+    while (_readOnInitCursor < count && issuedThisPass < kMaxReadOnInitPerLoop) {
+        const GroupObjectIndex index(_readOnInitCursor);
+        auto* obj = _groupObjectTable.getGroupObject(index);
+        ++_readOnInitCursor;
+
+        if (obj == nullptr || !obj->readOnInit()) {
+            continue;
+        }
+        if (!obj->getAddress().isValid()) {
+            continue;  // Not yet bound by ETS — nothing to read from.
+        }
+
+        const auto res = requestGroupValue(obj->getAddress());
+        if (res.isError()) {
+            if (res.error() == util::ErrorCode::Busy || res.error() == util::ErrorCode::QueueFull) {
+                // Bus or rate limiter is saturated; retry this object next loop.
+                --_readOnInitCursor;
+                return;
+            }
+            KNX_LOGW(TAG, "Read-on-init failed for obj %u: %d",
+                     static_cast<unsigned>(index.value()), static_cast<int>(res.error()));
+        }
+        ++issuedThisPass;
+    }
+
+    if (_readOnInitCursor >= count) {
+        _readOnInitState = ReadOnInitState::Done;
+    }
 }
 
-size_t BusAccessUnit::queuedOutboundTransmissionOutcomeCount() const {
-    return _stackPort ? _stackPort->queuedTransmissionOutcomeCount() : 0u;
+// ─── TransmissionControl surface ─────────────────────────────────────────────
+
+void GroupRuntime::setDefaultTransmissionOptions(const TransmissionOptions& options)
+{
+    if (_stackPort != nullptr) {
+        _stackPort->setDefaultTransmissionOptions(options);
+    }
 }
 
-util::Result<void> BusAccessUnit::beginProcessAutomaticResponse() {
-    if (!_initialized || !_stackPort) {
+const GroupRuntime::TransmissionOptions& GroupRuntime::defaultTransmissionOptions() const
+{
+    static const TransmissionOptions fallback{};
+    return _stackPort != nullptr ? _stackPort->defaultTransmissionOptions() : fallback;
+}
+
+bool GroupRuntime::popOutboundTransmissionOutcome(TransmissionOutcome& outcome)
+{
+    return _stackPort != nullptr ? _stackPort->popTransmissionOutcome(outcome) : false;
+}
+
+size_t GroupRuntime::queuedOutboundTransmissionOutcomeCount() const
+{
+    return _stackPort != nullptr ? _stackPort->queuedTransmissionOutcomeCount() : 0u;
+}
+
+util::Result<void> GroupRuntime::beginProcessAutomaticResponse()
+{
+    if (!_running || _stackPort == nullptr) {
         return util::ErrorCode::NotInitialized;
     }
-    if (_autoResponseOperation.active) {
+    if (_autoResponseActive) {
         return util::ErrorCode::Busy;
     }
 
@@ -445,34 +612,35 @@ util::Result<void> BusAccessUnit::beginProcessAutomaticResponse() {
         return beginResult.error();
     }
 
-    _autoResponseOperation.active = true;
+    _autoResponseActive = true;
     return util::Result<void>::ok();
 }
 
-util::Result<BusAccessUnit::TransmissionProgressState> BusAccessUnit::pollProcessAutomaticResponse() {
-    if (!_initialized || !_stackPort) {
+util::Result<GroupRuntime::TransmissionProgressState> GroupRuntime::pollProcessAutomaticResponse()
+{
+    if (!_running || _stackPort == nullptr) {
         return util::ErrorCode::NotInitialized;
     }
-    if (!_autoResponseOperation.active) {
+    if (!_autoResponseActive) {
         return util::ErrorCode::OperationNotReady;
     }
 
     auto progress = _stackPort->pollTransmissionProgress();
     if (progress.isError()) {
-        _autoResponseOperation = AutoResponseOperationState{};
+        _autoResponseActive = false;
         return progress.error();
     }
 
     if (progress.value() != TransmissionProgressState::Pending) {
-        _autoResponseOperation = AutoResponseOperationState{};
+        _autoResponseActive = false;
     }
     return progress.value();
 }
 
-util::Result<void> BusAccessUnit::sendAutomaticResponseImmediate(const GroupAddress& destination,
-                                                                 std::span<const uint8_t> data)
+util::Result<void> GroupRuntime::sendAutomaticResponseImmediate(const GroupAddress& destination,
+                                                                std::span<const uint8_t> data)
 {
-    if (!_initialized || !_stackPort) {
+    if (!_running || _stackPort == nullptr) {
         return util::ErrorCode::NotInitialized;
     }
 
@@ -502,7 +670,8 @@ util::Result<void> BusAccessUnit::sendAutomaticResponseImmediate(const GroupAddr
     }
 }
 
-void BusAccessUnit::enqueueAutomaticResponse(const GroupAddress& destination, std::span<const uint8_t> data) {
+void GroupRuntime::enqueueAutomaticResponse(const GroupAddress& destination, std::span<const uint8_t> data)
+{
     PendingAutoResponse response;
     response.destination = destination;
     response.data.assign(data.begin(), data.end());
@@ -522,7 +691,8 @@ void BusAccessUnit::enqueueAutomaticResponse(const GroupAddress& destination, st
     notifyWorkAvailableIfTransitioned();
 }
 
-bool BusAccessUnit::popAutomaticResponse(PendingAutoResponse& response) {
+bool GroupRuntime::popAutomaticResponse(PendingAutoResponse& response)
+{
     if (_autoResponseQueueCount == 0u) {
         return false;
     }
@@ -534,9 +704,11 @@ bool BusAccessUnit::popAutomaticResponse(PendingAutoResponse& response) {
     return true;
 }
 
-bool BusAccessUnit::enqueueInboundGroupEvent(MessageKind kind,
-                                             const GroupAddress& destination,
-                                             std::span<const uint8_t> data)
+// ─── Inbound ─────────────────────────────────────────────────────────────────
+
+bool GroupRuntime::enqueueInboundGroupEvent(MessageKind kind,
+                                            const GroupAddress& destination,
+                                            std::span<const uint8_t> data)
 {
     if (!_inboundGroupEventQueue) {
         return false;
@@ -568,23 +740,12 @@ bool BusAccessUnit::enqueueInboundGroupEvent(MessageKind kind,
     return true;
 }
 
-size_t BusAccessUnit::queuedInboundGroupEventCount() const {
+size_t GroupRuntime::queuedInboundGroupEventCount() const
+{
     return _inboundGroupEventQueue ? _inboundGroupEventQueue->count() : 0u;
 }
 
-void BusAccessUnit::refreshWorkAvailabilityState() {
-    _hadImmediateWork = ownerWorkHint().hasImmediateWork();
-}
-
-void BusAccessUnit::notifyWorkAvailableIfTransitioned() {
-    const bool hasImmediateWork = ownerWorkHint().hasImmediateWork();
-    if (!_hadImmediateWork && hasImmediateWork && _workAvailableCallback) {
-        _workAvailableCallback();
-    }
-    _hadImmediateWork = hasImmediateWork;
-}
-
-void BusAccessUnit::processInboundGroupEvents()
+void GroupRuntime::processInboundGroupEvents()
 {
     if (!_inboundGroupEventQueue) {
         return;
@@ -659,7 +820,7 @@ void BusAccessUnit::processInboundGroupEvents()
                 return;
             }
             auto* obj = _groupObjectTable.getGroupObject(objectIndex);
-            if (obj && obj->readable() && obj->isValid() && _stackPort) {
+            if (obj && obj->readable() && obj->isValid() && _stackPort != nullptr) {
                 if (_autoResponseMode == AutoResponseMode::Deferred) {
                     enqueueAutomaticResponse(destination, obj->getRawValue());
                 } else {
@@ -676,7 +837,7 @@ void BusAccessUnit::processInboundGroupEvents()
     }
 }
 
-void BusAccessUnit::clearInboundGroupEvents()
+void GroupRuntime::clearInboundGroupEvents()
 {
     if (!_inboundGroupEventQueue) {
         return;
@@ -687,11 +848,12 @@ void BusAccessUnit::clearInboundGroupEvents()
     }
 }
 
-void BusAccessUnit::handleApplicationFrame(const IndividualAddress& /*source*/,
-                                           const GroupAddress& destination,
-                                           MessageKind kind,
-                                           std::span<const uint8_t> data,
-                                           AddressType destinationType) {
+void GroupRuntime::handleApplicationFrame(const IndividualAddress& /*source*/,
+                                          const GroupAddress& destination,
+                                          MessageKind kind,
+                                          std::span<const uint8_t> data,
+                                          AddressType destinationType)
+{
     if (destinationType != AddressType::Group) {
         // Individual-addressed services are handled inside ApplicationLayer.
         return;
@@ -726,6 +888,28 @@ void BusAccessUnit::handleApplicationFrame(const IndividualAddress& /*source*/,
         return;
     }
 }
+
+// ─── TransmissionControl facet ───────────────────────────────────────────────
+
+void TransmissionControl::setDefaultOptions(const Options& options) { _runtime.setDefaultTransmissionOptions(options); }
+const TransmissionControl::Options& TransmissionControl::defaultOptions() const { return _runtime.defaultTransmissionOptions(); }
+util::Result<TransmissionControl::ProgressState> TransmissionControl::poll() { return _runtime.pollOutboundTransmission(); }
+bool TransmissionControl::popOutcome(Outcome& outcome) { return _runtime.popOutboundTransmissionOutcome(outcome); }
+size_t TransmissionControl::queuedOutcomeCount() const { return _runtime.queuedOutboundTransmissionOutcomeCount(); }
+void TransmissionControl::setAutoResponseMode(AutoResponseMode mode) { _runtime.setAutoResponseMode(mode); }
+TransmissionControl::AutoResponseMode TransmissionControl::autoResponseMode() const { return _runtime.autoResponseMode(); }
+util::Result<void> TransmissionControl::beginAutomaticResponse() { return _runtime.beginProcessAutomaticResponse(); }
+util::Result<TransmissionControl::ProgressState> TransmissionControl::pollAutomaticResponse() { return _runtime.pollProcessAutomaticResponse(); }
+size_t TransmissionControl::queuedAutomaticResponseCount() const { return _runtime.queuedAutomaticResponseCount(); }
+size_t TransmissionControl::droppedAutomaticResponseCount() const { return _runtime.droppedAutomaticResponseCount(); }
+size_t TransmissionControl::droppedInboundGroupEventCount() const { return _runtime.droppedInboundGroupEventCount(); }
+
+const ConstTransmissionControl::Options& ConstTransmissionControl::defaultOptions() const { return _runtime.defaultTransmissionOptions(); }
+size_t ConstTransmissionControl::queuedOutcomeCount() const { return _runtime.queuedOutboundTransmissionOutcomeCount(); }
+ConstTransmissionControl::AutoResponseMode ConstTransmissionControl::autoResponseMode() const { return _runtime.autoResponseMode(); }
+size_t ConstTransmissionControl::queuedAutomaticResponseCount() const { return _runtime.queuedAutomaticResponseCount(); }
+size_t ConstTransmissionControl::droppedAutomaticResponseCount() const { return _runtime.droppedAutomaticResponseCount(); }
+size_t ConstTransmissionControl::droppedInboundGroupEventCount() const { return _runtime.droppedInboundGroupEventCount(); }
 
 } // namespace bau
 } // namespace knx

@@ -170,9 +170,11 @@ public:
     
     /**
      * @brief Save all objects to persistence
-     * @return Number of objects saved
+     * @return Number of records written; NotInitialized when persistence is
+     *         off, StorageError when the new bank could not be completed or
+     *         made current (the previous bank then stays in force).
      */
-    size_t saveToPersistence();
+    util::Result<size_t> saveToPersistence();
 
     /**
      * @brief Checkpoint the Data Secure replay state, and nothing else.
