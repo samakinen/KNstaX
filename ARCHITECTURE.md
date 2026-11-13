@@ -29,9 +29,10 @@ The codebase is structured so protocol logic remains portable while backend avai
 ## Architecture invariants
 
 - There is one TP1 architecture only.
-- `Tp1MacController` is the only TP1 MAC/policy engine.
+- `Tp1MacPhysical` is the only physical layer for the TP1 medium.
 - `Tp1MediumBackend` is the only TP1 backend boundary.
-- `Tp1PhysicalLayer` remains a frame-oriented facade for higher layers.
+- Physical layers are frame-oriented. Their contract is the
+  `datalink::Tp1PhysicalLike` concept; there is no abstract physical base class.
 - Platform code must not leak scheduler- or driver-specific semantics into TP1 protocol behavior.
 - Embedded builds prefer compile-time backend selection over runtime family switching.
 - Public architecture documents must describe shipped code, not retired designs.
@@ -56,15 +57,19 @@ Tp1DataLinkLayer or IP adapters
 Physical / backend-specific transport
 ```
 
+The BAU reaches everything from `NetworkLayer` down through one concrete
+class, `bau::BusAccessStackPort` (`knx/bau/stack_port.hpp`). It owns the
+medium (physical + data link), the network, transport and application layers,
+the Data Secure application layer when built in, and for a coupler the second
+medium and the `TwoPortCoupler` between them. It has one implementation and no
+test double, so it is not an interface.
+
 ### Canonical TP1 stack shape
 
 ```text
 Tp1DataLinkLayer
-    ↓
-Tp1PhysicalLayer
-    ↓
+    ↓   (Tp1PhysicalLike)
 Tp1MacPhysical
-    ├─ Tp1MacController
     └─ Tp1MediumBackend
              └─ BitBangMediumBackendAdapter
 ```
@@ -86,25 +91,21 @@ Non-responsibilities:
 - direct FreeRTOS API ownership
 - backend diagnostics interpretation
 
-### `Tp1PhysicalLayer`
+### `Tp1PhysicalLike`
 
-`Tp1PhysicalLayer` is intentionally narrow. It exposes frame-oriented send/receive and bus-monitor control upward to the data-link layer. It does not expose backend-family-specific byte-stream policy.
+The concept `Tp1DataLinkLayer` requires of a physical layer (`Tp1MacPhysical`, the KNXnet/IP physicals and the test mock). It is intentionally narrow: it exposes frame-oriented send/receive and bus-monitor control upward to the data-link layer. It does not expose backend-family-specific byte-stream policy.
 
 ### `Tp1MacPhysical`
 
-`Tp1MacPhysical` is the canonical TP1 physical front-end. It owns one `Tp1MediumBackend` and one `Tp1MacController`, then adapts backend events into frame-oriented behavior for `Tp1DataLinkLayer`.
-
-### `Tp1MacController`
-
-`Tp1MacController` is the single TP1 MAC/policy implementation.
+`Tp1MacPhysical` is the TP1 physical layer. It owns one `Tp1MediumBackend` and adapts its events into frame-oriented behavior for `Tp1DataLinkLayer`.
 
 Responsibilities:
-- ACK policy evaluation
-- backend event interpretation
-- diagnostics snapshot flow
-- transport-facing TP1 service progression
+- latching TX outcomes from the backend's TX-ACK events (ACK, NACK, BUSY, deadline miss) into the result of a transmission
+- the RX queue, and the BUSY back-pressure it asks the backend to signal when nearly full
+- forwarding the ACK decision inputs (own address, subscribed group addresses, local busy) to the backend ahead of time
+- driving the backend's service step from the transmit and receive polls
 
-Backend-specific MAC policy must not be duplicated elsewhere.
+The per-telegram ACK decision itself is not here: it has to be made within t_ack of the frame end, which only the backend's timing domain (ISR, transceiver silicon) can meet.
 
 ### `Tp1MediumBackend`
 

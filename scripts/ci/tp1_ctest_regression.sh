@@ -15,7 +15,7 @@ required_tests=(
   "test_tp1_frame_golden"
   "test_tp1_datalink_frame_pool"
   "test_bitbang_mac_physical"
-  "test_tp1_mac_controller"
+  "test_tp1_mac_physical"
   "test_tp1_integration"
   "test_tp1_to_ip_routing_coupler"
   "test_ip_tp1_routing"

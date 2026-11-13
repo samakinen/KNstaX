@@ -70,7 +70,6 @@ set(KNX_SOURCES_CORE
 # --- TP1 medium ----------------------------------------------------------
 set(KNX_SOURCES_TP1
     "src/physical/tp1_mac_physical.cpp"
-    "src/physical/tp1_mac_controller.cpp"
     "src/physical/bitbang_driver_timer_isr.cpp"
     "src/physical/bitbang_driver_timer_isr_espidf.cpp"
     "src/physical/bitbang_medium_backend_adapter.cpp"

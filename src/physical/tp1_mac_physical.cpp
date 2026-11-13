@@ -3,7 +3,7 @@
 
 /**
  * @file tp1_mac_physical.cpp
- * @brief Canonical TP1 physical facade using owned Tp1MediumBackend + Tp1MacController composition
+ * @brief The TP1 physical layer: frame-oriented MAC over an owned Tp1MediumBackend
  */
 
 #include "knx/physical/tp1_mac_physical.hpp"
@@ -29,7 +29,6 @@ Tp1MacPhysical::Tp1MacPhysical(std::unique_ptr<Tp1MediumBackend> backend)
     : _initialized(false)
     , _busMonitorMode(false)
     , _backend(std::move(backend))
-    , _controller(*_backend)
     , _config()
     , _timingPlatform(nullptr)
     , _rxCallback(nullptr)
@@ -55,10 +54,10 @@ util::Result<void> Tp1MacPhysical::init() {
     _config.ownIndividualAddressRaw = initialIndividualAddress().raw;
     _config.busMonitorMode = _busMonitorMode;
 
-    _controller.setEventObserver(onTp1Event, this);
-    auto initResult = _controller.init(_config);
+    _backend->setEventCallback(onTp1Event, this);
+    auto initResult = _backend->init(_config);
     if (initResult.isError()) {
-        _controller.setEventObserver(nullptr, nullptr);
+        _backend->setEventCallback(nullptr, nullptr);
         return initResult;
     }
 
@@ -68,11 +67,11 @@ util::Result<void> Tp1MacPhysical::init() {
 
 util::Result<void> Tp1MacPhysical::setOwnAddress(uint16_t addressRaw) {
     _config.ownIndividualAddressRaw = addressRaw;
-    return _controller.setOwnAddress(addressRaw);
+    return _backend->setOwnAddress(addressRaw);
 }
 
 void Tp1MacPhysical::setAckGroupAddresses(std::span<const uint16_t> addresses) {
-    _controller.setAckGroupAddresses(addresses);
+    _backend->setAckGroupAddresses(addresses);
 }
 
 void Tp1MacPhysical::close() {
@@ -80,11 +79,14 @@ void Tp1MacPhysical::close() {
         return;
     }
 
-    _controller.setEventObserver(nullptr, nullptr);
+    _backend->setEventCallback(nullptr, nullptr);
     // The ISR keeps its busy input across a close; a later init() must not
     // start out refusing every frame with BUSY.
-    _controller.setLocalBusy(false);
-    _controller.close();
+    _backend->setLocalBusy(false);
+    _backend->close();
+    _lastTxAckResponse = Tp1AckClass::None;
+    _lastTxAckDeadlineMiss = false;
+    _txOutcomeSequence = 0;
 
     {
         std::lock_guard<std::mutex> lock(_rxMutex);
@@ -155,15 +157,15 @@ util::Result<uint32_t> Tp1MacPhysical::beginTransmit(std::span<const uint8_t> fr
         && isInitialIndividualAddress(IndividualAddress(outgoing.destination.raw));
     _txAckRequested = (frame[0] & datalink::CTRL_ACK_REQ) != 0u || !toUnconfiguredAddress;
 
-    const uint32_t initialTxOutcomeSequence = _controller.getTxOutcomeSequence();
+    const uint32_t initialTxOutcomeSequence = _txOutcomeSequence;
 
-    auto sendResult = _controller.sendFrame(frame);
+    auto sendResult = _backend->sendFrame(frame);
     if (sendResult.isError()) {
         return sendResult.error();
     }
 
     if (!_backend->getCapabilities().supportsDetailedTxConfirm) {
-        auto tickResult = _controller.onTick();
+        auto tickResult = _backend->service();
         if (tickResult.isError()) {
             return tickResult.error();
         }
@@ -177,7 +179,7 @@ util::Result<TxOutcomeState> Tp1MacPhysical::pollTransmit(uint32_t initialSequen
         return util::ErrorCode::NotInitialized;
     }
 
-    auto tickResult = _controller.onTick();
+    auto tickResult = _backend->service();
     if (tickResult.isError()) {
         return tickResult.error();
     }
@@ -196,15 +198,15 @@ util::Result<TxOutcomeState> Tp1MacPhysical::pollTransmit(uint32_t initialSequen
         return TxOutcomeState::Success;
     }
 
-    if (_controller.getTxOutcomeSequence() == initialSequence) {
+    if (_txOutcomeSequence == initialSequence) {
         return TxOutcomeState::Pending;
     }
 
-    if (_controller.didLastTxAckMissDeadline()) {
+    if (_lastTxAckDeadlineMiss) {
         return TxOutcomeState::Timeout;
     }
 
-    switch (_controller.getLastTxAckResponse()) {
+    switch (_lastTxAckResponse) {
         case Tp1AckClass::Ack:
             return TxOutcomeState::Success;
         case Tp1AckClass::Busy:
@@ -243,7 +245,7 @@ util::Result<Tp1MacPhysical::ProgressState> Tp1MacPhysical::pollReceive() {
         return util::ErrorCode::OperationNotReady;
     }
 
-    (void)_controller.onTick();
+    (void)_backend->service();
 
     {
         std::lock_guard<std::mutex> lock(_rxMutex);
@@ -296,7 +298,7 @@ void Tp1MacPhysical::updateLocalBusyLocked() {
     const bool busy = _rxCount >= (RX_QUEUE_CAPACITY - RX_BUSY_RESERVE);
     if (busy != _localBusyAsserted) {
         _localBusyAsserted = busy;
-        _controller.setLocalBusy(busy);
+        _backend->setLocalBusy(busy);
     }
 }
 
@@ -421,7 +423,27 @@ void Tp1MacPhysical::onTp1Event(const Tp1RxEvent& event, void* context) {
     }
 }
 
+void Tp1MacPhysical::latchTxOutcome(const Tp1RxEvent& event) {
+    switch (event.type) {
+        case Tp1RxEventType::TxAckResponse:
+            _lastTxAckResponse = event.ackClass;
+            _lastTxAckDeadlineMiss = false;
+            ++_txOutcomeSequence;
+            break;
+        case Tp1RxEventType::TxAckDeadlineMiss:
+            _lastTxAckResponse = Tp1AckClass::None;
+            _lastTxAckDeadlineMiss = true;
+            ++_txOutcomeSequence;
+            break;
+        default:
+            break;
+    }
+}
+
 void Tp1MacPhysical::handleTp1Event(const Tp1RxEvent& event) {
+    // The TX outcome is latched first, whatever else the event carries.
+    latchTxOutcome(event);
+
     // Byte-level parity/framing errors are already logged (deduplicated) by
     // the driver's noteRxPartialError/flushRxPartialErrorSummary — logging
     // again here would just repeat the same information with less detail.
@@ -510,7 +532,7 @@ util::Result<void> Tp1MacPhysical::waitForTxOutcome(uint32_t initialSequence) {
     const uint64_t deadlineMs = startMs + static_cast<uint64_t>(_txOutcomeTimeoutMs);
 
     for (;;) {
-        auto tickResult = _controller.onTick();
+        auto tickResult = _backend->service();
         if (tickResult.isError()) {
             return tickResult.error();
         }
@@ -523,12 +545,12 @@ util::Result<void> Tp1MacPhysical::waitForTxOutcome(uint32_t initialSequence) {
                 return util::Result<void>::ok();
             }
             // Still transmitting — keep looping.
-        } else if (_controller.getTxOutcomeSequence() != initialSequence) {
-            if (_controller.didLastTxAckMissDeadline()) {
+        } else if (_txOutcomeSequence != initialSequence) {
+            if (_lastTxAckDeadlineMiss) {
                 return util::ErrorCode::Timeout;
             }
 
-            const Tp1AckClass ackClass = _controller.getLastTxAckResponse();
+            const Tp1AckClass ackClass = _lastTxAckResponse;
             switch (ackClass) {
                 case Tp1AckClass::Ack:
                     return util::Result<void>::ok();

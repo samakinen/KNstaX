@@ -3,12 +3,11 @@
 
 /**
  * @file tp1_mac_physical.hpp
- * @brief Canonical TP1 physical facade using owned Tp1MediumBackend + Tp1MacController composition
+ * @brief The TP1 physical layer: frame-oriented MAC over an owned Tp1MediumBackend
  */
 
 #pragma once
 
-#include "knx/physical/tp1_mac_controller.hpp"
 #include "knx/physical/tp1_medium_backend.hpp"
 #include "knx/physical/tp1_physical_layer.hpp"
 #include "knx/platform/platform.hpp"
@@ -32,6 +31,20 @@ namespace physical {
 
 using Tp1TxOutcomeState = TxOutcomeState;
 
+/**
+ * @brief The TP1 physical layer the data link layer drives (Tp1PhysicalLike).
+ *
+ * Owns one medium backend and turns its events into frame-oriented
+ * behaviour: an RX queue with BUSY back-pressure, and TX outcomes built from
+ * the backend's TX-ACK events.
+ *
+ * Note on acknowledgement: there is deliberately NO per-telegram ACK decision
+ * here. The DL-ACK decision must be made within t_ack (15 bit-times,
+ * ~1.56 ms at 9600 baud) of the frame end — a deadline only the medium's own
+ * timing domain (bitbang ISR, TPUART silicon) can reliably meet. This class
+ * forwards the decision INPUTS (own address, subscribed group addresses, busy
+ * state) to the backend ahead of time and tracks TX-side ACK outcomes.
+ */
 class Tp1MacPhysical {
 public:
     using ProgressState = util::OperationProgressState;
@@ -111,6 +124,7 @@ private:
 
     static void onTp1Event(const Tp1RxEvent& event, void* context);
     void handleTp1Event(const Tp1RxEvent& event);
+    void latchTxOutcome(const Tp1RxEvent& event);
     void handleLinkStateEvent(const LinkStatus& status);
     /// Free the slot receivedFrameView() points into, then re-evaluate busy.
     void releaseHeldFrameLocked();
@@ -127,7 +141,12 @@ private:
     bool _initialized;
     bool _busMonitorMode;
     std::unique_ptr<Tp1MediumBackend> _backend;
-    Tp1MacController _controller;
+    // TX outcome of the last frame, latched from the backend's TX-ACK events
+    // before anything else looks at the event. The sequence advances once
+    // per outcome, so a transmitter can tell "no answer yet" from "answered".
+    Tp1AckClass _lastTxAckResponse{Tp1AckClass::None};
+    bool _lastTxAckDeadlineMiss{false};
+    uint32_t _txOutcomeSequence{0};
     Tp1MediumConfig _config;
     platform::TimingPlatform* _timingPlatform;
     ReceiveCallback _rxCallback;

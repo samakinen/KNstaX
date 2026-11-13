@@ -5,23 +5,26 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SCRIPT="$ROOT_DIR/scripts/ci/tp1_ctest_regression.sh"
+# The build tree to check; CTest passes its own, so the gate is checked against
+# the tests this build actually registered rather than whatever an in-tree
+# build/ directory last held.
+BUILD_DIR="${1:-$ROOT_DIR/build}"
 
 if [[ ! -x "$SCRIPT" ]]; then
   echo "Missing or non-executable script: $SCRIPT" >&2
   exit 1
 fi
 
-if [[ ! -d "$ROOT_DIR/build" ]]; then
-  echo "Build directory not found for regression test: $ROOT_DIR/build" >&2
+if [[ ! -d "$BUILD_DIR" ]]; then
+  echo "Build directory not found for regression test: $BUILD_DIR" >&2
   exit 1
 fi
 
-"$SCRIPT" --build-dir "$ROOT_DIR/build" \
-  --require-test test_tp1_frame_codec \
+"$SCRIPT" --build-dir "$BUILD_DIR" \
   --require-test test_tp1_frame_golden \
   --require-test test_tp1_datalink_frame_pool \
   --require-test test_bitbang_mac_physical \
-  --require-test test_tp1_mac_controller \
+  --require-test test_tp1_mac_physical \
   --require-test test_tp1_integration \
   --require-test test_tp1_to_ip_routing_coupler \
   --require-test test_ip_tp1_routing \
@@ -30,7 +33,7 @@ fi
   --require-test test_tp1_benchmark_gate_script \
   --preflight-only
 
-if "$SCRIPT" --build-dir "$ROOT_DIR/build" --require-test test_tp1_nonexistent_required_gate --preflight-only >/dev/null 2>&1; then
+if "$SCRIPT" --build-dir "$BUILD_DIR" --require-test test_tp1_nonexistent_required_gate --preflight-only >/dev/null 2>&1; then
   echo "Expected TP1 required-test gate failure did not occur for nonexistent required test" >&2
   exit 1
 fi

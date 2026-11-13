@@ -37,6 +37,7 @@
 #include "knx/application/telegram_rate_limiter.hpp"
 #include "knx/application/application_layer.hpp"
 #include "knx/util/inplace_function.hpp"
+#include "knx/util/operation_progress.hpp"
 #include "knx/util/result.hpp"
 #include <concepts>
 #include <array>
@@ -151,13 +152,7 @@ public:
 
     using WorkAvailableCallback = util::InplaceFunction<void(), 32>;
 
-    enum class TransmissionProgressState : uint8_t {
-        Pending = 0,
-        Success,
-        Busy,
-        TransmissionFailed,
-        Timeout,
-    };
+    using TransmissionProgressState = util::OperationProgressState;
 
     enum class MessageKind : uint8_t {
         Unknown = 0,
@@ -1026,144 +1021,6 @@ inline ConstManagementControl BusAccessUnit::management() const {
 inline LinkAccess BusAccessUnit::link() { return LinkAccess(*this); }
 inline ConstLinkAccess BusAccessUnit::link() const { return ConstLinkAccess(*this); }
 
-class BusAccessStackPort {
-public:
-    using TransmissionProgressState = BusAccessUnit::TransmissionProgressState;
-    using TransmissionOptions = BusAccessUnit::TransmissionOptions;
-    using TransmissionOutcome = BusAccessUnit::TransmissionOutcome;
-    using MessageKind = BusAccessUnit::MessageKind;
-    using WorkAvailableCallback = BusAccessUnit::WorkAvailableCallback;
-    /// Fires for every inbound group telegram, so it is stored inline: a
-    /// std::function here put a heap-allocated indirect call on the busiest
-    /// path in the stack.
-    using InboundCallback = util::InplaceFunction<void(const IndividualAddress&,
-                                                       const GroupAddress&,
-                                                       MessageKind,
-                                                       std::span<const uint8_t>,
-                                                       AddressType), 32>;
-    using PropertyReadProvider = application::PropertyReadProvider;
-    using PropertyWriteProvider = application::PropertyWriteProvider;
-    using PropertyDescriptionProvider = application::PropertyDescriptionProvider;
-
-    virtual ~BusAccessStackPort() = default;
-
-    virtual util::Result<void> init(const IndividualAddress& ownAddress) = 0;
-    virtual void close() = 0;
-    virtual void executePendingRestart() = 0;
-    /// Install what actually performs A_Restart. Without it the restart service
-    /// refuses every request and the device answers a master reset with an
-    /// error code instead of restarting.
-    virtual void setRestartHandler(application::RestartService::RestartCallback handler) = 0;
-    /// Install the device-side Resources behind Master Reset erase codes and
-    /// Verify Mode (see ApplicationLayer::ManagementServerHooks).
-    virtual void setManagementServerHooks(application::ApplicationLayer::ManagementServerHooks hooks) = 0;
-    virtual void processBackgroundWork() = 0;
-    virtual util::Result<void> sendDataLinkFrame(const datalink::LDataFrame& frame) = 0;
-    virtual void setDataLinkPromiscuousMode(datalink::PromiscuousMode mode) = 0;
-    virtual util::Result<void> addGroupAddress(const GroupAddress& address) = 0;
-    virtual util::Result<void> setOwnAddress(const IndividualAddress& ownAddress) = 0;
-    virtual void setIndividualAddressUpdateCallback(application::ApplicationLayer::IndividualAddressUpdateCallback callback) = 0;
-    virtual void configureDataSecure(objects::SecurityInterfaceObject& securityObject) = 0;
-    /// Install the handler for A_FunctionPropertyCommand / State_Read.
-    virtual void setFunctionPropertyHandler(application::FunctionPropertyHandler handler) = 0;
-    /// Install the handler for A_FunctionPropertyExtCommand / ExtState_Read.
-    /// Separate from the classic hook because the extended services address the
-    /// object by type + instance rather than by index, and answer in the
-    /// unified return-code space of 03/03/07 §3.4.8.3 rather than the small
-    /// FunctionPropertyReturnCode set.  ETS drives Data Secure through these.
-    virtual void setExtendedFunctionPropertyProvider(
-        application::PropertyExtServices::FunctionProvider provider) = 0;
-    /// Publish this device's 6-octet KNX serial number so it can be addressed
-    /// by A_IndividualAddressSerialNumber_Read/_Write without programming mode.
-    virtual void setCommissioningSerialNumber(const application::KnxSerialNumber& serialNumber) = 0;
-
-    /// The device's Domain Address in its medium's encoding; see
-    /// application::NetworkParameterService::setDomainAddress. A port without
-    /// an application layer has nowhere to put it.
-    virtual void setDomainAddress(std::span<const uint8_t> domainAddress) { (void)domainAddress; }
-    /// Adopt the authorisation key table restored from storage (03/03/07
-    /// §3.5.8). A port without an application layer has nowhere to put it.
-    virtual void setAuthorizationKeys(const application::AuthorizationService::KeyTable& keys) { (void)keys; }
-    virtual void setDomainAddressWriteCallback(application::DomainAddressWriteCallback callback) {
-        (void)callback;
-    }
-    /**
-     * Declare which medium this device is on.
-     *
-     * It reaches the Device Descriptor Type 0 that ETS reads before it will
-     * download anything: the mask version's high nibble is the medium
-     * (03/05/01 Table 7), so a System B device is 07B0h on TP1 and 57B0h on
-     * KNX IP. Defaulting to TP1 is right for most builds and wrong in a way
-     * that fails commissioning for the rest, since ETS compares the descriptor
-     * against the catalogue entry it is downloading.
-     */
-    virtual void setDeviceMedium(MediumType medium) = 0;
-    virtual void setInboundCallback(InboundCallback callback) = 0;
-    virtual void registerPropertyObject(InterfaceObjectType objectType,
-                                        InterfaceObjectIndex objectIndex) = 0;
-    virtual void setPropertyReadProvider(PropertyReadProvider provider) = 0;
-    virtual void setPropertyWriteProvider(PropertyWriteProvider provider) = 0;
-    virtual void setPropertyDescriptionProvider(PropertyDescriptionProvider provider) = 0;
-    /// Register a memory-mapped region backed by caller-owned storage (used by
-    /// the ETS SystemB download: table segments transferred via A_Memory_Write).
-    virtual util::Result<void> registerMemoryRegion(const application::MemoryRegion& region,
-                                                    std::span<uint8_t> storage) = 0;
-    /// Whether a management client has ever written into the region starting
-    /// at @p regionStart. Distinguishes "downloaded all zeros" from "never
-    /// downloaded" — the backing buffer reads zero in both cases.
-    virtual bool memoryRegionWritten(MemoryAddress regionStart) const = 0;
-    virtual void setWorkAvailableCallback(WorkAvailableCallback callback) = 0;
-    virtual util::Result<void> sendGroupValueWrite(const GroupAddress& address, std::span<const uint8_t> data) = 0;
-    virtual util::Result<void> beginSendGroupValueWrite(const GroupAddress& address, std::span<const uint8_t> data) = 0;
-    virtual util::Result<void> sendGroupValueRead(const GroupAddress& address) = 0;
-    virtual util::Result<void> beginSendGroupValueRead(const GroupAddress& address) = 0;
-    virtual util::Result<TransmissionProgressState> pollTransmissionProgress() = 0;
-    virtual bool transmissionInProgress() const = 0;
-    virtual void setDefaultTransmissionOptions(const TransmissionOptions& options) = 0;
-    virtual const TransmissionOptions& defaultTransmissionOptions() const = 0;
-    virtual bool popTransmissionOutcome(TransmissionOutcome& outcome) = 0;
-    virtual size_t queuedTransmissionOutcomeCount() const = 0;
-    virtual util::Result<void> sendGroupValueResponse(const GroupAddress& address, std::span<const uint8_t> data) = 0;
-    virtual util::Result<void> beginSendGroupValueResponse(const GroupAddress& address, std::span<const uint8_t> data) = 0;
-    virtual void setProgrammingModeEnabled(bool enabled) = 0;
-    virtual bool programmingModeEnabled() const = 0;
-
-    /**
-     * @brief The coupler, when this stack port was built as one.
-     *
-     * Returns nullptr for an ordinary single-port device, which is what makes
-     * the coupler discoverable without every caller having to know how the
-     * port was constructed. Use it to reach the filter table and the routing
-     * policy — see `network::TwoPortCoupler`.
-     */
-    virtual network::TwoPortCoupler* coupler() { return nullptr; }
-
-    /**
-     * @brief Re-issue the multicast membership of an IP routing port.
-     *
-     * OperationNotSupported for every port that is not KNXnet/IP Routing,
-     * which is the honest answer for a TP1 device rather than a silent
-     * success. See `physical::IpRoutingPhysical::refreshMulticastMembership()`
-     * for why a host has to ask for this at all.
-     */
-    virtual util::Result<void> refreshMulticastMembership() {
-        return util::ErrorCode::OperationNotSupported;
-    }
-
-    /**
-     * @brief Counters for the port, for telling silence apart from loss.
-     *
-     * A device that has stopped answering has three possible stories, and a
-     * capture taken on the network can only distinguish the first two:
-     * the telegram never reached the device, it reached the device and was
-     * filtered or dropped, or it was handled and the answer went missing on
-     * the way back. These counters separate the middle one from the first.
-     *
-     * Zero-filled on a port that does not keep the counter concerned.
-     */
-    virtual LinkDiagnostics linkDiagnostics() const { return {}; }
-};
-
 #if KNX_FEATURE_TP1
 // TP1 entry points. Gated for the mirror of the reason the IP ones are: an
 // IP-only firmware compiles no TP1 physical, so declaring these would leave
@@ -1185,7 +1042,8 @@ std::unique_ptr<BusAccessStackPort> createTp1StackPort(platform::Platform& platf
  *
  * The coupler role is derived from the individual address ETS assigns, so an
  * uncommissioned coupler behaves as a repeater until it has one. Reach the
- * filter table and routing policy through `BusAccessStackPort::coupler()`.
+ * filter table and routing policy through `BusAccessStackPort::coupler()`
+ * (knx/bau/stack_port.hpp).
  */
 std::unique_ptr<BusAccessStackPort> createTp1CouplerStackPort(
     platform::Platform& platform,
@@ -1225,3 +1083,6 @@ std::unique_ptr<BusAccessStackPort> createTp1MockTestStackPort(
 
 } // namespace bau
 } // namespace knx
+
+// The stack port's definition needs BusAccessUnit's types, so it comes last.
+#include "knx/bau/stack_port.hpp"

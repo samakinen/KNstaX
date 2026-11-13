@@ -27,15 +27,20 @@ wrappers.
 
 - One implementation per responsibility.
 - No parallel TP1 architectures for the same behaviour.
-- `Tp1MacController` is the only TP1 MAC/policy engine.
+- `Tp1MacPhysical` is the only physical layer for the TP1 medium.
 - `Tp1MediumBackend` is the only TP1 MAC/backend boundary.
-- `Tp1PhysicalLayer` stays frame-oriented and backend-family-neutral.
+- The physical-layer contract is the `datalink::Tp1PhysicalLike` concept, not
+  an abstract base class; physicals stay frame-oriented and
+  backend-family-neutral.
+- `bau::BusAccessStackPort` is one concrete class. Do not put an interface in
+  front of a class that has a single implementation and no test double.
 - Public docs must match `main`.
 
 ### TP1 rules
 
 - Do not reintroduce the legacy standalone `BitbangPhysical` architecture.
-- Do not add backend-specific MAC policy outside `Tp1MacController`.
+- Do not add backend-specific MAC policy to `Tp1MacPhysical`; it belongs in the
+  backend, behind `Tp1MediumBackend`.
 - Prefer compile-time backend selection for embedded product builds.
 - Avoid RTTI in TP1 hot paths, event emission paths, steady-state capability
   checks, and service loops. Limited construction-time RTTI in temporary
@@ -425,7 +430,7 @@ Before committing:
 
 For a TP1 change, additionally:
 
-1. Does it preserve the single `Tp1MacController` architecture?
+1. Does it preserve the single `Tp1MacPhysical` + `Tp1MediumBackend` architecture?
 2. Does it keep backend differences behind `Tp1MediumBackend`?
 3. Does it avoid RTTI and host-only shortcuts?
 4. Does it keep the concurrency model explicit?

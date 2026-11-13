@@ -539,7 +539,7 @@ else()
         knx_add_test(test_logging SOURCES test/unit/test_logging.cpp LABELS unit)
         knx_add_test(test_datalink_edge_cases SOURCES test/unit/test_datalink_edge_cases.cpp LABELS unit)
         knx_add_test(test_tp1_datalink_frame_pool SOURCES test/unit/test_tp1_datalink_frame_pool.cpp LABELS tp1 unit)
-        knx_add_test(test_tp1_mac_controller SOURCES test/unit/test_tp1_mac_controller.cpp LABELS tp1 unit)
+        knx_add_test(test_tp1_mac_physical SOURCES test/unit/test_tp1_mac_physical.cpp LABELS tp1 unit)
         knx_add_test(test_bitbang_driver_timer_isr SOURCES test/unit/test_bitbang_driver_timer_isr.cpp LABELS tp1 unit)
 
         # Virtual TP1 bus and virtual time.
@@ -579,6 +579,7 @@ else()
             LABELS tp1 script)
         knx_add_test(test_tp1_ctest_regression_script
             COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/test/scripts/test_tp1_ctest_regression.sh
+            ARGS ${CMAKE_CURRENT_BINARY_DIR}
             LABELS tp1 script)
         knx_add_test(test_tp1_benchmark_gate_script
             COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/test/scripts/test_tp1_benchmark_gate.sh

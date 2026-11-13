@@ -3,29 +3,26 @@
 
 /**
  * @file bau_stack_port.cpp
- * @brief Lower-stack composition behind BusAccessStackPort.
+ * @brief Lower-stack composition: BusAccessStackPort.
  *
  * Everything here assembles the physical/data-link/network/transport/
- * application chain and presents it to the BAU through one narrow interface.
+ * application chain and presents it to the BAU through one narrow class.
  * It has no knowledge of group objects or device lifecycle — the BAU only ever
  * reaches it through BusAccessStackPort — which is why it is a separate
- * translation unit rather than 1200 lines in the middle of bau.cpp.
+ * translation unit rather than 1000 lines in the middle of bau.cpp.
  */
 
-#include "knx/bau/bau.hpp"
-#include "bau_internal.hpp"
-#include "knx/objects/interface_object.hpp"
-#include "knx/objects/interface_object_manager.hpp"
+#include "knx/bau/stack_port.hpp"
 #include "knx/util/fixed_vector.hpp"
 #include "knx/util/log.hpp"
 #include "knx/util/result.hpp"
 #include "knx/application/apci_services.hpp"
 #include "knx/datalink/tp1_data_link_layer.hpp"
-#include "knx/platform/raii_resources.hpp"
 #include "knx/physical/tp1_mac_physical.hpp"
 #if KNX_ENABLE_TEST_HOOKS
 #include "knx/testing/mock_tp1_physical.hpp"
 #endif
+#include "knx/network/network_layer.hpp"
 #include "knx/security/data_secure.hpp"
 #include "knx/security/secure_application_layer.hpp"
 #include "knx/network/two_port_coupler.hpp"
@@ -33,7 +30,6 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
-#include <map>
 #include <memory>
 #include <span>
 #include <type_traits>
@@ -42,15 +38,9 @@
 namespace knx {
 namespace bau {
 
-using StackPort = BusAccessStackPort;
-
 namespace {
+
 constexpr const char* TAG = "KNX.BAU.Port";
-}
-
-using detail::PendingInboundGroupEvent;
-
-namespace {
 
 application::SendOptions toApplicationTransmissionOptions(const BusAccessUnit::TransmissionOptions& options)
 {
@@ -59,48 +49,6 @@ application::SendOptions toApplicationTransmissionOptions(const BusAccessUnit::T
     converted.retryOnBusy = options.retryOnBusy;
     converted.retryOnTimeout = options.retryOnTimeout;
     converted.retryOnTransmissionFailed = options.retryOnTransmissionFailed;
-    return converted;
-}
-
-BusAccessUnit::TransmissionProgressState toBauTransmissionProgressState(application::ApplicationLayer::SendProgressState state)
-{
-    switch (state) {
-        case application::ApplicationLayer::SendProgressState::Pending:
-            return BusAccessUnit::TransmissionProgressState::Pending;
-        case application::ApplicationLayer::SendProgressState::Success:
-            return BusAccessUnit::TransmissionProgressState::Success;
-        case application::ApplicationLayer::SendProgressState::Busy:
-            return BusAccessUnit::TransmissionProgressState::Busy;
-        case application::ApplicationLayer::SendProgressState::TransmissionFailed:
-            return BusAccessUnit::TransmissionProgressState::TransmissionFailed;
-        case application::ApplicationLayer::SendProgressState::Timeout:
-            return BusAccessUnit::TransmissionProgressState::Timeout;
-    }
-
-    return BusAccessUnit::TransmissionProgressState::TransmissionFailed;
-}
-
-BusAccessUnit::TransmissionOutcome toBauTransmissionOutcome(const application::ASendOutcome& outcome)
-{
-    BusAccessUnit::TransmissionOutcome converted;
-    converted.destination = outcome.destination;
-    switch (outcome.service) {
-        case application::APCIService::GroupValueWrite:
-            converted.kind = BusAccessUnit::MessageKind::GroupValueWrite;
-            break;
-        case application::APCIService::GroupValueRead:
-            converted.kind = BusAccessUnit::MessageKind::GroupValueRead;
-            break;
-        case application::APCIService::GroupValueResponse:
-            converted.kind = BusAccessUnit::MessageKind::GroupValueResponse;
-            break;
-        default:
-            converted.kind = BusAccessUnit::MessageKind::Unknown;
-            break;
-    }
-    converted.destinationType = outcome.destinationType;
-    converted.result = outcome.result;
-    converted.attempts = outcome.attempts;
     return converted;
 }
 
@@ -118,106 +66,48 @@ BusAccessUnit::MessageKind toBauMessageKind(application::APCIService service)
     }
 }
 
-class LowerStackLifecycle {
-public:
-    virtual ~LowerStackLifecycle() = default;
+BusAccessUnit::TransmissionOutcome toBauTransmissionOutcome(const application::ASendOutcome& outcome)
+{
+    BusAccessUnit::TransmissionOutcome converted;
+    converted.destination = outcome.destination;
+    converted.kind = toBauMessageKind(outcome.service);
+    converted.destinationType = outcome.destinationType;
+    converted.result = outcome.result;
+    converted.attempts = outcome.attempts;
+    return converted;
+}
 
-    virtual util::Result<void> init(const IndividualAddress& ownAddress) = 0;
-    virtual void close() = 0;
-    virtual void executePendingRestart() = 0;
-    virtual void setRestartHandler(application::RestartService::RestartCallback handler) = 0;
-    virtual void setManagementServerHooks(application::ApplicationLayer::ManagementServerHooks hooks) = 0;
-    virtual util::Result<void> setOwnAddress(const IndividualAddress& ownAddress) = 0;
-    virtual void setIndividualAddressUpdateCallback(application::ApplicationLayer::IndividualAddressUpdateCallback callback) = 0;
-};
+#if KNX_SECURE_ENABLED
+/// Translate a transport frame into the identity the S-AL binds into CCM.
+security::SecureFrameInfo secureFrameInfo(const transport::TDataFrame& frame)
+{
+    security::SecureFrameInfo info;
+    info.source = frame.source;
+    info.destination = frame.destination.raw;
+    info.destinationType = frame.destinationType;
+    info.tpci6 = frame.securityTpci6;
+    info.connected = frame.service == transport::TDataService::Connected;
+    return info;
+}
+#endif
 
-class LowerStackMediumAccess {
-public:
-    virtual ~LowerStackMediumAccess() = default;
+} // namespace
 
-    virtual void processBackgroundWork() = 0;
-    virtual util::Result<void> sendDataLinkFrame(const datalink::LDataFrame& frame) = 0;
-    virtual void setDataLinkPromiscuousMode(datalink::PromiscuousMode mode) = 0;
-};
+// ---------------------------------------------------------------------------
+// Medium: one physical layer and the data link layer over it
+// ---------------------------------------------------------------------------
 
-class LowerStackSecurityConfiguration {
-public:
-    virtual ~LowerStackSecurityConfiguration() = default;
-
-    virtual void configureDataSecure(objects::SecurityInterfaceObject& securityObject) = 0;
-    virtual void setFunctionPropertyHandler(application::FunctionPropertyHandler handler) = 0;
-    virtual void setExtendedFunctionPropertyProvider(
-        application::PropertyExtServices::FunctionProvider provider) = 0;
-    virtual void setCommissioningSerialNumber(const application::KnxSerialNumber& serialNumber) = 0;
-    virtual void setDomainAddress(std::span<const uint8_t> domainAddress) = 0;
-    virtual void setDomainAddressWriteCallback(application::DomainAddressWriteCallback callback) = 0;
-    virtual void setAuthorizationKeys(const application::AuthorizationService::KeyTable& keys) = 0;
-    virtual void setDeviceMedium(MediumType medium) = 0;
-};
-
-class LowerStackInboundConfiguration {
-public:
-    virtual ~LowerStackInboundConfiguration() = default;
-
-    virtual void setInboundCallback(StackPort::InboundCallback callback) = 0;
-    virtual void setWorkAvailableCallback(StackPort::WorkAvailableCallback callback) = 0;
-};
-
-class LowerStackSubscriptionConfiguration {
-public:
-    virtual ~LowerStackSubscriptionConfiguration() = default;
-
-    virtual util::Result<void> addGroupAddress(const GroupAddress& address) = 0;
-};
-
-class LowerStackPropertyAccess {
-public:
-    virtual ~LowerStackPropertyAccess() = default;
-
-    virtual void registerPropertyObject(InterfaceObjectType objectType,
-                                        InterfaceObjectIndex objectIndex) = 0;
-    virtual void setPropertyReadProvider(StackPort::PropertyReadProvider provider) = 0;
-    virtual void setPropertyWriteProvider(StackPort::PropertyWriteProvider provider) = 0;
-    virtual void setPropertyDescriptionProvider(StackPort::PropertyDescriptionProvider provider) = 0;
-    virtual util::Result<void> registerMemoryRegion(const application::MemoryRegion& region,
-                                                    std::span<uint8_t> storage) = 0;
-    virtual bool memoryRegionWritten(MemoryAddress regionStart) const = 0;
-};
-
-class LowerStackTransmissionServices {
-public:
-    virtual ~LowerStackTransmissionServices() = default;
-
-    virtual void processBackgroundWork() = 0;
-    virtual util::Result<void> sendGroupValueWrite(const GroupAddress& address, std::span<const uint8_t> data) = 0;
-    virtual util::Result<void> beginSendGroupValueWrite(const GroupAddress& address, std::span<const uint8_t> data) = 0;
-    virtual util::Result<void> sendGroupValueRead(const GroupAddress& address) = 0;
-    virtual util::Result<void> beginSendGroupValueRead(const GroupAddress& address) = 0;
-    virtual util::Result<StackPort::TransmissionProgressState> pollTransmissionProgress() = 0;
-    virtual bool transmissionInProgress() const = 0;
-    virtual void setDefaultTransmissionOptions(const StackPort::TransmissionOptions& options) = 0;
-    virtual const StackPort::TransmissionOptions& defaultTransmissionOptions() const = 0;
-    virtual bool popTransmissionOutcome(StackPort::TransmissionOutcome& outcome) = 0;
-    virtual size_t queuedTransmissionOutcomeCount() const = 0;
-    virtual util::Result<void> sendGroupValueResponse(const GroupAddress& address, std::span<const uint8_t> data) = 0;
-    virtual util::Result<void> beginSendGroupValueResponse(const GroupAddress& address, std::span<const uint8_t> data) = 0;
-    virtual void setProgrammingModeEnabled(bool enabled) = 0;
-    virtual bool programmingModeEnabled() const = 0;
-};
-
-class Tp1MediumBundle final {
+class BusAccessStackPort::Medium final {
 public:
     template <typename PhysicalT>
-    Tp1MediumBundle(platform::Platform& platform,
-                    std::unique_ptr<PhysicalT> physicalLayer)
+    Medium(platform::Platform& platform, std::unique_ptr<PhysicalT> physicalLayer)
         : _platform(platform)
     {
         assignPhysical(std::move(physicalLayer));
     }
 
 #if KNX_FEATURE_TP1
-    Tp1MediumBundle(platform::Platform& platform,
-                    std::unique_ptr<physical::Tp1MediumBackend> mediumBackend)
+    Medium(platform::Platform& platform, std::unique_ptr<physical::Tp1MediumBackend> mediumBackend)
         : _platform(platform)
         , _macPhysical(std::make_unique<physical::Tp1MacPhysical>(std::move(mediumBackend)))
     {
@@ -299,16 +189,13 @@ public:
                          : util::Result<void>::ok();
     }
 
-    datalink::Tp1DataLinkLayer* dataLinkLayer() {
-        return _dataLink.get();
-    }
+    datalink::Tp1DataLinkLayer* dataLinkLayer() { return _dataLink.get(); }
+    const datalink::Tp1DataLinkLayer* dataLinkLayer() const { return _dataLink.get(); }
 
 #if KNX_FEATURE_NETIP
-    /// The routing physical, when this bundle was built from one. Null for
+    /// The routing physical, when this medium was built from one. Null for
     /// every other medium, which is how the caller tells them apart.
-    physical::IpRoutingPhysical* ipRoutingPhysical() {
-        return _ipRoutingPhysical.get();
-    }
+    physical::IpRoutingPhysical* ipRoutingPhysical() const { return _ipRoutingPhysical.get(); }
 #endif
 
 private:
@@ -362,1327 +249,728 @@ private:
     std::unique_ptr<datalink::Tp1DataLinkLayer> _dataLink;
 };
 
-class Tp1ApplicationStackBundle final {
-public:
-    util::Result<void> init(datalink::Tp1DataLinkLayer& dataLink,
-                            platform::TimingPlatform& clock,
-                            const IndividualAddress& ownAddress,
-                            const StackPort::TransmissionOptions& defaultTransmissionOptions)
-    {
-        if (!_network) {
-            _network = std::make_unique<network::NetworkLayer>(dataLink);
-        }
-        auto netInit = _network->init(ownAddress);
-        if (!netInit) {
-            return netInit;
-        }
+// ---------------------------------------------------------------------------
+// Construction and lifecycle
+// ---------------------------------------------------------------------------
 
-        if (!_transport) {
-            _transport = std::make_unique<transport::TransportLayer>(*_network);
-        }
-        // Gives the connection-oriented timers a real timebase, so the owner
-        // loop's background-work pass retransmits unacknowledged data and
-        // reaps stale connections.
-        _transport->setClock([clockPtr = &clock]() { return clockPtr->millis(); });
-        auto tpInit = _transport->init(ownAddress);
-        if (!tpInit) {
-            return tpInit;
-        }
+BusAccessStackPort::BusAccessStackPort(platform::Platform& platform,
+                                       std::unique_ptr<Medium> primary,
+                                       std::unique_ptr<Medium> secondary)
+    : _platform(platform)
+    , _medium(std::move(primary))
+    // A coupler's second medium is built now but only initialised in init(),
+    // once the individual address is known — the coupler's role depends on it.
+    , _secondaryMedium(std::move(secondary))
+{
+}
 
-        if (!_application) {
-            _application = std::make_unique<application::ApplicationLayer>(*_transport);
-        }
-        _ownAddress = ownAddress;
+BusAccessStackPort::~BusAccessStackPort() = default;
+
+util::Result<void> BusAccessStackPort::initApplicationStack(datalink::Tp1DataLinkLayer& dataLink,
+                                                            const IndividualAddress& ownAddress)
+{
+    if (!_network) {
+        _network = std::make_unique<network::NetworkLayer>(dataLink);
+    }
+    auto netInit = _network->init(ownAddress);
+    if (!netInit) {
+        return netInit;
+    }
+
+    if (!_transport) {
+        _transport = std::make_unique<transport::TransportLayer>(*_network);
+    }
+    // Gives the connection-oriented timers a real timebase, so the owner
+    // loop's background-work pass retransmits unacknowledged data and
+    // reaps stale connections.
+    _transport->setClock([clockPtr = static_cast<platform::TimingPlatform*>(&_platform)]() {
+        return clockPtr->millis();
+    });
+    auto tpInit = _transport->init(ownAddress);
+    if (!tpInit) {
+        return tpInit;
+    }
+
+    if (!_application) {
+        _application = std::make_unique<application::ApplicationLayer>(*_transport);
+    }
 #if KNX_SECURE_ENABLED
-        if (_secureAl) {
-            _secureAl->setOwnAddress(ownAddress);
-        }
-#endif
-        _application->setProgrammingModeEnabled(_programmingModeEnabled);
-        _application->setDefaultSendOptions(toApplicationTransmissionOptions(defaultTransmissionOptions));
-        return _application->init(ownAddress);
-    }
-
-    void close() {
-        if (_application) {
-            _application->close();
-        }
-        if (_transport) {
-            _transport->close();
-        }
-        if (_network) {
-            _network->close();
-        }
-    }
-
-    void executePendingRestart() {
-        if (_application) {
-            _application->restartService().executePendingRestart();
-        }
-    }
-
-    void setRestartHandler(application::RestartService::RestartCallback handler) {
-        if (_application) {
-            _application->restartService().setRestartCallback(std::move(handler));
-        }
-    }
-
-    void setManagementServerHooks(application::ApplicationLayer::ManagementServerHooks hooks) {
-        if (_application) {
-            _application->setManagementServerHooks(std::move(hooks));
-        }
-    }
-
-    void processBackgroundWork() {
-        if (_application) {
-            _application->processBackgroundWork();
-        }
-    }
-
-    void setInboundCallback(StackPort::InboundCallback callback) {
-        if (!_application) {
-            return;
-        }
-
-        _application->setReceiveCallback(
-            [callback = std::move(callback)](const IndividualAddress& source,
-                                             const GroupAddress& destination,
-                                             application::APCIService service,
-                                             std::span<const uint8_t> data,
-                                             AddressType destinationType) {
-                callback(source,
-                         destination,
-                         toBauMessageKind(service),
-                         data,
-                         destinationType);
-            });
-    }
-
-    util::Result<void> setOwnAddress(const IndividualAddress& ownAddress) {
-        if (!_transport || !_application) {
-            return util::Result<void>::err(util::ErrorCode::InvalidParameter);
-        }
-
-        auto transportResult = _transport->setOwnAddress(ownAddress);
-        if (transportResult.isError()) {
-            return transportResult.error();
-        }
-
-        _application->setOwnAddress(ownAddress);
-        _ownAddress = ownAddress;
-#if KNX_SECURE_ENABLED
-        if (_secureAl) {
-            _secureAl->setOwnAddress(ownAddress);
-        }
-#endif
-        return util::Result<void>::ok();
-    }
-
-    void setIndividualAddressUpdateCallback(application::ApplicationLayer::IndividualAddressUpdateCallback callback) {
-        if (_application) {
-            _application->setIndividualAddressUpdateCallback(std::move(callback));
-        }
-    }
-
-    void setWorkAvailableCallback(StackPort::WorkAvailableCallback callback) {
-        if (_application) {
-            _application->setReceiveWorkAvailableCallback(std::move(callback));
-        }
-    }
-
-    void setProgrammingModeEnabled(bool enabled) {
-        _programmingModeEnabled = enabled;
-        if (_application) {
-            _application->setProgrammingModeEnabled(enabled);
-        }
-    }
-
-    bool programmingModeEnabled() const {
-        return _application ? _application->programmingModeEnabled() : _programmingModeEnabled;
-    }
-
-#if KNX_SECURE_ENABLED
-    void configureSecurity(objects::SecurityInterfaceObject* securityObject,
-                           platform::Platform& platform) {
-        if (!_transport || !securityObject) {
-            return;
-        }
-
-        if (!_secureAl) {
-            _secureAl = std::make_unique<security::SecureApplicationLayer>(
-                *securityObject,
-                [&platform]() { return platform.millis(); },
-                [&platform](std::span<uint8_t> out) { platform.randomBytes(out); });
-        }
-        _secureAl->setOwnAddress(_ownAddress);
-        _secureAl->setSerialNumber(_serialNumber);
-
-        // The Access Policies have a Security Mode Off and a Security Mode On
-        // column (03/4/1 Table 3); this is what tells the application layer
-        // which one it is in. Installed here because this is the one place
-        // that holds the Security Interface Object.
-        if (_application) {
-            _application->setSecurityModeProvider([securityObject]() {
-                return securityObject->isSecurityEnabled();
-            });
-        }
-
-        // The S-AL builds the S-A_Sync_Response itself and needs a way out that
-        // does not go back through the TX transform (the APDU is already
-        // secured). Sending it straight to the transport keeps the response on
-        // the communication mode the request arrived on, as §5.3.2 requires.
-        auto* transport = _transport.get();
-        _secureAl->setTpciResolver([transport](const security::SecureFrameInfo& info) -> uint8_t {
-            if (!info.connected || info.destinationType != AddressType::Individual) {
-                return 0;
-            }
-            return transport->connectedTxTpci6(IndividualAddress(info.destination));
-        });
-        _secureAl->setFrameSink([transport](const security::SecureFrameInfo& info,
-                                            std::span<const uint8_t> tpdu) -> util::Result<void> {
-            transport::TDataFrame frame;
-            frame.service = info.connected ? transport::TDataService::Connected
-                          : info.destinationType == AddressType::Individual
-                              ? transport::TDataService::Individual
-                              : transport::TDataService::Group;
-            frame.source = info.source;
-            frame.destination = GroupAddress(info.destination);
-            frame.destinationType = info.destinationType;
-            frame.priority = Priority::System;
-            // Every TX path in the stack clears this, and it is not decoration:
-            // Tp1MacPhysical opens an L_ACK window whenever CTRL bit 1 is set,
-            // and a (system) broadcast is never acknowledged on TP1. Leaving the
-            // TDataFrame default of true made the MAC wait for an ACK nobody
-            // sends, repeat the response three times and report the send failed.
-            frame.ackRequested = false;
-            frame.securityTpci6 = info.tpci6;
-            frame.tpdu.assign(tpdu);
-            return transport->sendFrame(frame);
-        });
-
-        _transport->setTxTransform([this](transport::TDataFrame& frame) -> util::Result<void> {
-            if (!_secureAl || frame.tpdu.size() < 2) {
-                return util::Result<void>::ok();
-            }
-
-            std::array<uint8_t, security::DataSecureSession::kMaxSecureTpduSize> secureTpdu{};
-            auto result = _secureAl->processOutgoing(secureFrameInfo(frame), frame.tpdu, secureTpdu);
-            if (result.isError()) {
-                return result.error();
-            }
-            if (result.value() != 0) {
-                // Refuse the send rather than let a frame that should have been
-                // secured go out in plain: assign() leaves the TPDU untouched
-                // when the secured form no longer fits.
-                if (!frame.tpdu.assign(std::span<const uint8_t>(secureTpdu.data(), result.value()))) {
-                    KNX_LOGE(TAG, "Secured APDU (%zu octets) exceeds the TPDU buffer", result.value());
-                    return util::ErrorCode::BufferTooSmall;
-                }
-            }
-            return util::Result<void>::ok();
-        });
-
-        _transport->setRxTransform([this](transport::TDataFrame& frame) -> util::Result<void> {
-            if (!_secureAl || frame.tpdu.size() < 2) {
-                return util::Result<void>::ok();
-            }
-
-            std::array<uint8_t, security::DataSecureSession::kMaxPlainApduSize> plainTpdu{};
-            const auto result = _secureAl->processIncoming(secureFrameInfo(frame), frame.tpdu, plainTpdu);
-            switch (result.disposition) {
-                case security::SecureRxDisposition::Plain:
-                    // Written rather than left at the default: the field only
-                    // ever grants permissions, so the one place that knows a
-                    // frame arrived unprotected says so outright.
-                    frame.security = RequestSecurity{};
-                    return util::Result<void>::ok();
-                case security::SecureRxDisposition::Unwrapped:
-                    frame.security = result.security;
-                    if (!frame.tpdu.assign(std::span<const uint8_t>(plainTpdu.data(), result.plainLength))) {
-                        // Dropping is the only safe outcome: leaving the frame
-                        // alone would deliver the still-encrypted APDU upwards.
-                        KNX_LOGE(TAG, "Unwrapped APDU (%zu octets) exceeds the TPDU buffer",
-                                 result.plainLength);
-                        return util::ErrorCode::BufferTooSmall;
-                    }
-                    return util::Result<void>::ok();
-                case security::SecureRxDisposition::Consumed:
-                    return util::ErrorCode::FrameConsumed;
-                case security::SecureRxDisposition::Rejected:
-                    break;
-            }
-            return util::ErrorCode::OperationNotSupported;
-        });
-    }
-#else
-    void configureSecurity(objects::SecurityInterfaceObject* /*securityObject*/,
-                           const std::shared_ptr<void>& /*sessions*/,
-                           platform::Platform& /*platform*/) {
-        // Security disabled build: no-op
+    _ownAddress = ownAddress;
+    if (_secureAl) {
+        _secureAl->setOwnAddress(ownAddress);
     }
 #endif
-
-    void setFunctionPropertyHandler(application::FunctionPropertyHandler handler) {
-        if (_application) {
-            _application->functionPropertyServices().setHandler(std::move(handler));
-        }
-    }
-
-    void setExtendedFunctionPropertyProvider(
-        application::PropertyExtServices::FunctionProvider provider) {
-        if (_application) {
-            _application->propertyExtServices().setFunctionProvider(std::move(provider));
-        }
-    }
-
-    void setDomainAddress(std::span<const uint8_t> domainAddress) {
-        if (_application) {
-            _application->networkParameterService().setDomainAddress(domainAddress);
-        }
-    }
-
-    void setDomainAddressWriteCallback(application::DomainAddressWriteCallback callback) {
-        if (_application) {
-            _application->networkParameterService().setDomainAddressWriteCallback(std::move(callback));
-        }
-    }
-
-    void setAuthorizationKeys(const application::AuthorizationService::KeyTable& keys) {
-        if (_application) {
-            _application->authorizationService().restoreKeyTable(keys);
-        }
-    }
-
-    void setCommissioningSerialNumber(const application::KnxSerialNumber& serialNumber) {
-        if (_application) {
-            _application->networkParameterService().setSerialNumber(serialNumber);
-        }
-        _serialNumber = serialNumber;
-#if KNX_SECURE_ENABLED
-        if (_secureAl) {
-            _secureAl->setSerialNumber(serialNumber);
-        }
-#endif
-    }
-
-    void setDeviceMedium(MediumType medium) {
-        if (!_application) {
-            return;
-        }
-
-        // Only the medium nibble of the mask version changes: the firmware type
-        // and version identify the stack, not the wire it sits on. The same
-        // table numbers the medium in the exported catalogue entry, which is
-        // what ETS compares this descriptor against.
-        const uint16_t mask = application::systemBMaskVersion(medium);
-        auto descriptor = application::DeviceDescriptor::createDefault();
-        descriptor.type0.maskHigh = static_cast<uint8_t>(mask >> 8);
-        descriptor.type0.maskLow = static_cast<uint8_t>(mask & 0xFFu);
-        descriptor.type2.mediumType = medium;
-        _application->deviceDescriptorService().setDescriptor(descriptor);
-    }
-
-    void registerPropertyObject(InterfaceObjectType objectType,
-                                InterfaceObjectIndex objectIndex) {
-        if (!_application) {
-            return;
-        }
-
-        _application->registerPropertyObject(objectType, objectIndex);
-    }
-
-    void setPropertyReadProvider(StackPort::PropertyReadProvider provider) {
-        if (_application) {
-            _application->setPropertyReadProvider(std::move(provider));
-        }
-    }
-
-    void setPropertyWriteProvider(StackPort::PropertyWriteProvider provider) {
-        if (_application) {
-            _application->setPropertyWriteProvider(std::move(provider));
-        }
-    }
-
-    void setPropertyDescriptionProvider(StackPort::PropertyDescriptionProvider provider) {
-        if (_application) {
-            _application->setPropertyDescriptionProvider(std::move(provider));
-        }
-    }
-
-    bool memoryRegionWritten(MemoryAddress regionStart) const {
-        return _application ? _application->memoryRegionWritten(regionStart) : false;
-    }
-
-    util::Result<void> registerMemoryRegion(const application::MemoryRegion& region,
-                                            std::span<uint8_t> storage) {
-        return _application ? _application->registerMemoryRegion(region, storage)
-                            : util::Result<void>::err(util::ErrorCode::NotInitialized);
-    }
-
-    util::Result<void> sendGroupValueWrite(const GroupAddress& address, std::span<const uint8_t> data) {
-        return _application ? _application->sendGroupValueWrite(address, data)
-                            : util::Result<void>::err(util::ErrorCode::InvalidParameter);
-    }
-
-    util::Result<void> beginSendGroupValueWrite(const GroupAddress& address, std::span<const uint8_t> data) {
-        return _application ? _application->beginSendGroupValueWrite(address, data)
-                            : util::Result<void>::err(util::ErrorCode::InvalidParameter);
-    }
-
-    util::Result<void> sendGroupValueRead(const GroupAddress& address) {
-        return _application ? _application->sendGroupValueRead(address)
-                            : util::Result<void>::err(util::ErrorCode::InvalidParameter);
-    }
-
-    util::Result<void> beginSendGroupValueRead(const GroupAddress& address) {
-        return _application ? _application->beginSendGroupValueRead(address)
-                            : util::Result<void>::err(util::ErrorCode::InvalidParameter);
-    }
-
-    util::Result<StackPort::TransmissionProgressState> pollTransmissionProgress() {
-        if (!_application) {
-            return util::ErrorCode::InvalidParameter;
-        }
-
-        const auto progress = _application->pollSendData();
-        if (progress.isError()) {
-            return progress.error();
-        }
-        return toBauTransmissionProgressState(progress.value());
-    }
-
-    bool transmissionInProgress() const {
-        return _application && _application->transmissionInProgress();
-    }
-
-    void setDefaultTransmissionOptions(const StackPort::TransmissionOptions& options) {
-        if (_application) {
-            _application->setDefaultSendOptions(toApplicationTransmissionOptions(options));
-        }
-    }
-
-    bool popTransmissionOutcome(StackPort::TransmissionOutcome& outcome) {
-        if (!_application) {
-            return false;
-        }
-
-        application::ASendOutcome applicationOutcome;
-        if (!_application->popSendOutcome(applicationOutcome)) {
-            return false;
-        }
-
-        outcome = toBauTransmissionOutcome(applicationOutcome);
-        return true;
-    }
-
-    size_t queuedTransmissionOutcomeCount() const {
-        return _application ? _application->queuedSendOutcomeCount() : 0U;
-    }
-
-    util::Result<void> sendGroupValueResponse(const GroupAddress& address, std::span<const uint8_t> data) {
-        return _application ? _application->sendGroupValueResponse(address, data)
-                            : util::Result<void>::err(util::ErrorCode::InvalidParameter);
-    }
-
-    util::Result<void> beginSendGroupValueResponse(const GroupAddress& address, std::span<const uint8_t> data) {
-        return _application ? _application->beginSendGroupValueResponse(address, data)
-                            : util::Result<void>::err(util::ErrorCode::InvalidParameter);
-    }
-
-private:
-#if KNX_SECURE_ENABLED
-    /// Translate a transport frame into the identity the S-AL binds into CCM.
-    static security::SecureFrameInfo secureFrameInfo(const transport::TDataFrame& frame) {
-        security::SecureFrameInfo info;
-        info.source = frame.source;
-        info.destination = frame.destination.raw;
-        info.destinationType = frame.destinationType;
-        info.tpci6 = frame.securityTpci6;
-        info.connected = frame.service == transport::TDataService::Connected;
-        return info;
-    }
-#endif
-
-    std::unique_ptr<network::NetworkLayer> _network;
-    std::unique_ptr<transport::TransportLayer> _transport;
-    std::unique_ptr<application::ApplicationLayer> _application;
-#if KNX_SECURE_ENABLED
-    std::unique_ptr<security::SecureApplicationLayer> _secureAl;
-#endif
-    IndividualAddress _ownAddress{};
-    application::KnxSerialNumber _serialNumber{};
-    bool _programmingModeEnabled{false};
-
-public:
-    /// The network layer, so a coupler can hand it locally relevant frames
-    /// after taking over the data link layer's receive callback.
-    network::NetworkLayer* networkLayer() { return _network.get(); }
-};
-
-struct Tp1LifecycleState {
-    bool initialized{false};
-};
-
-struct Tp1SubscriptionState {
-    util::FixedVector<GroupAddress, datalink::Tp1DataLinkLayer::MAX_GROUP_ADDRESSES> groupAddresses;
-};
-
-struct Tp1CallbackState {
-    StackPort::InboundCallback inboundCallback;
-    StackPort::WorkAvailableCallback workAvailableCallback;
-};
-
-struct Tp1TransmissionState {
-    StackPort::TransmissionOptions defaultTransmissionOptions{};
-};
+    _application->setProgrammingModeEnabled(_programmingModeEnabled);
+    _application->setDefaultSendOptions(toApplicationTransmissionOptions(_defaultTransmissionOptions));
+    return _application->init(ownAddress);
+}
 
 /**
- * @brief The second port and routing engine of a coupler.
+ * Bring up the second port and the routing engine, for a stack port built
+ * as a coupler. No-op otherwise.
  *
- * Present only when the stack port was built as a coupler. The primary medium
- * carries this device's own stack exactly as it does for an end device; this
- * adds the secondary medium and the forwarding decision between the two.
+ * Order matters: this runs *after* the application stack, because
+ * TwoPortCoupler::init() takes over both data link layers' receive
+ * callbacks — including the one NetworkLayer installed a moment ago. The
+ * local-delivery callback hands the displaced frames back, so the device's
+ * own stack keeps working while the coupler routes.
  */
-struct Tp1CouplerState {
-    std::unique_ptr<Tp1MediumBundle> secondaryMedium;
-    std::unique_ptr<network::TwoPortCoupler> coupler;
-
-    bool isCoupler() const { return secondaryMedium != nullptr; }
-};
-
-class Tp1LowerStackContext final {
-public:
-    template <typename PhysicalT>
-    Tp1LowerStackContext(platform::Platform& platformRef,
-                         std::unique_ptr<PhysicalT> physicalLayer)
-        : platform(platformRef)
-        , medium(platformRef, std::move(physicalLayer))
-    {
-    }
-
-#if KNX_FEATURE_TP1
-    Tp1LowerStackContext(platform::Platform& platformRef,
-                         std::unique_ptr<physical::Tp1MediumBackend> mediumBackend)
-        : platform(platformRef)
-        , medium(platformRef, std::move(mediumBackend))
-    {
-    }
-#endif
-
-    platform::Platform& platform;
-    Tp1MediumBundle medium;
-    Tp1CouplerState couplerState;
-    Tp1ApplicationStackBundle application;
-    Tp1LifecycleState lifecycle;
-    Tp1SubscriptionState subscriptions;
-    Tp1CallbackState callbacks;
-    Tp1TransmissionState transmission;
-#if KNX_SECURE_ENABLED
-    struct SecurityState {
-        objects::SecurityInterfaceObject* securityObject{nullptr};
-    } security;
-#endif
-};
-
-#if KNX_SECURE_ENABLED
-void installTp1SecurityTransforms(const std::shared_ptr<Tp1LowerStackContext>& context)
+util::Result<void> BusAccessStackPort::initCoupler(const IndividualAddress& ownAddress,
+                                                   datalink::Tp1DataLinkLayer& primaryDataLink)
 {
-    context->application.configureSecurity(context->security.securityObject,
-                                           context->platform);
+    if (!_secondaryMedium) {
+        return util::Result<void>::ok();
+    }
+
+    // The secondary port answers to the same individual address and the
+    // same group addresses: a coupler is one device with two attachments,
+    // not two devices.
+    auto secondaryInit = _secondaryMedium->init(ownAddress, _groupAddresses);
+    if (secondaryInit.isError()) {
+        return secondaryInit;
+    }
+
+    auto* secondaryDataLink = _secondaryMedium->dataLinkLayer();
+    if (!secondaryDataLink) {
+        return util::Result<void>::err(util::ErrorCode::InvalidParameter);
+    }
+
+    if (!_coupler) {
+        _coupler = std::make_unique<network::TwoPortCoupler>(primaryDataLink, *secondaryDataLink);
+    }
+
+    auto* networkLayer = _network.get();
+    if (!networkLayer) {
+        return util::Result<void>::err(util::ErrorCode::NotInitialized);
+    }
+    _coupler->setLocalDeliveryCallback(
+        [networkLayer](network::CouplerPort, const datalink::LDataFrame& frame) {
+            networkLayer->deliverLocalFrame(frame);
+        });
+
+    auto addressResult = _coupler->setOwnAddress(ownAddress);
+    if (addressResult.isError()) {
+        return addressResult;
+    }
+    return _coupler->init();
 }
+
+util::Result<void> BusAccessStackPort::init(const IndividualAddress& ownAddress)
+{
+    auto mediumInit = _medium->init(ownAddress, _groupAddresses);
+    if (mediumInit.isError()) {
+        return mediumInit;
+    }
+
+    auto* dataLink = _medium->dataLinkLayer();
+    if (!dataLink) {
+        return util::Result<void>::err(util::ErrorCode::InvalidParameter);
+    }
+
+    auto appInit = initApplicationStack(*dataLink, ownAddress);
+    if (appInit.isError()) {
+        return appInit;
+    }
+
+#if KNX_SECURE_ENABLED
+    configureSecurity();
+#endif
+    if (_inboundCallback) {
+        installInboundCallback();
+    }
+    if (_workAvailableCallback) {
+        _application->setReceiveWorkAvailableCallback(_workAvailableCallback);
+    }
+
+    auto couplerInit = initCoupler(ownAddress, *dataLink);
+    if (couplerInit.isError()) {
+        return couplerInit;
+    }
+
+    _initialized = true;
+    return util::Result<void>::ok();
+}
+
+void BusAccessStackPort::close()
+{
+    _initialized = false;
+    if (_coupler) {
+        _coupler->close();
+    }
+    if (_application) {
+        _application->close();
+    }
+    if (_transport) {
+        _transport->close();
+    }
+    if (_network) {
+        _network->close();
+    }
+    if (_secondaryMedium) {
+        _secondaryMedium->close();
+    }
+    _medium->close();
+}
+
+void BusAccessStackPort::executePendingRestart()
+{
+    if (_application) {
+        _application->restartService().executePendingRestart();
+    }
+}
+
+void BusAccessStackPort::setRestartHandler(application::RestartService::RestartCallback handler)
+{
+    if (_application) {
+        _application->restartService().setRestartCallback(std::move(handler));
+    }
+}
+
+void BusAccessStackPort::setManagementServerHooks(application::ApplicationLayer::ManagementServerHooks hooks)
+{
+    if (_application) {
+        _application->setManagementServerHooks(std::move(hooks));
+    }
+}
+
+util::Result<void> BusAccessStackPort::setOwnAddress(const IndividualAddress& ownAddress)
+{
+    auto* dataLink = _medium->dataLinkLayer();
+    if (!dataLink) {
+        return util::Result<void>::err(util::ErrorCode::InvalidParameter);
+    }
+
+    dataLink->setOwnAddress(ownAddress);
+    if (!_transport || !_application) {
+        return util::Result<void>::err(util::ErrorCode::InvalidParameter);
+    }
+    auto transportResult = _transport->setOwnAddress(ownAddress);
+    if (transportResult.isError()) {
+        return transportResult.error();
+    }
+    _application->setOwnAddress(ownAddress);
+#if KNX_SECURE_ENABLED
+    _ownAddress = ownAddress;
+    if (_secureAl) {
+        _secureAl->setOwnAddress(ownAddress);
+    }
 #endif
 
-class Tp1LifecycleServices final : public LowerStackLifecycle {
-public:
-    explicit Tp1LifecycleServices(std::shared_ptr<Tp1LowerStackContext> context)
-        : _context(std::move(context))
-    {
+    // A coupler's role and every point-to-point routing decision are
+    // derived from its own address, so an ETS address assignment has to
+    // reach the routing policy too — otherwise the device would answer to
+    // its new address while still routing for the old one.
+    if (_secondaryMedium) {
+        if (auto* secondary = _secondaryMedium->dataLinkLayer()) {
+            secondary->setOwnAddress(ownAddress);
+        }
+        if (_coupler) {
+            auto couplerRes = _coupler->setOwnAddress(ownAddress);
+            if (couplerRes.isError()) {
+                return couplerRes;
+            }
+        }
+    }
+    return util::Result<void>::ok();
+}
+
+void BusAccessStackPort::setIndividualAddressUpdateCallback(
+    application::ApplicationLayer::IndividualAddressUpdateCallback callback)
+{
+    if (_application) {
+        _application->setIndividualAddressUpdateCallback(std::move(callback));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Medium access
+// ---------------------------------------------------------------------------
+
+void BusAccessStackPort::processBackgroundWork()
+{
+    _medium->processBackgroundWork();
+    // The second port needs pumping on the same cadence, or traffic
+    // arriving on it would only be seen when something else happened to
+    // wake the stack.
+    if (_secondaryMedium) {
+        _secondaryMedium->processBackgroundWork();
+    }
+    if (_application) {
+        _application->processBackgroundWork();
+    }
+}
+
+util::Result<void> BusAccessStackPort::sendDataLinkFrame(const datalink::LDataFrame& frame)
+{
+    auto primaryResult = _medium->sendDataLinkFrame(frame);
+
+    // A coupler is reachable from both subnetworks, so its own telegrams
+    // have to leave by both. Sending only on the primary would mean a
+    // device on the sub line could address the coupler but never get an
+    // answer. This is the coupler's own traffic only — forwarded frames go
+    // out through TwoPortCoupler, which picks the correct single port.
+    if (_secondaryMedium) {
+        auto secondaryResult = _secondaryMedium->sendDataLinkFrame(frame);
+        if (primaryResult.isError()) {
+            return secondaryResult;
+        }
+    }
+    return primaryResult;
+}
+
+void BusAccessStackPort::setDataLinkPromiscuousMode(datalink::PromiscuousMode mode)
+{
+    _medium->setDataLinkPromiscuousMode(mode);
+}
+
+util::Result<void> BusAccessStackPort::addGroupAddress(const GroupAddress& address)
+{
+    const auto existing = std::find(_groupAddresses.begin(), _groupAddresses.end(), address);
+    if (existing == _groupAddresses.end()) {
+        if (!_groupAddresses.push_back(address)) {
+            return util::ErrorCode::BufferTooSmall;
+        }
     }
 
-private:
-    /**
-     * Bring up the second port and the routing engine, for a stack port built
-     * as a coupler. No-op otherwise.
-     *
-     * Order matters: this runs *after* the application stack, because
-     * TwoPortCoupler::init() takes over both data link layers' receive
-     * callbacks — including the one NetworkLayer installed a moment ago. The
-     * local-delivery callback hands the displaced frames back, so the device's
-     * own stack keeps working while the coupler routes.
-     */
-    util::Result<void> initCoupler(const IndividualAddress& ownAddress,
-                                   datalink::Tp1DataLinkLayer& primaryDataLink) {
-        auto& state = _context->couplerState;
-        if (!state.isCoupler()) {
-            return util::Result<void>::ok();
-        }
-
-        // The secondary port answers to the same individual address and the
-        // same group addresses: a coupler is one device with two attachments,
-        // not two devices.
-        auto secondaryInit = state.secondaryMedium->init(ownAddress,
-                                                         _context->subscriptions.groupAddresses);
-        if (secondaryInit.isError()) {
-            return secondaryInit;
-        }
-
-        auto* secondaryDataLink = state.secondaryMedium->dataLinkLayer();
-        if (!secondaryDataLink) {
-            return util::Result<void>::err(util::ErrorCode::InvalidParameter);
-        }
-
-        if (!state.coupler) {
-            state.coupler = std::make_unique<network::TwoPortCoupler>(primaryDataLink,
-                                                                      *secondaryDataLink);
-        }
-
-        auto* networkLayer = _context->application.networkLayer();
-        if (!networkLayer) {
-            return util::Result<void>::err(util::ErrorCode::NotInitialized);
-        }
-        state.coupler->setLocalDeliveryCallback(
-            [networkLayer](network::CouplerPort, const datalink::LDataFrame& frame) {
-                networkLayer->deliverLocalFrame(frame);
-            });
-
-        auto addressResult = state.coupler->setOwnAddress(ownAddress);
-        if (addressResult.isError()) {
-            return addressResult;
-        }
-        return state.coupler->init();
-    }
-
-public:
-
-    util::Result<void> init(const IndividualAddress& ownAddress) override {
-        auto mediumInit = _context->medium.init(ownAddress,
-                                                _context->subscriptions.groupAddresses);
-        if (mediumInit.isError()) {
-            return mediumInit;
-        }
-
-        auto* dataLink = _context->medium.dataLinkLayer();
-        if (!dataLink) {
-            return util::Result<void>::err(util::ErrorCode::InvalidParameter);
-        }
-
-        auto appInit = _context->application.init(*dataLink,
-                                                  _context->platform,
-                                                  ownAddress,
-                                                  _context->transmission.defaultTransmissionOptions);
-        if (appInit.isError()) {
-            return appInit;
-        }
-
-    #if KNX_SECURE_ENABLED
-        installTp1SecurityTransforms(_context);
-    #endif
-        if (_context->callbacks.inboundCallback) {
-            _context->application.setInboundCallback(_context->callbacks.inboundCallback);
-        }
-        if (_context->callbacks.workAvailableCallback) {
-            _context->application.setWorkAvailableCallback(_context->callbacks.workAvailableCallback);
-        }
-
-        auto couplerInit = initCoupler(ownAddress, *dataLink);
-        if (couplerInit.isError()) {
-            return couplerInit;
-        }
-
-        _context->lifecycle.initialized = true;
+    if (!_initialized) {
         return util::Result<void>::ok();
     }
 
-    void close() override {
-        _context->lifecycle.initialized = false;
-        if (_context->couplerState.coupler) {
-            _context->couplerState.coupler->close();
-        }
-        _context->application.close();
-        if (_context->couplerState.secondaryMedium) {
-            _context->couplerState.secondaryMedium->close();
-        }
-        _context->medium.close();
-    }
-
-    void executePendingRestart() override {
-        _context->application.executePendingRestart();
-    }
-
-    void setRestartHandler(application::RestartService::RestartCallback handler) override {
-        _context->application.setRestartHandler(std::move(handler));
-    }
-
-    void setManagementServerHooks(application::ApplicationLayer::ManagementServerHooks hooks) override {
-        _context->application.setManagementServerHooks(std::move(hooks));
-    }
-
-    util::Result<void> setOwnAddress(const IndividualAddress& ownAddress) override {
-        auto* dataLink = _context->medium.dataLinkLayer();
-        if (!dataLink) {
-            return util::Result<void>::err(util::ErrorCode::InvalidParameter);
-        }
-
-        dataLink->setOwnAddress(ownAddress);
-        auto res = _context->application.setOwnAddress(ownAddress);
-        if (res.isError()) {
-            return res;
-        }
-
-        // A coupler's role and every point-to-point routing decision are
-        // derived from its own address, so an ETS address assignment has to
-        // reach the routing policy too — otherwise the device would answer to
-        // its new address while still routing for the old one.
-        auto& state = _context->couplerState;
-        if (state.isCoupler()) {
-            if (auto* secondary = state.secondaryMedium->dataLinkLayer()) {
-                secondary->setOwnAddress(ownAddress);
-            }
-            if (state.coupler) {
-                auto couplerRes = state.coupler->setOwnAddress(ownAddress);
-                if (couplerRes.isError()) {
-                    return couplerRes;
-                }
-            }
-        }
-        return util::Result<void>::ok();
-    }
-
-    void setIndividualAddressUpdateCallback(application::ApplicationLayer::IndividualAddressUpdateCallback callback) override {
-        _context->application.setIndividualAddressUpdateCallback(std::move(callback));
-    }
-
-private:
-    std::shared_ptr<Tp1LowerStackContext> _context;
-};
-
-class Tp1MediumAccess final : public LowerStackMediumAccess {
-public:
-    explicit Tp1MediumAccess(std::shared_ptr<Tp1LowerStackContext> context)
-        : _context(std::move(context))
-    {
-    }
-
-    void processBackgroundWork() override {
-        _context->medium.processBackgroundWork();
-        // The second port needs pumping on the same cadence, or traffic
-        // arriving on it would only be seen when something else happened to
-        // wake the stack.
-        if (_context->couplerState.secondaryMedium) {
-            _context->couplerState.secondaryMedium->processBackgroundWork();
-        }
-    }
-
-    util::Result<void> sendDataLinkFrame(const datalink::LDataFrame& frame) override {
-        auto primaryResult = _context->medium.sendDataLinkFrame(frame);
-
-        // A coupler is reachable from both subnetworks, so its own telegrams
-        // have to leave by both. Sending only on the primary would mean a
-        // device on the sub line could address the coupler but never get an
-        // answer. This is the coupler's own traffic only — forwarded frames go
-        // out through TwoPortCoupler, which picks the correct single port.
-        auto& state = _context->couplerState;
-        if (state.isCoupler()) {
-            auto secondaryResult = state.secondaryMedium->sendDataLinkFrame(frame);
-            if (primaryResult.isError()) {
-                return secondaryResult;
-            }
-        }
+    auto primaryResult = _medium->addGroupAddress(address);
+    if (primaryResult.isError()) {
         return primaryResult;
     }
 
-    void setDataLinkPromiscuousMode(datalink::PromiscuousMode mode) override {
-        _context->medium.setDataLinkPromiscuousMode(mode);
+    // Both ports must acknowledge this device's group addresses; a coupler
+    // subscribes as one device however many attachments it has.
+    if (_secondaryMedium) {
+        return _secondaryMedium->addGroupAddress(address);
     }
+    return primaryResult;
+}
 
-private:
-    std::shared_ptr<Tp1LowerStackContext> _context;
-};
-
-class Tp1SecurityConfiguration final : public LowerStackSecurityConfiguration {
-public:
-    explicit Tp1SecurityConfiguration(std::shared_ptr<Tp1LowerStackContext> context)
-        : _context(std::move(context))
-    {
+util::Result<void> BusAccessStackPort::refreshMulticastMembership()
+{
+#if KNX_FEATURE_NETIP
+    if (auto* routing = _medium->ipRoutingPhysical()) {
+        return routing->refreshMulticastMembership();
     }
-
-    void setFunctionPropertyHandler(application::FunctionPropertyHandler handler) override {
-        _context->application.setFunctionPropertyHandler(std::move(handler));
-    }
-
-    void setExtendedFunctionPropertyProvider(
-        application::PropertyExtServices::FunctionProvider provider) override {
-        _context->application.setExtendedFunctionPropertyProvider(std::move(provider));
-    }
-
-    void setCommissioningSerialNumber(const application::KnxSerialNumber& serialNumber) override {
-        _context->application.setCommissioningSerialNumber(serialNumber);
-    }
-
-    void setDomainAddress(std::span<const uint8_t> domainAddress) override {
-        _context->application.setDomainAddress(domainAddress);
-    }
-
-    void setDomainAddressWriteCallback(application::DomainAddressWriteCallback callback) override {
-        _context->application.setDomainAddressWriteCallback(std::move(callback));
-    }
-
-    void setAuthorizationKeys(const application::AuthorizationService::KeyTable& keys) override {
-        _context->application.setAuthorizationKeys(keys);
-    }
-
-    void setDeviceMedium(MediumType medium) override {
-        _context->application.setDeviceMedium(medium);
-    }
-
-    void configureDataSecure(objects::SecurityInterfaceObject& securityObject) override {
-#if KNX_SECURE_ENABLED
-        _context->security.securityObject = &securityObject;
-        _context->application.configureSecurity(_context->security.securityObject,
-                            _context->platform);
-#else
-        (void)securityObject;
 #endif
+    return util::ErrorCode::OperationNotSupported;
+}
+
+LinkDiagnostics BusAccessStackPort::linkDiagnostics() const
+{
+    LinkDiagnostics out;
+    if (const auto* dataLink = _medium->dataLinkLayer()) {
+        const auto stats = dataLink->getStatistics();
+        out.rxFrames = stats.rxFrames;
+        out.rxFilterDropped = stats.filterDropped;
+        out.rxPoolDropped = stats.rxDropped;
+        out.rxDecodeFailed = stats.decodeFailed;
     }
 
-private:
-    std::shared_ptr<Tp1LowerStackContext> _context;
-};
+#if KNX_FEATURE_NETIP
+    // Only a routing port keeps these; every other medium leaves them zero,
+    // which is the honest answer rather than a fabricated one.
+    if (const auto* routing = _medium->ipRoutingPhysical()) {
+        const auto link = routing->linkStatistics();
+        out.mediumDatagramsReceived = link.datagramsReceived;
+        out.mediumDatagramsDropped = link.datagramsDropped;
+        out.multicastRefreshes = link.membershipRefreshes;
+        out.msSinceLastInbound = link.msSinceLastInbound;
+    }
+#endif
+    return out;
+}
 
-class Tp1InboundConfiguration final : public LowerStackInboundConfiguration {
-public:
-    explicit Tp1InboundConfiguration(std::shared_ptr<Tp1LowerStackContext> context)
-        : _context(std::move(context))
-    {
+// ---------------------------------------------------------------------------
+// Security and device configuration
+// ---------------------------------------------------------------------------
+
+#if KNX_SECURE_ENABLED
+void BusAccessStackPort::configureSecurity()
+{
+    auto* securityObject = _securityObject;
+    if (!_transport || !securityObject) {
+        return;
     }
 
-    void setInboundCallback(StackPort::InboundCallback callback) override {
-        _context->callbacks.inboundCallback = std::move(callback);
-        if (_context->callbacks.inboundCallback) {
-            _context->application.setInboundCallback(_context->callbacks.inboundCallback);
+    if (!_secureAl) {
+        auto& platform = _platform;
+        _secureAl = std::make_unique<security::SecureApplicationLayer>(
+            *securityObject,
+            [&platform]() { return platform.millis(); },
+            [&platform](std::span<uint8_t> out) { platform.randomBytes(out); });
+    }
+    _secureAl->setOwnAddress(_ownAddress);
+    _secureAl->setSerialNumber(_serialNumber);
+
+    // The Access Policies have a Security Mode Off and a Security Mode On
+    // column (03/4/1 Table 3); this is what tells the application layer
+    // which one it is in. Installed here because this is the one place
+    // that holds the Security Interface Object.
+    if (_application) {
+        _application->setSecurityModeProvider([securityObject]() {
+            return securityObject->isSecurityEnabled();
+        });
+    }
+
+    // The S-AL builds the S-A_Sync_Response itself and needs a way out that
+    // does not go back through the TX transform (the APDU is already
+    // secured). Sending it straight to the transport keeps the response on
+    // the communication mode the request arrived on, as §5.3.2 requires.
+    auto* transport = _transport.get();
+    _secureAl->setTpciResolver([transport](const security::SecureFrameInfo& info) -> uint8_t {
+        if (!info.connected || info.destinationType != AddressType::Individual) {
+            return 0;
         }
-    }
+        return transport->connectedTxTpci6(IndividualAddress(info.destination));
+    });
+    _secureAl->setFrameSink([transport](const security::SecureFrameInfo& info,
+                                        std::span<const uint8_t> tpdu) -> util::Result<void> {
+        transport::TDataFrame frame;
+        frame.service = info.connected ? transport::TDataService::Connected
+                      : info.destinationType == AddressType::Individual
+                          ? transport::TDataService::Individual
+                          : transport::TDataService::Group;
+        frame.source = info.source;
+        frame.destination = GroupAddress(info.destination);
+        frame.destinationType = info.destinationType;
+        frame.priority = Priority::System;
+        // Every TX path in the stack clears this, and it is not decoration:
+        // Tp1MacPhysical opens an L_ACK window whenever CTRL bit 1 is set,
+        // and a (system) broadcast is never acknowledged on TP1. Leaving the
+        // TDataFrame default of true made the MAC wait for an ACK nobody
+        // sends, repeat the response three times and report the send failed.
+        frame.ackRequested = false;
+        frame.securityTpci6 = info.tpci6;
+        frame.tpdu.assign(tpdu);
+        return transport->sendFrame(frame);
+    });
 
-    void setWorkAvailableCallback(StackPort::WorkAvailableCallback callback) override {
-        _context->callbacks.workAvailableCallback = std::move(callback);
-        _context->application.setWorkAvailableCallback(_context->callbacks.workAvailableCallback);
-    }
+    _transport->setTxTransform([this](transport::TDataFrame& frame) -> util::Result<void> {
+        if (!_secureAl || frame.tpdu.size() < 2) {
+            return util::Result<void>::ok();
+        }
 
-private:
-    std::shared_ptr<Tp1LowerStackContext> _context;
-};
-
-class Tp1SubscriptionConfiguration final : public LowerStackSubscriptionConfiguration {
-public:
-    explicit Tp1SubscriptionConfiguration(std::shared_ptr<Tp1LowerStackContext> context)
-        : _context(std::move(context))
-    {
-    }
-
-    util::Result<void> addGroupAddress(const GroupAddress& address) override {
-        const auto existing = std::find(_context->subscriptions.groupAddresses.begin(),
-                                        _context->subscriptions.groupAddresses.end(),
-                                        address);
-        if (existing == _context->subscriptions.groupAddresses.end()) {
-            if (!_context->subscriptions.groupAddresses.push_back(address)) {
+        std::array<uint8_t, security::DataSecureSession::kMaxSecureTpduSize> secureTpdu{};
+        auto result = _secureAl->processOutgoing(secureFrameInfo(frame), frame.tpdu, secureTpdu);
+        if (result.isError()) {
+            return result.error();
+        }
+        if (result.value() != 0) {
+            // Refuse the send rather than let a frame that should have been
+            // secured go out in plain: assign() leaves the TPDU untouched
+            // when the secured form no longer fits.
+            if (!frame.tpdu.assign(std::span<const uint8_t>(secureTpdu.data(), result.value()))) {
+                KNX_LOGE(TAG, "Secured APDU (%zu octets) exceeds the TPDU buffer", result.value());
                 return util::ErrorCode::BufferTooSmall;
             }
         }
+        return util::Result<void>::ok();
+    });
 
-        if (!_context->lifecycle.initialized) {
+    _transport->setRxTransform([this](transport::TDataFrame& frame) -> util::Result<void> {
+        if (!_secureAl || frame.tpdu.size() < 2) {
             return util::Result<void>::ok();
         }
 
-        auto primaryResult = _context->medium.addGroupAddress(address);
-        if (primaryResult.isError()) {
-            return primaryResult;
+        std::array<uint8_t, security::DataSecureSession::kMaxPlainApduSize> plainTpdu{};
+        const auto result = _secureAl->processIncoming(secureFrameInfo(frame), frame.tpdu, plainTpdu);
+        switch (result.disposition) {
+            case security::SecureRxDisposition::Plain:
+                // Written rather than left at the default: the field only
+                // ever grants permissions, so the one place that knows a
+                // frame arrived unprotected says so outright.
+                frame.security = RequestSecurity{};
+                return util::Result<void>::ok();
+            case security::SecureRxDisposition::Unwrapped:
+                frame.security = result.security;
+                if (!frame.tpdu.assign(std::span<const uint8_t>(plainTpdu.data(), result.plainLength))) {
+                    // Dropping is the only safe outcome: leaving the frame
+                    // alone would deliver the still-encrypted APDU upwards.
+                    KNX_LOGE(TAG, "Unwrapped APDU (%zu octets) exceeds the TPDU buffer",
+                             result.plainLength);
+                    return util::ErrorCode::BufferTooSmall;
+                }
+                return util::Result<void>::ok();
+            case security::SecureRxDisposition::Consumed:
+                return util::ErrorCode::FrameConsumed;
+            case security::SecureRxDisposition::Rejected:
+                break;
         }
-
-        // Both ports must acknowledge this device's group addresses; a coupler
-        // subscribes as one device however many attachments it has.
-        auto& state = _context->couplerState;
-        if (state.isCoupler()) {
-            return state.secondaryMedium->addGroupAddress(address);
-        }
-        return primaryResult;
-    }
-
-private:
-    std::shared_ptr<Tp1LowerStackContext> _context;
-};
-
-class Tp1PropertyAccessServices final : public LowerStackPropertyAccess {
-public:
-    explicit Tp1PropertyAccessServices(std::shared_ptr<Tp1LowerStackContext> context)
-        : _context(std::move(context))
-    {
-    }
-
-    void registerPropertyObject(InterfaceObjectType objectType,
-                                InterfaceObjectIndex objectIndex) override {
-        _context->application.registerPropertyObject(objectType, objectIndex);
-    }
-
-    void setPropertyReadProvider(StackPort::PropertyReadProvider provider) override {
-        _context->application.setPropertyReadProvider(std::move(provider));
-    }
-
-    void setPropertyWriteProvider(StackPort::PropertyWriteProvider provider) override {
-        _context->application.setPropertyWriteProvider(std::move(provider));
-    }
-
-    void setPropertyDescriptionProvider(StackPort::PropertyDescriptionProvider provider) override {
-        _context->application.setPropertyDescriptionProvider(std::move(provider));
-    }
-
-    util::Result<void> registerMemoryRegion(const application::MemoryRegion& region,
-                                            std::span<uint8_t> storage) override {
-        return _context->application.registerMemoryRegion(region, storage);
-    }
-
-    bool memoryRegionWritten(MemoryAddress regionStart) const override {
-        return _context->application.memoryRegionWritten(regionStart);
-    }
-
-private:
-    std::shared_ptr<Tp1LowerStackContext> _context;
-};
-
-class Tp1TransmissionServices final : public LowerStackTransmissionServices {
-public:
-    explicit Tp1TransmissionServices(std::shared_ptr<Tp1LowerStackContext> context)
-        : _context(std::move(context))
-    {
-    }
-
-    void processBackgroundWork() override {
-        _context->application.processBackgroundWork();
-    }
-
-    util::Result<void> sendGroupValueWrite(const GroupAddress& address, std::span<const uint8_t> data) override {
-        return _context->application.sendGroupValueWrite(address, data);
-    }
-
-    util::Result<void> beginSendGroupValueWrite(const GroupAddress& address, std::span<const uint8_t> data) override {
-        return _context->application.beginSendGroupValueWrite(address, data);
-    }
-
-    util::Result<void> sendGroupValueRead(const GroupAddress& address) override {
-        return _context->application.sendGroupValueRead(address);
-    }
-
-    util::Result<void> beginSendGroupValueRead(const GroupAddress& address) override {
-        return _context->application.beginSendGroupValueRead(address);
-    }
-
-    util::Result<StackPort::TransmissionProgressState> pollTransmissionProgress() override {
-        return _context->application.pollTransmissionProgress();
-    }
-
-    bool transmissionInProgress() const override {
-        return _context->application.transmissionInProgress();
-    }
-
-    void setDefaultTransmissionOptions(const StackPort::TransmissionOptions& options) override {
-        _context->transmission.defaultTransmissionOptions = options;
-        _context->application.setDefaultTransmissionOptions(options);
-    }
-
-    const StackPort::TransmissionOptions& defaultTransmissionOptions() const override {
-        return _context->transmission.defaultTransmissionOptions;
-    }
-
-    bool popTransmissionOutcome(StackPort::TransmissionOutcome& outcome) override {
-        return _context->application.popTransmissionOutcome(outcome);
-    }
-
-    size_t queuedTransmissionOutcomeCount() const override {
-        return _context->application.queuedTransmissionOutcomeCount();
-    }
-
-    util::Result<void> sendGroupValueResponse(const GroupAddress& address, std::span<const uint8_t> data) override {
-        return _context->application.sendGroupValueResponse(address, data);
-    }
-
-    util::Result<void> beginSendGroupValueResponse(const GroupAddress& address, std::span<const uint8_t> data) override {
-        return _context->application.beginSendGroupValueResponse(address, data);
-    }
-
-    void setProgrammingModeEnabled(bool enabled) override {
-        _context->application.setProgrammingModeEnabled(enabled);
-    }
-
-    bool programmingModeEnabled() const override {
-        return _context->application.programmingModeEnabled();
-    }
-
-private:
-    std::shared_ptr<Tp1LowerStackContext> _context;
-};
-
-class Tp1StackPort final : public StackPort {
-public:
-#if KNX_FEATURE_TP1
-    Tp1StackPort(platform::Platform& platform,
-                 std::unique_ptr<physical::Tp1MacPhysical> physicalLayer)
-        : _lowerStack(createTp1LowerStackRoles(platform, std::move(physicalLayer)))
-    {
-    }
-
-    /// Coupler form: the device's own stack runs on @p primaryPhysical, and
-    /// @p secondaryPhysical becomes the sub-line the coupler routes to.
-    Tp1StackPort(platform::Platform& platform,
-                 std::unique_ptr<physical::Tp1MacPhysical> primaryPhysical,
-                 std::unique_ptr<physical::Tp1MacPhysical> secondaryPhysical)
-        : _lowerStack(createTp1LowerStackRoles(platform, std::move(primaryPhysical)))
-    {
-        // The medium bundle is built now but only initialised in init(), once
-        // the individual address is known — the coupler's role depends on it.
-        _lowerStack.context->couplerState.secondaryMedium =
-            std::make_unique<Tp1MediumBundle>(platform, std::move(secondaryPhysical));
-    }
-#endif  // KNX_FEATURE_TP1
-
-    network::TwoPortCoupler* coupler() override {
-        return _lowerStack.context ? _lowerStack.context->couplerState.coupler.get() : nullptr;
-    }
-
-    util::Result<void> refreshMulticastMembership() override {
-#if KNX_FEATURE_NETIP
-        if (_lowerStack.context) {
-            if (auto* routing = _lowerStack.context->medium.ipRoutingPhysical()) {
-                return routing->refreshMulticastMembership();
-            }
-        }
-#endif
         return util::ErrorCode::OperationNotSupported;
-    }
-
-    LinkDiagnostics linkDiagnostics() const override {
-        LinkDiagnostics out;
-        if (!_lowerStack.context) {
-            return out;
-        }
-
-        if (const auto* dataLink = _lowerStack.context->medium.dataLinkLayer()) {
-            const auto stats = dataLink->getStatistics();
-            out.rxFrames = stats.rxFrames;
-            out.rxFilterDropped = stats.filterDropped;
-            out.rxPoolDropped = stats.rxDropped;
-            out.rxDecodeFailed = stats.decodeFailed;
-        }
-
-#if KNX_FEATURE_NETIP
-        // Only a routing port keeps these; every other medium leaves them zero,
-        // which is the honest answer rather than a fabricated one.
-        if (const auto* routing = _lowerStack.context->medium.ipRoutingPhysical()) {
-            const auto link = routing->linkStatistics();
-            out.mediumDatagramsReceived = link.datagramsReceived;
-            out.mediumDatagramsDropped = link.datagramsDropped;
-            out.multicastRefreshes = link.membershipRefreshes;
-            out.msSinceLastInbound = link.msSinceLastInbound;
-        }
-#endif
-        return out;
-    }
-
-#if KNX_IP_TUNNELING
-    Tp1StackPort(platform::Platform& platform,
-                 std::unique_ptr<physical::IpTunnelingPhysical> physicalLayer)
-        : _lowerStack(createTp1LowerStackRoles(platform, std::move(physicalLayer)))
-    {
-    }
+    });
+}
 #endif
 
-#if KNX_SECURE_IP_TUNNELING
-    Tp1StackPort(platform::Platform& platform,
-                 std::unique_ptr<physical::IpSecureTunnelingPhysical> physicalLayer)
-        : _lowerStack(createTp1LowerStackRoles(platform, std::move(physicalLayer)))
-    {
+void BusAccessStackPort::configureDataSecure(objects::SecurityInterfaceObject& securityObject)
+{
+#if KNX_SECURE_ENABLED
+    _securityObject = &securityObject;
+    configureSecurity();
+#else
+    (void)securityObject;
+#endif
+}
+
+void BusAccessStackPort::setFunctionPropertyHandler(application::FunctionPropertyHandler handler)
+{
+    if (_application) {
+        _application->functionPropertyServices().setHandler(std::move(handler));
+    }
+}
+
+void BusAccessStackPort::setExtendedFunctionPropertyProvider(
+    application::PropertyExtServices::FunctionProvider provider)
+{
+    if (_application) {
+        _application->propertyExtServices().setFunctionProvider(std::move(provider));
+    }
+}
+
+void BusAccessStackPort::setCommissioningSerialNumber(const application::KnxSerialNumber& serialNumber)
+{
+    if (_application) {
+        _application->networkParameterService().setSerialNumber(serialNumber);
+    }
+#if KNX_SECURE_ENABLED
+    _serialNumber = serialNumber;
+    if (_secureAl) {
+        _secureAl->setSerialNumber(serialNumber);
     }
 #endif
+}
 
-#if KNX_FEATURE_NETIP
-    Tp1StackPort(platform::Platform& platform,
-                 std::unique_ptr<physical::IpRoutingPhysical> physicalLayer)
-        : _lowerStack(createTp1LowerStackRoles(platform, std::move(physicalLayer)))
-    {
+void BusAccessStackPort::setDomainAddress(std::span<const uint8_t> domainAddress)
+{
+    if (_application) {
+        _application->networkParameterService().setDomainAddress(domainAddress);
     }
-#endif  // KNX_FEATURE_NETIP
+}
 
-#if KNX_ENABLE_TEST_HOOKS
-    Tp1StackPort(platform::Platform& platform,
-                 std::unique_ptr<testing::MockTp1Physical> physicalLayer)
-        : _lowerStack(createTp1LowerStackRoles(platform, std::move(physicalLayer)))
-    {
+void BusAccessStackPort::setDomainAddressWriteCallback(application::DomainAddressWriteCallback callback)
+{
+    if (_application) {
+        _application->networkParameterService().setDomainAddressWriteCallback(std::move(callback));
     }
-#endif
+}
 
-#if KNX_FEATURE_TP1
-    Tp1StackPort(platform::Platform& platform,
-                 std::unique_ptr<physical::Tp1MediumBackend> mediumBackend)
-        : _lowerStack(createTp1LowerStackRoles(platform, std::move(mediumBackend)))
-    {
+void BusAccessStackPort::setAuthorizationKeys(const application::AuthorizationService::KeyTable& keys)
+{
+    if (_application) {
+        _application->authorizationService().restoreKeyTable(keys);
     }
-#endif
+}
 
-    util::Result<void> init(const IndividualAddress& ownAddress) override {
-        return _lowerStack.lifecycle->init(ownAddress);
-    }
-
-    void close() override {
-        _lowerStack.lifecycle->close();
+void BusAccessStackPort::setDeviceMedium(MediumType medium)
+{
+    if (!_application) {
+        return;
     }
 
-    void executePendingRestart() override {
-        _lowerStack.lifecycle->executePendingRestart();
+    // Only the medium nibble of the mask version changes: the firmware type
+    // and version identify the stack, not the wire it sits on. The same
+    // table numbers the medium in the exported catalogue entry, which is
+    // what ETS compares this descriptor against.
+    const uint16_t mask = application::systemBMaskVersion(medium);
+    auto descriptor = application::DeviceDescriptor::createDefault();
+    descriptor.type0.maskHigh = static_cast<uint8_t>(mask >> 8);
+    descriptor.type0.maskLow = static_cast<uint8_t>(mask & 0xFFu);
+    descriptor.type2.mediumType = medium;
+    _application->deviceDescriptorService().setDescriptor(descriptor);
+}
+
+// ---------------------------------------------------------------------------
+// Inbound delivery
+// ---------------------------------------------------------------------------
+
+void BusAccessStackPort::installInboundCallback()
+{
+    _application->setReceiveCallback(
+        [callback = _inboundCallback](const IndividualAddress& source,
+                                      const GroupAddress& destination,
+                                      application::APCIService service,
+                                      std::span<const uint8_t> data,
+                                      AddressType destinationType) {
+            callback(source, destination, toBauMessageKind(service), data, destinationType);
+        });
+}
+
+void BusAccessStackPort::setInboundCallback(InboundCallback callback)
+{
+    _inboundCallback = std::move(callback);
+    if (_inboundCallback && _application) {
+        installInboundCallback();
+    }
+}
+
+void BusAccessStackPort::setWorkAvailableCallback(WorkAvailableCallback callback)
+{
+    _workAvailableCallback = std::move(callback);
+    if (_application) {
+        _application->setReceiveWorkAvailableCallback(_workAvailableCallback);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property and memory access
+// ---------------------------------------------------------------------------
+
+void BusAccessStackPort::registerPropertyObject(InterfaceObjectType objectType,
+                                                InterfaceObjectIndex objectIndex)
+{
+    if (_application) {
+        _application->registerPropertyObject(objectType, objectIndex);
+    }
+}
+
+void BusAccessStackPort::setPropertyReadProvider(PropertyReadProvider provider)
+{
+    if (_application) {
+        _application->setPropertyReadProvider(std::move(provider));
+    }
+}
+
+void BusAccessStackPort::setPropertyWriteProvider(PropertyWriteProvider provider)
+{
+    if (_application) {
+        _application->setPropertyWriteProvider(std::move(provider));
+    }
+}
+
+void BusAccessStackPort::setPropertyDescriptionProvider(PropertyDescriptionProvider provider)
+{
+    if (_application) {
+        _application->setPropertyDescriptionProvider(std::move(provider));
+    }
+}
+
+util::Result<void> BusAccessStackPort::registerMemoryRegion(const application::MemoryRegion& region,
+                                                            std::span<uint8_t> storage)
+{
+    return _application ? _application->registerMemoryRegion(region, storage)
+                        : util::Result<void>::err(util::ErrorCode::NotInitialized);
+}
+
+bool BusAccessStackPort::memoryRegionWritten(MemoryAddress regionStart) const
+{
+    return _application ? _application->memoryRegionWritten(regionStart) : false;
+}
+
+// ---------------------------------------------------------------------------
+// Group transmission
+// ---------------------------------------------------------------------------
+
+util::Result<void> BusAccessStackPort::sendGroupValueWrite(const GroupAddress& address,
+                                                           std::span<const uint8_t> data)
+{
+    return _application ? _application->sendGroupValueWrite(address, data)
+                        : util::Result<void>::err(util::ErrorCode::InvalidParameter);
+}
+
+util::Result<void> BusAccessStackPort::beginSendGroupValueWrite(const GroupAddress& address,
+                                                                std::span<const uint8_t> data)
+{
+    return _application ? _application->beginSendGroupValueWrite(address, data)
+                        : util::Result<void>::err(util::ErrorCode::InvalidParameter);
+}
+
+util::Result<void> BusAccessStackPort::sendGroupValueRead(const GroupAddress& address)
+{
+    return _application ? _application->sendGroupValueRead(address)
+                        : util::Result<void>::err(util::ErrorCode::InvalidParameter);
+}
+
+util::Result<void> BusAccessStackPort::beginSendGroupValueRead(const GroupAddress& address)
+{
+    return _application ? _application->beginSendGroupValueRead(address)
+                        : util::Result<void>::err(util::ErrorCode::InvalidParameter);
+}
+
+util::Result<void> BusAccessStackPort::sendGroupValueResponse(const GroupAddress& address,
+                                                              std::span<const uint8_t> data)
+{
+    return _application ? _application->sendGroupValueResponse(address, data)
+                        : util::Result<void>::err(util::ErrorCode::InvalidParameter);
+}
+
+util::Result<void> BusAccessStackPort::beginSendGroupValueResponse(const GroupAddress& address,
+                                                                   std::span<const uint8_t> data)
+{
+    return _application ? _application->beginSendGroupValueResponse(address, data)
+                        : util::Result<void>::err(util::ErrorCode::InvalidParameter);
+}
+
+util::Result<BusAccessStackPort::TransmissionProgressState> BusAccessStackPort::pollTransmissionProgress()
+{
+    if (!_application) {
+        return util::ErrorCode::InvalidParameter;
+    }
+    return _application->pollSendData();
+}
+
+bool BusAccessStackPort::transmissionInProgress() const
+{
+    return _application && _application->transmissionInProgress();
+}
+
+void BusAccessStackPort::setDefaultTransmissionOptions(const TransmissionOptions& options)
+{
+    _defaultTransmissionOptions = options;
+    if (_application) {
+        _application->setDefaultSendOptions(toApplicationTransmissionOptions(options));
+    }
+}
+
+bool BusAccessStackPort::popTransmissionOutcome(TransmissionOutcome& outcome)
+{
+    if (!_application) {
+        return false;
     }
 
-    void setRestartHandler(application::RestartService::RestartCallback handler) override {
-        _lowerStack.lifecycle->setRestartHandler(std::move(handler));
+    application::ASendOutcome applicationOutcome;
+    if (!_application->popSendOutcome(applicationOutcome)) {
+        return false;
     }
 
-    void setManagementServerHooks(application::ApplicationLayer::ManagementServerHooks hooks) override {
-        _lowerStack.lifecycle->setManagementServerHooks(std::move(hooks));
+    outcome = toBauTransmissionOutcome(applicationOutcome);
+    return true;
+}
+
+size_t BusAccessStackPort::queuedTransmissionOutcomeCount() const
+{
+    return _application ? _application->queuedSendOutcomeCount() : 0U;
+}
+
+void BusAccessStackPort::setProgrammingModeEnabled(bool enabled)
+{
+    _programmingModeEnabled = enabled;
+    if (_application) {
+        _application->setProgrammingModeEnabled(enabled);
     }
+}
 
-    void processBackgroundWork() override {
-        _lowerStack.medium->processBackgroundWork();
-        _lowerStack.transmission->processBackgroundWork();
-    }
+bool BusAccessStackPort::programmingModeEnabled() const
+{
+    return _application ? _application->programmingModeEnabled() : _programmingModeEnabled;
+}
 
-    util::Result<void> sendDataLinkFrame(const datalink::LDataFrame& frame) override {
-        return _lowerStack.medium->sendDataLinkFrame(frame);
-    }
+// ---------------------------------------------------------------------------
+// Factories
+// ---------------------------------------------------------------------------
 
-    void setDataLinkPromiscuousMode(datalink::PromiscuousMode mode) override {
-        _lowerStack.medium->setDataLinkPromiscuousMode(mode);
-    }
+namespace {
 
-    util::Result<void> addGroupAddress(const GroupAddress& address) override {
-        return _lowerStack.subscriptions->addGroupAddress(address);
-    }
-
-    util::Result<void> setOwnAddress(const IndividualAddress& ownAddress) override {
-        return _lowerStack.lifecycle->setOwnAddress(ownAddress);
-    }
-
-    void setIndividualAddressUpdateCallback(application::ApplicationLayer::IndividualAddressUpdateCallback callback) override {
-        _lowerStack.lifecycle->setIndividualAddressUpdateCallback(std::move(callback));
-    }
-
-    void configureDataSecure(objects::SecurityInterfaceObject& securityObject) override {
-        _lowerStack.security->configureDataSecure(securityObject);
-    }
-
-    void setFunctionPropertyHandler(application::FunctionPropertyHandler handler) override {
-        _lowerStack.security->setFunctionPropertyHandler(std::move(handler));
-    }
-
-    void setExtendedFunctionPropertyProvider(
-        application::PropertyExtServices::FunctionProvider provider) override {
-        _lowerStack.security->setExtendedFunctionPropertyProvider(std::move(provider));
-    }
-
-    void setCommissioningSerialNumber(const application::KnxSerialNumber& serialNumber) override {
-        _lowerStack.security->setCommissioningSerialNumber(serialNumber);
-    }
-
-    void setDomainAddress(std::span<const uint8_t> domainAddress) override {
-        _lowerStack.security->setDomainAddress(domainAddress);
-    }
-
-    void setDomainAddressWriteCallback(application::DomainAddressWriteCallback callback) override {
-        _lowerStack.security->setDomainAddressWriteCallback(std::move(callback));
-    }
-
-    void setAuthorizationKeys(const application::AuthorizationService::KeyTable& keys) override {
-        _lowerStack.security->setAuthorizationKeys(keys);
-    }
-
-    void setDeviceMedium(MediumType medium) override {
-        _lowerStack.security->setDeviceMedium(medium);
-    }
-
-    void setInboundCallback(InboundCallback callback) override {
-        _lowerStack.inbound->setInboundCallback(std::move(callback));
-    }
-
-    void registerPropertyObject(InterfaceObjectType objectType,
-                                InterfaceObjectIndex objectIndex) override {
-        _lowerStack.properties->registerPropertyObject(objectType, objectIndex);
-    }
-
-    void setPropertyReadProvider(PropertyReadProvider provider) override {
-        _lowerStack.properties->setPropertyReadProvider(std::move(provider));
-    }
-
-    void setPropertyWriteProvider(PropertyWriteProvider provider) override {
-        _lowerStack.properties->setPropertyWriteProvider(std::move(provider));
-    }
-
-    void setPropertyDescriptionProvider(PropertyDescriptionProvider provider) override {
-        _lowerStack.properties->setPropertyDescriptionProvider(std::move(provider));
-    }
-
-    util::Result<void> registerMemoryRegion(const application::MemoryRegion& region,
-                                            std::span<uint8_t> storage) override {
-        return _lowerStack.properties->registerMemoryRegion(region, storage);
-    }
-
-    bool memoryRegionWritten(MemoryAddress regionStart) const override {
-        return _lowerStack.properties->memoryRegionWritten(regionStart);
-    }
-
-    void setWorkAvailableCallback(WorkAvailableCallback callback) override {
-        _lowerStack.inbound->setWorkAvailableCallback(std::move(callback));
-    }
-
-    util::Result<void> sendGroupValueWrite(const GroupAddress& address, std::span<const uint8_t> data) override {
-        return _lowerStack.transmission->sendGroupValueWrite(address, data);
-    }
-
-    util::Result<void> beginSendGroupValueWrite(const GroupAddress& address, std::span<const uint8_t> data) override {
-        return _lowerStack.transmission->beginSendGroupValueWrite(address, data);
-    }
-
-    util::Result<void> sendGroupValueRead(const GroupAddress& address) override {
-        return _lowerStack.transmission->sendGroupValueRead(address);
-    }
-
-    util::Result<void> beginSendGroupValueRead(const GroupAddress& address) override {
-        return _lowerStack.transmission->beginSendGroupValueRead(address);
-    }
-
-    util::Result<TransmissionProgressState> pollTransmissionProgress() override {
-        return _lowerStack.transmission->pollTransmissionProgress();
-    }
-
-    bool transmissionInProgress() const override {
-        return _lowerStack.transmission->transmissionInProgress();
-    }
-
-    void setDefaultTransmissionOptions(const TransmissionOptions& options) override {
-        _lowerStack.transmission->setDefaultTransmissionOptions(options);
-    }
-
-    const TransmissionOptions& defaultTransmissionOptions() const override {
-        return _lowerStack.transmission->defaultTransmissionOptions();
-    }
-
-    bool popTransmissionOutcome(TransmissionOutcome& outcome) override {
-        return _lowerStack.transmission->popTransmissionOutcome(outcome);
-    }
-
-    size_t queuedTransmissionOutcomeCount() const override {
-        return _lowerStack.transmission->queuedTransmissionOutcomeCount();
-    }
-
-    util::Result<void> sendGroupValueResponse(const GroupAddress& address, std::span<const uint8_t> data) override {
-        return _lowerStack.transmission->sendGroupValueResponse(address, data);
-    }
-
-    util::Result<void> beginSendGroupValueResponse(const GroupAddress& address, std::span<const uint8_t> data) override {
-        return _lowerStack.transmission->beginSendGroupValueResponse(address, data);
-    }
-
-    void setProgrammingModeEnabled(bool enabled) override {
-        _lowerStack.transmission->setProgrammingModeEnabled(enabled);
-    }
-
-    bool programmingModeEnabled() const override {
-        return _lowerStack.transmission->programmingModeEnabled();
-    }
-
-private:
-    struct LowerStackRoles {
-        /// The shared lower-stack state. Held so the stack port can reach the
-        /// coupler, which the role interfaces deliberately do not expose.
-        std::shared_ptr<Tp1LowerStackContext> context;
-        std::unique_ptr<LowerStackLifecycle> lifecycle;
-        std::unique_ptr<LowerStackMediumAccess> mediumOwner;
-        LowerStackMediumAccess* medium{nullptr};
-        std::unique_ptr<LowerStackSecurityConfiguration> securityOwner;
-        LowerStackSecurityConfiguration* security{nullptr};
-        std::unique_ptr<LowerStackInboundConfiguration> inboundOwner;
-        LowerStackInboundConfiguration* inbound{nullptr};
-        std::unique_ptr<LowerStackSubscriptionConfiguration> subscriptionOwner;
-        LowerStackSubscriptionConfiguration* subscriptions{nullptr};
-        std::unique_ptr<LowerStackPropertyAccess> propertyOwner;
-        LowerStackPropertyAccess* properties{nullptr};
-        std::unique_ptr<LowerStackTransmissionServices> transmissionOwner;
-        LowerStackTransmissionServices* transmission{nullptr};
-    };
-
-    template <typename PhysicalT>
-    static LowerStackRoles createTp1LowerStackRoles(
-        platform::Platform& platform,
-        std::unique_ptr<PhysicalT> physicalLayer)
-    {
-        auto context = std::make_shared<Tp1LowerStackContext>(platform, std::move(physicalLayer));
-        auto retainedContext = context;
-        auto lifecycleServices = std::make_unique<Tp1LifecycleServices>(context);
-        auto mediumServices = std::make_unique<Tp1MediumAccess>(context);
-        auto securityServices = std::make_unique<Tp1SecurityConfiguration>(context);
-        auto inboundServices = std::make_unique<Tp1InboundConfiguration>(context);
-        auto subscriptionServices = std::make_unique<Tp1SubscriptionConfiguration>(context);
-        auto propertyServices = std::make_unique<Tp1PropertyAccessServices>(context);
-        auto transmissionServices = std::make_unique<Tp1TransmissionServices>(std::move(context));
-
-        LowerStackRoles roles;
-        roles.context = std::move(retainedContext);
-        roles.lifecycle = std::move(lifecycleServices);
-        roles.medium = mediumServices.get();
-        roles.mediumOwner = std::move(mediumServices);
-        roles.security = securityServices.get();
-        roles.securityOwner = std::move(securityServices);
-        roles.inbound = inboundServices.get();
-        roles.inboundOwner = std::move(inboundServices);
-        roles.subscriptions = subscriptionServices.get();
-        roles.subscriptionOwner = std::move(subscriptionServices);
-        roles.properties = propertyServices.get();
-        roles.propertyOwner = std::move(propertyServices);
-        roles.transmission = transmissionServices.get();
-        roles.transmissionOwner = std::move(transmissionServices);
-        return roles;
-    }
-
-#if KNX_FEATURE_TP1
-    static LowerStackRoles createTp1LowerStackRoles(
-        platform::Platform& platform,
-        std::unique_ptr<physical::Tp1MediumBackend> mediumBackend)
-    {
-        auto context = std::make_shared<Tp1LowerStackContext>(platform, std::move(mediumBackend));
-        auto retainedContext = context;
-        auto lifecycleServices = std::make_unique<Tp1LifecycleServices>(context);
-        auto mediumServices = std::make_unique<Tp1MediumAccess>(context);
-        auto securityServices = std::make_unique<Tp1SecurityConfiguration>(context);
-        auto inboundServices = std::make_unique<Tp1InboundConfiguration>(context);
-        auto subscriptionServices = std::make_unique<Tp1SubscriptionConfiguration>(context);
-        auto propertyServices = std::make_unique<Tp1PropertyAccessServices>(context);
-        auto transmissionServices = std::make_unique<Tp1TransmissionServices>(std::move(context));
-
-        LowerStackRoles roles;
-        roles.context = std::move(retainedContext);
-        roles.lifecycle = std::move(lifecycleServices);
-        roles.medium = mediumServices.get();
-        roles.mediumOwner = std::move(mediumServices);
-        roles.security = securityServices.get();
-        roles.securityOwner = std::move(securityServices);
-        roles.inbound = inboundServices.get();
-        roles.inboundOwner = std::move(inboundServices);
-        roles.subscriptions = subscriptionServices.get();
-        roles.subscriptionOwner = std::move(subscriptionServices);
-        roles.properties = propertyServices.get();
-        roles.propertyOwner = std::move(propertyServices);
-        roles.transmission = transmissionServices.get();
-        roles.transmissionOwner = std::move(transmissionServices);
-        return roles;
-    }
-#endif  // KNX_FEATURE_TP1
-
-    LowerStackRoles _lowerStack;
-};
+template <typename PhysicalT>
+std::unique_ptr<BusAccessStackPort> makeStackPort(platform::Platform& platform,
+                                                  std::unique_ptr<PhysicalT> physicalLayer)
+{
+    return std::make_unique<BusAccessStackPort>(
+        platform,
+        std::make_unique<BusAccessStackPort::Medium>(platform, std::move(physicalLayer)));
+}
 
 } // namespace
 
@@ -1690,7 +978,7 @@ private:
 std::unique_ptr<BusAccessStackPort> createTp1StackPort(platform::Platform& platform,
                                                        std::unique_ptr<physical::Tp1MacPhysical> physicalLayer)
 {
-    return std::make_unique<Tp1StackPort>(platform, std::move(physicalLayer));
+    return makeStackPort(platform, std::move(physicalLayer));
 }
 
 std::unique_ptr<BusAccessStackPort> createTp1CouplerStackPort(
@@ -1698,9 +986,16 @@ std::unique_ptr<BusAccessStackPort> createTp1CouplerStackPort(
     std::unique_ptr<physical::Tp1MacPhysical> primaryPhysical,
     std::unique_ptr<physical::Tp1MacPhysical> secondaryPhysical)
 {
-    return std::make_unique<Tp1StackPort>(platform,
-                                          std::move(primaryPhysical),
-                                          std::move(secondaryPhysical));
+    return std::make_unique<BusAccessStackPort>(
+        platform,
+        std::make_unique<BusAccessStackPort::Medium>(platform, std::move(primaryPhysical)),
+        std::make_unique<BusAccessStackPort::Medium>(platform, std::move(secondaryPhysical)));
+}
+
+std::unique_ptr<BusAccessStackPort> createTp1StackPort(platform::Platform& platform,
+                                                       std::unique_ptr<physical::Tp1MediumBackend> mediumBackend)
+{
+    return makeStackPort(platform, std::move(mediumBackend));
 }
 #endif  // KNX_FEATURE_TP1
 
@@ -1708,7 +1003,7 @@ std::unique_ptr<BusAccessStackPort> createTp1CouplerStackPort(
 std::unique_ptr<BusAccessStackPort> createTp1StackPort(platform::Platform& platform,
                                                        std::unique_ptr<physical::IpTunnelingPhysical> physicalLayer)
 {
-    return std::make_unique<Tp1StackPort>(platform, std::move(physicalLayer));
+    return makeStackPort(platform, std::move(physicalLayer));
 }
 #endif
 
@@ -1716,7 +1011,7 @@ std::unique_ptr<BusAccessStackPort> createTp1StackPort(platform::Platform& platf
 std::unique_ptr<BusAccessStackPort> createTp1StackPort(platform::Platform& platform,
                                                        std::unique_ptr<physical::IpSecureTunnelingPhysical> physicalLayer)
 {
-    return std::make_unique<Tp1StackPort>(platform, std::move(physicalLayer));
+    return makeStackPort(platform, std::move(physicalLayer));
 }
 #endif
 
@@ -1724,25 +1019,18 @@ std::unique_ptr<BusAccessStackPort> createTp1StackPort(platform::Platform& platf
 std::unique_ptr<BusAccessStackPort> createTp1StackPort(platform::Platform& platform,
                                                        std::unique_ptr<physical::IpRoutingPhysical> physicalLayer)
 {
-    return std::make_unique<Tp1StackPort>(platform, std::move(physicalLayer));
+    return makeStackPort(platform, std::move(physicalLayer));
 }
 #endif  // KNX_FEATURE_NETIP
-
-#if KNX_FEATURE_TP1
-std::unique_ptr<BusAccessStackPort> createTp1StackPort(platform::Platform& platform,
-                                                       std::unique_ptr<physical::Tp1MediumBackend> mediumBackend)
-{
-    return std::make_unique<Tp1StackPort>(platform, std::move(mediumBackend));
-}
-#endif
 
 #if KNX_ENABLE_TEST_HOOKS
 std::unique_ptr<BusAccessStackPort> detail::createTp1MockTestStackPort(
     platform::Platform& platform,
     std::unique_ptr<testing::MockTp1Physical> physicalLayer)
 {
-    return std::make_unique<Tp1StackPort>(platform, std::move(physicalLayer));
+    return makeStackPort(platform, std::move(physicalLayer));
 }
 #endif
+
 } // namespace bau
 } // namespace knx
