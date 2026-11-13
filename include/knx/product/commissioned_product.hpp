@@ -297,7 +297,7 @@ public:
             return std::nullopt;
         }
         std::vector<uint8_t> data;
-        if (_persistence->load(kRecordKey, data) != objects::PersistenceResult::Success) {
+        if (_persistence->load(kRecordKey, data).isError()) {
             return std::nullopt;
         }
         return decode(data);
@@ -309,10 +309,7 @@ public:
             return util::ErrorCode::NotInitialized;
         }
         const auto encoded = encode(record);
-        if (_persistence->save(kRecordKey, encoded) != objects::PersistenceResult::Success) {
-            return util::ErrorCode::OperationFailed;
-        }
-        return util::Result<void>::ok();
+        return _persistence->save(kRecordKey, encoded);
     }
 
 private:
@@ -1626,11 +1623,18 @@ public:
             InterfaceObjectType::knxNetIpParameter(), kPidBackboneKey);
         const bool storedKeySet = std::any_of(storedKey.begin(), storedKey.end(),
                                               [](uint8_t b) { return b != 0; });
+        util::Result<void> restored = util::Result<void>::ok();
         if (storedKeySet) {
-            (void)routing->applySecureRouting(storedKey, physical::IpRoutingPhysical::KeySource::Restored);
+            restored = routing->applySecureRouting(storedKey, physical::IpRoutingPhysical::KeySource::Restored);
         } else if (options.secureRouting.enabled) {
-            (void)routing->applySecureRouting(options.secureRouting.groupKey,
-                                              physical::IpRoutingPhysical::KeySource::Restored);
+            restored = routing->applySecureRouting(options.secureRouting.groupKey,
+                                                   physical::IpRoutingPhysical::KeySource::Restored);
+        }
+        if (restored.isError()) {
+            // The device stays on plain multicast, which its secured peers
+            // ignore; say so rather than leave a silent half-commissioned node.
+            KNX_LOGW("KNX.Product", "Backbone key not restored, routing stays plain: %s",
+                     util::errorCodeToString(restored.error()));
         }
 #else
         (void)routing;

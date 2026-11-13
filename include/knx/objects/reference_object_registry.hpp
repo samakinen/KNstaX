@@ -11,6 +11,7 @@
 #include "knx/application/property.hpp"
 #include "knx/types.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <span>
 
@@ -30,6 +31,11 @@ struct PropertyDeclaration {
     application::PropertyAccess access;
     uint16_t maxElements;
 };
+
+/// How many interface object types isReferenceObjectType() accepts. Sizes the
+/// InterfaceObjectManager's object list; a static_assert beside the list of
+/// types keeps the two in step.
+inline constexpr size_t kReferenceObjectTypeCount = 13;
 
 bool isReferenceObjectType(InterfaceObjectType type);
 std::span<const PropertyDeclaration> referenceObjectProperties(InterfaceObjectType type);

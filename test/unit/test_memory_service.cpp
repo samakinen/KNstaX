@@ -321,23 +321,23 @@ void test_MemoryService_ValidateAccess(void) {
     
     // Valid read
     auto result = service.validateAccess(knx::MemoryAddress(0x0150), 10, knx::AccessType::Read);
-    TEST_ASSERT_EQUAL(static_cast<int>(MemoryAccessResult::Success), static_cast<int>(result));
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success, result.error());
     
     // Valid write
     result = service.validateAccess(knx::MemoryAddress(0x0150), 10, knx::AccessType::Write);
-    TEST_ASSERT_EQUAL(static_cast<int>(MemoryAccessResult::Success), static_cast<int>(result));
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success, result.error());
     
     // Invalid length (0)
     result = service.validateAccess(knx::MemoryAddress(0x0150), 0, knx::AccessType::Read);
-    TEST_ASSERT_EQUAL(static_cast<int>(MemoryAccessResult::InvalidLength), static_cast<int>(result));
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::InvalidFrameSize, result.error());
     
     // Invalid length (>63)
     result = service.validateAccess(knx::MemoryAddress(0x0150), 64, knx::AccessType::Read);
-    TEST_ASSERT_EQUAL(static_cast<int>(MemoryAccessResult::InvalidLength), static_cast<int>(result));
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::InvalidFrameSize, result.error());
     
     // Region not found
     result = service.validateAccess(knx::MemoryAddress(0x0050), 10, knx::AccessType::Read);
-    TEST_ASSERT_EQUAL(static_cast<int>(MemoryAccessResult::RegionNotFound), static_cast<int>(result));
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::InvalidAddress, result.error());
 }
 
 void test_MemoryService_DataSizeMismatch(void) {
@@ -707,6 +707,28 @@ void test_MemoryService_WritePermissionRefusesWrite(void) {
     TEST_ASSERT_EQUAL_HEX8(0x00, mockMemory[0x0180]);
 }
 
+/// The one ErrorCode -> KnxReturnCode mapping, for the codes validateAccess
+/// produces: the extended memory answers must stay exactly what they were when
+/// each refusal picked its return code by hand.
+void test_ToKnxReturnCode_MapsMemoryRefusals(void) {
+    using knx::application::KnxReturnCode;
+    using knx::application::toKnxReturnCode;
+    using knx::util::ErrorCode;
+    TEST_ASSERT_EQUAL_HEX8(0x00, static_cast<uint8_t>(toKnxReturnCode(ErrorCode::Success)));
+    TEST_ASSERT_EQUAL_HEX8(static_cast<uint8_t>(KnxReturnCode::AccessReadOnly),
+                           static_cast<uint8_t>(toKnxReturnCode(ErrorCode::ReadOnly)));
+    TEST_ASSERT_EQUAL_HEX8(static_cast<uint8_t>(KnxReturnCode::AccessWriteOnly),
+                           static_cast<uint8_t>(toKnxReturnCode(ErrorCode::WriteOnly)));
+    TEST_ASSERT_EQUAL_HEX8(static_cast<uint8_t>(KnxReturnCode::AccessDenied),
+                           static_cast<uint8_t>(toKnxReturnCode(ErrorCode::AccessDenied)));
+    TEST_ASSERT_EQUAL_HEX8(static_cast<uint8_t>(KnxReturnCode::ExceedsMaxApduLength),
+                           static_cast<uint8_t>(toKnxReturnCode(ErrorCode::InvalidFrameSize)));
+    TEST_ASSERT_EQUAL_HEX8(static_cast<uint8_t>(KnxReturnCode::AddressVoid),
+                           static_cast<uint8_t>(toKnxReturnCode(ErrorCode::InvalidAddress)));
+    TEST_ASSERT_EQUAL_HEX8(static_cast<uint8_t>(KnxReturnCode::GenericError),
+                           static_cast<uint8_t>(toKnxReturnCode(ErrorCode::UnknownError)));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_MemoryService_FailedReadAnswersWithNumberZero);
@@ -747,6 +769,7 @@ int main(void) {
     RUN_TEST(test_MemoryExtended_WriteOnlyRegionRefusesRead);
     RUN_TEST(test_MemoryExtended_ReturnCodesMatchSpecTables);
     RUN_TEST(test_MemoryExtended_TruncatedWriteIsRejected);
+    RUN_TEST(test_ToKnxReturnCode_MapsMemoryRefusals);
     
     return UNITY_END();
 }

@@ -11,6 +11,7 @@
 #include "knx/physical/ip_routing_physical.hpp"
 #include "knx/physical/bitbang_driver_tp1_interface.hpp"
 #include "knx/physical/tp1_mac_physical.hpp"
+#include "knx/util/log.hpp"
 
 
 namespace knx {
@@ -99,7 +100,11 @@ std::unique_ptr<IpRoutingPhysical> createConfiguredIpRoutingPhysical(platform::N
 #if KNX_SECURE_ENABLED
     if (secureConfig.enabled) {
         phys->setSecureRoutingSerial(secureConfig.serial);
-        (void)phys->applySecureRouting(secureConfig.groupKey, IpRoutingPhysical::KeySource::Restored);
+        const auto applied = phys->applySecureRouting(secureConfig.groupKey, IpRoutingPhysical::KeySource::Restored);
+        if (applied.isError()) {
+            KNX_LOGW("KNX.PhysFactory", "Secure Routing key not applied, routing stays plain: %s",
+                     util::errorCodeToString(applied.error()));
+        }
     }
 #else
     (void)secureConfig;

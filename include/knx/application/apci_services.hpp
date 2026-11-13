@@ -15,6 +15,7 @@
 #include "knx/application/property.hpp"
 #include "knx/types.hpp"
 #include "knx/util/fixed_vector.hpp"
+#include "knx/util/result.hpp"
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -380,6 +381,38 @@ enum class KnxReturnCode : uint8_t {
 
 /// The extended memory services draw from the same set (§3.4.9 Tables 3 and 4).
 using MemoryExtendedReturnCode = KnxReturnCode;
+
+/**
+ * @brief The return code a refusal puts on the wire, for a service whose
+ *        answer is derived from an internal error.
+ *
+ * The one place an ErrorCode becomes a KnxReturnCode. Services that pick their
+ * return code from the request itself (a read-only property found in the
+ * description, say) still choose it directly.
+ */
+[[nodiscard]] constexpr KnxReturnCode toKnxReturnCode(util::ErrorCode error) noexcept
+{
+    using util::ErrorCode;
+    switch (error) {
+        case ErrorCode::Success: return KnxReturnCode::Success;
+        case ErrorCode::ReadOnly: return KnxReturnCode::AccessReadOnly;
+        case ErrorCode::WriteOnly: return KnxReturnCode::AccessWriteOnly;
+        case ErrorCode::AccessDenied: return KnxReturnCode::AccessDenied;
+        case ErrorCode::InvalidAddress:
+        case ErrorCode::NotFound: return KnxReturnCode::AddressVoid;
+        case ErrorCode::InvalidFrameSize:
+        case ErrorCode::BufferTooSmall: return KnxReturnCode::ExceedsMaxApduLength;
+        case ErrorCode::InvalidParameter:
+        case ErrorCode::OutOfRange:
+        case ErrorCode::DecodeFailed: return KnxReturnCode::DataVoid;
+        case ErrorCode::Busy:
+        case ErrorCode::OperationNotReady:
+        case ErrorCode::ResourceUnavailable: return KnxReturnCode::TemporarilyNotAvailable;
+        case ErrorCode::StorageFull:
+        case ErrorCode::StorageError: return KnxReturnCode::MemoryError;
+        default: return KnxReturnCode::GenericError;
+    }
+}
 
 /**
  * @brief A_MemoryExtended_Read / A_MemoryExtended_Write request.

@@ -120,6 +120,16 @@ void logOversizedServiceResponse(const char* serviceName, size_t payloadSize)
              static_cast<size_t>(config::MAX_APDU_LENGTH));
 }
 
+/// A management response is sent once; when the send fails the client is left
+/// to time out, which is worth a line in the log.
+void warnIfResponseNotSent(APCIService service, const util::Result<void>& sent)
+{
+    if (sent.isError()) {
+        KNX_LOGW(TAG, "Response APCI 0x%03X not sent: %s",
+                 static_cast<unsigned>(service), util::errorCodeToString(sent.error()));
+    }
+}
+
 }
 
 SendOptions ApplicationLayer::optionsForPreset(SendPolicyPreset preset) {
@@ -524,10 +534,7 @@ void ApplicationLayer::wireServiceCallbacks() {
                 logOversizedServiceResponse("DeviceDescriptor", 1u + data.size());
                 return;
             }
-            (void)sendToIndividual(destination,
-                                   APCIService::DeviceDescriptorResponse,
-                                   payload,
-                                   _serviceResponseSendOptions);
+            sendServiceResponse(destination, APCIService::DeviceDescriptorResponse, payload);
         });
 
     _memoryService->setResponseCallback(
@@ -540,10 +547,7 @@ void ApplicationLayer::wireServiceCallbacks() {
                 logOversizedServiceResponse("Memory", 3u + response.data.size());
                 return;
             }
-            (void)sendToIndividual(destination,
-                                   APCIService::MemoryResponse,
-                                   payload,
-                                   _serviceResponseSendOptions);
+            sendServiceResponse(destination, APCIService::MemoryResponse, payload);
         });
 
     _memoryService->setExtendedResponseCallback(
@@ -562,7 +566,7 @@ void ApplicationLayer::wireServiceCallbacks() {
             const auto service = response.kind == MemoryExtendedResponseKind::Read
                                      ? APCIService::MemoryExtendedReadResponse
                                      : APCIService::MemoryExtendedWriteResponse;
-            (void)sendToIndividual(destination, service, payload, _serviceResponseSendOptions);
+            sendServiceResponse(destination, service, payload);
         });
 
     _propertyExtServices->setValueResponseCallback(
@@ -588,7 +592,7 @@ void ApplicationLayer::wireServiceCallbacks() {
                                             PropertyExtHeader::kEncodedLength + 3u + response.data.size());
                 return;
             }
-            (void)sendToIndividual(destination, service, payload, _serviceResponseSendOptions);
+            sendServiceResponse(destination, service, payload);
         });
 
     _propertyExtServices->setDescriptionResponseCallback(
@@ -616,10 +620,7 @@ void ApplicationLayer::wireServiceCallbacks() {
                 logOversizedServiceResponse("PropertyExtDescription", 15u);
                 return;
             }
-            (void)sendToIndividual(destination,
-                                   APCIService::PropertyExtDescriptionResponse,
-                                   payload,
-                                   _serviceResponseSendOptions);
+            sendServiceResponse(destination, APCIService::PropertyExtDescriptionResponse, payload);
         });
 
     _propertyExtServices->setFunctionResponseCallback(
@@ -636,10 +637,7 @@ void ApplicationLayer::wireServiceCallbacks() {
                                             PropertyExtHeader::kEncodedLength + 1u + response.data.size());
                 return;
             }
-            (void)sendToIndividual(destination,
-                                   APCIService::FunctionPropertyExtStateResponse,
-                                   payload,
-                                   _serviceResponseSendOptions);
+            sendServiceResponse(destination, APCIService::FunctionPropertyExtStateResponse, payload);
         });
 
     _functionPropertyServices->setResponseCallback(
@@ -664,10 +662,7 @@ void ApplicationLayer::wireServiceCallbacks() {
                     return;
                 }
             }
-            (void)sendToIndividual(destination,
-                                   APCIService::FunctionPropertyStateResponse,
-                                   payload,
-                                   _serviceResponseSendOptions);
+            sendServiceResponse(destination, APCIService::FunctionPropertyStateResponse, payload);
         });
 
     _networkParameterService->setSerialNumberResponseCallback(
@@ -684,9 +679,7 @@ void ApplicationLayer::wireServiceCallbacks() {
                 logOversizedServiceResponse("SerialNumberResponse", serialNumber.size() + 4u);
                 return;
             }
-            (void)sendBroadcast(APCIService::IndividualAddressSerialNumberResponse,
-                                payload,
-                                _serviceResponseSendOptions);
+            broadcastServiceResponse(APCIService::IndividualAddressSerialNumberResponse, payload);
         });
 
     _networkParameterService->setDomainAddressResponseCallback(
@@ -701,9 +694,7 @@ void ApplicationLayer::wireServiceCallbacks() {
                                             serialNumber.size() + domainAddress.size());
                 return;
             }
-            (void)sendBroadcast(APCIService::DomainAddressSerialNumberResponse,
-                                payload,
-                                _serviceResponseSendOptions);
+            broadcastServiceResponse(APCIService::DomainAddressSerialNumberResponse, payload);
         });
 
     _networkParameterService->setNetworkParameterResponseCallback(
@@ -718,9 +709,7 @@ void ApplicationLayer::wireServiceCallbacks() {
                 logOversizedServiceResponse("NetworkParameterResponse", 3u + value.size());
                 return;
             }
-            (void)sendBroadcast(APCIService::NetworkParameterResponse,
-                                payload,
-                                _serviceResponseSendOptions);
+            broadcastServiceResponse(APCIService::NetworkParameterResponse, payload);
         });
 
     _networkParameterService->setAddressWriteCallback(
@@ -741,10 +730,7 @@ void ApplicationLayer::wireServiceCallbacks() {
                 logOversizedServiceResponse("Authorize", 1u);
                 return;
             }
-            (void)sendToIndividual(destination,
-                                   APCIService::AuthorizeResponse,
-                                   payload,
-                                   _serviceResponseSendOptions);
+            sendServiceResponse(destination, APCIService::AuthorizeResponse, payload);
         });
 
     _propertyServices->setValueResponseCallback(
@@ -760,10 +746,7 @@ void ApplicationLayer::wireServiceCallbacks() {
                 logOversizedServiceResponse("PropertyValue", 4u + response.data.size());
                 return;
             }
-            (void)sendToIndividual(destination,
-                                   APCIService::PropertyValueResponse,
-                                   payload,
-                                   _serviceResponseSendOptions);
+            sendServiceResponse(destination, APCIService::PropertyValueResponse, payload);
         });
 
     _propertyServices->setDescriptionResponseCallback(
@@ -794,10 +777,7 @@ void ApplicationLayer::wireServiceCallbacks() {
                 logOversizedServiceResponse("PropertyDescription", 7u);
                 return;
             }
-            (void)sendToIndividual(destination,
-                                   APCIService::PropertyDescriptionResponse,
-                                   payload,
-                                   _serviceResponseSendOptions);
+            sendServiceResponse(destination, APCIService::PropertyDescriptionResponse, payload);
         });
 }
 
@@ -851,6 +831,16 @@ void ApplicationLayer::wireTransportReceiveCallback() {
     _transport.setConnectionClosedCallback([this](const IndividualAddress& partner) {
         _authorizationService->clearAuthorization(partner);
     });
+}
+
+void ApplicationLayer::sendServiceResponse(IndividualAddress destination,
+                                           APCIService service,
+                                           std::span<const uint8_t> data) {
+    warnIfResponseNotSent(service, sendToIndividual(destination, service, data, _serviceResponseSendOptions));
+}
+
+void ApplicationLayer::broadcastServiceResponse(APCIService service, std::span<const uint8_t> data) {
+    warnIfResponseNotSent(service, sendBroadcast(service, data, _serviceResponseSendOptions));
 }
 
 util::Result<void> ApplicationLayer::sendToIndividual(IndividualAddress destination,
@@ -992,7 +982,7 @@ void ApplicationLayer::handlePropertyValueRead(const ADataFrame& frame) {
     request.objectIndex = InterfaceObjectIndex(frame.data[0]);
     request.propertyId = static_cast<PropertyID>(frame.data[1]);
     request.elementCount = (frame.data[2] >> 4) & 0x0F;
-    request.startIndex = (static_cast<uint16_t>(frame.data[2] & 0x0F) << 8) | frame.data[3];
+    request.startIndex = static_cast<uint16_t>((static_cast<uint16_t>(frame.data[2] & 0x0F) << 8) | frame.data[3]);
     (void)_propertyServices->handleValueRead(frame.source, request);
 }
 
@@ -1004,7 +994,7 @@ void ApplicationLayer::handlePropertyValueWrite(const ADataFrame& frame) {
     request.objectIndex = InterfaceObjectIndex(frame.data[0]);
     request.propertyId = static_cast<PropertyID>(frame.data[1]);
     request.elementCount = (frame.data[2] >> 4) & 0x0F;
-    request.startIndex = (static_cast<uint16_t>(frame.data[2] & 0x0F) << 8) | frame.data[3];
+    request.startIndex = static_cast<uint16_t>((static_cast<uint16_t>(frame.data[2] & 0x0F) << 8) | frame.data[3]);
     if (frame.data.size() > 4) {
         (void)request.data.assign(std::span<const uint8_t>(frame.data).subspan(4));
     }
@@ -1159,7 +1149,7 @@ void ApplicationLayer::handleKeyWrite(const ADataFrame& frame) {
         logOversizedServiceResponse("Key", 1u);
         return;
     }
-    (void)sendToIndividual(frame.source, APCIService::KeyResponse, payload, _serviceResponseSendOptions);
+    sendServiceResponse(frame.source, APCIService::KeyResponse, payload);
 }
 
 void ApplicationLayer::setManagementServerHooks(ManagementServerHooks hooks) {
@@ -1422,7 +1412,7 @@ void ApplicationLayer::handleIndividualAddressWrite(const ADataFrame& frame) {
         return;
     }
 
-    const uint16_t newAddressValue = (static_cast<uint16_t>(frame.data[0]) << 8) | frame.data[1];
+    const uint16_t newAddressValue = static_cast<uint16_t>((static_cast<uint16_t>(frame.data[0]) << 8) | frame.data[1]);
     const IndividualAddress newAddress(newAddressValue);
     _ownAddress = newAddress;
     if (_individualAddressUpdateCallback) {

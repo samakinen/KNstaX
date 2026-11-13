@@ -52,10 +52,10 @@ void bootAndPersist(uint16_t schemaVersion, uint8_t markerValue) {
     TEST_ASSERT_TRUE(manager.init(true, kNamespace, schemaVersion).isOk());
 
     const std::vector<uint8_t> value{markerValue};
-    TEST_ASSERT_EQUAL(static_cast<int>(PropertyAccessResult::Success),
-                      static_cast<int>(manager.writeProperty(InterfaceObjectType::device(),
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
+                      manager.writeProperty(InterfaceObjectType::device(),
                                                              InterfaceObjectInstance(1),
-                                                             kProgModeProperty, 1, value)));
+                                                             kProgModeProperty, 1, value).error());
     TEST_ASSERT_TRUE(manager.saveToPersistence() > 0u);
 }
 
@@ -73,7 +73,7 @@ uint16_t storedSchemaVersion() {
     const auto res =
         persistence->loadById(InterfaceObjectManager::kPersistenceSchemaVersionKeyId, marker);
     persistence->close();
-    TEST_ASSERT_EQUAL(static_cast<int>(PersistenceResult::Success), static_cast<int>(res));
+    TEST_ASSERT_EQUAL(util::ErrorCode::Success, res.error());
     TEST_ASSERT_EQUAL(2u, marker.size());
     return static_cast<uint16_t>((static_cast<uint16_t>(marker[0]) << 8) | marker[1]);
 }
@@ -125,8 +125,8 @@ void test_unversioned_legacy_state_is_discarded(void) {
         auto persistence = createPersistence();
         TEST_ASSERT_TRUE(persistence->init(kNamespace));
         const std::array<uint8_t, 4> legacyBlob{0xDE, 0xAD, 0xBE, 0xEF};
-        TEST_ASSERT_EQUAL(static_cast<int>(PersistenceResult::Success),
-                          static_cast<int>(persistence->saveById(0x0102, legacyBlob)));
+        TEST_ASSERT_EQUAL(util::ErrorCode::Success,
+                          persistence->saveById(0x0102, legacyBlob).error());
         persistence->close();
     }
 
@@ -138,8 +138,8 @@ void test_unversioned_legacy_state_is_discarded(void) {
     auto check = createPersistence();
     TEST_ASSERT_TRUE(check->init(kNamespace));
     std::vector<uint8_t> data;
-    TEST_ASSERT_EQUAL(static_cast<int>(PersistenceResult::NotFound),
-                      static_cast<int>(check->loadById(0x0102, data)));
+    TEST_ASSERT_EQUAL(util::ErrorCode::NotFound,
+                      check->loadById(0x0102, data).error());
     check->close();
 
     // ...and the marker is now present, so the next boot is an ordinary one.

@@ -63,25 +63,6 @@ using detail::PendingInboundGroupEvent;
 
 class PropertyAccessBridge final {
 public:
-    static util::ErrorCode toErrorCode(objects::PropertyAccessResult result)
-    {
-        switch (result) {
-            case objects::PropertyAccessResult::Success:
-                return util::ErrorCode::Success;
-            case objects::PropertyAccessResult::InvalidObject:
-                return util::ErrorCode::InvalidAddress;
-            case objects::PropertyAccessResult::InvalidProperty:
-            case objects::PropertyAccessResult::InvalidValue:
-                return util::ErrorCode::InvalidParameter;
-            case objects::PropertyAccessResult::ReadOnly:
-            case objects::PropertyAccessResult::WriteOnly:
-            case objects::PropertyAccessResult::NotImplemented:
-                return util::ErrorCode::OperationNotSupported;
-        }
-
-        return util::ErrorCode::OperationFailed;
-    }
-
     PropertyAccessBridge(objects::DeviceObject& deviceObject,
                          objects::AddressTableObject& addressTable,
                          objects::AssociationTableObject& associationTable,
@@ -194,9 +175,9 @@ public:
     // rather than riding on the full save.
 
     /// See InterfaceObjectManager::saveAuthorizationKeyTable.
-    bool saveAuthorizationKeyTable(const application::AuthorizationService::KeyTable& keys) {
+    util::Result<void> saveAuthorizationKeyTable(const application::AuthorizationService::KeyTable& keys) {
         if (!_interfaceObjectManager) {
-            return false;
+            return util::ErrorCode::NotInitialized;
         }
         const bool anyKey = std::any_of(keys.begin(), keys.end(), [](const application::AuthorizationKey& key) {
             return key != application::AuthorizationService::kNoKey;
@@ -358,7 +339,11 @@ public:
             }
             // GenericInterfaceObject builds its handlers from referenceObjectProperties().
             _referenceObjects.emplace_back(std::make_unique<objects::GenericInterfaceObject>(objectType));
-            _interfaceObjectManager->registerReferenceObject(*_referenceObjects.back());
+            if (_interfaceObjectManager->registerReferenceObject(*_referenceObjects.back()).isError()) {
+                // The manager has room for one object of every reference
+                // type, so this is a sizing bug; the manager logged it.
+                _referenceObjects.pop_back();
+            }
         }
     }
 
@@ -384,8 +369,8 @@ public:
                                                                startIndex,
                                                                elementCount,
                                                                data);
-        if (res != objects::PropertyAccessResult::Success) {
-            return toErrorCode(res);
+        if (res.isError()) {
+            return res.error();
         }
         if (data.size() > out.size()) {
             return util::ErrorCode::BufferTooSmall;
@@ -410,8 +395,8 @@ public:
                                                                 propertyId,
                                                                 startIndex,
                                                                 data);
-        if (res != objects::PropertyAccessResult::Success) {
-            return toErrorCode(res);
+        if (res.isError()) {
+            return res;
         }
         // Same reason as the bus-driven write path below: whatever is written
         // into the Security Interface Object is a credential the next
@@ -480,7 +465,7 @@ public:
                     request.startIndex,
                     request.elementCount,
                     data);
-                if (res != objects::PropertyAccessResult::Success) {
+                if (res.isError()) {
                     return std::nullopt;
                 }
                 std::copy(data.begin(), data.end(), out.begin());
@@ -532,7 +517,7 @@ public:
                     propertyId,
                     propertyIndex.value(),
                     description);
-                if (res != objects::PropertyAccessResult::Success) {
+                if (res.isError()) {
                     return std::nullopt;
                 }
 
@@ -573,8 +558,8 @@ private:
             request.propertyId,
             request.startIndex,
             request.data.span());
-        if (res != objects::PropertyAccessResult::Success) {
-            return util::Result<void>::err(util::ErrorCode::OperationNotSupported);
+        if (res.isError()) {
+            return res;
         }
         if (*objectType == InterfaceObjectType::security()) {
             afterSecurityObjectWrite();
@@ -1214,8 +1199,11 @@ util::Result<void> BusAccessUnit::setReferenceObjectProperty(InterfaceObjectType
 }
 
 void BusAccessUnit::saveAuthorizationKeyTable(const application::AuthorizationService::KeyTable& keys) {
-    if (_propertyAccessBridge && !_propertyAccessBridge->saveAuthorizationKeyTable(keys)) {
-        KNX_LOGW(TAG, "Authorisation key table could not be stored");
+    if (!_propertyAccessBridge) {
+        return;
+    }
+    if (const auto saved = _propertyAccessBridge->saveAuthorizationKeyTable(keys); saved.isError()) {
+        KNX_LOGW(TAG, "Authorisation key table could not be stored: %s", util::errorCodeToString(saved.error()));
     }
 }
 

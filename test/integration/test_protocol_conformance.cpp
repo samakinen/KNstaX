@@ -434,7 +434,7 @@ struct DeviceObjectBackend {
                 PropertyServiceDataBuffer data;
                 if (manager.readProperty(InterfaceObjectType::device(), InterfaceObjectInstance(1),
                                          request.propertyId, request.startIndex, request.elementCount,
-                                         data) != PropertyAccessResult::Success) {
+                                         data).isError()) {
                     return std::nullopt;
                 }
                 std::copy(data.begin(), data.end(), out.begin());
@@ -446,7 +446,7 @@ struct DeviceObjectBackend {
                 if (request.objectIndex.value() != 0
                         || manager.writeProperty(InterfaceObjectType::device(), InterfaceObjectInstance(1),
                                                  request.propertyId, request.startIndex,
-                                                 request.data.span()) != PropertyAccessResult::Success) {
+                                                 request.data.span()).isError()) {
                     return knx::util::Result<void>::err(knx::util::ErrorCode::OperationNotSupported);
                 }
                 return knx::util::Result<void>::ok();
@@ -461,7 +461,7 @@ struct DeviceObjectBackend {
                 knx::objects::PropertyDescription description;
                 if (manager.describeProperty(InterfaceObjectType::device(), InterfaceObjectInstance(1),
                                              propertyId, propertyIndex.value(),
-                                             description) != PropertyAccessResult::Success) {
+                                             description).isError()) {
                     return std::nullopt;
                 }
                 PropertyDescriptionInfo info;

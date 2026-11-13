@@ -3,293 +3,115 @@
 
 /**
  * @file test_interface_object_manager_instances.cpp
- * @brief Unit tests for InterfaceObjectManager multi-instance routing
+ * @brief Unit tests for InterfaceObjectManager object and instance addressing
+ *
+ * Every interface object is a singleton: instance 1, which instance 0
+ * ("unspecified") also names. Reference objects are registered at most once per
+ * type, and the manager has room for one of each.
  */
 
+#include "knx/objects/generic_interface_object.hpp"
 #include "knx/objects/interface_object_manager.hpp"
+#include "knx/objects/reference_object_registry.hpp"
 
 #include <unity.h>
 
+#include <algorithm>
 #include <cstdint>
-#include <map>
-#include <span>
+#include <memory>
 #include <vector>
 
 using namespace knx;
 using namespace knx::objects;
 
 namespace {
-// describeProperty() with its result spread over out-parameters, the shape
-// these tests were written against. access: bit 0 read, bit 1 write.
-[[maybe_unused]] knx::objects::PropertyAccessResult describeInto(
-    knx::objects::InterfaceObjectManager& manager,
-    knx::InterfaceObjectType objectType,
-    knx::InterfaceObjectInstance objectInstance,
-    knx::application::PropertyID propertyId,
-    knx::PropertyIndex propertyIndex,
-    knx::application::PropertyID& resolvedPropertyId,
-    knx::application::PropertyDataType& type,
-    uint16_t& maxElements,
-    uint8_t& access,
-    uint8_t& readLevel,
-    uint8_t& writeLevel)
-{
-    knx::objects::PropertyDescription description;
-    const auto res = manager.describeProperty(objectType, objectInstance, propertyId,
-                                              propertyIndex.value(), description);
-    resolvedPropertyId = description.id;
-    type = description.type;
-    maxElements = description.maxElements;
-    access = static_cast<uint8_t>((knx::objects::canRead(description.capability) ? 0x01u : 0u)
-                                  | (knx::objects::canWrite(description.capability) ? 0x02u : 0u));
-    readLevel = description.readLevel;
-    writeLevel = description.writeLevel;
-    return res;
-}
-} // namespace
-
-namespace {
-constexpr uint16_t OBJTYPE_CUSTOM = 200;
-constexpr uint8_t PROP_OBJECT_TYPE = 1;
-constexpr uint8_t PROP_VALUE = 10;
-
-struct CustomInstanceState {
-    std::vector<uint8_t> value;
-};
+constexpr auto kPidObjectType = application::PropertyID::ObjectType;
+constexpr auto kPidBackboneKey = static_cast<application::PropertyID>(91);  // PID_BACKBONE_KEY
 } // namespace
 
 void setUp(void) {}
 void tearDown(void) {}
 
-void test_InterfaceObjectManager_MultiInstance_ReadWriteAndDescribeRoutedByInstance(void) {
+void test_InterfaceObjectManager_SingletonInstanceAddressing(void) {
     InterfaceObjectManager mgr;
     TEST_ASSERT_TRUE(mgr.init(false).isOk());
 
-    std::map<uint8_t, CustomInstanceState> state;
-    state[1].value = {0x01};
-    state[2].value = {0x02};
+    const auto addressTable = InterfaceObjectType::addressTable();
+    TEST_ASSERT_TRUE(mgr.hasObjectType(addressTable));
+    TEST_ASSERT_EQUAL_UINT8(1, mgr.getObjectCount(addressTable));
 
-    auto makeHandlers = [&](uint8_t instance) -> InterfaceObjectManager::RegisteredObjectHandlers {
-        InterfaceObjectManager::RegisteredObjectHandlers h;
+    // Instance 0 and instance 1 both reach the one object.
+    for (const uint8_t instance : {0, 1}) {
+        application::PropertyServiceDataBuffer out;
+        TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
+                          mgr.readProperty(addressTable, InterfaceObjectInstance(instance), kPidObjectType, 1, 1, out).error());
+        TEST_ASSERT_EQUAL_UINT32(2, out.size());
+        TEST_ASSERT_EQUAL_HEX8(0x00, out[0]);
+        TEST_ASSERT_EQUAL_HEX8(0x01, out[1]);
 
-        h.read = [&, instance](knx::application::PropertyID propertyId, uint16_t startIndex, uint8_t elementCount, knx::application::PropertyServiceDataBuffer& out) {
-            if (startIndex != 1 || elementCount != 1) {
-                return PropertyAccessResult::InvalidValue;
-            }
-            if (static_cast<uint8_t>(propertyId) == PROP_OBJECT_TYPE) {
-                out = {static_cast<uint8_t>((OBJTYPE_CUSTOM >> 8) & 0xFF), static_cast<uint8_t>(OBJTYPE_CUSTOM & 0xFF)};
-                return PropertyAccessResult::Success;
-            }
-            if (static_cast<uint8_t>(propertyId) == PROP_VALUE) {
-                (void)out.assign(state[instance].value);
-                return PropertyAccessResult::Success;
-            }
-            return PropertyAccessResult::InvalidProperty;
-        };
-
-        h.write = [&, instance](knx::application::PropertyID propertyId, uint16_t startIndex, std::span<const uint8_t> in) {
-            if (startIndex != 1) {
-                return PropertyAccessResult::InvalidValue;
-            }
-            if (static_cast<uint8_t>(propertyId) == PROP_VALUE) {
-                state[instance].value.assign(in.begin(), in.end());
-                return PropertyAccessResult::Success;
-            }
-            return PropertyAccessResult::InvalidProperty;
-        };
-
-        h.describe = [instance](knx::application::PropertyID propertyId,
-                                uint16_t propertyIndex,
-                                PropertyDescription& description) {
-            auto& resolvedPropertyId = description.id;
-            auto& type = description.type;
-            auto& maxElements = description.maxElements;
-            auto& readLevel = description.readLevel;
-            auto& writeLevel = description.writeLevel;
-            (void)instance;
-
-            // By PID when it is not zero, otherwise by 0-based index.
-            if (static_cast<uint8_t>(propertyId) == 0) {
-                if (propertyIndex == 0) {
-                    resolvedPropertyId = static_cast<knx::application::PropertyID>(PROP_OBJECT_TYPE);
-                } else if (propertyIndex == 1) {
-                    resolvedPropertyId = static_cast<knx::application::PropertyID>(PROP_VALUE);
-                } else {
-                    return PropertyAccessResult::InvalidProperty;
-                }
-            } else {
-                resolvedPropertyId = propertyId;
-            }
-
-            readLevel = 0;
-            writeLevel = 0;
-            maxElements = 1;
-
-            if (static_cast<uint8_t>(resolvedPropertyId) == PROP_OBJECT_TYPE) {
-                type = knx::application::PropertyDataType::UnsignedInt;
-                description.capability = PropertyCapability::ReadOnly;
-                return PropertyAccessResult::Success;
-            }
-
-            if (static_cast<uint8_t>(resolvedPropertyId) == PROP_VALUE) {
-                type = knx::application::PropertyDataType::GenericData;
-                description.capability = PropertyCapability::ReadWrite;
-                return PropertyAccessResult::Success;
-            }
-
-            return PropertyAccessResult::InvalidProperty;
-        };
-
-        return h;
-    };
-
-    TEST_ASSERT_TRUE(mgr.registerObjectInstance(InterfaceObjectType(OBJTYPE_CUSTOM), InterfaceObjectInstance(1), makeHandlers(1)).isOk());
-    TEST_ASSERT_TRUE(mgr.registerObjectInstance(InterfaceObjectType(OBJTYPE_CUSTOM), InterfaceObjectInstance(2), makeHandlers(2)).isOk());
-
-    TEST_ASSERT_EQUAL_UINT8(2, mgr.getObjectCount(InterfaceObjectType(OBJTYPE_CUSTOM)));
-
-    // Instance-specific read
-    knx::application::PropertyServiceDataBuffer out;
-    TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
-                      mgr.readProperty(InterfaceObjectType(OBJTYPE_CUSTOM), InterfaceObjectInstance(1),
-                                       static_cast<knx::application::PropertyID>(PROP_VALUE), 1, 1, out));
-    TEST_ASSERT_EQUAL_UINT32(1, out.size());
-    if (out.size() != 1) {
-        return;
+        PropertyDescription description;
+        TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
+                          mgr.describeProperty(addressTable, InterfaceObjectInstance(instance), kPidObjectType, 0,
+                                               description).error());
+        TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(kPidObjectType), static_cast<uint8_t>(description.id));
     }
-    TEST_ASSERT_EQUAL_HEX8(0x01, out[0]);
 
-    out.clear();
-    TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
-                      mgr.readProperty(InterfaceObjectType(OBJTYPE_CUSTOM), InterfaceObjectInstance(2),
-                                       static_cast<knx::application::PropertyID>(PROP_VALUE), 1, 1, out));
-    TEST_ASSERT_EQUAL_UINT32(1, out.size());
-    if (out.size() != 1) {
-        return;
-    }
-    TEST_ASSERT_EQUAL_HEX8(0x02, out[0]);
+    // There is no second instance, and an unknown type has none at all.
+    application::PropertyServiceDataBuffer out;
+    PropertyDescription description;
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::InvalidAddress,
+                      mgr.readProperty(addressTable, InterfaceObjectInstance(2), kPidObjectType, 1, 1, out).error());
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::InvalidAddress,
+                      mgr.writeProperty(addressTable, InterfaceObjectInstance(2), kPidObjectType, 1, {0x00, 0x01}).error());
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::InvalidAddress,
+                      mgr.describeProperty(addressTable, InterfaceObjectInstance(2), kPidObjectType, 0, description).error());
 
-    // Instance-specific write
-    TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
-                      mgr.writeProperty(InterfaceObjectType(OBJTYPE_CUSTOM), InterfaceObjectInstance(2),
-                                        static_cast<knx::application::PropertyID>(PROP_VALUE), 1, {0xAA}));
-    out.clear();
-    TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
-                      mgr.readProperty(InterfaceObjectType(OBJTYPE_CUSTOM), InterfaceObjectInstance(2),
-                                       static_cast<knx::application::PropertyID>(PROP_VALUE), 1, 1, out));
-    TEST_ASSERT_EQUAL_UINT32(1, out.size());
-    if (out.size() != 1) {
-        return;
-    }
-    TEST_ASSERT_EQUAL_HEX8(0xAA, out[0]);
-
-    // Describe property by index should resolve property IDs.
-    knx::application::PropertyID resolvedId = static_cast<knx::application::PropertyID>(0);
-    knx::application::PropertyDataType type{};
-    uint16_t maxElements = 0;
-    uint8_t access = 0;
-    uint8_t readLevel = 0;
-    uint8_t writeLevel = 0;
-
-    TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
-                      describeInto(mgr, InterfaceObjectType(OBJTYPE_CUSTOM),
-                                          InterfaceObjectInstance(1),
-                                          static_cast<knx::application::PropertyID>(0),
-                                          PropertyIndex(1),  // 0-based: the second property
-                                          resolvedId,
-                                          type,
-                                          maxElements,
-                                          access,
-                                          readLevel,
-                                          writeLevel));
-    TEST_ASSERT_EQUAL_UINT8(PROP_VALUE, static_cast<uint8_t>(resolvedId));
-
-    // "All/unspecified" instance should be rejected when multiple instances exist.
-    out.clear();
-    TEST_ASSERT_EQUAL(PropertyAccessResult::InvalidObject,
-                      mgr.readProperty(InterfaceObjectType(OBJTYPE_CUSTOM), InterfaceObjectInstance(0),
-                                       static_cast<knx::application::PropertyID>(PROP_VALUE), 1, 1, out));
+    const auto unknown = InterfaceObjectType(200);
+    TEST_ASSERT_FALSE(mgr.hasObjectType(unknown));
+    TEST_ASSERT_EQUAL_UINT8(0, mgr.getObjectCount(unknown));
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::InvalidAddress,
+                      mgr.readProperty(unknown, InterfaceObjectInstance(1), kPidObjectType, 1, 1, out).error());
 }
 
-void test_InterfaceObjectManager_MixedBuiltInAndRegisteredInstance_CountAndRouting(void) {
+void test_InterfaceObjectManager_ReferenceObjectsOnePerTypeAndAllFit(void) {
     InterfaceObjectManager mgr;
     TEST_ASSERT_TRUE(mgr.init(false).isOk());
 
-    std::vector<uint8_t> registeredValue{0xAB};
+    const auto knxNetIp = InterfaceObjectType::knxNetIpParameter();
+    GenericInterfaceObject first(knxNetIp);
+    TEST_ASSERT_TRUE(mgr.registerReferenceObject(first).isOk());
 
-    InterfaceObjectManager::RegisteredObjectHandlers handlers;
-    handlers.read = [&](knx::application::PropertyID propertyId, uint16_t startIndex, uint8_t elementCount, knx::application::PropertyServiceDataBuffer& out) {
-        if (startIndex != 1 || elementCount != 1) {
-            return PropertyAccessResult::InvalidValue;
+    const std::vector<uint8_t> key = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+                                      0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10};
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
+                      mgr.writeProperty(knxNetIp, InterfaceObjectInstance(1), kPidBackboneKey, 1, key).error());
+
+    // A second object of the same type replaces the first rather than becoming
+    // instance 2.
+    GenericInterfaceObject second(knxNetIp);
+    TEST_ASSERT_TRUE(mgr.registerReferenceObject(second).isOk());
+    TEST_ASSERT_EQUAL_UINT8(1, mgr.getObjectCount(knxNetIp));
+    application::PropertyServiceDataBuffer out;
+    (void)mgr.readProperty(knxNetIp, InterfaceObjectInstance(1), kPidBackboneKey, 1, 1, out);
+    TEST_ASSERT_FALSE(out.size() == key.size() && std::equal(key.begin(), key.end(), out.begin()));
+
+    // One object of every reference type fits beside the core objects.
+    const uint16_t candidates[] = {4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21};
+    std::vector<std::unique_ptr<GenericInterfaceObject>> objects;
+    for (const auto raw : candidates) {
+        const InterfaceObjectType type(raw);
+        if (!isReferenceObjectType(type) || type == knxNetIp) {
+            continue;
         }
-        if (static_cast<uint8_t>(propertyId) == PROP_VALUE) {
-            (void)out.assign(registeredValue);
-            return PropertyAccessResult::Success;
-        }
-        return PropertyAccessResult::InvalidProperty;
-    };
-
-    handlers.write = [&](knx::application::PropertyID propertyId, uint16_t startIndex, std::span<const uint8_t> in) {
-        if (startIndex != 1) {
-            return PropertyAccessResult::InvalidValue;
-        }
-        if (static_cast<uint8_t>(propertyId) == PROP_VALUE) {
-            registeredValue.assign(in.begin(), in.end());
-            return PropertyAccessResult::Success;
-        }
-        return PropertyAccessResult::InvalidProperty;
-    };
-
-    handlers.describe = [&](knx::application::PropertyID propertyId,
-                            uint16_t /*propertyIndex*/,
-                            PropertyDescription& description) {
-        description.id = propertyId;
-        description.type = knx::application::PropertyDataType::GenericData;
-        description.maxElements = 1;
-        description.capability = PropertyCapability::ReadWrite;
-        return PropertyAccessResult::Success;
-    };
-
-    TEST_ASSERT_TRUE(mgr.registerObjectInstance(InterfaceObjectType::addressTable(), InterfaceObjectInstance(2), std::move(handlers)).isOk());
-
-    // Built-in singleton (instance 1) + one registered instance (instance 2).
-    TEST_ASSERT_EQUAL_UINT8(2, mgr.getObjectCount(InterfaceObjectType::addressTable()));
-
-    // Instance 1 remains routed to built-in address table object.
-    knx::application::PropertyServiceDataBuffer out;
-    TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
-                      mgr.readProperty(InterfaceObjectType::addressTable(),
-                                       InterfaceObjectInstance(1),
-                                       static_cast<knx::application::PropertyID>(AddressTableProperty::ObjectType),
-                                       1,
-                                       1,
-                                       out));
-    TEST_ASSERT_EQUAL_UINT32(2, out.size());
-
-    // Instance 2 routes to registered handlers.
-    out.clear();
-    TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
-                      mgr.readProperty(InterfaceObjectType::addressTable(),
-                                       InterfaceObjectInstance(2),
-                                       static_cast<knx::application::PropertyID>(PROP_VALUE),
-                                       1,
-                                       1,
-                                       out));
-    TEST_ASSERT_EQUAL_UINT32(1, out.size());
-    if (out.size() != 1) {
-        return;
+        objects.push_back(std::make_unique<GenericInterfaceObject>(type));
+        TEST_ASSERT_TRUE(mgr.registerReferenceObject(*objects.back()).isOk());
+        TEST_ASSERT_TRUE(mgr.hasObjectType(type));
     }
-    TEST_ASSERT_EQUAL_HEX8(0xAB, out[0]);
-
-    // Unspecified instance is ambiguous when both are reachable.
-    out.clear();
-    TEST_ASSERT_EQUAL(PropertyAccessResult::InvalidObject,
-                      mgr.readProperty(InterfaceObjectType::addressTable(),
-                                       InterfaceObjectInstance(0),
-                                       static_cast<knx::application::PropertyID>(AddressTableProperty::ObjectType),
-                                       1,
-                                       1,
-                                       out));
+    TEST_ASSERT_EQUAL_UINT32(kReferenceObjectTypeCount - 1u, objects.size());
+    TEST_ASSERT_EQUAL_UINT32(InterfaceObjectManager::kMaxInterfaceObjects,
+                             InterfaceObjectManager::kCoreObjectCount + kReferenceObjectTypeCount);
+    TEST_ASSERT_TRUE(mgr.hasObjectType(InterfaceObjectType::device()));
+    TEST_ASSERT_TRUE(mgr.hasObjectType(InterfaceObjectType::security()));
 }
 
 int main(int argc, char** argv) {
@@ -298,8 +120,8 @@ int main(int argc, char** argv) {
 
     UNITY_BEGIN();
 
-    RUN_TEST(test_InterfaceObjectManager_MultiInstance_ReadWriteAndDescribeRoutedByInstance);
-    RUN_TEST(test_InterfaceObjectManager_MixedBuiltInAndRegisteredInstance_CountAndRouting);
+    RUN_TEST(test_InterfaceObjectManager_SingletonInstanceAddressing);
+    RUN_TEST(test_InterfaceObjectManager_ReferenceObjectsOnePerTypeAndAllFit);
 
     return UNITY_END();
 }

@@ -663,7 +663,12 @@ void BusAccessUnit::processInboundGroupEvents()
                 if (_autoResponseMode == AutoResponseMode::Deferred) {
                     enqueueAutomaticResponse(destination, obj->getRawValue());
                 } else {
-                    (void)sendAutomaticResponseImmediate(destination, obj->getRawValue());
+                    if (const auto sent = sendAutomaticResponseImmediate(destination, obj->getRawValue());
+                        sent.isError()) {
+                        KNX_LOGW(TAG, "Automatic response for %d/%d/%d not sent: %s",
+                                 destination.main(), destination.middle(), destination.sub(),
+                                 util::errorCodeToString(sent.error()));
+                    }
                 }
                 responded = true;
             }

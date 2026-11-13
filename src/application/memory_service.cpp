@@ -22,22 +22,6 @@ MemoryService::MemoryService(AddressSpace& addressSpace)
     : _addressSpace(addressSpace) {
 }
 
-static util::ErrorCode toErrorCode(MemoryAccessResult result) {
-    switch (result) {
-        case MemoryAccessResult::Success:
-            return util::ErrorCode::Success;
-        case MemoryAccessResult::InvalidAddress:
-        case MemoryAccessResult::RegionNotFound:
-            return util::ErrorCode::InvalidAddress;
-        case MemoryAccessResult::InvalidLength:
-            return util::ErrorCode::InvalidParameter;
-        case MemoryAccessResult::AccessDenied:
-            return util::ErrorCode::OperationNotSupported;
-        default:
-            return util::ErrorCode::OperationFailed;
-    }
-}
-
 void MemoryService::sendNegativeResponse(const IndividualAddress& dest, MemoryAddress address) {
     MemoryResponse response;
     response.count = 0;
@@ -45,25 +29,25 @@ void MemoryService::sendNegativeResponse(const IndividualAddress& dest, MemoryAd
     sendResponse(dest, response);
 }
 
-util::Result<void> MemoryService::handleReadRequest(const IndividualAddress& source, 
+util::Result<void> MemoryService::handleReadRequest(const IndividualAddress& source,
                                       uint8_t count, MemoryAddress address) {
     // 03/03/07 §3.5.3: a read from a protected or non-existent area, or one
     // longer than the APDU allows, is answered with number = 0 and no data.
     // Staying silent instead left the client waiting out its full timeout.
     auto result = validateAccess(address, count, AccessType::Read);
-    if (result != MemoryAccessResult::Success) {
-        KNX_LOGW(TAG, "Read denied at 0x%04X (%d bytes): result=%d", 
-             address.raw, count, static_cast<int>(result));
+    if (result.isError()) {
+        KNX_LOGW(TAG, "Read denied at 0x%04X (%d bytes): %s",
+                 address.raw, count, util::errorCodeToString(result.error()));
         sendNegativeResponse(source, address);
-        return util::Result<void>::err(toErrorCode(result));
+        return result;
     }
-    
+
     if (!_readCallback) {
         KNX_LOGE(TAG, "No read callback registered");
         sendNegativeResponse(source, address);
         return util::Result<void>::err(util::ErrorCode::OperationNotReady);
     }
-    
+
     MemoryResponse::DataBuffer data;
     data.resize(count);
     auto readRes = _readCallback(address, count, data.span());
@@ -72,19 +56,19 @@ util::Result<void> MemoryService::handleReadRequest(const IndividualAddress& sou
         sendNegativeResponse(source, address);
         return readRes.error();
     }
-    
+
     MemoryResponse response;
     response.count = count;
     response.address = address;
     response.data = data;
     sendResponse(source, response);
-    
+
     KNX_LOGD(TAG, "Read %d bytes from 0x%04X", count, address.raw);
     return util::Result<void>::ok();
 }
 
-util::Result<void> MemoryService::handleWriteRequest(const IndividualAddress& source, 
-                                       uint8_t count, MemoryAddress address, 
+util::Result<void> MemoryService::handleWriteRequest(const IndividualAddress& source,
+                                       uint8_t count, MemoryAddress address,
                                        std::span<const uint8_t> data) {
     // 03/03/07 §3.5.4: A_Memory_Write is confirmed only while Verify Mode is
     // active. Then the answer carries the area read back after the write, or
@@ -100,10 +84,10 @@ util::Result<void> MemoryService::handleWriteRequest(const IndividualAddress& so
     };
 
     auto result = validateAccess(address, count, AccessType::Write);
-    if (result != MemoryAccessResult::Success) {
-        KNX_LOGW(TAG, "Write denied at 0x%04X (%d bytes): result=%d", 
-                 address.raw, count, static_cast<int>(result));
-        return fail(toErrorCode(result));
+    if (result.isError()) {
+        KNX_LOGW(TAG, "Write denied at 0x%04X (%d bytes): %s",
+                 address.raw, count, util::errorCodeToString(result.error()));
+        return fail(result.error());
     }
 
     // §3.5.4: "the remote Application Layer shall ignore the A_Memory_Write.ind
@@ -121,12 +105,12 @@ util::Result<void> MemoryService::handleWriteRequest(const IndividualAddress& so
                  address.raw, source.raw);
         return fail(util::ErrorCode::AccessDenied);
     }
-    
+
     if (!_writeCallback) {
         KNX_LOGE(TAG, "No write callback registered");
         return fail(util::ErrorCode::OperationNotReady);
     }
-    
+
     auto writeRes = _writeCallback(address, data);
     if (writeRes.isError()) {
         KNX_LOGE(TAG, "Write callback failed at 0x%04X", address.raw);
@@ -153,12 +137,12 @@ util::Result<void> MemoryService::handleWriteRequest(const IndividualAddress& so
         }
         sendResponse(source, response);
     }
-    
+
     KNX_LOGD(TAG, "Wrote %d bytes to 0x%04X%s", count, address.raw, verify ? " (verified)" : "");
     return util::Result<void>::ok();
 }
 
-MemoryAccessResult MemoryService::validateAccess(MemoryAddress address,
+util::Result<void> MemoryService::validateAccess(MemoryAddress address,
                                                  uint8_t length,
                                                  AccessType accessType,
                                                  size_t maxLength) const {
@@ -170,24 +154,36 @@ MemoryAccessResult MemoryService::validateAccess(MemoryAddress address,
     // exactly the table-segment size ETS downloads, so no real project could
     // ever be loaded.
     if (length == 0 || length > maxLength) {
-        return MemoryAccessResult::InvalidLength;
+        return util::ErrorCode::InvalidFrameSize;
     }
-    
+
     // Check if region exists
     const MemoryRegion* region = _addressSpace.findRegion(address);
     if (!region) {
-        return MemoryAccessResult::RegionNotFound;
+        return util::ErrorCode::InvalidAddress;
     }
-    
+
     // Check access permissions
     auto accessRes = (accessType == AccessType::Write)
         ? _addressSpace.canWrite(address, length)
         : _addressSpace.canRead(address, length);
     if (accessRes.isError()) {
-        return MemoryAccessResult::AccessDenied;
+        // The spec separates "this location refuses that direction" from
+        // "you are not authorised": the extended services answer the first
+        // with E_ACCESS_WRITE_ONLY / E_ACCESS_READ_ONLY (03/03/07 §3.4.9
+        // Tables 3 and 4) and keep E_ACCESS_DENIED for A_Authorize / KNX
+        // Security refusals.
+        const auto mode = _addressSpace.getAccessMode(address, length);
+        if (accessType == AccessType::Read && mode == MemoryAccessMode::WriteOnly) {
+            return util::ErrorCode::WriteOnly;
+        }
+        if (accessType == AccessType::Write && mode == MemoryAccessMode::ReadOnly) {
+            return util::ErrorCode::ReadOnly;
+        }
+        return util::ErrorCode::AccessDenied;
     }
-    
-    return MemoryAccessResult::Success;
+
+    return util::Result<void>::ok();
 }
 
 void MemoryService::sendResponse(const IndividualAddress& dest, const MemoryResponse& response) {
@@ -223,31 +219,7 @@ MemoryExtendedReturnCode MemoryService::checkExtendedAccess(ExtendedMemoryAddres
         return MemoryExtendedReturnCode::AddressVoid;
     }
 
-    switch (validateAccess(address.narrow(), count, accessType, kMaxExtendedMemoryBytes)) {
-        case MemoryAccessResult::Success:
-            return MemoryExtendedReturnCode::Success;
-        case MemoryAccessResult::AccessDenied: {
-            // The spec separates "this location refuses that direction" from
-            // "you are not authorised": Table 3 offers only E_ACCESS_WRITE_ONLY
-            // and Table 4 only E_ACCESS_READ_ONLY, while E_ACCESS_DENIED is
-            // reserved for A_Authorize / KNX Security refusals.
-            const auto mode = _addressSpace.getAccessMode(address.narrow(), count);
-            if (accessType == AccessType::Read && mode == MemoryAccessMode::WriteOnly) {
-                return MemoryExtendedReturnCode::AccessWriteOnly;
-            }
-            if (accessType == AccessType::Write && mode == MemoryAccessMode::ReadOnly) {
-                return MemoryExtendedReturnCode::AccessReadOnly;
-            }
-            return MemoryExtendedReturnCode::AccessDenied;
-        }
-        case MemoryAccessResult::InvalidLength:
-            return MemoryExtendedReturnCode::ExceedsMaxApduLength;
-        case MemoryAccessResult::InvalidAddress:
-        case MemoryAccessResult::RegionNotFound:
-            return MemoryExtendedReturnCode::AddressVoid;
-    }
-
-    return MemoryExtendedReturnCode::GenericError;
+    return toKnxReturnCode(validateAccess(address.narrow(), count, accessType, kMaxExtendedMemoryBytes).error());
 }
 
 util::Result<void> MemoryService::handleExtendedReadRequest(const IndividualAddress& source,

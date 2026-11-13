@@ -20,7 +20,7 @@ using namespace knx::objects;
 namespace {
 // describeProperty() with its result spread over out-parameters, the shape
 // these tests were written against. access: bit 0 read, bit 1 write.
-[[maybe_unused]] knx::objects::PropertyAccessResult describeInto(
+[[maybe_unused]] knx::util::Result<void> describeInto(
     knx::objects::InterfaceObjectManager& manager,
     knx::InterfaceObjectType objectType,
     knx::InterfaceObjectInstance objectInstance,
@@ -73,7 +73,7 @@ void test_InterfaceObjectManager_DescribeProperty_DeviceObject(void) {
         readLevel,
         writeLevel);
 
-    TEST_ASSERT_EQUAL(PropertyAccessResult::Success, res);
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success, res.error());
     TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DeviceProperty::SubnetAddress), static_cast<uint8_t>(resolvedPropertyId));
     TEST_ASSERT_EQUAL(knx::application::PropertyDataType::UnsignedChar, type);
     TEST_ASSERT_EQUAL_UINT16(1, maxElements);
@@ -103,7 +103,7 @@ void test_InterfaceObjectManager_DescribeProperty_AddressTable_TableData(void) {
         readLevel,
         writeLevel);
 
-    TEST_ASSERT_EQUAL(PropertyAccessResult::Success, res);
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success, res.error());
     TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(AddressTableProperty::TableData),
                             static_cast<uint8_t>(resolvedPropertyId));
     TEST_ASSERT_EQUAL(knx::application::PropertyDataType::UnsignedInt, type);
@@ -127,7 +127,7 @@ void test_InterfaceObjectManager_ReadWrite_AddressTable_TableDataSlice(void) {
         static_cast<knx::application::PropertyID>(AddressTableProperty::TableData),
         1,
         writeBytes);
-    TEST_ASSERT_EQUAL(PropertyAccessResult::Success, wres);
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success, wres.error());
 
     knx::application::PropertyServiceDataBuffer readBytes;
     auto rres = mgr.readProperty(
@@ -138,7 +138,7 @@ void test_InterfaceObjectManager_ReadWrite_AddressTable_TableDataSlice(void) {
         2,
         readBytes);
 
-    TEST_ASSERT_EQUAL(PropertyAccessResult::Success, rres);
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success, rres.error());
     TEST_ASSERT_EQUAL_UINT32(writeBytes.size(), readBytes.size());
     TEST_ASSERT_EQUAL_MEMORY(writeBytes.data(), readBytes.data(), writeBytes.size());
 }
@@ -159,7 +159,7 @@ void test_InterfaceObjectManager_ReadWrite_AssociationTable_TableDataSlice(void)
         static_cast<knx::application::PropertyID>(AssociationTableProperty::TableData),
         1,
         writeBytes);
-    TEST_ASSERT_EQUAL(PropertyAccessResult::Success, wres);
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success, wres.error());
 
     knx::application::PropertyServiceDataBuffer readBytes;
     auto rres = mgr.readProperty(
@@ -170,7 +170,7 @@ void test_InterfaceObjectManager_ReadWrite_AssociationTable_TableDataSlice(void)
         1,
         readBytes);
 
-    TEST_ASSERT_EQUAL(PropertyAccessResult::Success, rres);
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success, rres.error());
     TEST_ASSERT_EQUAL_UINT32(writeBytes.size(), readBytes.size());
     TEST_ASSERT_EQUAL_MEMORY(writeBytes.data(), readBytes.data(), writeBytes.size());
 }
@@ -188,7 +188,7 @@ void test_InterfaceObjectManager_ZeroElementCountRejected(void) {
         0,
         out);
 
-    TEST_ASSERT_EQUAL(PropertyAccessResult::InvalidValue, rres);
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::InvalidParameter, rres.error());
 }
 
 // Array element 0 is not an out-of-range element index: 03/03/07 §3.4.4.1 makes
@@ -202,23 +202,23 @@ void test_InterfaceObjectManager_ElementZeroReadsCurrentElementCount(void) {
     const auto tableData = static_cast<knx::application::PropertyID>(AddressTableProperty::TableData);
 
     knx::application::PropertyServiceDataBuffer out;
-    TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
                       mgr.readProperty(InterfaceObjectType::addressTable(),
-                                       InterfaceObjectInstance(1), tableData, 0, 1, out));
+                                       InterfaceObjectInstance(1), tableData, 0, 1, out).error());
     TEST_ASSERT_EQUAL_UINT32(2u, out.size());
     TEST_ASSERT_EQUAL_UINT16(0u, static_cast<uint16_t>((out[0] << 8) | out[1]));
 
     // Two group addresses downloaded; the count follows the table, the
     // descriptor's maximum does not move.
     const std::vector<uint8_t> addresses = {0x09, 0x02, 0x09, 0x03};
-    TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
                       mgr.writeProperty(InterfaceObjectType::addressTable(),
-                                        InterfaceObjectInstance(1), tableData, 1, addresses));
+                                        InterfaceObjectInstance(1), tableData, 1, addresses).error());
 
     out = {};
-    TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
                       mgr.readProperty(InterfaceObjectType::addressTable(),
-                                       InterfaceObjectInstance(1), tableData, 0, 1, out));
+                                       InterfaceObjectInstance(1), tableData, 0, 1, out).error());
     TEST_ASSERT_EQUAL_UINT32(2u, out.size());
     TEST_ASSERT_EQUAL_UINT16(2u, static_cast<uint16_t>((out[0] << 8) | out[1]));
 }
@@ -236,35 +236,34 @@ void test_InterfaceObjectManager_ElementZeroWriteSetsElementCount(void) {
 
     // Two 8-octet entries.
     std::vector<uint8_t> table(16, 0xAB);
-    TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
                       mgr.writeProperty(InterfaceObjectType::security(),
-                                        InterfaceObjectInstance(1), iaTable, 1, table));
+                                        InterfaceObjectInstance(1), iaTable, 1, table).error());
 
     knx::application::PropertyServiceDataBuffer out;
-    TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
                       mgr.readProperty(InterfaceObjectType::security(),
-                                       InterfaceObjectInstance(1), iaTable, 0, 1, out));
+                                       InterfaceObjectInstance(1), iaTable, 0, 1, out).error());
     TEST_ASSERT_EQUAL_UINT16(2u, static_cast<uint16_t>((out[0] << 8) | out[1]));
 
     const std::vector<uint8_t> clear = {0x00, 0x00};
-    TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
                       mgr.writeProperty(InterfaceObjectType::security(),
-                                        InterfaceObjectInstance(1), iaTable, 0, clear));
+                                        InterfaceObjectInstance(1), iaTable, 0, clear).error());
 
     out = {};
-    TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
                       mgr.readProperty(InterfaceObjectType::security(),
-                                       InterfaceObjectInstance(1), iaTable, 0, 1, out));
+                                       InterfaceObjectInstance(1), iaTable, 0, 1, out).error());
     TEST_ASSERT_EQUAL_UINT16(0u, static_cast<uint16_t>((out[0] << 8) | out[1]));
 
     // A property whose length the firmware owns keeps refusing the write: the
     // address table's length follows its entries, not a client's declaration.
     const std::vector<uint8_t> shrink = {0x00, 0x01};
-    TEST_ASSERT_NOT_EQUAL(
-        static_cast<int>(PropertyAccessResult::Success),
-        static_cast<int>(mgr.writeProperty(
-            InterfaceObjectType::addressTable(), InterfaceObjectInstance(1),
-            static_cast<knx::application::PropertyID>(AddressTableProperty::TableData), 0, shrink)));
+    TEST_ASSERT_TRUE(mgr.writeProperty(
+                         InterfaceObjectType::addressTable(), InterfaceObjectInstance(1),
+                         static_cast<knx::application::PropertyID>(AddressTableProperty::TableData), 0, shrink)
+                         .isError());
 }
 
 // --- KNXnet/IP Parameter Object: PID 90-94 (Secure PIDs) ---
@@ -281,7 +280,7 @@ void test_KnxNetIpParam_BackboneKey_Describe(void)
     GenericInterfaceObject paramObj(InterfaceObjectType::knxNetIpParameter());
     InterfaceObjectManager mgr;
     TEST_ASSERT_TRUE(mgr.init(false).isOk());
-    mgr.registerReferenceObject(paramObj);
+    TEST_ASSERT_TRUE(mgr.registerReferenceObject(paramObj).isOk());
 
     knx::application::PropertyDataType type{};
     uint16_t maxElements = 0;
@@ -302,7 +301,7 @@ void test_KnxNetIpParam_BackboneKey_Describe(void)
         readLevel,
         writeLevel);
 
-    TEST_ASSERT_EQUAL(PropertyAccessResult::Success, res);
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success, res.error());
     TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(kPidBackboneKey), static_cast<uint8_t>(resolvedId));
     // PID 91 is Generic16 (1 element × 16 bytes), ReadWrite
     TEST_ASSERT_EQUAL(knx::application::PropertyDataType::Generic16, type);
@@ -315,7 +314,7 @@ void test_KnxNetIpParam_BackboneKey_WriteRead(void)
     GenericInterfaceObject paramObj(InterfaceObjectType::knxNetIpParameter());
     InterfaceObjectManager mgr;
     TEST_ASSERT_TRUE(mgr.init(false).isOk());
-    mgr.registerReferenceObject(paramObj);
+    TEST_ASSERT_TRUE(mgr.registerReferenceObject(paramObj).isOk());
 
     // Write a 16-byte AES key
     const std::vector<uint8_t> key = {
@@ -327,7 +326,7 @@ void test_KnxNetIpParam_BackboneKey_WriteRead(void)
         InterfaceObjectInstance(1),
         kPidBackboneKey,
         1, key);
-    TEST_ASSERT_EQUAL(PropertyAccessResult::Success, wres);
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success, wres.error());
 
     // Read it back
     knx::application::PropertyServiceDataBuffer buf;
@@ -336,7 +335,7 @@ void test_KnxNetIpParam_BackboneKey_WriteRead(void)
         InterfaceObjectInstance(1),
         kPidBackboneKey,
         1, 1, buf);
-    TEST_ASSERT_EQUAL(PropertyAccessResult::Success, rres);
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success, rres.error());
     TEST_ASSERT_EQUAL_UINT32(16, static_cast<uint32_t>(buf.size()));
     TEST_ASSERT_EQUAL_MEMORY(key.data(), buf.data(), 16);
 }
@@ -346,7 +345,7 @@ void test_KnxNetIpParam_MulticastLatencyTolerance_WriteRead(void)
     GenericInterfaceObject paramObj(InterfaceObjectType::knxNetIpParameter());
     InterfaceObjectManager mgr;
     TEST_ASSERT_TRUE(mgr.init(false).isOk());
-    mgr.registerReferenceObject(paramObj);
+    TEST_ASSERT_TRUE(mgr.registerReferenceObject(paramObj).isOk());
 
     // PID 92: UnsignedInt (2 bytes) — write 2000 ms (0x07D0)
     const std::vector<uint8_t> latency = {0x07, 0xD0};
@@ -355,7 +354,7 @@ void test_KnxNetIpParam_MulticastLatencyTolerance_WriteRead(void)
         InterfaceObjectInstance(1),
         kPidMulticastLatency,
         1, latency);
-    TEST_ASSERT_EQUAL(PropertyAccessResult::Success, wres);
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success, wres.error());
 
     knx::application::PropertyServiceDataBuffer buf;
     auto rres = mgr.readProperty(
@@ -363,7 +362,7 @@ void test_KnxNetIpParam_MulticastLatencyTolerance_WriteRead(void)
         InterfaceObjectInstance(1),
         kPidMulticastLatency,
         1, 1, buf);
-    TEST_ASSERT_EQUAL(PropertyAccessResult::Success, rres);
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success, rres.error());
     TEST_ASSERT_EQUAL_UINT32(2, static_cast<uint32_t>(buf.size()));
     TEST_ASSERT_EQUAL_HEX8(0x07, buf[0]);
     TEST_ASSERT_EQUAL_HEX8(0xD0, buf[1]);
@@ -374,7 +373,7 @@ void test_KnxNetIpParam_SyncLatencyFraction_WriteRead(void)
     GenericInterfaceObject paramObj(InterfaceObjectType::knxNetIpParameter());
     InterfaceObjectManager mgr;
     TEST_ASSERT_TRUE(mgr.init(false).isOk());
-    mgr.registerReferenceObject(paramObj);
+    TEST_ASSERT_TRUE(mgr.registerReferenceObject(paramObj).isOk());
 
     // PID 93: UnsignedChar (1 byte) — write 10 (%)
     const std::vector<uint8_t> fraction = {0x0A};
@@ -383,7 +382,7 @@ void test_KnxNetIpParam_SyncLatencyFraction_WriteRead(void)
         InterfaceObjectInstance(1),
         kPidSyncLatencyFrac,
         1, fraction);
-    TEST_ASSERT_EQUAL(PropertyAccessResult::Success, wres);
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success, wres.error());
 
     knx::application::PropertyServiceDataBuffer buf;
     auto rres = mgr.readProperty(
@@ -391,7 +390,7 @@ void test_KnxNetIpParam_SyncLatencyFraction_WriteRead(void)
         InterfaceObjectInstance(1),
         kPidSyncLatencyFrac,
         1, 1, buf);
-    TEST_ASSERT_EQUAL(PropertyAccessResult::Success, rres);
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success, rres.error());
     TEST_ASSERT_EQUAL_UINT32(1, static_cast<uint32_t>(buf.size()));
     TEST_ASSERT_EQUAL_HEX8(0x0A, buf[0]);
 }
@@ -401,7 +400,7 @@ void test_KnxNetIpParam_SecuredServiceFamilies_IsAFunctionProperty(void)
     GenericInterfaceObject paramObj(InterfaceObjectType::knxNetIpParameter());
     InterfaceObjectManager mgr;
     TEST_ASSERT_TRUE(mgr.init(false).isOk());
-    mgr.registerReferenceObject(paramObj);
+    TEST_ASSERT_TRUE(mgr.registerReferenceObject(paramObj).isOk());
 
     // 03/08/09 §2.3.1.5: "Property Datatype: PDT_FUNCTION [...] The coding of
     // the data depends on whether data is written to the function or responded
@@ -431,7 +430,7 @@ void test_KnxNetIpParam_SecuredServiceFamilies_IsAFunctionProperty(void)
         readLevel,
         writeLevel);
 
-    TEST_ASSERT_EQUAL(PropertyAccessResult::Success, res);
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success, res.error());
     TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(kPidSecuredSvcFamilies),
                             static_cast<uint8_t>(resolvedId));
     TEST_ASSERT_EQUAL(knx::application::PropertyDataType::Function, type);
@@ -443,7 +442,7 @@ void test_KnxNetIpParam_TunnellingUsers_Describe(void)
     GenericInterfaceObject paramObj(InterfaceObjectType::knxNetIpParameter());
     InterfaceObjectManager mgr;
     TEST_ASSERT_TRUE(mgr.init(false).isOk());
-    mgr.registerReferenceObject(paramObj);
+    TEST_ASSERT_TRUE(mgr.registerReferenceObject(paramObj).isOk());
 
     knx::application::PropertyDataType type{};
     uint16_t maxElements = 0;
@@ -465,7 +464,7 @@ void test_KnxNetIpParam_TunnellingUsers_Describe(void)
         writeLevel);
 
     // PID 90 must be declared (ReadWrite, GenericData, multi-element)
-    TEST_ASSERT_EQUAL(PropertyAccessResult::Success, res);
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success, res.error());
     TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(kPidTunnellingUsers), static_cast<uint8_t>(resolvedId));
     TEST_ASSERT_EQUAL_UINT8(0x03, access); // ReadWrite
 }
@@ -475,7 +474,7 @@ void test_KnxNetIpParam_UndeclaredPid_RejectsInvalid(void)
     GenericInterfaceObject paramObj(InterfaceObjectType::knxNetIpParameter());
     InterfaceObjectManager mgr;
     TEST_ASSERT_TRUE(mgr.init(false).isOk());
-    mgr.registerReferenceObject(paramObj);
+    TEST_ASSERT_TRUE(mgr.registerReferenceObject(paramObj).isOk());
 
     knx::application::PropertyServiceDataBuffer buf;
     // PID 98 is not declared in the knxNetIpParameter manifest
@@ -485,9 +484,7 @@ void test_KnxNetIpParam_UndeclaredPid_RejectsInvalid(void)
         static_cast<knx::application::PropertyID>(98),
         1, 1, buf);
 
-    TEST_ASSERT_NOT_EQUAL(
-        static_cast<int>(PropertyAccessResult::Success),
-        static_cast<int>(rres));
+    TEST_ASSERT_TRUE(rres.isError());
 }
 
 // The handler tables are the one declaration of each object's properties.
@@ -530,7 +527,7 @@ void test_PropertyModel_IndicesFollowAscendingPids(void)
             TEST_ASSERT_TRUE(index < 64);
             PropertyDescription byIndex;
             if (mgr.describeProperty(type, InterfaceObjectInstance(1), static_cast<knx::application::PropertyID>(0),
-                                     index, byIndex) != PropertyAccessResult::Success) {
+                                     index, byIndex).isError()) {
                 break;
             }
             const auto pid = static_cast<uint8_t>(byIndex.id);
@@ -543,8 +540,8 @@ void test_PropertyModel_IndicesFollowAscendingPids(void)
             previous = pid;
 
             PropertyDescription byPid;
-            TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
-                              mgr.describeProperty(type, InterfaceObjectInstance(1), byIndex.id, 0, byPid));
+            TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
+                              mgr.describeProperty(type, InterfaceObjectInstance(1), byIndex.id, 0, byPid).error());
             TEST_ASSERT_EQUAL_UINT16(index, byPid.index);
         }
         TEST_ASSERT_TRUE(index > 1);
@@ -559,13 +556,13 @@ void test_PropertyModel_UndeclaredPidIsInvalidProperty(void)
     const auto unknownPid = static_cast<knx::application::PropertyID>(0xEF);
 
     knx::application::PropertyServiceDataBuffer buf;
-    TEST_ASSERT_EQUAL(PropertyAccessResult::InvalidProperty,
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::NotFound,
                       mgr.readProperty(InterfaceObjectType::device(), InterfaceObjectInstance(1),
-                                       unknownPid, 1, 1, buf));
+                                       unknownPid, 1, 1, buf).error());
     PropertyDescription description;
-    TEST_ASSERT_EQUAL(PropertyAccessResult::InvalidProperty,
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::NotFound,
                       mgr.describeProperty(InterfaceObjectType::device(), InterfaceObjectInstance(1),
-                                           unknownPid, 0, description));
+                                           unknownPid, 0, description).error());
 }
 
 // Every persisted property must be a live, readable and writeable property, or
@@ -575,13 +572,13 @@ void test_PropertyModel_PersistedPropertiesExistAndAreWriteable(void)
     GenericInterfaceObject paramObj(InterfaceObjectType::knxNetIpParameter());
     InterfaceObjectManager mgr;
     TEST_ASSERT_TRUE(mgr.init(false).isOk());
-    mgr.registerReferenceObject(paramObj);
+    TEST_ASSERT_TRUE(mgr.registerReferenceObject(paramObj).isOk());
 
     for (const auto& property : InterfaceObjectManager::persistedProperties()) {
         PropertyDescription description;
-        TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
+        TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
                           mgr.describeProperty(property.objectType, InterfaceObjectInstance(1),
-                                               property.propertyId, 0, description));
+                                               property.propertyId, 0, description).error());
         TEST_ASSERT_TRUE(canRead(description.capability));
         TEST_ASSERT_TRUE(canWrite(description.capability));
     }

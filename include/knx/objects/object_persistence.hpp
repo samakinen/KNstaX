@@ -23,18 +23,12 @@
 namespace knx {
 namespace objects {
 
-/**
- * @brief Persistence result codes
- */
-enum class PersistenceResult {
-    Success,
-    NotFound,
-    InvalidData,
-    StorageFull,
-    ReadError,
-    WriteError,
-    NotInitialized
-};
+// Results are util::Result<void>. The codes a backend returns:
+//   NotFound        the key is not stored
+//   StorageFull     no room for the write
+//   StorageError    the read, write or erase failed
+//   NotInitialized  init() has not succeeded
+// PersistenceManager adds EncodeFailed / DecodeFailed for the object itself.
 
 /**
  * @brief Object persistence interface
@@ -62,33 +56,33 @@ public:
      * @brief Save binary data
      * @param key Unique identifier for the data
      * @param data Data to save
-     * @return Result code
+     * @return ok, or the error code (see above)
      */
-    virtual PersistenceResult save(const std::string& key, std::span<const uint8_t> data) = 0;
+    virtual util::Result<void> save(const std::string& key, std::span<const uint8_t> data) = 0;
 
     /**
      * @brief Save binary data by compact numeric identifier
      * @param keyId Compact key identifier
      * @param data Data to save
-     * @return Result code
+     * @return ok, or the error code (see above)
      */
-    virtual PersistenceResult saveById(uint16_t keyId, std::span<const uint8_t> data) = 0;
+    virtual util::Result<void> saveById(uint16_t keyId, std::span<const uint8_t> data) = 0;
     
     /**
      * @brief Load binary data
      * @param key Unique identifier for the data
      * @param data Output buffer for loaded data
-     * @return Result code
+     * @return ok, or the error code (see above)
      */
-    virtual PersistenceResult load(const std::string& key, std::vector<uint8_t>& data) = 0;
+    virtual util::Result<void> load(const std::string& key, std::vector<uint8_t>& data) = 0;
 
     /**
      * @brief Load binary data by compact numeric identifier
      * @param keyId Compact key identifier
      * @param data Output buffer for loaded data
-     * @return Result code
+     * @return ok, or the error code (see above)
      */
-    virtual PersistenceResult loadById(uint16_t keyId, std::vector<uint8_t>& data) = 0;
+    virtual util::Result<void> loadById(uint16_t keyId, std::vector<uint8_t>& data) = 0;
     
     /**
      * @brief Check if key exists
@@ -107,22 +101,22 @@ public:
     /**
      * @brief Delete stored data
      * @param key Key to delete
-     * @return Result code
+     * @return ok, or the error code (see above)
      */
-    virtual PersistenceResult erase(const std::string& key) = 0;
+    virtual util::Result<void> erase(const std::string& key) = 0;
 
     /**
      * @brief Delete stored data by compact numeric identifier
      * @param keyId Compact key identifier
-     * @return Result code
+     * @return ok, or the error code (see above)
      */
-    virtual PersistenceResult eraseById(uint16_t keyId) = 0;
+    virtual util::Result<void> eraseById(uint16_t keyId) = 0;
     
     /**
      * @brief Clear all data in namespace
-     * @return Result code
+     * @return ok, or the error code (see above)
      */
-    virtual PersistenceResult eraseAll() = 0;
+    virtual util::Result<void> eraseAll() = 0;
     
     /**
      * @brief Get list of all keys in namespace
@@ -200,16 +194,16 @@ public:
     /**
      * @brief Save a serializable object
      * @param object Object to save
-     * @return Result code
+     * @return ok, or the error code (see above)
      */
-    PersistenceResult saveObject(const SerializableObject& object);
+    util::Result<void> saveObject(const SerializableObject& object);
     
     /**
      * @brief Load a serializable object
      * @param object Object to load into
-     * @return Result code
+     * @return ok, or the error code (see above)
      */
-    PersistenceResult loadObject(SerializableObject& object);
+    util::Result<void> loadObject(SerializableObject& object);
     
     /**
      * @brief Check if object exists in storage
@@ -221,9 +215,9 @@ public:
     /**
      * @brief Delete object from storage
      * @param object Object to delete
-     * @return Result code
+     * @return ok, or the error code (see above)
      */
-    PersistenceResult eraseObject(const SerializableObject& object);
+    util::Result<void> eraseObject(const SerializableObject& object);
 
 private:
     ObjectPersistence& _persistence;

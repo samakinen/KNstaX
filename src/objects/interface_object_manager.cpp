@@ -22,7 +22,8 @@ namespace {
 /// Instance is always 1 in the persistence path; encoding it is unnecessary.
 constexpr uint16_t makePersistenceKeyId(knx::InterfaceObjectType objectType, knx::application::PropertyID propertyId)
 {
-    return (static_cast<uint16_t>(objectType.value()) << 8) | static_cast<uint16_t>(static_cast<uint8_t>(propertyId));
+    return static_cast<uint16_t>((static_cast<uint16_t>(objectType.value()) << 8) |
+                                 static_cast<uint16_t>(static_cast<uint8_t>(propertyId)));
 }
 
 /// The key a persisted property has in @p bank (see kPersistenceBankMarkerKeyId).
@@ -40,29 +41,26 @@ void forEachPersistedProperty(Visitor&& visit)
     }
 }
 
-knx::objects::PropertyAccessResult mapKernelResult(const knx::util::Result<void>& res, knx::AccessType accessType) {
-    using knx::objects::PropertyAccessResult;
+/// The kernel's error, in the terms the property paths report: a refused
+/// direction becomes ReadOnly / WriteOnly, a missing property NotFound, and
+/// anything else about the request InvalidParameter.
+knx::util::Result<void> mapKernelResult(const knx::util::Result<void>& res, knx::AccessType accessType) {
     using knx::util::ErrorCode;
 
     if (res.isOk()) {
-        return PropertyAccessResult::Success;
+        return res;
     }
 
     switch (res.error()) {
         case ErrorCode::AccessDenied:
-            return (accessType == knx::AccessType::Read) ? PropertyAccessResult::WriteOnly : PropertyAccessResult::ReadOnly;
+            return (accessType == knx::AccessType::Read) ? ErrorCode::WriteOnly : ErrorCode::ReadOnly;
         case ErrorCode::OperationNotSupported:
-            return PropertyAccessResult::InvalidProperty;
-        case ErrorCode::InvalidParameter:
-        case ErrorCode::OutOfRange:
-        case ErrorCode::BufferTooSmall:
-        case ErrorCode::DecodeFailed:
-        case ErrorCode::EncodeFailed:
-            return PropertyAccessResult::InvalidValue;
+            return ErrorCode::NotFound;
         default:
-            // Unexpected internal error — report as invalid value rather than
-            // "not implemented" (which would tell ETS the property doesn't exist).
-            return PropertyAccessResult::InvalidValue;
+            // Out of range, a bad value, or an unexpected internal error: all
+            // reported as an invalid value rather than "not implemented"
+            // (which would tell ETS the property doesn't exist).
+            return ErrorCode::InvalidParameter;
     }
 }
 } // namespace
@@ -151,134 +149,43 @@ bool InterfaceObjectManager::isPersistedProperty(InterfaceObjectType objectType,
     return false;
 }
 
-const InterfaceObjectManager::RegisteredObject* InterfaceObjectManager::findRegisteredObject(InterfaceObjectType objectType,
-                                                                                             InterfaceObjectInstance objectInstance) const {
-    auto tIt = _registeredObjects.find(objectType.value());
-    if (tIt == _registeredObjects.end()) {
-        return nullptr;
-    }
-    auto iIt = tIt->second.find(objectInstance);
-    if (iIt == tIt->second.end()) {
-        return nullptr;
-    }
-    return &iIt->second;
-}
-
-InterfaceObjectManager::RegisteredObject* InterfaceObjectManager::findRegisteredObject(InterfaceObjectType objectType,
-                                                                                       InterfaceObjectInstance objectInstance) {
-    auto tIt = _registeredObjects.find(objectType.value());
-    if (tIt == _registeredObjects.end()) {
-        return nullptr;
-    }
-    auto iIt = tIt->second.find(objectInstance);
-    if (iIt == tIt->second.end()) {
-        return nullptr;
-    }
-    return &iIt->second;
-}
-
-uint8_t InterfaceObjectManager::getRegisteredObjectCount(InterfaceObjectType objectType) const {
-    auto tIt = _registeredObjects.find(objectType.value());
-    if (tIt == _registeredObjects.end()) {
-        return 0;
-    }
-    const auto n = tIt->second.size();
-    return n > 255 ? 255 : static_cast<uint8_t>(n);
-}
-
-bool InterfaceObjectManager::hasRegisteredObjectType(InterfaceObjectType objectType) const {
-    return getRegisteredObjectCount(objectType) != 0;
-}
-
-InterfaceObjectManager::DispatchTarget InterfaceObjectManager::resolveDispatchTarget(InterfaceObjectType objectType,
-                                                                                     InterfaceObjectInstance objectInstance) const {
-    const auto registeredCount = getRegisteredObjectCount(objectType);
-    const bool hasKernel = (findKernelObject(objectType) != nullptr);
-
-    // KNX objectInstance=0 means unspecified/all.
-    // Resolve only when unambiguous across registered + kernel-backed singleton.
-    if (objectInstance.value() == 0) {
-        bool kernelReachable = hasKernel;
-        if (kernelReachable && findRegisteredObject(objectType, InterfaceObjectInstance(1)) != nullptr) {
-            // Registered instance 1 overrides kernel singleton instance 1.
-            kernelReachable = false;
-        }
-
-        const uint8_t reachableCount = static_cast<uint8_t>(registeredCount + (kernelReachable ? 1 : 0));
-        if (reachableCount != 1) {
-            return {};
-        }
-
-        if (registeredCount == 1) {
-            const auto& instances = _registeredObjects.at(objectType.value());
-            return {DispatchTargetKind::Registered, instances.begin()->first};
-        }
-
-        if (kernelReachable) {
-            return {DispatchTargetKind::Kernel, InterfaceObjectInstance(0)};
-        }
-
-        return {};
-    }
-
-    // Prefer explicitly registered instances.
-    if (findRegisteredObject(objectType, objectInstance) != nullptr) {
-        return {DispatchTargetKind::Registered, objectInstance};
-    }
-
-    // Kernel-backed built-ins are singleton instance 1.
-    if (hasKernel && objectInstance.value() == 1) {
-        return {DispatchTargetKind::Kernel, InterfaceObjectInstance(0)};
-    }
-
-    return {};
-}
-
 InterfaceObject* InterfaceObjectManager::findKernelObject(InterfaceObjectType objectType) {
-    auto it = _kernelObjects.find(objectType.value());
-    return (it == _kernelObjects.end()) ? nullptr : it->second;
+    for (auto* object : _kernelObjects) {
+        if (object->objectType() == objectType) {
+            return object;
+        }
+    }
+    return nullptr;
 }
 
 const InterfaceObject* InterfaceObjectManager::findKernelObject(InterfaceObjectType objectType) const {
-    auto it = _kernelObjects.find(objectType.value());
-    return (it == _kernelObjects.end()) ? nullptr : it->second;
+    for (const auto* object : _kernelObjects) {
+        if (object->objectType() == objectType) {
+            return object;
+        }
+    }
+    return nullptr;
 }
 
-util::Result<void> InterfaceObjectManager::registerObjectInstance(InterfaceObjectType objectType,
-                                                                   InterfaceObjectInstance objectInstance,
-                                                                   RegisteredObjectHandlers handlers) {
-    if (objectType == InterfaceObjectType::device() || objectInstance.value() == 0) {
-        // Device object type is built-in; objectInstance=0 means "all/unspecified".
-        // Registration requires a non-built-in type and a concrete 1-based instance.
-        return util::Result<void>::err(util::ErrorCode::InvalidParameter);
+const InterfaceObject* InterfaceObjectManager::resolveObject(InterfaceObjectType objectType,
+                                                             InterfaceObjectInstance objectInstance) const {
+    // KNX objectInstance=0 means unspecified; with one instance per type it
+    // names the same object as instance 1.
+    if (objectInstance.value() > 1) {
+        return nullptr;
     }
-
-    if (!handlers.read || !handlers.write || !handlers.describe) {
-        return util::Result<void>::err(util::ErrorCode::InvalidParameter);
-    }
-
-    auto& byInstance = _registeredObjects[objectType.value()];
-    if (byInstance.find(objectInstance) != byInstance.end()) {
-        return util::Result<void>::err(util::ErrorCode::AlreadyInitialized);
-    }
-
-    byInstance.emplace(objectInstance, RegisteredObject{std::move(handlers)});
-    return util::Result<void>::ok();
+    return findKernelObject(objectType);
 }
 
-util::Result<void> InterfaceObjectManager::unregisterObjectInstance(InterfaceObjectType objectType, InterfaceObjectInstance objectInstance) {
-    auto tIt = _registeredObjects.find(objectType.value());
-    if (tIt == _registeredObjects.end()) {
-        return util::Result<void>::err(util::ErrorCode::InvalidParameter);
-    }
-    const auto erased = tIt->second.erase(objectInstance);
-    if (tIt->second.empty()) {
-        _registeredObjects.erase(tIt);
-    }
-    if (erased == 0) {
-        return util::Result<void>::err(util::ErrorCode::InvalidParameter);
-    }
-    return util::Result<void>::ok();
+void InterfaceObjectManager::registerCoreObjects() {
+    static_assert(kCoreObjectCount <= kMaxInterfaceObjects);
+    _kernelObjects.clear();
+    (void)_kernelObjects.push_back(_deviceObjectPtr);
+    (void)_kernelObjects.push_back(_addressTablePtr);
+    (void)_kernelObjects.push_back(_associationTablePtr);
+    (void)_kernelObjects.push_back(_applicationProgramPtr);
+    (void)_kernelObjects.push_back(_groupObjectTablePtr);
+    (void)_kernelObjects.push_back(_securityObjectPtr);
 }
 
 InterfaceObjectManager::InterfaceObjectManager()
@@ -291,12 +198,7 @@ InterfaceObjectManager::InterfaceObjectManager()
     , _persistenceEnabled(false)
     , _initialized(false)
 {
-    _kernelObjects[InterfaceObjectType::device().value()] = _deviceObjectPtr;
-    _kernelObjects[InterfaceObjectType::addressTable().value()] = _addressTablePtr;
-    _kernelObjects[InterfaceObjectType::associationTable().value()] = _associationTablePtr;
-    _kernelObjects[InterfaceObjectType::applicationProgram().value()] = _applicationProgramPtr;
-    _kernelObjects[InterfaceObjectType::groupObjectTable().value()] = _groupObjectTablePtr;
-    _kernelObjects[InterfaceObjectType::security().value()] = _securityObjectPtr;
+    registerCoreObjects();
 }
 
 InterfaceObjectManager::InterfaceObjectManager(
@@ -315,16 +217,23 @@ InterfaceObjectManager::InterfaceObjectManager(
     , _persistenceEnabled(false)
     , _initialized(false)
 {
-    _kernelObjects[InterfaceObjectType::device().value()] = _deviceObjectPtr;
-    _kernelObjects[InterfaceObjectType::addressTable().value()] = _addressTablePtr;
-    _kernelObjects[InterfaceObjectType::associationTable().value()] = _associationTablePtr;
-    _kernelObjects[InterfaceObjectType::applicationProgram().value()] = _applicationProgramPtr;
-    _kernelObjects[InterfaceObjectType::groupObjectTable().value()] = _groupObjectTablePtr;
-    _kernelObjects[InterfaceObjectType::security().value()] = _securityObjectPtr;
+    registerCoreObjects();
 }
 
-void InterfaceObjectManager::registerReferenceObject(GenericInterfaceObject& object) {
-    _kernelObjects[object.objectType().value()] = &object;
+util::Result<void> InterfaceObjectManager::registerReferenceObject(GenericInterfaceObject& object) {
+    for (auto& registered : _kernelObjects) {
+        if (registered->objectType() == object.objectType()) {
+            registered = &object;
+            return util::Result<void>::ok();
+        }
+    }
+    if (!_kernelObjects.push_back(&object)) {
+        KNX_LOGE(TAG, "No room for interface object type %u (%u registered)",
+                 static_cast<unsigned>(object.objectType().value()),
+                 static_cast<unsigned>(_kernelObjects.size()));
+        return util::Result<void>::err(util::ErrorCode::OutOfRange);
+    }
+    return util::Result<void>::ok();
 }
 
 util::Result<void> InterfaceObjectManager::init(bool enablePersistence,
@@ -368,13 +277,13 @@ void InterfaceObjectManager::enforcePersistenceSchemaVersion(uint16_t schemaVers
     // fields and the device would come up mis-parameterised with no error
     // anywhere.  Discarding is the only safe response; ETS re-downloads.
     std::vector<uint8_t> stored;
-    const PersistenceResult res = _persistence->loadById(kPersistenceSchemaVersionKeyId, stored);
+    const auto res = _persistence->loadById(kPersistenceSchemaVersionKeyId, stored);
 
     const auto writeCurrent = [&]() {
         const std::array<uint8_t, 2> bytes{
             static_cast<uint8_t>((schemaVersion >> 8) & 0xFFu),
             static_cast<uint8_t>(schemaVersion & 0xFFu)};
-        if (_persistence->saveById(kPersistenceSchemaVersionKeyId, bytes) != PersistenceResult::Success) {
+        if (_persistence->saveById(kPersistenceSchemaVersionKeyId, bytes).isError()) {
             // Non-fatal, but worth shouting about: without the marker the next
             // boot cannot tell a layout change from a first boot.
             KNX_LOGE(TAG, "Failed to store persistence schema version %u",
@@ -382,7 +291,7 @@ void InterfaceObjectManager::enforcePersistenceSchemaVersion(uint16_t schemaVers
         }
     };
 
-    if (res == PersistenceResult::NotFound) {
+    if (res.error() == util::ErrorCode::NotFound) {
         // First boot in this namespace, or state written before versioning
         // existed.  Either way there is nothing trustworthy to keep: an
         // unversioned blob is exactly the case this guard exists to catch.
@@ -392,15 +301,15 @@ void InterfaceObjectManager::enforcePersistenceSchemaVersion(uint16_t schemaVers
                      "Persisted state carries no schema version; discarding %zu key(s) "
                      "and starting at version %u",
                      keys.size(), static_cast<unsigned>(schemaVersion));
-            (void)_persistence->eraseAll();
+            eraseAllPersistence("unversioned state");
         }
         writeCurrent();
         return;
     }
 
-    if (res != PersistenceResult::Success || stored.size() != 2u) {
+    if (res.isError() || stored.size() != 2u) {
         KNX_LOGW(TAG, "Persistence schema version unreadable; discarding stored state");
-        (void)_persistence->eraseAll();
+        eraseAllPersistence("unreadable schema version");
         writeCurrent();
         return;
     }
@@ -415,7 +324,7 @@ void InterfaceObjectManager::enforcePersistenceSchemaVersion(uint16_t schemaVers
              "Persisted state was written by schema version %u, this firmware uses %u; "
              "discarding it. ETS must re-download.",
              static_cast<unsigned>(storedVersion), static_cast<unsigned>(schemaVersion));
-    (void)_persistence->eraseAll();
+    eraseAllPersistence("schema version change");
     writeCurrent();
 }
 
@@ -431,17 +340,18 @@ size_t InterfaceObjectManager::loadFromPersistence() {
     auto loadProp = [&](InterfaceObjectType objectType, application::PropertyID propertyId) {
         const uint16_t keyId = bankedKeyId(makePersistenceKeyId(objectType, propertyId), _activeBank);
         std::vector<uint8_t> data;
-        const PersistenceResult res = _persistence->loadById(keyId, data);
-        if (res == PersistenceResult::NotFound) {
+        const auto res = _persistence->loadById(keyId, data);
+        if (res.error() == util::ErrorCode::NotFound) {
             return;
         }
-        if (res != PersistenceResult::Success) {
-            KNX_LOGW(TAG, "Failed to load keyId=0x%04x (res=%d)", keyId, static_cast<int>(res));
+        if (res.isError()) {
+            KNX_LOGW(TAG, "Failed to load keyId=0x%04x: %s", keyId, util::errorCodeToString(res.error()));
             return;
         }
         const auto writeResult = writeProperty(objectType, instance, propertyId, 1, data);
-        if (writeResult != PropertyAccessResult::Success) {
-            KNX_LOGW(TAG, "Loaded keyId=0x%04x but property write failed (res=%d)", keyId, static_cast<int>(writeResult));
+        if (writeResult.isError()) {
+            KNX_LOGW(TAG, "Loaded keyId=0x%04x but property write failed: %s", keyId,
+                     util::errorCodeToString(writeResult.error()));
             return;
         }
         KNX_LOGD(TAG,
@@ -467,7 +377,7 @@ size_t InterfaceObjectManager::loadFromPersistence() {
 
 uint8_t InterfaceObjectManager::readActivePersistenceBank() {
     std::vector<uint8_t> stored;
-    if (_persistence->loadById(kPersistenceBankMarkerKeyId, stored) == PersistenceResult::Success &&
+    if (_persistence->loadById(kPersistenceBankMarkerKeyId, stored).isOk() &&
         stored.size() == 1u && stored[0] <= 1u) {
         return stored[0];
     }
@@ -476,9 +386,24 @@ uint8_t InterfaceObjectManager::readActivePersistenceBank() {
 }
 
 void InterfaceObjectManager::erasePersistenceBank(uint8_t bank) {
+    size_t failed = 0;
     forEachPersistedProperty([&](InterfaceObjectType objectType, application::PropertyID propertyId) {
-        (void)_persistence->eraseById(bankedKeyId(makePersistenceKeyId(objectType, propertyId), bank));
+        const auto erased = _persistence->eraseById(bankedKeyId(makePersistenceKeyId(objectType, propertyId), bank));
+        if (erased.isError() && erased.error() != util::ErrorCode::NotFound) {
+            ++failed;
+        }
     });
+    if (failed != 0u) {
+        KNX_LOGW(TAG, "Could not erase %zu key(s) of persistence bank %u", failed, static_cast<unsigned>(bank));
+    }
+}
+
+void InterfaceObjectManager::eraseAllPersistence(const char* reason) {
+    const auto erased = _persistence->eraseAll();
+    if (erased.isError()) {
+        KNX_LOGE(TAG, "Discarding persisted state (%s) failed: %s", reason,
+                 util::errorCodeToString(erased.error()));
+    }
 }
 
 size_t InterfaceObjectManager::saveToPersistence() {
@@ -526,20 +451,26 @@ size_t InterfaceObjectManager::saveToPersistence() {
             // The old bank is about to be dropped, so carry its copy across
             // rather than lose it.
             data.clear();
-            if (_persistence->loadById(bankedKeyId(baseKeyId, _activeBank), data) != PersistenceResult::Success) {
+            if (_persistence->loadById(bankedKeyId(baseKeyId, _activeBank), data).isError()) {
                 data.clear();
             }
         }
 
-        // Avoid saving empty blobs for NVS safety; erase instead.
+        // Avoid saving empty blobs for NVS safety; erase instead. An erase
+        // that fails leaves whatever the bank held before, which the marker
+        // switch would then make current, so it fails the bank like a write.
         if (data.empty()) {
-            (void)_persistence->eraseById(keyId);
+            const auto erased = _persistence->eraseById(keyId);
+            if (erased.isError() && erased.error() != util::ErrorCode::NotFound) {
+                KNX_LOGW(TAG, "Failed to erase keyId=0x%04x: %s", keyId, util::errorCodeToString(erased.error()));
+                bankComplete = false;
+            }
             return;
         }
 
-        const PersistenceResult res = _persistence->saveById(keyId, data);
-        if (res != PersistenceResult::Success) {
-            KNX_LOGW(TAG, "Failed to save keyId=0x%04x (res=%d)", keyId, static_cast<int>(res));
+        const auto res = _persistence->saveById(keyId, data);
+        if (res.isError()) {
+            KNX_LOGW(TAG, "Failed to save keyId=0x%04x: %s", keyId, util::errorCodeToString(res.error()));
             bankComplete = false;
             return;
         }
@@ -556,7 +487,7 @@ size_t InterfaceObjectManager::saveToPersistence() {
                                                    1,
                                                    1,
                                                    value);
-                     if (res != PropertyAccessResult::Success) {
+                     if (res.isError()) {
                          return false;
                      }
                      out.assign(value.begin(), value.end());
@@ -658,7 +589,7 @@ size_t InterfaceObjectManager::saveToPersistence() {
 
     // The switch: one key, one commit.
     const std::array<uint8_t, 1> marker{nextBank};
-    if (_persistence->saveById(kPersistenceBankMarkerKeyId, marker) != PersistenceResult::Success) {
+    if (_persistence->saveById(kPersistenceBankMarkerKeyId, marker).isError()) {
         KNX_LOGE(TAG, "Failed to switch persistence bank marker to %u; keeping bank %u",
                  static_cast<unsigned>(nextBank), static_cast<unsigned>(_activeBank));
         return 0;
@@ -677,6 +608,7 @@ size_t InterfaceObjectManager::saveSecuritySequenceState() {
     }
 
     size_t saved = 0;
+    bool allSaved = true;
 
     // The per-partner numbers live in the array property itself (the Security
     // Interface Object writes them through on every accepted telegram), so
@@ -690,8 +622,12 @@ size_t InterfaceObjectManager::saveSecuritySequenceState() {
     if (const auto* blob = _securityObjectPtr->findExtraProperty(
             SecurityProperty::SecurityIndividualAddressTable);
         blob != nullptr && !blob->empty()) {
-        if (_persistence->saveById(tableKeyId, *blob) == PersistenceResult::Success) {
+        if (const auto res = _persistence->saveById(tableKeyId, *blob); res.isOk()) {
             ++saved;
+        } else {
+            KNX_LOGW(TAG, "Failed to checkpoint the Security Individual Address Table: %s",
+                     util::errorCodeToString(res.error()));
+            allSaved = false;
         }
     }
 
@@ -700,11 +636,19 @@ size_t InterfaceObjectManager::saveSecuritySequenceState() {
     for (size_t i = 0; i < encoded.size(); ++i) {
         encoded[i] = static_cast<uint8_t>((toolSequence >> (8u * (encoded.size() - 1u - i))) & 0xFFu);
     }
-    if (_persistence->saveById(kToolAccessSequenceKeyId, encoded) == PersistenceResult::Success) {
+    if (const auto res = _persistence->saveById(kToolAccessSequenceKeyId, encoded); res.isOk()) {
         ++saved;
+    } else {
+        KNX_LOGW(TAG, "Failed to checkpoint the Sequence Number for Tool Access: %s",
+                 util::errorCodeToString(res.error()));
+        allSaved = false;
     }
 
-    _securityObjectPtr->clearSequenceStateDirty();
+    // Left dirty after a failure, so the next checkpoint tries again rather
+    // than the replay window silently living in RAM only.
+    if (allSaved) {
+        _securityObjectPtr->clearSequenceStateDirty();
+    }
     KNX_LOGD(TAG, "Checkpointed Data Secure sequence state (%zu record(s))", saved);
     return saved;
 }
@@ -715,7 +659,7 @@ bool InterfaceObjectManager::loadSecuritySequenceState() {
     }
 
     std::vector<uint8_t> stored;
-    if (_persistence->loadById(kToolAccessSequenceKeyId, stored) != PersistenceResult::Success ||
+    if (_persistence->loadById(kToolAccessSequenceKeyId, stored).isError() ||
         stored.size() != 6u) {
         return false;
     }
@@ -733,27 +677,30 @@ bool InterfaceObjectManager::loadSecuritySequenceState() {
     return true;
 }
 
-bool InterfaceObjectManager::saveAuthorizationKeyTable(std::span<const uint8_t> record) {
+util::Result<void> InterfaceObjectManager::saveAuthorizationKeyTable(std::span<const uint8_t> record) {
     if (!_persistenceEnabled || !_persistenceManager) {
-        return false;
+        return util::ErrorCode::NotInitialized;
     }
     if (record.empty()) {
         const auto erased = _persistence->eraseById(kAuthorizationKeyTableKeyId);
-        return erased == PersistenceResult::Success || erased == PersistenceResult::NotFound;
+        if (erased.error() == util::ErrorCode::NotFound) {
+            return util::Result<void>::ok();
+        }
+        return erased;
     }
-    return _persistence->saveById(kAuthorizationKeyTableKeyId, record) == PersistenceResult::Success;
+    return _persistence->saveById(kAuthorizationKeyTableKeyId, record);
 }
 
 std::vector<uint8_t> InterfaceObjectManager::loadAuthorizationKeyTable() {
     std::vector<uint8_t> stored;
     if (!_persistenceEnabled || !_persistenceManager ||
-        _persistence->loadById(kAuthorizationKeyTableKeyId, stored) != PersistenceResult::Success) {
+        _persistence->loadById(kAuthorizationKeyTableKeyId, stored).isError()) {
         stored.clear();
     }
     return stored;
 }
 
-PropertyAccessResult InterfaceObjectManager::readProperty(
+util::Result<void> InterfaceObjectManager::readProperty(
     InterfaceObjectType objectType,
     InterfaceObjectInstance objectInstance,
     application::PropertyID propertyId,
@@ -761,36 +708,20 @@ PropertyAccessResult InterfaceObjectManager::readProperty(
     uint8_t elementCount,
     application::PropertyServiceDataBuffer& value)
 {
-    const auto target = resolveDispatchTarget(objectType, objectInstance);
-    if (target.kind == DispatchTargetKind::None) {
-        return PropertyAccessResult::InvalidObject;
-    }
-
-    if (target.kind == DispatchTargetKind::Registered) {
-        const auto* obj = findRegisteredObject(objectType, target.registeredInstance);
-        if (!obj) {
-            return PropertyAccessResult::InvalidObject;
-        }
-        if (startIndex == 0 || elementCount == 0) {
-            return PropertyAccessResult::InvalidValue;
-        }
-        return obj->handlers.read(propertyId, startIndex, elementCount, value);
+    const auto* object = resolveObject(objectType, objectInstance);
+    if (!object) {
+        return util::ErrorCode::InvalidAddress;
     }
 
     // KNX uses 1-based indexing for property elements; index 0 is the array's
     // current element count, handled below once the property is known to exist.
     if (elementCount == 0) {
-        return PropertyAccessResult::InvalidValue;
-    }
-
-    const auto* object = findKernelObject(objectType);
-    if (!object) {
-        return PropertyAccessResult::InvalidObject;
+        return util::ErrorCode::InvalidParameter;
     }
 
     const auto binding = object->kernelBinding();
     if (!binding.handlers || binding.handlerCount == 0) {
-        return PropertyAccessResult::NotImplemented;
+        return util::ErrorCode::OperationNotSupported;
     }
 
     // 03/03/07 §3.4.4.1: start_index 0 reads "the current number of elements of
@@ -810,7 +741,7 @@ PropertyAccessResult InterfaceObjectManager::readProperty(
         value.resize(2);
         value[0] = static_cast<uint8_t>((current.value() >> 8) & 0xFFu);
         value[1] = static_cast<uint8_t>(current.value() & 0xFFu);
-        return PropertyAccessResult::Success;
+        return util::Result<void>::ok();
     }
 
     const auto res = ::knx::objects::readProperty(binding.handlers,
@@ -823,27 +754,16 @@ PropertyAccessResult InterfaceObjectManager::readProperty(
     return mapKernelResult(res, AccessType::Read);
 }
 
-PropertyAccessResult InterfaceObjectManager::writeProperty(
+util::Result<void> InterfaceObjectManager::writeProperty(
     InterfaceObjectType objectType,
     InterfaceObjectInstance objectInstance,
     application::PropertyID propertyId,
     uint16_t startIndex,
     std::span<const uint8_t> value)
 {
-    const auto target = resolveDispatchTarget(objectType, objectInstance);
-    if (target.kind == DispatchTargetKind::None) {
-        return PropertyAccessResult::InvalidObject;
-    }
-
-    if (target.kind == DispatchTargetKind::Registered) {
-        const auto* obj = findRegisteredObject(objectType, target.registeredInstance);
-        if (!obj) {
-            return PropertyAccessResult::InvalidObject;
-        }
-        if (startIndex == 0) {
-            return PropertyAccessResult::InvalidValue;
-        }
-        return obj->handlers.write(propertyId, startIndex, value);
+    const auto* object = resolveObject(objectType, objectInstance);
+    if (!object) {
+        return util::ErrorCode::InvalidAddress;
     }
 
     // Device Object policy: SubnetAddress/DeviceAddress writes must go through
@@ -853,10 +773,10 @@ PropertyAccessResult InterfaceObjectManager::writeProperty(
          propertyId == static_cast<application::PropertyID>(DeviceProperty::DeviceAddress))) {
         // Scalar properties: only allow writing the first element.
         if (startIndex != 1) {
-            return PropertyAccessResult::InvalidValue;
+            return util::ErrorCode::InvalidParameter;
         }
         if (value.empty()) {
-            return PropertyAccessResult::InvalidValue;
+            return util::ErrorCode::InvalidParameter;
         }
         const uint16_t current = _deviceObjectPtr->readIndividualAddress().raw;
         uint16_t updated = current;
@@ -870,19 +790,14 @@ PropertyAccessResult InterfaceObjectManager::writeProperty(
         // on programming mode — that gate applies only to the A_IndividualAddress_Write
         // management service. See DeviceObject::applyIndividualAddress.
         if (_deviceObjectPtr->applyIndividualAddress(IndividualAddress(updated)).isError()) {
-            return PropertyAccessResult::InvalidValue;
+            return util::ErrorCode::InvalidParameter;
         }
-        return PropertyAccessResult::Success;
-    }
-
-    const auto* object = findKernelObject(objectType);
-    if (!object) {
-        return PropertyAccessResult::InvalidObject;
+        return util::Result<void>::ok();
     }
 
     const auto binding = object->kernelBinding();
     if (!binding.handlers || binding.handlerCount == 0) {
-        return PropertyAccessResult::NotImplemented;
+        return util::ErrorCode::OperationNotSupported;
     }
 
     // A write to array element 0 sets the current number of elements rather
@@ -891,7 +806,7 @@ PropertyAccessResult InterfaceObjectManager::writeProperty(
     // the Security Individual Address Table before re-downloading it.
     if (startIndex == 0) {
         if (value.size() != 2u) {
-            return PropertyAccessResult::InvalidValue;
+            return util::ErrorCode::InvalidParameter;
         }
         const uint16_t requested = static_cast<uint16_t>((value[0] << 8) | value[1]);
         const auto res = ::knx::objects::resizeProperty(binding.handlers,
@@ -911,29 +826,16 @@ PropertyAccessResult InterfaceObjectManager::writeProperty(
     return mapKernelResult(res, AccessType::Write);
 }
 
-PropertyAccessResult InterfaceObjectManager::describeProperty(
+util::Result<void> InterfaceObjectManager::describeProperty(
     InterfaceObjectType objectType,
     InterfaceObjectInstance objectInstance,
     application::PropertyID propertyId,
     uint16_t propertyIndex,
     PropertyDescription& description)
 {
-    const auto target = resolveDispatchTarget(objectType, objectInstance);
-    if (target.kind == DispatchTargetKind::None) {
-        return PropertyAccessResult::InvalidObject;
-    }
-
-    if (target.kind == DispatchTargetKind::Registered) {
-        const auto* obj = findRegisteredObject(objectType, target.registeredInstance);
-        if (!obj) {
-            return PropertyAccessResult::InvalidObject;
-        }
-        return obj->handlers.describe(propertyId, propertyIndex, description);
-    }
-
-    const auto* object = findKernelObject(objectType);
+    const auto* object = resolveObject(objectType, objectInstance);
     if (!object) {
-        return PropertyAccessResult::InvalidObject;
+        return util::ErrorCode::InvalidAddress;
     }
 
     // The handler table is the declaration: a property exists, and has the
@@ -941,7 +843,7 @@ PropertyAccessResult InterfaceObjectManager::describeProperty(
     // second list to consult.
     const auto binding = object->kernelBinding();
     if (!binding.handlers || binding.handlerCount == 0) {
-        return PropertyAccessResult::NotImplemented;
+        return util::ErrorCode::OperationNotSupported;
     }
 
     const auto res = ::knx::objects::describeProperty(binding.handlers,
@@ -950,26 +852,17 @@ PropertyAccessResult InterfaceObjectManager::describeProperty(
                                                       propertyIndex,
                                                       description);
     if (res.isError()) {
-        return PropertyAccessResult::InvalidProperty;
+        return util::ErrorCode::NotFound;
     }
-    return PropertyAccessResult::Success;
+    return util::Result<void>::ok();
 }
 
 uint8_t InterfaceObjectManager::getObjectCount(InterfaceObjectType objectType) const {
-    uint16_t count = getRegisteredObjectCount(objectType);
-
-    if (findKernelObject(objectType) != nullptr && findRegisteredObject(objectType, InterfaceObjectInstance(1)) == nullptr) {
-        ++count;
-    }
-
-    return count > 255 ? 255 : static_cast<uint8_t>(count);
+    return findKernelObject(objectType) != nullptr ? 1u : 0u;
 }
 
 bool InterfaceObjectManager::hasObjectType(InterfaceObjectType objectType) const {
-    if (hasRegisteredObjectType(objectType)) {
-        return true;
-    }
-    return _kernelObjects.find(objectType.value()) != _kernelObjects.end();
+    return findKernelObject(objectType) != nullptr;
 }
 
 } // namespace objects

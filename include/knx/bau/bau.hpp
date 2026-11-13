@@ -187,13 +187,12 @@ public:
                            std::unique_ptr<BusAccessStackPort> stackPort);
     virtual ~BusAccessUnit();
 
-    // Delete copy operations (owns unique resources)
+    // Neither copyable nor movable: callbacks capturing
+    // `this` are installed into the stack port and the interface objects.
     BusAccessUnit(const BusAccessUnit&) = delete;
     BusAccessUnit& operator=(const BusAccessUnit&) = delete;
-
-    // Allow move operations
-    BusAccessUnit(BusAccessUnit&&) = default;
-    BusAccessUnit& operator=(BusAccessUnit&&) = default;
+    BusAccessUnit(BusAccessUnit&&) = delete;
+    BusAccessUnit& operator=(BusAccessUnit&&) = delete;
 
     // Initialization
     /// @param persistenceSchemaVersion Layout version of the commissioned state

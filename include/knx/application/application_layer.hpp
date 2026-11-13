@@ -513,6 +513,11 @@ private:
                                      std::span<const uint8_t> data,
                                      const SendOptions& options);
 
+    /// A management server response, sent with the service response options.
+    /// A failed send is logged: nothing retries it.
+    void sendServiceResponse(IndividualAddress destination, APCIService service, std::span<const uint8_t> data);
+    void broadcastServiceResponse(APCIService service, std::span<const uint8_t> data);
+
     void handleDeviceDescriptorRead(const ADataFrame& frame);
     void handlePropertyValueRead(const ADataFrame& frame);
     void handlePropertyValueWrite(const ADataFrame& frame);

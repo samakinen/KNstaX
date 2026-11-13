@@ -31,7 +31,6 @@ using knx::InterfaceObjectIndex;
 using knx::InterfaceObjectInstance;
 using knx::InterfaceObjectType;
 using knx::objects::InterfaceObjectManager;
-using knx::objects::PropertyAccessResult;
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -109,8 +108,7 @@ struct Fixture {
             }
             PropertyServiceDataBuffer data;
             if (manager.readProperty(*type, InterfaceObjectInstance(1), request.propertyId,
-                                     request.startIndex, request.elementCount, data)
-                    != PropertyAccessResult::Success) {
+                                     request.startIndex, request.elementCount, data).isError()) {
                 return std::nullopt;
             }
             std::copy(data.begin(), data.end(), out.begin());
@@ -121,8 +119,7 @@ struct Fixture {
             -> knx::util::Result<void> {
             const auto type = typeAt(request.objectIndex);
             if (!type || manager.writeProperty(*type, InterfaceObjectInstance(1), request.propertyId,
-                                               request.startIndex, request.data.span())
-                             != PropertyAccessResult::Success) {
+                                               request.startIndex, request.data.span()).isError()) {
                 return knx::util::Result<void>::err(knx::util::ErrorCode::OperationFailed);
             }
             return knx::util::Result<void>::ok();
@@ -136,8 +133,7 @@ struct Fixture {
             }
             knx::objects::PropertyDescription description;
             if (manager.describeProperty(*type, InterfaceObjectInstance(1), propertyId,
-                                         propertyIndex.value(), description)
-                    != PropertyAccessResult::Success) {
+                                         propertyIndex.value(), description).isError()) {
                 return std::nullopt;
             }
             PropertyDescriptionInfo info;
@@ -356,9 +352,9 @@ void test_PropertyExt_InstanceZeroAndMissingInstancesAreAddressVoid(void) {
 
 void test_PropertyExtValue_ReadReturnsLiveData(void) {
     Fixture f;
-    TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
                       f.manager.writeProperty(InterfaceObjectType::device(), InterfaceObjectInstance(1),
-                                              kProgMode, 1, {0x01}));
+                                              kProgMode, 1, {0x01}).error());
 
     auto request = makeValueRequest(kDeviceObjectType, 1, kProgMode, 1, 1);
     TEST_ASSERT_TRUE(f.services.handleValueRead(source(), request).isOk());
@@ -432,9 +428,9 @@ void test_PropertyExtValue_WriteConReachesTheObjectAndConfirms(void) {
     TEST_ASSERT_EQUAL(0x00, static_cast<int>(f.valueResponse.returnCode));
 
     PropertyServiceDataBuffer readBack;
-    TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
                       f.manager.readProperty(InterfaceObjectType::device(), InterfaceObjectInstance(1),
-                                             kProgMode, 1, 1, readBack));
+                                             kProgMode, 1, 1, readBack).error());
     TEST_ASSERT_EQUAL(1, readBack.size());
     TEST_ASSERT_EQUAL(0x01, readBack[0]);
 }

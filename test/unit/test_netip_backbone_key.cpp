@@ -28,7 +28,6 @@ using knx::InterfaceObjectInstance;
 using knx::InterfaceObjectType;
 using knx::objects::GenericInterfaceObject;
 using knx::objects::InterfaceObjectManager;
-using knx::objects::PropertyAccessResult;
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -56,7 +55,7 @@ void test_property_write_reaches_the_observer(void)
     GenericInterfaceObject paramObj(InterfaceObjectType::knxNetIpParameter());
     InterfaceObjectManager mgr;
     TEST_ASSERT_TRUE(mgr.init(false).isOk());
-    mgr.registerReferenceObject(paramObj);
+    TEST_ASSERT_TRUE(mgr.registerReferenceObject(paramObj).isOk());
 
     knx::application::PropertyID seenProperty{};
     std::vector<uint8_t> seenValue;
@@ -69,11 +68,11 @@ void test_property_write_reaches_the_observer(void)
     });
 
     const auto key = exampleKey(0x10);
-    TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
                       mgr.writeProperty(InterfaceObjectType::knxNetIpParameter(),
                                         InterfaceObjectInstance(1),
                                         kPidBackboneKey,
-                                        1, key));
+                                        1, key).error());
 
     TEST_ASSERT_EQUAL_INT(1, callCount);
     TEST_ASSERT_EQUAL_UINT8(91, static_cast<uint8_t>(seenProperty));
@@ -86,7 +85,7 @@ void test_observer_reports_which_property_changed(void)
     GenericInterfaceObject paramObj(InterfaceObjectType::knxNetIpParameter());
     InterfaceObjectManager mgr;
     TEST_ASSERT_TRUE(mgr.init(false).isOk());
-    mgr.registerReferenceObject(paramObj);
+    TEST_ASSERT_TRUE(mgr.registerReferenceObject(paramObj).isOk());
 
     std::vector<uint8_t> observedProperties;
     paramObj.setWriteObserver([&](knx::application::PropertyID id, std::span<const uint8_t>,
@@ -116,13 +115,13 @@ void test_writes_without_an_observer_still_succeed(void)
     GenericInterfaceObject paramObj(InterfaceObjectType::knxNetIpParameter());
     InterfaceObjectManager mgr;
     TEST_ASSERT_TRUE(mgr.init(false).isOk());
-    mgr.registerReferenceObject(paramObj);
+    TEST_ASSERT_TRUE(mgr.registerReferenceObject(paramObj).isOk());
 
-    TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
                       mgr.writeProperty(InterfaceObjectType::knxNetIpParameter(),
                                         InterfaceObjectInstance(1),
                                         kPidBackboneKey,
-                                        1, exampleKey(0x30)));
+                                        1, exampleKey(0x30)).error());
 }
 
 #if KNX_SECURE_ENABLED

@@ -178,9 +178,26 @@ std::optional<GroupAddress> parseGroupAddress(std::string_view str);
 | `TransmissionFailed` | Physical transmission error |
 | `Timeout` | Operation timed out |
 | `ResourceUnavailable` | Connection or memory unavailable |
+| `NotFound` | A stored record or a property that does not exist |
+| `StorageFull` / `StorageError` | Persistent storage out of room / failed |
+| `ReadOnly` / `WriteOnly` | The resource refuses that direction (not an authorisation refusal: that is `AccessDenied`) |
 
-Some older code still returns `bool`. Convert it when you touch it; do not add
-new `bool`-returning APIs.
+There is one internal error type. Do not add a parallel result enum for a
+subsystem; add the `ErrorCode` the subsystem needs (with its string and a
+`test_result` case) instead.
+
+KNX wire return codes (`KnxReturnCode`, `FunctionPropertyReturnCode`,
+`RouteTableReturnCode`) are values on the bus, not errors, and stay their own
+types. Where a wire code is derived from an internal error, use
+`application::toKnxReturnCode(ErrorCode)`; where the service picks it from the
+request itself, choose it directly.
+
+`bool` is for predicates only (`isX`, `hasX`, `canX`). Some older code still
+returns `bool` for success; convert it when you touch it.
+
+Do not discard a `Result` from a persistence or send path with `(void)` unless
+the call is genuinely fire-and-forget (a transport ACK, a coupler forward the
+protocol repeats anyway). Otherwise log the failure (`KNX_LOGW`) or return it.
 
 ---
 
@@ -201,6 +218,20 @@ new `bool`-returning APIs.
   a concrete subsystem-level benefit justifies them.
 - Use ranges selectively in parsing and configuration code. Do not replace an
   explicit hot-path loop without a measured win.
+
+### Callables
+
+- A callback the stack installs once and whose captures are small (`this`,
+  a reference or two) is a `util::InplaceFunction` sized for those captures:
+  no heap, and an oversized capture fails to compile instead of allocating.
+- `std::function` only where the product layer accepts user code whose
+  captures the stack cannot bound (the endpoint bindings with their default
+  capacity of 0).
+- An object that installs callbacks capturing `this`, or hands out pointers to
+  its own members, deletes its copy and move operations.
+
+Not all of the stack follows this yet. When you touch a `std::function`
+member outside the product layer, convert it.
 
 ### Containers own, spans view
 

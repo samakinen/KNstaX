@@ -10,6 +10,8 @@
 
 #include "knx/application/property.hpp"
 
+#include <iterator>
+
 namespace knx {
 namespace objects {
 
@@ -175,21 +177,36 @@ constexpr PropertyDeclaration objectTypeEntry()
 
 } // namespace
 
+namespace {
+
+constexpr InterfaceObjectType kReferenceObjectTypes[] = {
+    InterfaceObjectType::interfaceProgram(),
+    InterfaceObjectType::eibObjectAssociation(),
+    InterfaceObjectType::router(),
+    InterfaceObjectType::lteFsm(),
+    InterfaceObjectType::cemiServer(),
+    InterfaceObjectType::pollingMaster(),
+    InterfaceObjectType::knxNetIpParameter(),
+    InterfaceObjectType::fileServer(),
+    InterfaceObjectType::eModeChannel(),
+    InterfaceObjectType::adjustedEModeChannel(),
+    InterfaceObjectType::textCatalogue(),
+    InterfaceObjectType::eModeDevice(),
+    InterfaceObjectType::rfMedium(),
+};
+static_assert(std::size(kReferenceObjectTypes) == kReferenceObjectTypeCount,
+              "kReferenceObjectTypeCount sizes the InterfaceObjectManager's object list");
+
+} // namespace
+
 bool isReferenceObjectType(InterfaceObjectType type)
 {
-    return type == InterfaceObjectType::interfaceProgram() ||
-           type == InterfaceObjectType::eibObjectAssociation() ||
-           type == InterfaceObjectType::router() ||
-           type == InterfaceObjectType::lteFsm() ||
-           type == InterfaceObjectType::cemiServer() ||
-           type == InterfaceObjectType::pollingMaster() ||
-           type == InterfaceObjectType::knxNetIpParameter() ||
-           type == InterfaceObjectType::fileServer() ||
-           type == InterfaceObjectType::eModeChannel() ||
-           type == InterfaceObjectType::adjustedEModeChannel() ||
-           type == InterfaceObjectType::textCatalogue() ||
-           type == InterfaceObjectType::eModeDevice() ||
-           type == InterfaceObjectType::rfMedium();
+    for (const auto referenceType : kReferenceObjectTypes) {
+        if (type == referenceType) {
+            return true;
+        }
+    }
+    return false;
 }
 
 std::span<const PropertyDeclaration> referenceObjectProperties(InterfaceObjectType type)

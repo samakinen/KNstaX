@@ -109,7 +109,7 @@ util::Result<void> PropertyExtServices::handleValueRead(const IndividualAddress&
     // §3.4.5.5: E_ACCESS_WRITE_ONLY for a read of a write-only property.
     if (!description->readable) {
         sendValueFailure(source, kService, request, KnxReturnCode::AccessWriteOnly);
-        return util::Result<void>::err(util::ErrorCode::OperationNotSupported);
+        return util::Result<void>::err(util::ErrorCode::WriteOnly);
     }
 
     // §3.4.5.1: start_index 0 asks for the *current* element count, answered
@@ -203,7 +203,7 @@ util::Result<void> PropertyExtServices::handleValueWrite(const IndividualAddress
     // read-only property is E_ACCESS_READ_ONLY, not the authorisation-flavoured
     // E_ACCESS_DENIED — the two mean different things to the tool.
     if (description->writeAccess != PropertyWriteAccess::Allowed) {
-        return fail(KnxReturnCode::AccessReadOnly, util::ErrorCode::OperationNotSupported);
+        return fail(KnxReturnCode::AccessReadOnly, util::ErrorCode::ReadOnly);
     }
 
     // 03/03/07 §3.5.7: refused when the current access level is below the

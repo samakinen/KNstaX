@@ -57,59 +57,59 @@ void test_InterfaceObjectManager_Persistence_SaveLoadRoundtrip(void) {
 
         // Device properties
         std::vector<uint8_t> progMode = {0x01};
-        TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
+        TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
                   mgr.writeProperty(InterfaceObjectType::device(), InterfaceObjectInstance(1),
-                                            static_cast<knx::application::PropertyID>(DeviceProperty::ProgMode), 1, progMode));
+                                            static_cast<knx::application::PropertyID>(DeviceProperty::ProgMode), 1, progMode).error());
 
         std::vector<uint8_t> subnet = {0x12};
         std::vector<uint8_t> device = {0x34};
-        TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
+        TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
             mgr.writeProperty(InterfaceObjectType::device(), InterfaceObjectInstance(1),
-                static_cast<knx::application::PropertyID>(DeviceProperty::SubnetAddress), 1, subnet));
-        TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
+                static_cast<knx::application::PropertyID>(DeviceProperty::SubnetAddress), 1, subnet).error());
+        TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
             mgr.writeProperty(InterfaceObjectType::device(), InterfaceObjectInstance(1),
-                static_cast<knx::application::PropertyID>(DeviceProperty::DeviceAddress), 1, device));
+                static_cast<knx::application::PropertyID>(DeviceProperty::DeviceAddress), 1, device).error());
 
         // Address table: 2 entries at indices 1..2
         std::vector<uint8_t> addrTable = {
             0x00, 0x11,
             0x00, 0x22,
         };
-        TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
+        TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
                   mgr.writeProperty(InterfaceObjectType::addressTable(), InterfaceObjectInstance(1),
-                                            static_cast<knx::application::PropertyID>(AddressTableProperty::TableData), 1, addrTable));
+                                            static_cast<knx::application::PropertyID>(AddressTableProperty::TableData), 1, addrTable).error());
 
         // Association table: one entry at index 1
         std::vector<uint8_t> assocTable = {
             0x00, 0x01,
             0x12, 0x34,
         };
-        TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
+        TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
                   mgr.writeProperty(InterfaceObjectType::associationTable(), InterfaceObjectInstance(1),
-                                            static_cast<knx::application::PropertyID>(AssociationTableProperty::TableData), 1, assocTable));
+                                            static_cast<knx::application::PropertyID>(AssociationTableProperty::TableData), 1, assocTable).error());
 
         // Application Program. PID_PROGRAM_VERSION is PDT_GENERIC_05:
         // manufacturer (2 B) + application number (2 B) + version (1 B).
         std::vector<uint8_t> progVersion = {0x00, 0xFA, 0x00, 0x01, 0x42};
-        TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
+        TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
                   mgr.writeProperty(InterfaceObjectType::applicationProgram(), InterfaceObjectInstance(1),
-                                            static_cast<knx::application::PropertyID>(AppProgramProperty::ProgramVersion), 1, progVersion));
+                                            static_cast<knx::application::PropertyID>(AppProgramProperty::ProgramVersion), 1, progVersion).error());
 
         std::vector<uint8_t> appId = {0xBE, 0xEF};
-        TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
+        TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
                   mgr.writeProperty(InterfaceObjectType::applicationProgram(), InterfaceObjectInstance(1),
-                                            static_cast<knx::application::PropertyID>(AppProgramProperty::ApplicationId), 1, appId));
+                                            static_cast<knx::application::PropertyID>(AppProgramProperty::ApplicationId), 1, appId).error());
 
         // Security
         std::vector<uint8_t> secMode = {static_cast<uint8_t>(SecurityMode::Enabled)};
-        TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
+        TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
                   mgr.writeProperty(InterfaceObjectType::security(), InterfaceObjectInstance(1),
-                                            static_cast<knx::application::PropertyID>(SecurityProperty::SecurityMode), 1, secMode));
+                                            static_cast<knx::application::PropertyID>(SecurityProperty::SecurityMode), 1, secMode).error());
 
         std::vector<uint8_t> toolKey(16, 0xAA);
-        TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
+        TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
                   mgr.writeProperty(InterfaceObjectType::security(), InterfaceObjectInstance(1),
-                                            static_cast<knx::application::PropertyID>(SecurityProperty::ToolKey), 1, toolKey));
+                                            static_cast<knx::application::PropertyID>(SecurityProperty::ToolKey), 1, toolKey).error());
 
         const size_t saved = mgr.saveToPersistence();
         TEST_ASSERT_TRUE(saved > 0);
@@ -159,30 +159,30 @@ void test_InterfaceObjectManager_Persistence_SaveLoadRoundtrip(void) {
 
         // Verify device
         knx::application::PropertyServiceDataBuffer out;
-        TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
+        TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
                     mgr.readProperty(InterfaceObjectType::device(), InterfaceObjectInstance(1),
-                                        static_cast<knx::application::PropertyID>(DeviceProperty::SubnetAddress), 1, 1, out));
+                                        static_cast<knx::application::PropertyID>(DeviceProperty::SubnetAddress), 1, 1, out).error());
         TEST_ASSERT_EQUAL_UINT32(1, out.size());
         TEST_ASSERT_EQUAL_UINT8(0x12, out[0]);
 
-        TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
+        TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
                     mgr.readProperty(InterfaceObjectType::device(), InterfaceObjectInstance(1),
-                                        static_cast<knx::application::PropertyID>(DeviceProperty::DeviceAddress), 1, 1, out));
+                                        static_cast<knx::application::PropertyID>(DeviceProperty::DeviceAddress), 1, 1, out).error());
         TEST_ASSERT_EQUAL_UINT32(1, out.size());
         TEST_ASSERT_EQUAL_UINT8(0x34, out[0]);
 
         // ProgMode must come back OFF after a reload — it is never restored
         // from persistence (KNX devices power up out of programming mode).
-        TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
+        TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
                             mgr.readProperty(InterfaceObjectType::device(), InterfaceObjectInstance(1),
-                                                                                static_cast<knx::application::PropertyID>(DeviceProperty::ProgMode), 1, 1, out));
+                                                                                static_cast<knx::application::PropertyID>(DeviceProperty::ProgMode), 1, 1, out).error());
         TEST_ASSERT_EQUAL_UINT32(1, out.size());
         TEST_ASSERT_EQUAL_UINT8(0x00, out[0]);
 
         // Verify address table slice
-        TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
+        TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
               mgr.readProperty(InterfaceObjectType::addressTable(), InterfaceObjectInstance(1),
-                           static_cast<knx::application::PropertyID>(AddressTableProperty::TableData), 1, 2, out));
+                           static_cast<knx::application::PropertyID>(AddressTableProperty::TableData), 1, 2, out).error());
         TEST_ASSERT_EQUAL_UINT32(4, out.size());
         TEST_ASSERT_EQUAL_UINT8(0x00, out[0]);
         TEST_ASSERT_EQUAL_UINT8(0x11, out[1]);
@@ -190,9 +190,9 @@ void test_InterfaceObjectManager_Persistence_SaveLoadRoundtrip(void) {
         TEST_ASSERT_EQUAL_UINT8(0x22, out[3]);
 
         // Verify association table slice
-        TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
+        TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
               mgr.readProperty(InterfaceObjectType::associationTable(), InterfaceObjectInstance(1),
-                           static_cast<knx::application::PropertyID>(AssociationTableProperty::TableData), 1, 1, out));
+                           static_cast<knx::application::PropertyID>(AssociationTableProperty::TableData), 1, 1, out).error());
         TEST_ASSERT_EQUAL_UINT32(4, out.size());
         TEST_ASSERT_EQUAL_UINT8(0x00, out[0]);
         TEST_ASSERT_EQUAL_UINT8(0x01, out[1]);
@@ -200,31 +200,31 @@ void test_InterfaceObjectManager_Persistence_SaveLoadRoundtrip(void) {
         TEST_ASSERT_EQUAL_UINT8(0x34, out[3]);
 
         // Verify app program (5-byte PDT_GENERIC_05 version block)
-        TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
+        TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
               mgr.readProperty(InterfaceObjectType::applicationProgram(), InterfaceObjectInstance(1),
-                           static_cast<knx::application::PropertyID>(AppProgramProperty::ProgramVersion), 1, 1, out));
+                           static_cast<knx::application::PropertyID>(AppProgramProperty::ProgramVersion), 1, 1, out).error());
         TEST_ASSERT_EQUAL_UINT32(5, out.size());
         TEST_ASSERT_EQUAL_UINT8(0x00, out[0]);
         TEST_ASSERT_EQUAL_UINT8(0xFA, out[1]);
         TEST_ASSERT_EQUAL_UINT8(0x42, out[4]);
 
-        TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
+        TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
               mgr.readProperty(InterfaceObjectType::applicationProgram(), InterfaceObjectInstance(1),
-                           static_cast<knx::application::PropertyID>(AppProgramProperty::ApplicationId), 1, 1, out));
+                           static_cast<knx::application::PropertyID>(AppProgramProperty::ApplicationId), 1, 1, out).error());
         TEST_ASSERT_EQUAL_UINT32(2, out.size());
         TEST_ASSERT_EQUAL_UINT8(0xBE, out[0]);
         TEST_ASSERT_EQUAL_UINT8(0xEF, out[1]);
 
         // Verify security
-        TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
+        TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
                   mgr.readProperty(InterfaceObjectType::security(), InterfaceObjectInstance(1),
-                                           static_cast<knx::application::PropertyID>(SecurityProperty::SecurityMode), 1, 1, out));
+                                           static_cast<knx::application::PropertyID>(SecurityProperty::SecurityMode), 1, 1, out).error());
         TEST_ASSERT_EQUAL_UINT32(1, out.size());
         TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(SecurityMode::Enabled), out[0]);
 
-        TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
+        TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
                   mgr.readProperty(InterfaceObjectType::security(), InterfaceObjectInstance(1),
-                                           static_cast<knx::application::PropertyID>(SecurityProperty::ToolKey), 1, 1, out));
+                                           static_cast<knx::application::PropertyID>(SecurityProperty::ToolKey), 1, 1, out).error());
         TEST_ASSERT_EQUAL_UINT32(16, out.size());
         for (uint8_t b : out) {
             TEST_ASSERT_EQUAL_UINT8(0xAA, b);
@@ -246,17 +246,17 @@ static uint16_t bankKey(InterfaceObjectType type, application::PropertyID pid, u
 
 static uint8_t readSubnet(InterfaceObjectManager& mgr) {
     knx::application::PropertyServiceDataBuffer out;
-    TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
-                      mgr.readProperty(InterfaceObjectType::device(), InterfaceObjectInstance(1), kSubnetPid, 1, 1, out));
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
+                      mgr.readProperty(InterfaceObjectType::device(), InterfaceObjectInstance(1), kSubnetPid, 1, 1, out).error());
     TEST_ASSERT_EQUAL_UINT32(1, out.size());
     return out[0];
 }
 
 static uint16_t readFirstGroupAddress(InterfaceObjectManager& mgr) {
     knx::application::PropertyServiceDataBuffer out;
-    TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
                       mgr.readProperty(InterfaceObjectType::addressTable(), InterfaceObjectInstance(1),
-                                       kAddrTablePid, 1, 1, out));
+                                       kAddrTablePid, 1, 1, out).error());
     TEST_ASSERT_EQUAL_UINT32(2, out.size());
     return static_cast<uint16_t>((out[0] << 8) | out[1]);
 }
@@ -275,14 +275,14 @@ void test_Persistence_LegacyUnmarkedLayoutIsLoadedAndMigrated(void) {
         auto p = createPersistence();
         TEST_ASSERT_TRUE(p->init("knx_objects"));
         const std::vector<uint8_t> schema = {0x00, 0x01};  // init()'s default schema version
-        TEST_ASSERT_EQUAL(PersistenceResult::Success,
-                          p->saveById(InterfaceObjectManager::kPersistenceSchemaVersionKeyId, schema));
+        TEST_ASSERT_EQUAL(util::ErrorCode::Success,
+                          p->saveById(InterfaceObjectManager::kPersistenceSchemaVersionKeyId, schema).error());
         const std::vector<uint8_t> subnet = {0x12};
         const std::vector<uint8_t> table = {0x0A, 0x01};
-        TEST_ASSERT_EQUAL(PersistenceResult::Success,
-                          p->saveById(makePersistenceKeyId(InterfaceObjectType::device(), kSubnetPid), subnet));
-        TEST_ASSERT_EQUAL(PersistenceResult::Success,
-                          p->saveById(makePersistenceKeyId(InterfaceObjectType::addressTable(), kAddrTablePid), table));
+        TEST_ASSERT_EQUAL(util::ErrorCode::Success,
+                          p->saveById(makePersistenceKeyId(InterfaceObjectType::device(), kSubnetPid), subnet).error());
+        TEST_ASSERT_EQUAL(util::ErrorCode::Success,
+                          p->saveById(makePersistenceKeyId(InterfaceObjectType::addressTable(), kAddrTablePid), table).error());
         p->close();
     }
 
@@ -302,8 +302,8 @@ void test_Persistence_LegacyUnmarkedLayoutIsLoadedAndMigrated(void) {
         auto p = createPersistence();
         TEST_ASSERT_TRUE(p->init("knx_objects"));
         std::vector<uint8_t> marker;
-        TEST_ASSERT_EQUAL(PersistenceResult::Success,
-                          p->loadById(InterfaceObjectManager::kPersistenceBankMarkerKeyId, marker));
+        TEST_ASSERT_EQUAL(util::ErrorCode::Success,
+                          p->loadById(InterfaceObjectManager::kPersistenceBankMarkerKeyId, marker).error());
         TEST_ASSERT_EQUAL_UINT32(1, marker.size());
         TEST_ASSERT_EQUAL_UINT8(1, marker[0]);
         TEST_ASSERT_FALSE(rawExists(*p, bankKey(InterfaceObjectType::device(), kSubnetPid, 0)));
@@ -332,11 +332,11 @@ void test_Persistence_InterruptedSaveKeepsPreviousDownload(void) {
         TEST_ASSERT_TRUE(mgr.init(true).isOk());
         const std::vector<uint8_t> subnet = {0x12};
         const std::vector<uint8_t> table = {0x0A, 0x01};
-        TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
-                          mgr.writeProperty(InterfaceObjectType::device(), InterfaceObjectInstance(1), kSubnetPid, 1, subnet));
-        TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
+        TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
+                          mgr.writeProperty(InterfaceObjectType::device(), InterfaceObjectInstance(1), kSubnetPid, 1, subnet).error());
+        TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
                           mgr.writeProperty(InterfaceObjectType::addressTable(), InterfaceObjectInstance(1),
-                                            kAddrTablePid, 1, table));
+                                            kAddrTablePid, 1, table).error());
         TEST_ASSERT_TRUE(mgr.saveToPersistence() > 0u);
         savedBank = mgr.activePersistenceBank();
     }
@@ -349,10 +349,10 @@ void test_Persistence_InterruptedSaveKeepsPreviousDownload(void) {
         TEST_ASSERT_TRUE(p->init("knx_objects"));
         const std::vector<uint8_t> newSubnet = {0x77};
         const std::vector<uint8_t> newTable = {0x0B, 0x02};
-        TEST_ASSERT_EQUAL(PersistenceResult::Success,
-                          p->saveById(bankKey(InterfaceObjectType::device(), kSubnetPid, otherBank), newSubnet));
-        TEST_ASSERT_EQUAL(PersistenceResult::Success,
-                          p->saveById(bankKey(InterfaceObjectType::addressTable(), kAddrTablePid, otherBank), newTable));
+        TEST_ASSERT_EQUAL(util::ErrorCode::Success,
+                          p->saveById(bankKey(InterfaceObjectType::device(), kSubnetPid, otherBank), newSubnet).error());
+        TEST_ASSERT_EQUAL(util::ErrorCode::Success,
+                          p->saveById(bankKey(InterfaceObjectType::addressTable(), kAddrTablePid, otherBank), newTable).error());
         p->close();
     }
 
@@ -382,23 +382,23 @@ void test_Persistence_KnxNetIpBackboneKeySurvivesRestart(void) {
     {
         InterfaceObjectManager mgr;
         GenericInterfaceObject ipObject(InterfaceObjectType::knxNetIpParameter());
-        mgr.registerReferenceObject(ipObject);
+        TEST_ASSERT_TRUE(mgr.registerReferenceObject(ipObject).isOk());
         TEST_ASSERT_TRUE(mgr.init(true).isOk());
-        TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
+        TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
                           mgr.writeProperty(InterfaceObjectType::knxNetIpParameter(), InterfaceObjectInstance(1),
-                                            kBackboneKeyPid, 1, key));
+                                            kBackboneKeyPid, 1, key).error());
         TEST_ASSERT_TRUE(mgr.saveToPersistence() > 0u);
     }
 
     InterfaceObjectManager mgr;
     GenericInterfaceObject ipObject(InterfaceObjectType::knxNetIpParameter());
-    mgr.registerReferenceObject(ipObject);
+    TEST_ASSERT_TRUE(mgr.registerReferenceObject(ipObject).isOk());
     TEST_ASSERT_TRUE(mgr.init(true).isOk());
     TEST_ASSERT_TRUE(mgr.loadFromPersistence() > 0u);
     knx::application::PropertyServiceDataBuffer out;
-    TEST_ASSERT_EQUAL(PropertyAccessResult::Success,
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
                       mgr.readProperty(InterfaceObjectType::knxNetIpParameter(), InterfaceObjectInstance(1),
-                                       kBackboneKeyPid, 1, 1, out));
+                                       kBackboneKeyPid, 1, 1, out).error());
     TEST_ASSERT_EQUAL_UINT32(key.size(), out.size());
     for (size_t i = 0; i < key.size(); ++i) {
         TEST_ASSERT_EQUAL_UINT8(key[i], out[i]);

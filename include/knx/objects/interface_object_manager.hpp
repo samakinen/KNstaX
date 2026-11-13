@@ -18,13 +18,14 @@
 #include "knx/objects/security_interface_object.hpp"
 #include "knx/objects/generic_interface_object.hpp"
 #include "knx/objects/object_persistence.hpp"
+#include "knx/objects/reference_object_registry.hpp"
 #include "knx/application/apci_services.hpp"
 #include "knx/application/property.hpp"
 #include "knx/types.hpp"
+#include "knx/util/fixed_vector.hpp"
 #include "knx/util/result.hpp"
-#include <functional>
+#include <cstddef>
 #include <initializer_list>
-#include <map>
 #include <memory>
 #include <span>
 #include <vector>
@@ -32,18 +33,12 @@
 namespace knx {
 namespace objects {
 
-/**
- * @brief Property access result
- */
-enum class PropertyAccessResult {
-    Success,
-    InvalidObject,
-    InvalidProperty,
-    ReadOnly,
-    WriteOnly,
-    InvalidValue,
-    NotImplemented
-};
+// Property access results are util::Result<void>:
+//   InvalidAddress         no such object (type, or an instance other than 0/1)
+//   NotFound               the object has no such property
+//   InvalidParameter       the index, count or value is not acceptable
+//   ReadOnly / WriteOnly   the property refuses that direction
+//   OperationNotSupported  the object has no property handlers at all
 
 /**
  * @brief Interface object manager
@@ -66,11 +61,22 @@ public:
         SecurityInterfaceObject& security);
     ~InterfaceObjectManager() = default;
     
-    // Disable copy, enable move
+    // Neither copyable nor movable: the object pointers and the object list
+    // point at this manager's own members, and the BAU hands out references
+    // to it.
     InterfaceObjectManager(const InterfaceObjectManager&) = delete;
     InterfaceObjectManager& operator=(const InterfaceObjectManager&) = delete;
-    InterfaceObjectManager(InterfaceObjectManager&&) = default;
-    InterfaceObjectManager& operator=(InterfaceObjectManager&&) = default;
+    InterfaceObjectManager(InterfaceObjectManager&&) = delete;
+    InterfaceObjectManager& operator=(InterfaceObjectManager&&) = delete;
+
+    /// The six core objects every device has.
+    static constexpr size_t kCoreObjectCount = 6;
+
+    /// Upper bound on the objects the manager routes to: the core objects
+    /// plus one of each reference object type. registerReferenceObject()
+    /// replaces an object of a type already present, so this is never
+    /// exceeded by a well-formed configuration.
+    static constexpr size_t kMaxInterfaceObjects = kCoreObjectCount + kReferenceObjectTypeCount;
     
     /**
      * @brief Initialize object manager
@@ -152,8 +158,13 @@ private:
     /// Read kPersistenceBankMarkerKeyId; an absent marker means bank 0.
     uint8_t readActivePersistenceBank();
 
-    /// Erase every persisted-property key of @p bank.
+    /// Erase every persisted-property key of @p bank. A failure is logged:
+    /// the next save overwrites or erases every key of the bank again.
     void erasePersistenceBank(uint8_t bank);
+
+    /// Erase the whole namespace; a failure is logged, since stored state of
+    /// another layout then survives.
+    void eraseAllPersistence(const char* reason);
 
 public:
     
@@ -172,7 +183,8 @@ public:
      * saveToPersistence() would rewrite all ~23 persisted blobs at bus rate.
      * This writes the two records that actually changed.
      *
-     * @return Number of records written.
+     * @return Number of records written. When a write fails the state stays
+     *         dirty, so the next checkpoint tries again.
      */
     size_t saveSecuritySequenceState();
 
@@ -186,7 +198,7 @@ public:
     /// layer. An empty @p record erases it (no key on any level, the
     /// ex-factory state). Written at once: A_Key_Write is rare and its answer
     /// promises the key is set.
-    bool saveAuthorizationKeyTable(std::span<const uint8_t> record);
+    util::Result<void> saveAuthorizationKeyTable(std::span<const uint8_t> record);
 
     /// The stored authorisation key table; empty when none is stored.
     std::vector<uint8_t> loadAuthorizationKeyTable();
@@ -231,46 +243,14 @@ public:
 
     /**
      * @brief Register a reference interface object for routing and descriptors.
+     *
+     * An object of a type already registered replaces it.
+     * @return OutOfRange when kMaxInterfaceObjects objects are registered.
      */
-    void registerReferenceObject(GenericInterfaceObject& object);
+    util::Result<void> registerReferenceObject(GenericInterfaceObject& object);
     
     // === Property Services ===
 
-    struct RegisteredObjectHandlers {
-        // Return detailed access results so callers can distinguish invalid values
-        // from missing properties, etc.
-        std::function<PropertyAccessResult(
-            application::PropertyID propertyId,
-            uint16_t startIndex,
-            uint8_t elementCount,
-            application::PropertyServiceDataBuffer& value)> read;
-
-        std::function<PropertyAccessResult(
-            application::PropertyID propertyId,
-            uint16_t startIndex,
-            std::span<const uint8_t> value)> write;
-
-        /// Same addressing as describeProperty(): by PID when it is not zero,
-        /// otherwise by the 0-based property index.
-        std::function<PropertyAccessResult(
-            application::PropertyID propertyId,
-            uint16_t propertyIndex,
-            PropertyDescription& description)> describe;
-    };
-
-    /**
-     * @brief Register a specific instance of an interface object type.
-     *
-     * This enables multi-instance handling beyond the built-in singleton objects.
-     * The registered handlers are used when routing read/write/describe for that
-     * (objectType, objectInstance) pair.
-     */
-    util::Result<void> registerObjectInstance(InterfaceObjectType objectType, InterfaceObjectInstance objectInstance, RegisteredObjectHandlers handlers);
-
-    /**
-     * @brief Unregister a previously registered object instance.
-     */
-    util::Result<void> unregisterObjectInstance(InterfaceObjectType objectType, InterfaceObjectInstance objectInstance);
     
     /**
      * @brief Read property value from an object
@@ -280,9 +260,9 @@ public:
      * @param startIndex Start element index for array properties
      * @param elementCount Number of elements to read
      * @param value Output buffer for property value
-     * @return Access result
+     * @return ok, or an error code as listed at the top of this file
      */
-    PropertyAccessResult readProperty(
+    util::Result<void> readProperty(
         InterfaceObjectType objectType,
         InterfaceObjectInstance objectInstance,
         application::PropertyID propertyId,
@@ -297,16 +277,16 @@ public:
     * @param propertyId Property ID
      * @param startIndex Start element index for array properties
      * @param value Property value to write
-     * @return Access result
+     * @return ok, or an error code as listed at the top of this file
      */
-    PropertyAccessResult writeProperty(
+    util::Result<void> writeProperty(
         InterfaceObjectType objectType,
         InterfaceObjectInstance objectInstance,
         application::PropertyID propertyId,
         uint16_t startIndex,
         std::span<const uint8_t> value);
 
-    PropertyAccessResult writeProperty(
+    util::Result<void> writeProperty(
         InterfaceObjectType objectType,
         InterfaceObjectInstance objectInstance,
         application::PropertyID propertyId,
@@ -329,7 +309,7 @@ public:
      * This is the one description both A_PropertyDescription_Read and
      * A_PropertyExtDescription_Read answer from.
      */
-    PropertyAccessResult describeProperty(
+    util::Result<void> describeProperty(
         InterfaceObjectType objectType,
         InterfaceObjectInstance objectInstance,
         application::PropertyID propertyId,
@@ -383,8 +363,9 @@ private:
     GroupObjectTableObject* _groupObjectTablePtr;
     SecurityInterfaceObject* _securityObjectPtr;
 
-    // Unified kernel-backed objects (built-ins + registered reference objects).
-    std::map<uint16_t, InterfaceObject*> _kernelObjects;
+    // Kernel-backed objects (built-ins + registered reference objects), at
+    // most one per type, searched linearly.
+    util::FixedVector<InterfaceObject*, kMaxInterfaceObjects> _kernelObjects;
     
     // Persistence
     std::unique_ptr<ObjectPersistence> _persistence;
@@ -393,31 +374,15 @@ private:
     bool _initialized;
     uint8_t _activeBank{0};  ///< See kPersistenceBankMarkerKeyId.
 
-    struct RegisteredObject {
-        RegisteredObjectHandlers handlers;
-    };
-
-    std::map<uint16_t, std::map<InterfaceObjectInstance, RegisteredObject>> _registeredObjects;
-
-    enum class DispatchTargetKind : uint8_t {
-        None,
-        Registered,
-        Kernel,
-    };
-
-    struct DispatchTarget {
-        DispatchTargetKind kind{DispatchTargetKind::None};
-        InterfaceObjectInstance registeredInstance{0};
-    };
-
     InterfaceObject* findKernelObject(InterfaceObjectType objectType);
     const InterfaceObject* findKernelObject(InterfaceObjectType objectType) const;
 
-    const RegisteredObject* findRegisteredObject(InterfaceObjectType objectType, InterfaceObjectInstance objectInstance) const;
-    RegisteredObject* findRegisteredObject(InterfaceObjectType objectType, InterfaceObjectInstance objectInstance);
-    uint8_t getRegisteredObjectCount(InterfaceObjectType objectType) const;
-    bool hasRegisteredObjectType(InterfaceObjectType objectType) const;
-    DispatchTarget resolveDispatchTarget(InterfaceObjectType objectType, InterfaceObjectInstance objectInstance) const;
+    /// The kernel object addressed by (@p objectType, @p objectInstance), or
+    /// nullptr. Every object is a singleton: instance 1, or 0 ("unspecified").
+    const InterfaceObject* resolveObject(InterfaceObjectType objectType, InterfaceObjectInstance objectInstance) const;
+
+    void registerCoreObjects();
+
     
 };
 

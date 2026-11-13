@@ -151,9 +151,9 @@ public:
         }
     }
     
-    PersistenceResult save(const std::string& key, std::span<const uint8_t> data) override {
+    util::Result<void> save(const std::string& key, std::span<const uint8_t> data) override {
         if (!_initialized) {
-            return PersistenceResult::NotInitialized;
+            return util::ErrorCode::NotInitialized;
         }
 
         static constexpr uint8_t kEmptyBlobByte = 0;
@@ -163,24 +163,24 @@ public:
         if (err != ESP_OK) {
             KNX_LOGE(TAG, "Failed to save key '%s': %d", key.c_str(), err);
             return (err == ESP_ERR_NVS_NOT_ENOUGH_SPACE) ? 
-                   PersistenceResult::StorageFull : PersistenceResult::WriteError;
+                   util::ErrorCode::StorageFull : util::ErrorCode::StorageError;
         }
         
         // Commit to flash
         err = nvs_commit(_handle);
         if (err != ESP_OK) {
             KNX_LOGE(TAG, "Failed to commit key '%s': %d", key.c_str(), err);
-            return PersistenceResult::WriteError;
+            return util::ErrorCode::StorageError;
         }
         
         KNX_LOGD(TAG, "Saved key '%s' (%zu bytes)", key.c_str(), data.size());
-        return PersistenceResult::Success;
+        return util::Result<void>::ok();
     }
 
-    PersistenceResult saveById(uint16_t keyId, std::span<const uint8_t> data) override {
+    util::Result<void> saveById(uint16_t keyId, std::span<const uint8_t> data) override {
         const auto key = makeCompactKey(keyId);
         if (!_initialized) {
-            return PersistenceResult::NotInitialized;
+            return util::ErrorCode::NotInitialized;
         }
 
         static constexpr uint8_t kEmptyBlobByte = 0;
@@ -190,33 +190,33 @@ public:
         if (err != ESP_OK) {
             KNX_LOGE(TAG, "Failed to save id '%s': %d", key.data(), err);
             return (err == ESP_ERR_NVS_NOT_ENOUGH_SPACE) ?
-                   PersistenceResult::StorageFull : PersistenceResult::WriteError;
+                   util::ErrorCode::StorageFull : util::ErrorCode::StorageError;
         }
 
         err = nvs_commit(_handle);
         if (err != ESP_OK) {
             KNX_LOGE(TAG, "Failed to commit id '%s': %d", key.data(), err);
-            return PersistenceResult::WriteError;
+            return util::ErrorCode::StorageError;
         }
 
         KNX_LOGD(TAG, "Saved id '%s' (%zu bytes)", key.data(), data.size());
-        return PersistenceResult::Success;
+        return util::Result<void>::ok();
     }
     
-    PersistenceResult load(const std::string& key, std::vector<uint8_t>& data) override {
+    util::Result<void> load(const std::string& key, std::vector<uint8_t>& data) override {
         if (!_initialized) {
-            return PersistenceResult::NotInitialized;
+            return util::ErrorCode::NotInitialized;
         }
         
         // Get blob size
         size_t required_size = 0;
         esp_err_t err = nvs_get_blob(_handle, key.c_str(), nullptr, &required_size);
         if (err == ESP_ERR_NVS_NOT_FOUND) {
-            return PersistenceResult::NotFound;
+            return util::ErrorCode::NotFound;
         }
         if (err != ESP_OK) {
             KNX_LOGE(TAG, "Failed to get size for key '%s': %d", key.c_str(), err);
-            return PersistenceResult::ReadError;
+            return util::ErrorCode::StorageError;
         }
         
         // Read blob
@@ -224,38 +224,38 @@ public:
         err = nvs_get_blob(_handle, key.c_str(), data.data(), &required_size);
         if (err != ESP_OK) {
             KNX_LOGE(TAG, "Failed to load key '%s': %d", key.c_str(), err);
-            return PersistenceResult::ReadError;
+            return util::ErrorCode::StorageError;
         }
         
         KNX_LOGD(TAG, "Loaded key '%s' (%zu bytes)", key.c_str(), data.size());
-        return PersistenceResult::Success;
+        return util::Result<void>::ok();
     }
 
-    PersistenceResult loadById(uint16_t keyId, std::vector<uint8_t>& data) override {
+    util::Result<void> loadById(uint16_t keyId, std::vector<uint8_t>& data) override {
         const auto key = makeCompactKey(keyId);
         if (!_initialized) {
-            return PersistenceResult::NotInitialized;
+            return util::ErrorCode::NotInitialized;
         }
 
         size_t required_size = 0;
         esp_err_t err = nvs_get_blob(_handle, key.data(), nullptr, &required_size);
         if (err == ESP_ERR_NVS_NOT_FOUND) {
-            return PersistenceResult::NotFound;
+            return util::ErrorCode::NotFound;
         }
         if (err != ESP_OK) {
             KNX_LOGE(TAG, "Failed to get size for id '%s': %d", key.data(), err);
-            return PersistenceResult::ReadError;
+            return util::ErrorCode::StorageError;
         }
 
         data.resize(required_size);
         err = nvs_get_blob(_handle, key.data(), data.data(), &required_size);
         if (err != ESP_OK) {
             KNX_LOGE(TAG, "Failed to load id '%s': %d", key.data(), err);
-            return PersistenceResult::ReadError;
+            return util::ErrorCode::StorageError;
         }
 
         KNX_LOGD(TAG, "Loaded id '%s' (%zu bytes)", key.data(), data.size());
-        return PersistenceResult::Success;
+        return util::Result<void>::ok();
     }
     
     util::Result<bool> exists(const std::string& key) override {
@@ -279,59 +279,59 @@ public:
         return util::Result<bool>(err == ESP_OK);
     }
     
-    PersistenceResult erase(const std::string& key) override {
+    util::Result<void> erase(const std::string& key) override {
         if (!_initialized) {
-            return PersistenceResult::NotInitialized;
+            return util::ErrorCode::NotInitialized;
         }
         
         esp_err_t err = nvs_erase_key(_handle, key.c_str());
         if (err == ESP_ERR_NVS_NOT_FOUND) {
-            return PersistenceResult::NotFound;
+            return util::ErrorCode::NotFound;
         }
         if (err != ESP_OK) {
             KNX_LOGE(TAG, "Failed to erase key '%s': %d", key.c_str(), err);
-            return PersistenceResult::WriteError;
+            return util::ErrorCode::StorageError;
         }
         
         nvs_commit(_handle);
         KNX_LOGD(TAG, "Erased key '%s'", key.c_str());
-        return PersistenceResult::Success;
+        return util::Result<void>::ok();
     }
 
-    PersistenceResult eraseById(uint16_t keyId) override {
+    util::Result<void> eraseById(uint16_t keyId) override {
         const auto key = makeCompactKey(keyId);
         if (!_initialized) {
-            return PersistenceResult::NotInitialized;
+            return util::ErrorCode::NotInitialized;
         }
 
         esp_err_t err = nvs_erase_key(_handle, key.data());
         if (err == ESP_ERR_NVS_NOT_FOUND) {
-            return PersistenceResult::NotFound;
+            return util::ErrorCode::NotFound;
         }
         if (err != ESP_OK) {
             KNX_LOGE(TAG, "Failed to erase id '%s': %d", key.data(), err);
-            return PersistenceResult::WriteError;
+            return util::ErrorCode::StorageError;
         }
 
         nvs_commit(_handle);
         KNX_LOGD(TAG, "Erased id '%s'", key.data());
-        return PersistenceResult::Success;
+        return util::Result<void>::ok();
     }
     
-    PersistenceResult eraseAll() override {
+    util::Result<void> eraseAll() override {
         if (!_initialized) {
-            return PersistenceResult::NotInitialized;
+            return util::ErrorCode::NotInitialized;
         }
         
         esp_err_t err = nvs_erase_all(_handle);
         if (err != ESP_OK) {
             KNX_LOGE(TAG, "Failed to erase all: %d", err);
-            return PersistenceResult::WriteError;
+            return util::ErrorCode::StorageError;
         }
         
         nvs_commit(_handle);
         KNX_LOGI(TAG, "Erased all keys in namespace");
-        return PersistenceResult::Success;
+        return util::Result<void>::ok();
     }
     
     std::vector<std::string> listKeys() override {
@@ -405,16 +405,16 @@ public:
         _initialized = false;
     }
     
-    PersistenceResult save(const std::string& key, std::span<const uint8_t> data) override {
+    util::Result<void> save(const std::string& key, std::span<const uint8_t> data) override {
         if (!_initialized) {
-            return PersistenceResult::NotInitialized;
+            return util::ErrorCode::NotInitialized;
         }
         
         std::string filepath = _directory + "/" + key + ".bin";
         std::ofstream file(filepath, std::ios::binary);
         if (!file) {
             KNX_LOGE(TAG, "Failed to open file '%s' for writing", filepath.c_str());
-            return PersistenceResult::WriteError;
+            return util::ErrorCode::StorageError;
         }
         
         if (!data.empty()) {
@@ -422,16 +422,16 @@ public:
         }
         if (!file) {
             KNX_LOGE(TAG, "Failed to write file '%s'", filepath.c_str());
-            return PersistenceResult::WriteError;
+            return util::ErrorCode::StorageError;
         }
         
         KNX_LOGD(TAG, "Saved key '%s' (%zu bytes)", key.c_str(), data.size());
-        return PersistenceResult::Success;
+        return util::Result<void>::ok();
     }
 
-    PersistenceResult saveById(uint16_t keyId, std::span<const uint8_t> data) override {
+    util::Result<void> saveById(uint16_t keyId, std::span<const uint8_t> data) override {
         if (!_initialized) {
-            return PersistenceResult::NotInitialized;
+            return util::ErrorCode::NotInitialized;
         }
 
         const auto key = makeCompactKey(keyId);
@@ -439,7 +439,7 @@ public:
         std::ofstream file(filepath, std::ios::binary);
         if (!file) {
             KNX_LOGE(TAG, "Failed to open file '%s' for writing", filepath.c_str());
-            return PersistenceResult::WriteError;
+            return util::ErrorCode::StorageError;
         }
 
         if (!data.empty()) {
@@ -447,22 +447,22 @@ public:
         }
         if (!file) {
             KNX_LOGE(TAG, "Failed to write file '%s'", filepath.c_str());
-            return PersistenceResult::WriteError;
+            return util::ErrorCode::StorageError;
         }
 
         KNX_LOGD(TAG, "Saved id '%s' (%zu bytes)", key.data(), data.size());
-        return PersistenceResult::Success;
+        return util::Result<void>::ok();
     }
     
-    PersistenceResult load(const std::string& key, std::vector<uint8_t>& data) override {
+    util::Result<void> load(const std::string& key, std::vector<uint8_t>& data) override {
         if (!_initialized) {
-            return PersistenceResult::NotInitialized;
+            return util::ErrorCode::NotInitialized;
         }
         
         std::string filepath = _directory + "/" + key + ".bin";
         std::ifstream file(filepath, std::ios::binary | std::ios::ate);
         if (!file) {
-            return PersistenceResult::NotFound;
+            return util::ErrorCode::NotFound;
         }
         
         std::streamsize size = file.tellg();
@@ -471,23 +471,23 @@ public:
         data.resize(static_cast<size_t>(size));
         if (!file.read(reinterpret_cast<char*>(data.data()), size)) {
             KNX_LOGE(TAG, "Failed to read file '%s'", filepath.c_str());
-            return PersistenceResult::ReadError;
+            return util::ErrorCode::StorageError;
         }
         
         KNX_LOGD(TAG, "Loaded key '%s' (%zu bytes)", key.c_str(), data.size());
-        return PersistenceResult::Success;
+        return util::Result<void>::ok();
     }
 
-    PersistenceResult loadById(uint16_t keyId, std::vector<uint8_t>& data) override {
+    util::Result<void> loadById(uint16_t keyId, std::vector<uint8_t>& data) override {
         if (!_initialized) {
-            return PersistenceResult::NotInitialized;
+            return util::ErrorCode::NotInitialized;
         }
 
         const auto key = makeCompactKey(keyId);
         std::string filepath = _directory + "/" + std::string(key.data()) + ".bin";
         std::ifstream file(filepath, std::ios::binary | std::ios::ate);
         if (!file) {
-            return PersistenceResult::NotFound;
+            return util::ErrorCode::NotFound;
         }
 
         std::streamsize size = file.tellg();
@@ -496,11 +496,11 @@ public:
         data.resize(static_cast<size_t>(size));
         if (!file.read(reinterpret_cast<char*>(data.data()), size)) {
             KNX_LOGE(TAG, "Failed to read file '%s'", filepath.c_str());
-            return PersistenceResult::ReadError;
+            return util::ErrorCode::StorageError;
         }
 
         KNX_LOGD(TAG, "Loaded id '%s' (%zu bytes)", key.data(), data.size());
-        return PersistenceResult::Success;
+        return util::Result<void>::ok();
     }
     
     util::Result<bool> exists(const std::string& key) override {
@@ -522,9 +522,9 @@ public:
         return util::Result<bool>(std::filesystem::exists(filepath));
     }
     
-    PersistenceResult erase(const std::string& key) override {
+    util::Result<void> erase(const std::string& key) override {
         if (!_initialized) {
-            return PersistenceResult::NotInitialized;
+            return util::ErrorCode::NotInitialized;
         }
         
         std::string filepath = _directory + "/" + key + ".bin";
@@ -532,18 +532,18 @@ public:
         if (!std::filesystem::remove(filepath, ec)) {
             if (ec) {
                 KNX_LOGE(TAG, "Failed to erase key '%s': %s", key.c_str(), ec.message().c_str());
-                return PersistenceResult::WriteError;
+                return util::ErrorCode::StorageError;
             }
-            return PersistenceResult::NotFound;
+            return util::ErrorCode::NotFound;
         }
         
         KNX_LOGD(TAG, "Erased key '%s'", key.c_str());
-        return PersistenceResult::Success;
+        return util::Result<void>::ok();
     }
 
-    PersistenceResult eraseById(uint16_t keyId) override {
+    util::Result<void> eraseById(uint16_t keyId) override {
         if (!_initialized) {
-            return PersistenceResult::NotInitialized;
+            return util::ErrorCode::NotInitialized;
         }
 
         const auto key = makeCompactKey(keyId);
@@ -552,18 +552,18 @@ public:
         if (!std::filesystem::remove(filepath, ec)) {
             if (ec) {
                 KNX_LOGE(TAG, "Failed to erase id '%s': %s", key.data(), ec.message().c_str());
-                return PersistenceResult::WriteError;
+                return util::ErrorCode::StorageError;
             }
-            return PersistenceResult::NotFound;
+            return util::ErrorCode::NotFound;
         }
 
         KNX_LOGD(TAG, "Erased id '%s'", key.data());
-        return PersistenceResult::Success;
+        return util::Result<void>::ok();
     }
     
-    PersistenceResult eraseAll() override {
+    util::Result<void> eraseAll() override {
         if (!_initialized) {
-            return PersistenceResult::NotInitialized;
+            return util::ErrorCode::NotInitialized;
         }
         
         std::error_code ec;
@@ -572,7 +572,7 @@ public:
         }
         
         KNX_LOGI(TAG, "Erased all keys in namespace");
-        return PersistenceResult::Success;
+        return util::Result<void>::ok();
     }
     
     std::vector<std::string> listKeys() override {
@@ -614,38 +614,38 @@ PersistenceManager::PersistenceManager(ObjectPersistence& persistence)
 {
 }
 
-PersistenceResult PersistenceManager::saveObject(const SerializableObject& object) {
+util::Result<void> PersistenceManager::saveObject(const SerializableObject& object) {
     std::vector<uint8_t> data;
     auto serializeRes = object.serialize(data);
     if (serializeRes.isError()) {
         KNX_LOGE(TAG, "Failed to serialize object '%s'", object.getStorageKey().c_str());
-        return PersistenceResult::InvalidData;
+        return util::ErrorCode::EncodeFailed;
     }
     
     return _persistence.save(object.getStorageKey(), data);
 }
 
-PersistenceResult PersistenceManager::loadObject(SerializableObject& object) {
+util::Result<void> PersistenceManager::loadObject(SerializableObject& object) {
     std::vector<uint8_t> data;
-    PersistenceResult result = _persistence.load(object.getStorageKey(), data);
-    if (result != PersistenceResult::Success) {
+    auto result = _persistence.load(object.getStorageKey(), data);
+    if (result.isError()) {
         return result;
     }
     
     auto deserializeRes = object.deserialize(data);
     if (deserializeRes.isError()) {
         KNX_LOGE(TAG, "Failed to deserialize object '%s'", object.getStorageKey().c_str());
-        return PersistenceResult::InvalidData;
+        return util::ErrorCode::DecodeFailed;
     }
     
-    return PersistenceResult::Success;
+    return util::Result<void>::ok();
 }
 
 util::Result<bool> PersistenceManager::objectExists(const SerializableObject& object) {
     return _persistence.exists(object.getStorageKey());
 }
 
-PersistenceResult PersistenceManager::eraseObject(const SerializableObject& object) {
+util::Result<void> PersistenceManager::eraseObject(const SerializableObject& object) {
     return _persistence.erase(object.getStorageKey());
 }
 

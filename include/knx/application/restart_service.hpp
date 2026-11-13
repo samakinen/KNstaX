@@ -63,16 +63,6 @@ enum class RestartErrorCode : uint8_t {
 };
 
 /**
- * @brief Restart result codes
- */
-enum class RestartResult : uint8_t {
-    Success = 0,           ///< Restart initiated successfully
-    Denied = 1,            ///< Restart denied (not authorized)
-    NotSupported = 2,      ///< Restart type not supported
-    InvalidRequest = 3     ///< Invalid restart request
-};
-
-/**
  * @brief Restart Service Handler
  * 
  * Handles A_Restart requests with optional authorization checking

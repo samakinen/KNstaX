@@ -26,17 +26,6 @@ namespace knx {
 namespace application {
 
 /**
- * @brief Memory access result codes
- */
-enum class MemoryAccessResult : uint8_t {
-    Success = 0,             ///< Operation successful
-    InvalidAddress = 1,      ///< Address out of range
-    AccessDenied = 2,        ///< Region does not allow this operation
-    InvalidLength = 3,       ///< Length exceeds limits (max 63 bytes)
-    RegionNotFound = 4       ///< No region contains this address
-};
-
-/**
  * @brief Memory Service Handler
  * 
  * Handles A_Memory_Read and A_Memory_Write services with address
@@ -195,12 +184,15 @@ public:
      * @param address Starting address
      * @param length Number of bytes
     * @param accessType Requested access type
-     * @return Access result
+     * @return ok; InvalidFrameSize for a length of 0 or above @p maxLength;
+     *         InvalidAddress when no region holds @p address; WriteOnly /
+     *         ReadOnly when the region refuses that direction, AccessDenied
+     *         when it refuses the range otherwise.
      */
    /// @param maxLength Largest payload the *calling service* may carry. The
    ///                  classic A_Memory_* services top out at 63 octets (6-bit
    ///                  APCI count); A_MemoryExtended_* carries a full octet.
-   MemoryAccessResult validateAccess(MemoryAddress address,
+   util::Result<void> validateAccess(MemoryAddress address,
                                      uint8_t length,
                                      AccessType accessType,
                                      size_t maxLength = MAX_MEMORY_BYTES) const;

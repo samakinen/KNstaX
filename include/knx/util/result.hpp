@@ -51,6 +51,16 @@ enum class ErrorCode : uint8_t {
     /// travel further. Not a failure: KNX Data Secure answers an
     /// S-A_Sync_Request itself, and the request never reaches the application.
     FrameConsumed,
+    /// The addressed item (a stored record, a property) does not exist.
+    NotFound,
+    /// Persistent storage has no room left for the write.
+    StorageFull,
+    /// Persistent storage failed to read, write or erase.
+    StorageError,
+    /// A write to something that can only be read.
+    ReadOnly,
+    /// A read of something that can only be written.
+    WriteOnly,
     UnknownError = 255
 };
 
@@ -80,6 +90,11 @@ enum class ErrorCode : uint8_t {
         case ErrorCode::OperationNotReady: return "Operation not ready";
         case ErrorCode::OperationNotSupported: return "Operation not supported";
         case ErrorCode::FrameConsumed: return "Frame consumed";
+        case ErrorCode::NotFound: return "Not found";
+        case ErrorCode::StorageFull: return "Storage full";
+        case ErrorCode::StorageError: return "Storage error";
+        case ErrorCode::ReadOnly: return "Read only";
+        case ErrorCode::WriteOnly: return "Write only";
         case ErrorCode::UnknownError: return "Unknown error";
         default: return "Undefined error";
     }

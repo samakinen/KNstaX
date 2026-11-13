@@ -9,6 +9,8 @@
 #include "knx/util/result.hpp"
 #include "unity.h"
 
+#include <cstring>
+
 using namespace knx::util;
 
 void setUp(void) {}
@@ -69,6 +71,24 @@ void test_error_code_to_string(void) {
     TEST_ASSERT_EQUAL_STRING("Invalid parameter", errorCodeToString(ErrorCode::InvalidParameter));
     TEST_ASSERT_EQUAL_STRING("Timeout", errorCodeToString(ErrorCode::Timeout));
     TEST_ASSERT_EQUAL_STRING("Queue full", errorCodeToString(ErrorCode::QueueFull));
+    TEST_ASSERT_EQUAL_STRING("Not found", errorCodeToString(ErrorCode::NotFound));
+    TEST_ASSERT_EQUAL_STRING("Storage full", errorCodeToString(ErrorCode::StorageFull));
+    TEST_ASSERT_EQUAL_STRING("Storage error", errorCodeToString(ErrorCode::StorageError));
+    TEST_ASSERT_EQUAL_STRING("Read only", errorCodeToString(ErrorCode::ReadOnly));
+    TEST_ASSERT_EQUAL_STRING("Write only", errorCodeToString(ErrorCode::WriteOnly));
+}
+
+/// Every code below UnknownError has its own string, so a log line never has
+/// to fall back to "Undefined error" for a code the stack actually returns.
+void test_error_code_strings_are_distinct(void) {
+    const auto last = static_cast<uint8_t>(ErrorCode::WriteOnly);
+    for (uint8_t a = 0; a <= last; ++a) {
+        const char* sa = errorCodeToString(static_cast<ErrorCode>(a));
+        TEST_ASSERT_NOT_EQUAL(0, strcmp("Undefined error", sa));
+        for (uint8_t b = static_cast<uint8_t>(a + 1u); b <= last; ++b) {
+            TEST_ASSERT_NOT_EQUAL(0, strcmp(sa, errorCodeToString(static_cast<ErrorCode>(b))));
+        }
+    }
 }
 
 void test_result_copy_construction(void) {
@@ -116,6 +136,7 @@ int main(int argc, char** argv) {
     RUN_TEST(test_result_void_success);
     RUN_TEST(test_result_void_error);
     RUN_TEST(test_error_code_to_string);
+    RUN_TEST(test_error_code_strings_are_distinct);
     RUN_TEST(test_result_copy_construction);
     RUN_TEST(test_result_move_construction);
     RUN_TEST(test_result_assignment);
