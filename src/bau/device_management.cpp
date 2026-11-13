@@ -628,6 +628,13 @@ void DeviceManagement::publishRouterObject()
         _model.setReferenceObjectTypes(std::move(required));
     }
 
+    // During BusAccessUnit::init() this first runs in phase 4, before the
+    // model has created any reference object: the type is declared now and
+    // seeded in phase 7 once the object exists. Seeding here would only fail.
+    if (!_model.referenceObjectsInstantiated()) {
+        return;
+    }
+
     // Seeding failures are logged, not swallowed. A silently unseeded Router
     // Object answers every read with nothing, which looks to ETS like a coupler
     // that has no configuration rather than a device with a wiring bug.

@@ -19,7 +19,7 @@
 #include "knx/types.hpp"
 #include "knx/util/result.hpp"
 #include <cstdint>
-#include <functional>
+#include "knx/util/inplace_function.hpp"
 #include <span>
 
 namespace knx {
@@ -43,7 +43,7 @@ public:
      * @param data Output buffer
      * @return true if read successful
      */
-   using ReadCallback = std::function<util::Result<void>(MemoryAddress address, uint8_t length, std::span<uint8_t> data)>;
+   using ReadCallback = util::InplaceFunction<util::Result<void>(MemoryAddress address, uint8_t length, std::span<uint8_t> data), 32>;
     
     /**
      * @brief Memory write callback
@@ -51,14 +51,14 @@ public:
      * @param data Data to write
      * @return true if write successful
      */
-   using WriteCallback = std::function<util::Result<void>(MemoryAddress address, std::span<const uint8_t> data)>;
+   using WriteCallback = util::InplaceFunction<util::Result<void>(MemoryAddress address, std::span<const uint8_t> data), 32>;
     
     /**
      * @brief Memory response callback
      * @param dest Destination address
      * @param response Response data
      */
-    using ResponseCallback = std::function<void(const IndividualAddress& dest, const MemoryResponse& response)>;
+    using ResponseCallback = util::InplaceFunction<void(const IndividualAddress& dest, const MemoryResponse& response), 32>;
 
     /**
      * @brief Extended memory response callback
@@ -67,7 +67,7 @@ public:
      * a return code and a 24-bit address, and must answer even on failure.
      */
     using ExtendedResponseCallback =
-        std::function<void(const IndividualAddress& dest, const MemoryExtendedResponse& response)>;
+        util::InplaceFunction<void(const IndividualAddress& dest, const MemoryExtendedResponse& response), 32>;
 
     /**
      * @brief Whether Verify Mode is on (PID_DEVICE_CONTROL bit 2, 03/05/01 §4.2.14.7)
@@ -75,7 +75,7 @@ public:
      * Decides whether A_Memory_Write is answered at all (03/03/07 §3.5.4).
      * Left unset, Verify Mode is off, which is its default in the spec.
      */
-    using VerifyModeProvider = std::function<bool()>;
+    using VerifyModeProvider = util::InplaceFunction<bool(), 32>;
 
     /**
      * @brief Whether @p source holds the access level memory writes require
@@ -83,7 +83,7 @@ public:
      * Asked for A_Memory_Write and A_MemoryExtended_Write alike. Left unset,
      * every write is permitted.
      */
-    using WritePermission = std::function<bool(const IndividualAddress& source)>;
+    using WritePermission = util::InplaceFunction<bool(const IndividualAddress& source), 32>;
 
     /// Largest payload an extended memory operation may carry.
     ///

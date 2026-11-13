@@ -20,7 +20,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <functional>
+#include "knx/util/inplace_function.hpp"
 #include <span>
 
 namespace knx {
@@ -63,13 +63,13 @@ public:
     static constexpr size_t kSerializedKeyTableSize = kKeyedLevelCount * 4u;
 
     /// Sends A_Authorize_Response(level) to @p destination.
-    using ResponseCallback = std::function<void(const IndividualAddress& destination, AccessLevel level)>;
+    using ResponseCallback = util::InplaceFunction<void(const IndividualAddress& destination, AccessLevel level), 32>;
 
     /// The key table changed through a management service; persist it.
-    using KeyTableChangedCallback = std::function<void(const KeyTable& keys)>;
+    using KeyTableChangedCallback = util::InplaceFunction<void(const KeyTable& keys), 32>;
 
     /// Monotonic ticks for the optional authorisation expiry.
-    using TimeSource = std::function<uint32_t()>;
+    using TimeSource = util::InplaceFunction<uint32_t(), 32>;
     static constexpr uint32_t NO_TIMEOUT = 0u;
 
     AuthorizationService();

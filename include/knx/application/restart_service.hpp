@@ -15,7 +15,7 @@
 #include "knx/types.hpp"
 #include "knx/util/result.hpp"
 #include <cstdint>
-#include <functional>
+#include "knx/util/inplace_function.hpp"
 #include <span>
 #include <vector>
 
@@ -75,20 +75,20 @@ public:
      * @param type Type of restart requested
      * @return true if restart can be performed
      */
-    using RestartCallback = std::function<util::Result<void>(RestartType type)>;
+    using RestartCallback = util::InplaceFunction<util::Result<void>(RestartType type), 32>;
     
     /**
      * @brief Authorization check callback
      * @param source Source address requesting restart
      * @return true if restart is authorized
      */
-    using AuthorizationCallback = std::function<util::Result<void>(const IndividualAddress& source)>;
+    using AuthorizationCallback = util::InplaceFunction<util::Result<void>(const IndividualAddress& source), 32>;
     
     /**
      * @brief Pre-restart cleanup callback
      * Called before restart to save state, close connections, etc.
      */
-    using CleanupCallback = std::function<void()>;
+    using CleanupCallback = util::InplaceFunction<void(), 32>;
 
     /**
      * @brief Resets the Resources an Erase Code names.
@@ -102,7 +102,7 @@ public:
      * they are answered "Unsupported Erase Code", which is the honest answer
      * for a device that would otherwise report a reset it did not perform.
      */
-    using MasterResetCallback = std::function<util::Result<void>(EraseCode eraseCode)>;
+    using MasterResetCallback = util::InplaceFunction<util::Result<void>(EraseCode eraseCode), 32>;
 
     /**
      * @brief Initialize restart service

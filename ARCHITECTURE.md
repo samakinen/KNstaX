@@ -64,6 +64,16 @@ the Data Secure application layer when built in, and for a coupler the second
 medium and the `TwoPortCoupler` between them. It has one implementation and no
 test double, so it is not an interface.
 
+`ApplicationLayer` is three parts. It decodes each received APDU, drops a
+service that arrived on a communication mode it is not defined for (03/03/07
+Table 1) or that the Access Policy refuses, and routes the rest: management
+services to `ManagementServer`, everything else to the group runtime.
+`ManagementServer` owns the nine management service objects, decodes their
+requests and encodes their responses; it is handed a `RequestContext` saying
+whether the request came on the transport connection and how it was secured,
+and its answers leave on that same path. `ASendPipeline` encodes APDUs and
+owns retries and the send-outcome queue for both.
+
 ### Canonical TP1 stack shape
 
 ```text

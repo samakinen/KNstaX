@@ -240,13 +240,9 @@ public:
 
     // Single-slot, overwrite-on-set callback for the endpoint runtime's own
     // programming-mode observer. Unlike registerProgModeCallback() (append,
-    // for independent long-lived observers such as the BAU), this slot is
-    // meant to be re-set by EndpointRuntime::rewireCallbacksAfterMove() after
-    // a CommissionedProductRuntime move. Using the append API there left a
-    // dangling this-capturing closure from the pre-move (stack) instance
-    // registered alongside the fresh one, since append never removes the
-    // stale entry — the dangling closure crashed the next time programming
-    // mode was toggled once its captured stack frame was reused.
+    // for independent long-lived observers such as the BAU), setting it again
+    // replaces the previous observer instead of leaving it registered beside
+    // the new one.
     void setInternalProgModeCallback(ProgModeCallback callback);
     void registerIndividualAddressCallback(IndividualAddressCallback callback);
     

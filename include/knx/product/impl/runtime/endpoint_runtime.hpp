@@ -106,6 +106,12 @@ public:
     {
     }
 
+    // start() installs callbacks capturing `this` in the BAU and its objects.
+    EndpointRuntime(const EndpointRuntime&) = delete;
+    EndpointRuntime& operator=(const EndpointRuntime&) = delete;
+    EndpointRuntime(EndpointRuntime&&) = delete;
+    EndpointRuntime& operator=(EndpointRuntime&&) = delete;
+
     const auto& compiledDefinition() const
     {
         return _compiled;
@@ -668,33 +674,6 @@ public:
             return;
         }
         _bau->applicationProgram().setProgramData(data);
-    }
-
-    /// Re-point the program-data callback (e.g. after the owner object is moved)
-    /// without re-applying any already-stored program data.  The caller is
-    /// responsible for ensuring any existing state was already transferred.
-    void rewireParameterDataCallbackNoReapply(
-        objects::ApplicationProgramObject::ProgramDataChangedCallback callback)
-    {
-        if (!_bau) {
-            return;
-        }
-        _bau->applicationProgram().setOnProgramDataChanged(std::move(callback));
-    }
-
-    void rewireCallbacksAfterMove()
-    {
-        if (!_bau) {
-            return;
-        }
-
-        wireCallbacks();
-
-        if (_workAvailableCallback) {
-            _bau->setWorkAvailableCallback([this]() { notifyWorkAvailableIfTransitioned(); });
-        }
-
-        refreshWorkAvailabilityState();
     }
 
     // -----------------------------------------------------------------------

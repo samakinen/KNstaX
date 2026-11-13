@@ -32,7 +32,6 @@
 #include "knx/util/result.hpp"
 
 #include <cstdint>
-#include <functional>
 #include <optional>
 #include <span>
 
@@ -47,18 +46,18 @@ namespace application {
  */
 class PropertyExtServices {
 public:
-    using ValueResponseCallback = std::function<void(
+    using ValueResponseCallback = util::InplaceFunction<void(
         const IndividualAddress& destination,
         APCIService service,
-        const PropertyExtValueResponse& response)>;
+        const PropertyExtValueResponse& response), 32>;
 
-    using DescriptionResponseCallback = std::function<void(
+    using DescriptionResponseCallback = util::InplaceFunction<void(
         const IndividualAddress& destination,
-        const PropertyExtDescriptionResponse& response)>;
+        const PropertyExtDescriptionResponse& response), 32>;
 
-    using FunctionResponseCallback = std::function<void(
+    using FunctionResponseCallback = util::InplaceFunction<void(
         const IndividualAddress& destination,
-        const FunctionPropertyExtResponse& response)>;
+        const FunctionPropertyExtResponse& response), 32>;
 
     /**
      * @brief Optional backend for function property invocation

@@ -112,9 +112,8 @@ class CommissionedProductRuntime;
 /// rather than by value. The runtime carries the full endpoint and parameter
 /// state inline and is tens of kilobytes for a product of any size — far too
 /// large to sit in an MCU task's stack frame, let alone in the two frames a
-/// by-value return would need it in at once. Constructing it directly in its
-/// final storage also removes the move that a by-value return would perform,
-/// and with it the callback re-wiring that move has to do.
+/// by-value return would need it in at once. It is not movable either: its
+/// callbacks capture `this`, so it is built directly in its final storage.
 ///
 /// Nothing about the product's compile-time model changes: the runtime type is
 /// still fully static in the product definition and binding capacity, and all
@@ -1225,32 +1224,13 @@ public:
     {
     }
 
-    // Move constructor: re-wire the parameter data callback so it references
-    // the new _parametersState address rather than the moved-from one.
-    CommissionedProductRuntime(CommissionedProductRuntime&& other) noexcept
-        : _definition(std::move(other._definition))
-        , _knxPersistenceIdentity(std::move(other._knxPersistenceIdentity))
-        , _parametersState(std::move(other._parametersState))
-        , _lifecycleCallback(std::move(other._lifecycleCallback))
-        , _lastLifecycleState(other._lastLifecycleState)
-        , _runtime(std::move(other._runtime))
-        , _startInProgrammingMode(other._startInProgrammingMode)
-        , _transportPath(other._transportPath)
-        , _secureOptions(other._secureOptions)
-#if KNX_FEATURE_NETIP && KNX_SECURE_ENABLED
-        , _mcTimerStore(std::move(other._mcTimerStore))
-#endif
-    {
-        // Update the APO callback to point at this object's _parametersState.
-        // Use the no-reapply variant so existing data (already carried over via
-        // the move of _parametersState) is not re-decoded and callbacks don't
-        // fire spuriously during construction.
-        _runtime.rewireParameterDataCallbackNoReapply([this](std::span<const uint8_t> data) {
-            _parametersState.applyFromBytes(data);
-        });
-        _runtime.rewireCallbacksAfterMove();
-    }
-
+    // Not copyable or movable: start() hands `this` to the parameter, endpoint
+    // and IP routing callbacks (setLatencySettingsSource among them), so the
+    // runtime stays where it was built. startCommissionedProduct() builds it on
+    // the heap for that reason.
+    CommissionedProductRuntime(const CommissionedProductRuntime&) = delete;
+    CommissionedProductRuntime& operator=(const CommissionedProductRuntime&) = delete;
+    CommissionedProductRuntime(CommissionedProductRuntime&&) = delete;
     CommissionedProductRuntime& operator=(CommissionedProductRuntime&&) = delete;
 
     auto start(platform::Platform& platform,
@@ -2208,9 +2188,8 @@ auto startCommissionedProduct(platform::Platform& platform,
     -> util::Result<CommissionedProductHandle<ProductDefinitionT, BindingCapacity>>
 {
     // Built directly in its final heap storage: the runtime is far too large to
-    // pass through a stack frame, and constructing it here also spares it the
-    // move (and the callback re-wiring that move performs) that a by-value
-    // return would impose.
+    // pass through a stack frame, and it cannot be moved: its callbacks
+    // capture `this`.
     auto runtime = std::make_unique<CommissionedProductRuntime<ProductDefinitionT, BindingCapacity>>(
         definition,
         std::move(bindings)._endpointBindings,
@@ -2274,9 +2253,8 @@ auto startCommissionedProduct(platform::Platform& platform,
     -> util::Result<CommissionedProductHandle<ProductDefinitionT, BindingCapacity>>
 {
     // Built directly in its final heap storage: the runtime is far too large to
-    // pass through a stack frame, and constructing it here also spares it the
-    // move (and the callback re-wiring that move performs) that a by-value
-    // return would impose.
+    // pass through a stack frame, and it cannot be moved: its callbacks
+    // capture `this`.
     auto runtime = std::make_unique<CommissionedProductRuntime<ProductDefinitionT, BindingCapacity>>(
         definition,
         std::move(bindings)._endpointBindings,
@@ -2304,9 +2282,8 @@ auto startCommissionedProduct(platform::Platform& platform,
     -> util::Result<CommissionedProductHandle<ProductDefinitionT, BindingCapacity>>
 {
     // Built directly in its final heap storage: the runtime is far too large to
-    // pass through a stack frame, and constructing it here also spares it the
-    // move (and the callback re-wiring that move performs) that a by-value
-    // return would impose.
+    // pass through a stack frame, and it cannot be moved: its callbacks
+    // capture `this`.
     auto runtime = std::make_unique<CommissionedProductRuntime<ProductDefinitionT, BindingCapacity>>(
         definition,
         std::move(bindings)._endpointBindings,
@@ -2332,9 +2309,8 @@ auto startCommissionedProduct(platform::Platform& platform,
     -> util::Result<CommissionedProductHandle<ProductDefinitionT, BindingCapacity>>
 {
     // Built directly in its final heap storage: the runtime is far too large to
-    // pass through a stack frame, and constructing it here also spares it the
-    // move (and the callback re-wiring that move performs) that a by-value
-    // return would impose.
+    // pass through a stack frame, and it cannot be moved: its callbacks
+    // capture `this`.
     auto runtime = std::make_unique<CommissionedProductRuntime<ProductDefinitionT, BindingCapacity>>(
         definition,
         std::move(bindings)._endpointBindings,
@@ -2361,9 +2337,8 @@ auto startCommissionedProduct(platform::Platform& platform,
     -> util::Result<CommissionedProductHandle<ProductDefinitionT, BindingCapacity>>
 {
     // Built directly in its final heap storage: the runtime is far too large to
-    // pass through a stack frame, and constructing it here also spares it the
-    // move (and the callback re-wiring that move performs) that a by-value
-    // return would impose.
+    // pass through a stack frame, and it cannot be moved: its callbacks
+    // capture `this`.
     auto runtime = std::make_unique<CommissionedProductRuntime<ProductDefinitionT, BindingCapacity>>(
         definition,
         std::move(bindings)._endpointBindings,
@@ -2395,9 +2370,8 @@ auto startCommissionedProduct(platform::Platform& platform,
     -> util::Result<CommissionedProductHandle<ProductDefinitionT, BindingCapacity>>
 {
     // Built directly in its final heap storage: the runtime is far too large to
-    // pass through a stack frame, and constructing it here also spares it the
-    // move (and the callback re-wiring that move performs) that a by-value
-    // return would impose.
+    // pass through a stack frame, and it cannot be moved: its callbacks
+    // capture `this`.
     auto runtime = std::make_unique<CommissionedProductRuntime<ProductDefinitionT, BindingCapacity>>(
         definition,
         std::move(bindings)._endpointBindings,
@@ -2430,9 +2404,8 @@ auto startCommissionedProduct(platform::Platform& platform,
     -> util::Result<CommissionedProductHandle<ProductDefinitionT, BindingCapacity>>
 {
     // Built directly in its final heap storage: the runtime is far too large to
-    // pass through a stack frame, and constructing it here also spares it the
-    // move (and the callback re-wiring that move performs) that a by-value
-    // return would impose.
+    // pass through a stack frame, and it cannot be moved: its callbacks
+    // capture `this`.
     auto runtime = std::make_unique<CommissionedProductRuntime<ProductDefinitionT, BindingCapacity>>(
         definition,
         std::move(bindings)._endpointBindings,

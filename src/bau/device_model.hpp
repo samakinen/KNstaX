@@ -86,6 +86,9 @@ public:
     /// Before init() only records; init() instantiates.
     void setReferenceObjectTypes(std::vector<InterfaceObjectType> objectTypes);
     const std::vector<InterfaceObjectType>& referenceObjectTypes() const { return _referenceObjectTypes; }
+    /// Whether init() has created the reference objects. Before that a type
+    /// can be declared but its object, and so its properties, do not exist.
+    bool referenceObjectsInstantiated() const { return _interfaceObjectManager != nullptr; }
 
     /// Live reference object of `type`, or nullptr when it is not registered.
     objects::GenericInterfaceObject* referenceObject(InterfaceObjectType type);

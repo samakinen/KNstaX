@@ -17,7 +17,6 @@
 #include "knx/util/result.hpp"
 #include <cstddef>
 #include <cstdint>
-#include <functional>
 
 #include "knx/util/inplace_function.hpp"
 #include <optional>
@@ -29,15 +28,15 @@ namespace application {
 /**
  * @brief Property value response callback
  */
-using PropertyValueResponseCallback = std::function<void(
+using PropertyValueResponseCallback = util::InplaceFunction<void(
     const IndividualAddress& destination,
     const PropertyValueResponse& response
-)>;
+), 32>;
 
 /**
  * @brief Property description response callback
  */
-using PropertyDescriptionResponseCallback = std::function<void(
+using PropertyDescriptionResponseCallback = util::InplaceFunction<void(
     const IndividualAddress& destination,
     InterfaceObjectIndex objectIndex,
     PropertyID propertyId,
@@ -47,7 +46,7 @@ using PropertyDescriptionResponseCallback = std::function<void(
     uint16_t maxElements,
     uint8_t readLevel,
     uint8_t writeLevel
-)>;
+), 32>;
 
 /**
  * @brief Backend provider for property reads

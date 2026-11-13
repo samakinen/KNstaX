@@ -3,90 +3,39 @@
 
 /**
  * @file application_layer.hpp
- * @brief KNX Application Layer - Service Dispatcher
- * 
- * Implements application layer service dispatching and routing.
- * Routes incoming APCI requests to appropriate service handlers.
- * Per KNX spec 03/03/07 (Application Layer).
+ * @brief KNX Application Layer - receive, filter and route
+ *
+ * Decodes the APDU of every frame the transport layer delivers, drops services
+ * that arrived on a communication mode they are not defined for (03/03/07
+ * Table 1) or that the Access Policy refuses (03/4/1 §6.2), and routes the
+ * rest: management services to the ManagementServer, everything else (group
+ * communication) to the receive callback. Sending goes through the
+ * ASendPipeline, which both halves share.
  */
 
 #pragma once
 
 #include "knx/types.hpp"
+#include "knx/application/a_send_pipeline.hpp"
 #include "knx/application/apci_services.hpp"
-#include "knx/application/device_descriptor_service.hpp"
-#include "knx/application/property_services.hpp"
-#include "knx/application/property_ext_services.hpp"
-#include "knx/application/function_property_services.hpp"
-#include "knx/application/network_parameter_service.hpp"
-#include "knx/application/memory_service.hpp"
-#include "knx/application/authorization_service.hpp"
-#include "knx/application/restart_service.hpp"
-#include "knx/config.hpp"
+#include "knx/application/management_server.hpp"
 #include "knx/transport/transport_layer.hpp"
-#include "knx/util/fixed_vector.hpp"
 #include "knx/util/inplace_function.hpp"
 #include "knx/util/operation_progress.hpp"
 #include "knx/util/result.hpp"
-#include <array>
 #include <cstddef>
-#include <functional>
 #include <cstdint>
-#include <memory>
-#include <optional>
 #include <span>
 
 namespace knx {
 namespace application {
 
 /**
- * @brief Application layer frame structure
- */
-struct ADataFrame {
-    IndividualAddress source;      ///< Source individual address
-    GroupAddress destination;      ///< Destination address (group or individual)
-    APCIService service;            ///< APCI service code
-    util::FixedVector<uint8_t, config::MAX_APDU_LENGTH> data; ///< Service data payload (bounded)
-    AddressType destinationType;    ///< Destination address type
-    /// Low 6 bits of the APCI. Most services leave them zero, but some encode a
-    /// parameter there — A_Restart puts restart_type in bit 0 — and masking to
-    /// the service group would otherwise discard it.
-    uint8_t apciData{0};
-    /// How the carrying frame was secured, taken from the transport frame.
-    /// The Access Policies of 03/4/1 §6.2 are decided on this.
-    RequestSecurity security{};
-};
-
-struct ASendOutcome {
-    GroupAddress destination;       ///< Destination address (group or individual)
-    APCIService service;            ///< APCI service code
-    AddressType destinationType;    ///< Destination address type
-    util::ErrorCode result;         ///< Lower-layer send result
-    uint8_t attempts{0};            ///< Number of send attempts performed
-};
-
-struct SendOptions {
-    uint8_t maxAttempts{1};
-    bool retryOnBusy{true};
-    bool retryOnTimeout{true};
-    bool retryOnTransmissionFailed{false};
-    Priority priority{Priority::Low};
-};
-
-enum class SendPolicyPreset : uint8_t {
-    SingleAttempt = 0,
-    RetryTransientOnce,
-    RetryTransientTwice,
-};
-
-/**
- * @brief Application layer service dispatcher
- * 
- * Routes incoming service requests to appropriate handlers.
- * Manages response generation and callback routing.
- * 
- * @thread_safety Most methods are NOT thread-safe. sendData() should be called from 
- * the same thread that processes the transport layer. Callbacks are invoked from the 
+ * @brief Application layer: receive/dispatch, plus forwarders to the send
+ *        pipeline and the management server.
+ *
+ * @thread_safety Most methods are NOT thread-safe. sendData() should be called from
+ * the same thread that processes the transport layer. Callbacks are invoked from the
  * transport layer context. Service handler registration should be done during initialization.
  */
 class ApplicationLayer {
@@ -96,7 +45,7 @@ public:
 
     /**
      * @brief Callback for application data reception (for group value services)
-     * 
+     *
      * @param source Source individual address
      * @param destination Destination group address
      * @param service Service code
@@ -110,7 +59,7 @@ public:
         std::span<const uint8_t> data,
         AddressType destinationType
     ), 64>;
-    using IndividualAddressUpdateCallback = util::InplaceFunction<void(const IndividualAddress&), 32>;
+    using IndividualAddressUpdateCallback = ManagementServer::IndividualAddressUpdateCallback;
 
     /**
      * @brief Answers "is PID_SECURITY_MODE enabled?".
@@ -125,40 +74,23 @@ public:
      */
     using SecurityModeProvider = util::InplaceFunction<bool(), 32>;
 
-    /**
-     * @brief Reads this device's AD converter (03/03/07 §3.5.2).
-     *
-     * @param channel  channel_nr from the request (6 bits).
-     * @param readCount number of consecutive conversions to sum.
-     * @return the summed value, or nullopt for "wrong channel number" / a
-     *         summation the device cannot produce — which §3.5.2 says is
-     *         answered with read_count = 0 rather than with silence.
-     *
-     * Left unset, every channel answers "not available". That is still an
-     * answer: A_ADC_Read arrives on a transport connection, and a management
-     * client that gets nothing sits in its timeout and then tears the
-     * connection down.
-     */
-    using AdcReadProvider =
-        util::InplaceFunction<std::optional<uint16_t>(uint8_t channel, uint8_t readCount), 32>;
+    using AdcReadProvider = ManagementServer::AdcReadProvider;
+    using ManagementServerHooks = ManagementServer::Hooks;
 
-    /**
-     * @brief Constructor
-     * 
-     * @param transport Reference to transport layer
-     */
     explicit ApplicationLayer(transport::TransportLayer& transport);
-
-    /**
-     * @brief Destructor
-     */
     ~ApplicationLayer();
+
+    // The transport layer holds callbacks capturing `this`.
+    ApplicationLayer(const ApplicationLayer&) = delete;
+    ApplicationLayer& operator=(const ApplicationLayer&) = delete;
+    ApplicationLayer(ApplicationLayer&&) = delete;
+    ApplicationLayer& operator=(ApplicationLayer&&) = delete;
 
     /**
      * @brief Initialize application layer
-     * 
+     *
      * @param ownAddress Own individual address
-    * @return Result indicating success or failure
+     * @return Result indicating success or failure
      */
     util::Result<void> init(const IndividualAddress& ownAddress);
 
@@ -167,89 +99,97 @@ public:
      */
     void close();
 
+    // --- Sending (ASendPipeline) -------------------------------------------
+
     /**
      * @brief Send application data
-     * 
-     * @param destination Destination address
-     * @param service APCI service code
-     * @param data Service data
-    * @param destinationType Destination address type
-    * @return Result indicating success or failure
+     *
+     * A frame to an individual address goes out connectionless; answers on a
+     * transport connection are the management server's.
+     *
      * @thread_safety NOT thread-safe - should be called from single thread
      */
     util::Result<void> sendData(const GroupAddress& destination, APCIService service,
-                         std::span<const uint8_t> data, AddressType destinationType,
-                          const SendOptions& options = {});
+                                std::span<const uint8_t> data, AddressType destinationType,
+                                const SendOptions& options = {}) {
+        return _send.sendData(destination, service, data, destinationType, options);
+    }
     util::Result<void> beginSendData(const GroupAddress& destination, APCIService service,
-                             std::span<const uint8_t> data, AddressType destinationType,
-                               const SendOptions& options = {});
-    util::Result<SendProgressState> pollSendData();
-        void processBackgroundWork();
+                                     std::span<const uint8_t> data, AddressType destinationType,
+                                     const SendOptions& options = {}) {
+        return _send.beginSendData(destination, service, data, destinationType, options);
+    }
+    util::Result<SendProgressState> pollSendData() { return _send.pollSendData(); }
+    void processBackgroundWork() { _transport.processBackgroundWork(); }
 
-    /**
-     * @brief Set callback for application data reception
-     * 
-     * Used for group value services and other unhandled services.
-     * 
-     * @param callback Callback function
-     * @thread_safety NOT thread-safe - should be called during initialization
-     * @warning Callback is invoked from transport layer context - avoid blocking operations
-     */
-    void setReceiveCallback(DataCallback callback);
-    void setReceiveWorkAvailableCallback(WorkAvailableCallback callback);
     void setDefaultSendOptions(const SendOptions& options) { _defaultSendOptions = options; }
-    void setServiceResponseSendOptions(const SendOptions& options) { _serviceResponseSendOptions = options; }
-    void setProgrammingModeEnabled(bool enabled) { _programmingModeEnabled = enabled; }
-    bool programmingModeEnabled() const { return _programmingModeEnabled; }
-    void setOwnAddress(const IndividualAddress& ownAddress);
-    void setIndividualAddressUpdateCallback(IndividualAddressUpdateCallback callback);
-    bool popSendOutcome(ASendOutcome& outcome);
-    size_t queuedSendOutcomeCount() const { return _txOutcomeQueueCount; }
-    size_t droppedSendOutcomeCount() const { return _droppedSendOutcomes; }
-    bool transmissionInProgress() const { return _sendOperation.active; }
+    bool popSendOutcome(ASendOutcome& outcome) { return _send.popSendOutcome(outcome); }
+    size_t queuedSendOutcomeCount() const { return _send.queuedSendOutcomeCount(); }
+    size_t droppedSendOutcomeCount() const { return _send.droppedSendOutcomeCount(); }
+    bool transmissionInProgress() const { return _send.transmissionInProgress(); }
+    void setOwnAddress(const IndividualAddress& ownAddress) { _send.setOwnAddress(ownAddress); }
 
-    /**
-     * @brief Send group value write
-     * 
-     * Convenience method for A_GroupValue_Write service.
-     * 
-     * @param destination Group address
-     * @param data Value data to write
-    * @return Result indicating success or failure
-     */
+    /// A_GroupValue_Write / _Read / _Response with the default send options.
     util::Result<void> sendGroupValueWrite(const GroupAddress& destination, std::span<const uint8_t> data);
     util::Result<void> beginSendGroupValueWrite(const GroupAddress& destination, std::span<const uint8_t> data);
-
-    /**
-     * @brief Send group value read request
-     * 
-     * Convenience method for A_GroupValue_Read service.
-     * 
-     * @param destination Group address
-    * @return Result indicating success or failure
-     */
     util::Result<void> sendGroupValueRead(const GroupAddress& destination);
     util::Result<void> beginSendGroupValueRead(const GroupAddress& destination);
-
-    /**
-     * @brief Send group value response
-     * 
-     * Convenience method for A_GroupValue_Response service.
-     * 
-     * @param destination Group address
-     * @param data Value data to respond with
-    * @return Result indicating success or failure
-     */
     util::Result<void> sendGroupValueResponse(const GroupAddress& destination, std::span<const uint8_t> data);
     util::Result<void> beginSendGroupValueResponse(const GroupAddress& destination, std::span<const uint8_t> data);
 
-    static SendOptions optionsForPreset(SendPolicyPreset preset);
+    static SendOptions optionsForPreset(SendPolicyPreset preset) {
+        return ASendPipeline::optionsForPreset(preset);
+    }
+
+    // --- Receiving ---------------------------------------------------------
 
     /**
-     * @brief Get device descriptor service handler
-     * @return Reference to device descriptor service
+     * @brief Set callback for application data reception
+     *
+     * Receives group value services and every other service the management
+     * server does not serve.
+     *
+     * @thread_safety NOT thread-safe - should be called during initialization
+     * @warning Callback is invoked from transport layer context - avoid blocking operations
      */
-    DeviceDescriptorService& deviceDescriptorService() { return *_deviceDescriptorService; }
+    void setReceiveCallback(DataCallback callback) { _rxCallback = std::move(callback); }
+    void setReceiveWorkAvailableCallback(WorkAvailableCallback callback) {
+        _receiveWorkAvailableCallback = std::move(callback);
+    }
+
+    /**
+     * @brief Install the PID_SECURITY_MODE source used by the Access Policies.
+     */
+    void setSecurityModeProvider(SecurityModeProvider provider) {
+        _securityModeProvider = std::move(provider);
+    }
+
+    // --- Management server -------------------------------------------------
+
+    ManagementServer& managementServer() { return _management; }
+
+    void setServiceResponseSendOptions(const SendOptions& options) {
+        _management.setServiceResponseSendOptions(options);
+    }
+    void setProgrammingModeEnabled(bool enabled) { _management.setProgrammingModeEnabled(enabled); }
+    bool programmingModeEnabled() const { return _management.programmingModeEnabled(); }
+    void setIndividualAddressUpdateCallback(IndividualAddressUpdateCallback callback) {
+        _management.setIndividualAddressUpdateCallback(std::move(callback));
+    }
+
+    DeviceDescriptorService& deviceDescriptorService() { return _management.deviceDescriptorService(); }
+    PropertyServices& propertyServices() { return _management.propertyServices(); }
+    PropertyExtServices& propertyExtServices() { return _management.propertyExtServices(); }
+    MemoryService& memoryService() { return _management.memoryService(); }
+    AuthorizationService& authorizationService() { return _management.authorizationService(); }
+    RestartService& restartService() { return _management.restartService(); }
+    /// PDT_FUNCTION properties install their handler here; it is the path ETS
+    /// uses to switch KNX Data Secure on.
+    FunctionPropertyServices& functionPropertyServices() { return _management.functionPropertyServices(); }
+    NetworkParameterService& networkParameterService() { return _management.networkParameterService(); }
+    /// Exposed so higher layers and integration tests can configure memory
+    /// regions for Memory Services.
+    AddressSpace& addressSpace() { return _management.addressSpace(); }
 
     /**
      * @brief Announce the interface object at @p objectIndex
@@ -258,63 +198,25 @@ public:
      * by index and the extended ones by (type, instance); this mapping is what
      * lets both, and the Access Policy, name the same object.
      */
-    void registerPropertyObject(InterfaceObjectType objectType,
-                                InterfaceObjectIndex objectIndex);
-    void setPropertyReadProvider(PropertyReadProvider provider);
-    void setPropertyWriteProvider(PropertyWriteProvider provider);
-    void setPropertyDescriptionProvider(PropertyDescriptionProvider provider);
+    void registerPropertyObject(InterfaceObjectType objectType, InterfaceObjectIndex objectIndex) {
+        _management.registerPropertyObject(objectType, objectIndex);
+    }
+    void setPropertyReadProvider(PropertyReadProvider provider) {
+        _management.setPropertyReadProvider(std::move(provider));
+    }
+    void setPropertyWriteProvider(PropertyWriteProvider provider) {
+        _management.setPropertyWriteProvider(std::move(provider));
+    }
+    void setPropertyDescriptionProvider(PropertyDescriptionProvider provider) {
+        _management.setPropertyDescriptionProvider(std::move(provider));
+    }
 
     /// Whether any memory write has landed in the region starting at @p regionStart.
     /// False means the management client never downloaded that segment, which is
     /// not the same as downloading zeros.
-    bool memoryRegionWritten(MemoryAddress regionStart) const;
-
-    /**
-     * @brief Get property services handler
-     * @return Reference to property services
-     */
-    PropertyServices& propertyServices() { return *_propertyServices; }
-    PropertyExtServices& propertyExtServices() { return *_propertyExtServices; }
-
-    /**
-     * @brief Get memory service handler
-     * @return Reference to memory service
-     */
-    MemoryService& memoryService() { return *_memoryService; }
-
-    /**
-     * @brief Get authorization service handler
-     * @return Reference to authorization service
-     */
-    AuthorizationService& authorizationService() { return *_authorizationService; }
-
-    /**
-     * @brief Get restart service handler
-     * @return Reference to restart service
-     */
-    RestartService& restartService() { return *_restartService; }
-
-    /**
-     * @brief Get Function Property services handler (A_FunctionPropertyCommand
-     *        / A_FunctionPropertyState_Read).
-     *
-     * Interface objects that expose PDT_FUNCTION properties install their
-     * handler here.  This is the path ETS uses to switch KNX Data Secure on.
-     */
-    FunctionPropertyServices& functionPropertyServices() { return *_functionPropertyServices; }
-
-    /**
-     * @brief Get the serial-number / network-parameter broadcast service.
-     */
-    NetworkParameterService& networkParameterService() { return *_networkParameterService; }
-
-    /**
-     * @brief Get address space manager
-     *
-     * Exposed so higher layers and integration tests can configure memory regions
-     * for Memory Services.
-     */
-    AddressSpace& addressSpace() { return *_addressSpace; }
+    bool memoryRegionWritten(MemoryAddress regionStart) const {
+        return _management.memoryRegionWritten(regionStart);
+    }
 
     /**
      * @brief Register a memory-mapped region backed by caller-owned storage.
@@ -324,32 +226,11 @@ public:
      * A_Memory_Read within the registered address range. The storage must
      * outlive the application layer.
      */
-    util::Result<void> registerMemoryRegion(const MemoryRegion& region, std::span<uint8_t> storage);
-
-    /**
-     * @brief Install the PID_SECURITY_MODE source used by the Access Policies.
-     */
-    void setSecurityModeProvider(SecurityModeProvider provider) {
-        _securityModeProvider = std::move(provider);
+    util::Result<void> registerMemoryRegion(const MemoryRegion& region, std::span<uint8_t> storage) {
+        return _management.registerMemoryRegion(region, storage);
     }
 
-    /**
-     * @brief Device Resources some management services act on but this layer
-     *        does not own; the BAU, which holds the interface objects, fills
-     *        them in.
-     */
-    struct ManagementServerHooks {
-        /// Performs Erase Codes 02h…07h of a Master Reset (see RestartService).
-        /// The authorisation keys are this layer's and are reset here first.
-        RestartService::MasterResetCallback masterReset;
-        /// PID_DEVICE_CONTROL bit 2, which makes A_Memory_Write confirmed.
-        MemoryService::VerifyModeProvider verifyMode;
-        /// The authorisation key table changed (A_Key_Write, or a Master
-        /// Reset); the owner of persistent storage saves it.
-        AuthorizationService::KeyTableChangedCallback authorizationKeysChanged;
-    };
-
-    void setManagementServerHooks(ManagementServerHooks hooks);
+    void setManagementServerHooks(ManagementServerHooks hooks) { _management.setHooks(std::move(hooks)); }
 
     /**
      * @brief Access level (wire numbering, 0 = maximum) a requester needs for
@@ -357,29 +238,16 @@ public:
      *        level 03/05/01 gives the configuration Resources. Only bites once
      *        a level has a key (A_Key_Write, or authorizationService().setKey()).
      */
-    void setMemoryWriteAccessLevel(uint8_t level) { _memoryWriteAccessLevel = level; }
+    void setMemoryWriteAccessLevel(uint8_t level) { _management.setMemoryWriteAccessLevel(level); }
 
     /**
      * @brief Install the AD converter read-out behind A_ADC_Read.
      */
-    void setAdcReadProvider(AdcReadProvider provider) {
-        _adcReadProvider = std::move(provider);
-    }
+    void setAdcReadProvider(AdcReadProvider provider) { _management.setAdcReadProvider(std::move(provider)); }
 
 private:
-    /**
-     * @brief Handle transport layer reception
-     * 
-     * @param frame Transport data frame
-     */
+    /// Decode, filter and route one frame from the transport layer.
     void handleTransportRx(const transport::TDataFrame& frame);
-
-    /**
-     * @brief Dispatch service request to appropriate handler
-     * 
-     * @param aFrame Application frame
-     */
-    void dispatchService(const ADataFrame& aFrame);
 
     /**
      * @brief Access Policy gate applied to every inbound service (03/4/1 §6.2).
@@ -391,160 +259,18 @@ private:
      */
     bool isRequestPermitted(const ADataFrame& aFrame) const;
 
-    /// Access Policy gate for the properties of one interface object, used by
-    /// the four property services once they have resolved what is addressed.
-    bool isPropertyAccessPermitted(uint16_t objectType,
-                                   uint16_t propertyId,
-                                   bool write,
-                                   const RequestSecurity& security) const;
-
-    /// Object type behind an object *index*, for the classic services that
-    /// address by index. nullopt when no such object is registered.
-    std::optional<uint16_t> objectTypeForIndex(InterfaceObjectIndex objectIndex) const;
-
-    // Transport layer reference
-    transport::TransportLayer& _transport;
-
-    // Own individual address
-    IndividualAddress _ownAddress;
-
-    // Service handler dependencies (owned by application layer)
-    std::unique_ptr<DeviceDescriptor> _deviceDescriptor;
-    std::unique_ptr<AddressSpace> _addressSpace;
-
-    /// Index -> type of every object announced through registerPropertyObject().
-    struct RegisteredObject {
-        InterfaceObjectIndex index;
-        InterfaceObjectType type;
-    };
-    static constexpr size_t kMaxInterfaceObjects = 32;
-    util::FixedVector<RegisteredObject, kMaxInterfaceObjects> _registeredObjects;
-
-    // Memory-mapped regions registered via registerMemoryRegion(); the memory
-    // service read/write callbacks route A_Memory accesses into these spans.
-    struct MemorySegmentBinding {
-        MemoryRegion region;
-        std::span<uint8_t> storage;
-        /// Set once a memory write lands anywhere in this region. Lets callers
-        /// tell "ETS downloaded zeros" from "ETS never touched this segment" —
-        /// the buffer reads all-zero either way.
-        bool written{false};
-    };
-    static constexpr size_t kMaxMemorySegments = 8;
-    util::FixedVector<MemorySegmentBinding, kMaxMemorySegments> _memorySegments;
-
-    // Service handlers (initialized in init())
-    std::unique_ptr<DeviceDescriptorService> _deviceDescriptorService;
-    std::unique_ptr<PropertyServices> _propertyServices;
-    std::unique_ptr<PropertyExtServices> _propertyExtServices;
-    std::unique_ptr<MemoryService> _memoryService;
-    std::unique_ptr<AuthorizationService> _authorizationService;
-    /// The current access level of whoever requested the pending Master
-    /// Reset, taken when it was requested: 03/05/02 §3.7.1.2.3.2.3 resets the
-    /// authorisation keys from that level up.
-    AccessLevel _masterResetRequesterLevel{AuthorizationService::kMinimumAccessLevel};
-    std::unique_ptr<RestartService> _restartService;
-    std::unique_ptr<FunctionPropertyServices> _functionPropertyServices;
-    std::unique_ptr<NetworkParameterService> _networkParameterService;
-
-    // Application data callback (for group value services)
-    DataCallback _rxCallback;
-    WorkAvailableCallback _receiveWorkAvailableCallback;
-    IndividualAddressUpdateCallback _individualAddressUpdateCallback;
-
-    static constexpr size_t TX_OUTCOME_QUEUE_CAPACITY = 8u;
-    std::array<ASendOutcome, TX_OUTCOME_QUEUE_CAPACITY> _txOutcomeQueue{};
-    size_t _txOutcomeQueueHead{0};
-    size_t _txOutcomeQueueCount{0};
-    size_t _droppedSendOutcomes{0};
-
-    // Initialization state
-    bool _initialized;
-    bool _programmingModeEnabled{false};
-
-    // True while dispatching a request that arrived on a transport connection
-    // (T_Data_Connected). Responses built during that dispatch go back on the
-    // connection; everything else — including answers to connectionless
-    // T_Data_Individual requests received while a connection is open — is sent
-    // connectionless. See TDataFrame::service.
-    bool _handlingConnectedRequest{false};
-
-    // How the request currently being dispatched was secured, and where the
-    // current Security Mode comes from. Together these decide every Access
-    // Policy question the service handlers ask.
-    RequestSecurity _requestSecurity{};
-    SecurityModeProvider _securityModeProvider{};
-    AdcReadProvider _adcReadProvider{};
-    uint8_t _memoryWriteAccessLevel{2};
-
-    SendOptions _defaultSendOptions{};
-    SendOptions _serviceResponseSendOptions{};
-
-    struct SendOperationState {
-        bool active{false};
-        transport::TDataFrame frame{};
-        ASendOutcome outcome{};
-        SendOptions options{};
-        uint8_t attemptsStarted{0};
-    };
-    SendOperationState _sendOperation{};
-
-    void enqueueSendOutcome(const ASendOutcome& outcome);
-    void finishSendOperation();
-    util::Result<void> startSendAttempt();
-    bool shouldRetrySendError(util::ErrorCode error, const SendOptions& options) const;
-    SendProgressState mapSendErrorToProgressState(util::ErrorCode error) const;
-    util::Result<void> buildTransportTxFrame(const GroupAddress& destination,
-                                             APCIService service,
-                                             std::span<const uint8_t> data,
-                                             AddressType destinationType,
-                                             transport::TDataFrame& tFrame,
-                                             ASendOutcome& outcome);
-
-    void wireServiceCallbacks();
-    void wireAccessPolicy();
-    void wireTransportReceiveCallback();
-
-    util::Result<void> sendToIndividual(IndividualAddress destination,
-                                        APCIService service,
-                                        std::span<const uint8_t> data,
-                                        const SendOptions& options);
-    util::Result<void> sendBroadcast(APCIService service,
-                                     std::span<const uint8_t> data,
-                                     const SendOptions& options);
-
-    /// A management server response, sent with the service response options.
-    /// A failed send is logged: nothing retries it.
-    void sendServiceResponse(IndividualAddress destination, APCIService service, std::span<const uint8_t> data);
-    void broadcastServiceResponse(APCIService service, std::span<const uint8_t> data);
-
-    void handleDeviceDescriptorRead(const ADataFrame& frame);
-    void handlePropertyValueRead(const ADataFrame& frame);
-    void handlePropertyValueWrite(const ADataFrame& frame);
-    void handlePropertyDescriptionRead(const ADataFrame& frame);
-    void handleFunctionProperty(const ADataFrame& frame);
-    void handleIndividualAddressSerialNumberRead(const ADataFrame& frame);
-    void handleIndividualAddressSerialNumberWrite(const ADataFrame& frame);
-    void handleDomainAddressSerialNumberRead(const ADataFrame& frame);
-    void handleDomainAddressSerialNumberWrite(const ADataFrame& frame);
-    void handleNetworkParameterRead(const ADataFrame& frame);
-    void handleNetworkParameterWrite(const ADataFrame& frame);
-    void handleMemoryRead(const ADataFrame& frame);
-    void handleMemoryWrite(const ADataFrame& frame);
-    void handleMemoryExtendedRead(const ADataFrame& frame);
-    void handleMemoryExtendedWrite(const ADataFrame& frame);
-    void handlePropertyExtValueRead(const ADataFrame& frame);
-    void handlePropertyExtValueWrite(const ADataFrame& frame, bool confirmed);
-    void handlePropertyExtDescriptionRead(const ADataFrame& frame);
-    void handleFunctionPropertyExt(const ADataFrame& frame, FunctionPropertyInvocation invocation);
-    void handleAuthorizeRequest(const ADataFrame& frame);
-    void handleKeyWrite(const ADataFrame& frame);
-    void handleRestart(const ADataFrame& frame);
-    void handleAdcRead(const ADataFrame& frame);
-    void handleIndividualAddressRead(const ADataFrame& frame);
-    void handleSystemNetworkParameterRead(const ADataFrame& frame);
-    void handleIndividualAddressWrite(const ADataFrame& frame);
     void forwardToUser(const ADataFrame& frame);
+
+    transport::TransportLayer& _transport;
+    ASendPipeline _send;
+    ManagementServer _management;
+
+    DataCallback _rxCallback{};
+    WorkAvailableCallback _receiveWorkAvailableCallback{};
+    SecurityModeProvider _securityModeProvider{};
+    SendOptions _defaultSendOptions{};
+
+    bool _initialized{false};
 };
 
 } // namespace application

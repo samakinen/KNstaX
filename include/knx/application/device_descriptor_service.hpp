@@ -19,7 +19,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <functional>
+#include "knx/util/inplace_function.hpp"
 #include <span>
 
 namespace knx {
@@ -34,11 +34,11 @@ namespace application {
  * @param descriptorType Descriptor type (0 or 2)
  * @param data Encoded descriptor data
  */
-using DescriptorResponseCallback = std::function<void(
+using DescriptorResponseCallback = util::InplaceFunction<void(
     const IndividualAddress& destination,
     uint8_t descriptorType,
     std::span<const uint8_t> data
-)>;
+), 32>;
 
 struct DescriptorSupportEntry {
     uint8_t descriptorType;

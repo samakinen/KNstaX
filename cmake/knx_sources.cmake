@@ -42,6 +42,8 @@ set(KNX_SOURCES_CORE
     "src/application/restart_service.cpp"
     "src/application/network_parameter_service.cpp"
     "src/application/security_access_policy.cpp"
+    "src/application/a_send_pipeline.cpp"
+    "src/application/management_server.cpp"
     "src/application/application_layer.cpp"
 
     # Objects
