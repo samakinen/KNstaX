@@ -151,6 +151,7 @@ public:
     virtual void setCommissioningSerialNumber(const application::KnxSerialNumber& serialNumber) = 0;
     virtual void setDomainAddress(std::span<const uint8_t> domainAddress) = 0;
     virtual void setDomainAddressWriteCallback(application::DomainAddressWriteCallback callback) = 0;
+    virtual void setAuthorizationKeys(const application::AuthorizationService::KeyTable& keys) = 0;
     virtual void setDeviceMedium(MediumType medium) = 0;
 };
 
@@ -646,6 +647,12 @@ public:
         }
     }
 
+    void setAuthorizationKeys(const application::AuthorizationService::KeyTable& keys) {
+        if (_application) {
+            _application->authorizationService().restoreKeyTable(keys);
+        }
+    }
+
     void setCommissioningSerialNumber(const application::KnxSerialNumber& serialNumber) {
         if (_application) {
             _application->networkParameterService().setSerialNumber(serialNumber);
@@ -1120,6 +1127,10 @@ public:
         _context->application.setDomainAddressWriteCallback(std::move(callback));
     }
 
+    void setAuthorizationKeys(const application::AuthorizationService::KeyTable& keys) override {
+        _context->application.setAuthorizationKeys(keys);
+    }
+
     void setDeviceMedium(MediumType medium) override {
         _context->application.setDeviceMedium(medium);
     }
@@ -1483,6 +1494,10 @@ public:
 
     void setDomainAddressWriteCallback(application::DomainAddressWriteCallback callback) override {
         _lowerStack.security->setDomainAddressWriteCallback(std::move(callback));
+    }
+
+    void setAuthorizationKeys(const application::AuthorizationService::KeyTable& keys) override {
+        _lowerStack.security->setAuthorizationKeys(keys);
     }
 
     void setDeviceMedium(MediumType medium) override {

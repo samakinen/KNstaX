@@ -106,6 +106,15 @@ public:
     /// paths while sharing the same key space.
     static constexpr uint16_t kToolAccessSequenceKeyId = 0x11F0u;
 
+    /// Reserved persistence key holding the A_Authorize / A_Key_Write key
+    /// table (03/03/07 §3.5.8, Figure 88).
+    ///
+    /// A device Resource with no Property to be keyed by and no service that
+    /// reads it back, like the Sequence Number for Tool Access. 0xF1 is outside
+    /// the PID range of the Device Object (type 0), so the key shares the key
+    /// space without being reachable from the property paths.
+    static constexpr uint16_t kAuthorizationKeyTableKeyId = 0x00F1u;
+
     /// Reserved persistence key naming the bank that holds the commissioned
     /// state (0 or 1).
     ///
@@ -172,6 +181,15 @@ public:
     /// PID_SECURITY_INDIVIDUAL_ADDRESS_TABLE and need no separate step.
     /// @return true when a stored value was found and adopted.
     bool loadSecuritySequenceState();
+
+    /// Store the authorisation key table, as serialised by the application
+    /// layer. An empty @p record erases it (no key on any level, the
+    /// ex-factory state). Written at once: A_Key_Write is rare and its answer
+    /// promises the key is set.
+    bool saveAuthorizationKeyTable(std::span<const uint8_t> record);
+
+    /// The stored authorisation key table; empty when none is stored.
+    std::vector<uint8_t> loadAuthorizationKeyTable();
 
     // === Object Access ===
     
@@ -330,6 +348,9 @@ public:
         application::PropertyID propertyId;
     };
     static std::span<const PersistedProperty> persistedProperties();
+
+    /// Whether (objectType, propertyId) is one of persistedProperties().
+    static bool isPersistedProperty(InterfaceObjectType objectType, application::PropertyID propertyId);
     
     /**
      * @brief Get number of objects of a specific type

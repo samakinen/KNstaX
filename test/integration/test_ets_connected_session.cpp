@@ -37,6 +37,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -59,6 +60,8 @@ public:
 
 std::unique_ptr<RecordingPlatform> gPlatform;
 std::unique_ptr<knx::bau::BusAccessUnit> gBau;
+/// E11 reports from PID_ROUTING_MULTICAST_ADDRESS since the last (re)boot.
+int gRoutingGroupChanges = 0;
 
 /// One frame the device put on the wire, reduced to what this test asserts on.
 struct SentFrame {
@@ -573,6 +576,12 @@ void rebootFromPersistence() {
     gPhysical = ownedPhysical.get();
     auto stackPort = knx::test::createTp1TestStackPort(*gPlatform, std::move(ownedPhysical));
     gBau = std::make_unique<knx::bau::BusAccessUnit>(*gPlatform, std::move(stackPort));
+#if KNX_FEATURE_NETIP
+    // Installed before init(), which restores the stored objects: a value
+    // coming back from storage must not be reported as a new domain.
+    gRoutingGroupChanges = 0;
+    gBau->management().setRoutingMulticastAddressCallback([](IpAddress) { ++gRoutingGroupChanges; });
+#endif
     TEST_ASSERT_TRUE(gBau->init(kUnaddressed).isOk());
     gBau->link().setPromiscuousMode(knx::datalink::PromiscuousMode::Enable);
     (void)pumpAndCollect(20);
@@ -733,23 +742,376 @@ void test_device_control_is_cleared_at_start_up(void) {
     TEST_ASSERT_EQUAL_HEX8(0x00, gBau->deviceObject().getDeviceControl());
 }
 
-int main(void) {
+// ---------------------------------------------------------------------------
+// A_Key_Write (03/03/07 §3.5.8) and the A_Authorize levels it sets up
+// (§3.5.7), on the wire, persisted, and reset by Master Reset.
+// ---------------------------------------------------------------------------
+namespace {
+
+using Key = std::array<uint8_t, 4>;
+const Key kNoKey{0xFF, 0xFF, 0xFF, 0xFF};
+const Key kLevel0Key{0x12, 0x34, 0x56, 0x78};
+const Key kLevel1Key{0x0A, 0x0B, 0x0C, 0x0D};
+
+/// A commissioned device with ETS connected to it; the next request is seq 0.
+void connectToCommissionedDevice() {
+    injectTpdu(kEtsAddress, kCommissionedAddress.raw, AddressType::Individual,
+               std::vector<uint8_t>{0x80});  // T_Connect
+    (void)pumpAndCollect(50);
+}
+
+void disconnectFromDevice() {
+    injectTpdu(kEtsAddress, kCommissionedAddress.raw, AddressType::Individual,
+               std::vector<uint8_t>{0x81});  // T_Disconnect
+    (void)pumpAndCollect(50);
+}
+
+/// A_Authorize_Request on the connection; the level answered, or -1.
+int authorizeOnConnection(uint8_t seq, const Key& key) {
+    const auto sent = connectedRequest(seq, application::APCIService::AuthorizeRequest, 0,
+                                       {0x00, key[0], key[1], key[2], key[3]});
+    const auto* response = findResponse(sent, kFullMask,
+        static_cast<uint16_t>(application::APCIService::AuthorizeResponse));
+    return (response == nullptr || response->payload.empty()) ? -1 : response->payload[0];
+}
+
+/// A_Key_Write on the connection (Figure 89); the level answered, or -1.
+int keyWriteOnConnection(uint8_t seq, uint8_t level, const Key& key) {
+    const auto sent = connectedRequest(seq, application::APCIService::KeyWrite, 0,
+                                       {level, key[0], key[1], key[2], key[3]});
+    const auto* response = findResponse(sent, kFullMask,
+        static_cast<uint16_t>(application::APCIService::KeyResponse));
+    TEST_ASSERT_TRUE(response == nullptr || response->tpci == protocol::TPCI::NumberedData);
+    return (response == nullptr || response->payload.empty()) ? -1 : response->payload[0];
+}
+
+/// Levels 0 and 1 keyed, by ETS, on an unkeyed device; the connection is
+/// closed again afterwards.
+void keyLevelsZeroAndOne() {
+    startUnaddressed();
+    commissionForReset();
+    connectToCommissionedDevice();
+    TEST_ASSERT_EQUAL_INT(0, authorizeOnConnection(0, kNoKey));
+    TEST_ASSERT_EQUAL_INT(1, keyWriteOnConnection(1, 1, kLevel1Key));
+    TEST_ASSERT_EQUAL_INT(0, keyWriteOnConnection(2, 0, kLevel0Key));
+    disconnectFromDevice();
+}
+
+} // namespace
+
+// The invariant Habinari relies on: a device nobody keyed grants level 0 to
+// every key, so nothing is gated.
+void test_unkeyed_device_authorises_every_key_at_level_zero(void) {
+    startUnaddressed();
+    commissionForReset();
+    connectToCommissionedDevice();
+    TEST_ASSERT_EQUAL_INT(0, authorizeOnConnection(0, kNoKey));
+    TEST_ASSERT_EQUAL_INT(0, authorizeOnConnection(1, kLevel0Key));
+    TEST_ASSERT_EQUAL_INT(0, authorizeOnConnection(2, {0x00, 0x00, 0x00, 0x00}));
+}
+
+void test_key_write_sets_keys_that_authorize_their_levels(void) {
+    keyLevelsZeroAndOne();
+
+    connectToCommissionedDevice();
+    // "The maximum access level protected with FFFFFFFFh": 0 and 1 have keys.
+    TEST_ASSERT_EQUAL_INT(2, authorizeOnConnection(0, kNoKey));
+    TEST_ASSERT_EQUAL_INT(1, authorizeOnConnection(1, kLevel1Key));
+    TEST_ASSERT_EQUAL_INT(0, authorizeOnConnection(2, kLevel0Key));
+    // Invalid key: the minimal level.
+    TEST_ASSERT_EQUAL_INT(15, authorizeOnConnection(3, {0xDE, 0xAD, 0xBE, 0xEF}));
+}
+
+void test_key_write_above_the_requesters_level_is_answered_ff(void) {
+    keyLevelsZeroAndOne();
+
+    // Not authorised on this connection: the free level, 2.
+    connectToCommissionedDevice();
+    TEST_ASSERT_EQUAL_INT(0xFF, keyWriteOnConnection(0, 1, {1, 1, 1, 1}));
+    TEST_ASSERT_EQUAL_INT(0xFF, keyWriteOnConnection(1, 0, {1, 1, 1, 1}));
+    TEST_ASSERT_EQUAL_INT(2, keyWriteOnConnection(2, 2, {2, 2, 2, 2}));
+    disconnectFromDevice();
+
+    // The refused writes changed nothing.
+    connectToCommissionedDevice();
+    TEST_ASSERT_EQUAL_INT(1, authorizeOnConnection(0, kLevel1Key));
+    TEST_ASSERT_EQUAL_INT(0, authorizeOnConnection(1, kLevel0Key));
+}
+
+void test_key_write_of_ffffffff_removes_the_key(void) {
+    keyLevelsZeroAndOne();
+
+    connectToCommissionedDevice();
+    TEST_ASSERT_EQUAL_INT(0, authorizeOnConnection(0, kLevel0Key));
+    TEST_ASSERT_EQUAL_INT(1, keyWriteOnConnection(1, 1, kNoKey));
+    disconnectFromDevice();
+
+    connectToCommissionedDevice();
+    TEST_ASSERT_EQUAL_INT(1, authorizeOnConnection(0, kNoKey));
+    TEST_ASSERT_EQUAL_INT(15, authorizeOnConnection(1, kLevel1Key));
+}
+
+void test_keys_survive_a_restart(void) {
+    keyLevelsZeroAndOne();
+
+    rebootFromPersistence();
+    connectToCommissionedDevice();
+    TEST_ASSERT_EQUAL_INT(2, authorizeOnConnection(0, kNoKey));
+    TEST_ASSERT_EQUAL_INT(0, authorizeOnConnection(1, kLevel0Key));
+}
+
+// 03/05/02 §3.7.1.2.3.2.3: 02h and 07h reset the keys of the requester's
+// level and every less privileged one.
+void test_factory_reset_by_an_authorised_tool_clears_every_key(void) {
+    keyLevelsZeroAndOne();
+
+    connectToCommissionedDevice();
+    TEST_ASSERT_EQUAL_INT(0, authorizeOnConnection(0, kLevel0Key));
+    TEST_ASSERT_EQUAL_INT(0x00, restartErrorCode(masterReset(0x07)));
+
+    rebootFromPersistence();
+    connectToCommissionedDevice();
+    // Unkeyed again: every key, including a stale one, is level 0.
+    TEST_ASSERT_EQUAL_INT(0, authorizeOnConnection(0, kLevel1Key));
+}
+
+void test_factory_reset_by_an_unauthorised_client_keeps_the_keys_above_it(void) {
+    keyLevelsZeroAndOne();
+
+    // No authorisation: the request comes from level 2, so 0 and 1 stay.
+    TEST_ASSERT_EQUAL_INT(0x00, restartErrorCode(masterReset(0x07)));
+
+    rebootFromPersistence();
+    connectToCommissionedDevice();
+    TEST_ASSERT_EQUAL_INT(2, authorizeOnConnection(0, kNoKey));
+    TEST_ASSERT_EQUAL_INT(0, authorizeOnConnection(1, kLevel0Key));
+}
+
+void test_confirmed_restart_keeps_the_keys(void) {
+    keyLevelsZeroAndOne();
+
+    connectToCommissionedDevice();
+    TEST_ASSERT_EQUAL_INT(0, authorizeOnConnection(0, kLevel0Key));
+    TEST_ASSERT_EQUAL_INT(0x00, restartErrorCode(masterReset(0x01)));
+
+    rebootFromPersistence();
+    connectToCommissionedDevice();
+    TEST_ASSERT_EQUAL_INT(2, authorizeOnConnection(0, kNoKey));
+}
+
+// 03/03/07 Table 1: A_Key_Write is connection-oriented only.
+void test_key_write_without_a_connection_is_ignored(void) {
+    startUnaddressed();
+    commissionForReset();
+
+    injectTpdu(kEtsAddress, kCommissionedAddress.raw, AddressType::Individual,
+               unnumbered(application::APCIService::KeyWrite, 0,
+                          {0x00, kLevel0Key[0], kLevel0Key[1], kLevel0Key[2], kLevel0Key[3]}));
+    const auto sent = pumpAndCollect();
+    TEST_ASSERT_NULL(findResponse(sent, kFullMask,
+        static_cast<uint16_t>(application::APCIService::KeyResponse)));
+
+    connectToCommissionedDevice();
+    TEST_ASSERT_EQUAL_INT(0, authorizeOnConnection(0, {0xDE, 0xAD, 0xBE, 0xEF}));
+}
+
+#if KNX_FEATURE_NETIP
+// ---------------------------------------------------------------------------
+// PID_ROUTING_MULTICAST_ADDRESS (03_08_03 §2.5.17): ETS sets it, it survives
+// the restart that ends the download, and it is the group from then on.
+// ---------------------------------------------------------------------------
+namespace {
+
+const IpAddress kDefaultGroup = IpAddress::fromOctets(224, 0, 23, 12);
+const IpAddress kProjectGroup = IpAddress::fromOctets(239, 1, 2, 3);
+constexpr auto kPidRoutingMulticastAddress = static_cast<application::PropertyID>(66);
+
+std::array<uint8_t, 4> octetsOf(IpAddress address) {
+    std::array<uint8_t, 4> octets{};
+    address.toOctets(octets[0], octets[1], octets[2], octets[3]);
+    return octets;
+}
+
+/// The property write ETS performs, through the same object and checks.
+util::Result<void> writeRoutingGroup(std::array<uint8_t, 4> octets) {
+    return gBau->writeProperty(InterfaceObjectType::knxNetIpParameter(), InterfaceObjectInstance(1),
+                               kPidRoutingMulticastAddress, 1, std::span<const uint8_t>(octets));
+}
+
+IpAddress adoptDefault(bool productDefaultWins = false, IpAddress productDefault = kDefaultGroup) {
+    return gBau->management().adoptRoutingMulticastAddress(productDefault, productDefaultWins);
+}
+
+} // namespace
+
+void test_routing_group_written_by_ets_is_the_group_after_restart(void) {
+    startUnaddressed();
+    TEST_ASSERT_EQUAL_HEX32(kDefaultGroup.raw, adoptDefault().raw);
+    TEST_ASSERT_EQUAL_HEX32(kDefaultGroup.raw, gBau->management().routingMulticastAddress().raw);
+
+    TEST_ASSERT_TRUE(writeRoutingGroup(octetsOf(kProjectGroup)).isOk());
+    TEST_ASSERT_EQUAL_INT(1, gRoutingGroupChanges);  // E11
+    TEST_ASSERT_EQUAL_HEX32(kProjectGroup.raw, gBau->management().routingMulticastAddress().raw);
+
+    // What the A_Restart at the end of the download does first. Only flushes
+    // what was marked dirty, so this also proves the write was.
+    gBau->flushPendingPersistence();
+    rebootFromPersistence();
+
+    // The stored group wins over the product default, and coming back from
+    // storage is not a new domain.
+    TEST_ASSERT_EQUAL_HEX32(kProjectGroup.raw, adoptDefault().raw);
+    TEST_ASSERT_EQUAL_INT(0, gRoutingGroupChanges);
+}
+
+void test_routing_group_written_again_unchanged_is_not_a_new_domain(void) {
+    startUnaddressed();
+    (void)adoptDefault();
+
+    TEST_ASSERT_TRUE(writeRoutingGroup(octetsOf(kProjectGroup)).isOk());
+    TEST_ASSERT_EQUAL_INT(1, gRoutingGroupChanges);
+    // E12: same value, no event.
+    TEST_ASSERT_TRUE(writeRoutingGroup(octetsOf(kProjectGroup)).isOk());
+    TEST_ASSERT_EQUAL_INT(1, gRoutingGroupChanges);
+    TEST_ASSERT_TRUE(writeRoutingGroup(octetsOf(kDefaultGroup)).isOk());
+    TEST_ASSERT_EQUAL_INT(2, gRoutingGroupChanges);
+}
+
+void test_routing_group_that_is_not_multicast_is_refused(void) {
+    startUnaddressed();
+    (void)adoptDefault();
+
+    TEST_ASSERT_TRUE(writeRoutingGroup({192, 168, 1, 10}).isError());
+    TEST_ASSERT_TRUE(writeRoutingGroup({0, 0, 0, 0}).isError());
+    TEST_ASSERT_TRUE(writeRoutingGroup({240, 0, 0, 1}).isError());
+
+    TEST_ASSERT_EQUAL_HEX32(kDefaultGroup.raw, gBau->management().routingMulticastAddress().raw);
+    TEST_ASSERT_EQUAL_INT(0, gRoutingGroupChanges);
+}
+
+void test_routing_group_product_override_replaces_the_stored_one(void) {
+    startUnaddressed();
+    (void)adoptDefault();
+    TEST_ASSERT_TRUE(writeRoutingGroup(octetsOf(kProjectGroup)).isOk());
+    gBau->flushPendingPersistence();
+    rebootFromPersistence();
+
+    const IpAddress serviceChannelGroup = IpAddress::fromOctets(239, 5, 5, 5);
+    TEST_ASSERT_EQUAL_HEX32(serviceChannelGroup.raw, adoptDefault(true, serviceChannelGroup).raw);
+    TEST_ASSERT_EQUAL_INT(0, gRoutingGroupChanges);
+
+    // Stored by the adoption itself: the next start keeps it with no override.
+    rebootFromPersistence();
+    TEST_ASSERT_EQUAL_HEX32(serviceChannelGroup.raw, adoptDefault().raw);
+}
+
+void test_routing_group_written_by_serial_number_is_the_same_property(void) {
+    startUnaddressed();
+    const std::array<uint8_t, 6> serial{0x00, 0xFA, 0x01, 0x02, 0x03, 0x04};
+    gBau->deviceObject().setSerialNumber(serial);
+    (void)adoptDefault();
+    (void)pumpAndCollect(20);
+
+    // A_DomainAddressSerialNumber_Write, KNX IP plain format (03/03/07
+    // §3.3.7, Figure 31): serial number, then the four-octet multicast address.
+    std::vector<uint8_t> payload(serial.begin(), serial.end());
+    const auto group = octetsOf(kProjectGroup);
+    payload.insert(payload.end(), group.begin(), group.end());
+    injectTpdu(kEtsAddress, 0x0000u, AddressType::Group,
+               unnumbered(application::APCIService::DomainAddressSerialNumberWrite, 0, payload));
+    (void)pumpAndCollect();
+
+    TEST_ASSERT_EQUAL_HEX32(kProjectGroup.raw, gBau->management().routingMulticastAddress().raw);
+    TEST_ASSERT_EQUAL_INT(1, gRoutingGroupChanges);
+
+    // A unicast address is not a routing group, whichever way it arrives.
+    payload.resize(serial.size());
+    payload.insert(payload.end(), {192, 168, 1, 10});
+    injectTpdu(kEtsAddress, 0x0000u, AddressType::Group,
+               unnumbered(application::APCIService::DomainAddressSerialNumberWrite, 0, payload));
+    (void)pumpAndCollect();
+    TEST_ASSERT_EQUAL_HEX32(kProjectGroup.raw, gBau->management().routingMulticastAddress().raw);
+    TEST_ASSERT_EQUAL_INT(1, gRoutingGroupChanges);
+
+    gBau->flushPendingPersistence();
+    rebootFromPersistence();
+    TEST_ASSERT_EQUAL_HEX32(kProjectGroup.raw, adoptDefault().raw);
+}
+
+// 03/05/02 Table 6: the IP multicast address "shall be reset" by 02h and
+// "shall NOT be reset" by 07h.
+void test_routing_group_factory_reset_restores_the_default(void) {
+    startUnaddressed();
+    commissionForReset();
+    (void)adoptDefault();
+    TEST_ASSERT_TRUE(writeRoutingGroup(octetsOf(kProjectGroup)).isOk());
+
+    TEST_ASSERT_EQUAL_INT(0x00, restartErrorCode(masterReset(0x02)));
+    rebootFromPersistence();
+    TEST_ASSERT_EQUAL_HEX32(kDefaultGroup.raw, adoptDefault().raw);
+}
+
+void test_routing_group_factory_reset_without_ia_keeps_it(void) {
+    startUnaddressed();
+    commissionForReset();
+    (void)adoptDefault();
+    TEST_ASSERT_TRUE(writeRoutingGroup(octetsOf(kProjectGroup)).isOk());
+
+    TEST_ASSERT_EQUAL_INT(0x00, restartErrorCode(masterReset(0x07)));
+    rebootFromPersistence();
+    TEST_ASSERT_EQUAL_HEX32(kProjectGroup.raw, adoptDefault().raw);
+}
+#endif  // KNX_FEATURE_NETIP
+
+/**
+ * Three ctest entries run this binary, one group each, so that no single entry
+ * spends its whole timeout pumping a sequence of connected requests:
+ * "session" (download, master reset, sequence numbers), "keys" (A_Key_Write)
+ * and "routing" (PID_ROUTING_MULTICAST_ADDRESS). No argument runs everything.
+ */
+int main(int argc, char** argv) {
+    const std::string group = argc > 1 ? argv[1] : "all";
+    const bool all = group == "all";
     UNITY_BEGIN();
-    RUN_TEST(test_full_ets_commissioning_sequence_without_verify_mode);
-    RUN_TEST(test_full_ets_commissioning_sequence_with_verify_mode);
-    RUN_TEST(test_management_writes_on_the_wrong_mode_are_ignored);
-    RUN_TEST(test_master_reset_factory_reset_restores_ex_factory_state);
-    RUN_TEST(test_master_reset_factory_reset_without_ia_keeps_the_address);
-    RUN_TEST(test_master_reset_reset_ia_resets_only_the_address);
-    RUN_TEST(test_master_reset_reset_ap_and_param_drop_the_parameters);
-    RUN_TEST(test_master_reset_reset_links_clears_the_tables);
-    RUN_TEST(test_master_reset_confirmed_restart_resets_nothing);
-    RUN_TEST(test_master_reset_unsupported_erase_codes_are_refused);
-    RUN_TEST(test_master_reset_with_a_channel_is_refused);
-    RUN_TEST(test_master_reset_with_reserved_bits_is_ignored);
-    RUN_TEST(test_device_control_is_cleared_at_start_up);
-    RUN_TEST(test_ets_prologue_numbers_every_response_in_order);
-    RUN_TEST(test_lost_ack_does_not_freeze_send_sequence);
-    RUN_TEST(test_requests_are_acked_with_their_own_sequence_number);
+    if (all || group == "session") {
+        RUN_TEST(test_full_ets_commissioning_sequence_without_verify_mode);
+        RUN_TEST(test_full_ets_commissioning_sequence_with_verify_mode);
+        RUN_TEST(test_management_writes_on_the_wrong_mode_are_ignored);
+        RUN_TEST(test_master_reset_factory_reset_restores_ex_factory_state);
+        RUN_TEST(test_master_reset_factory_reset_without_ia_keeps_the_address);
+        RUN_TEST(test_master_reset_reset_ia_resets_only_the_address);
+        RUN_TEST(test_master_reset_reset_ap_and_param_drop_the_parameters);
+        RUN_TEST(test_master_reset_reset_links_clears_the_tables);
+        RUN_TEST(test_master_reset_confirmed_restart_resets_nothing);
+        RUN_TEST(test_master_reset_unsupported_erase_codes_are_refused);
+        RUN_TEST(test_master_reset_with_a_channel_is_refused);
+        RUN_TEST(test_master_reset_with_reserved_bits_is_ignored);
+        RUN_TEST(test_device_control_is_cleared_at_start_up);
+        RUN_TEST(test_ets_prologue_numbers_every_response_in_order);
+        RUN_TEST(test_lost_ack_does_not_freeze_send_sequence);
+        RUN_TEST(test_requests_are_acked_with_their_own_sequence_number);
+    }
+    if (all || group == "keys") {
+        RUN_TEST(test_unkeyed_device_authorises_every_key_at_level_zero);
+        RUN_TEST(test_key_write_sets_keys_that_authorize_their_levels);
+        RUN_TEST(test_key_write_above_the_requesters_level_is_answered_ff);
+        RUN_TEST(test_key_write_of_ffffffff_removes_the_key);
+        RUN_TEST(test_keys_survive_a_restart);
+        RUN_TEST(test_factory_reset_by_an_authorised_tool_clears_every_key);
+        RUN_TEST(test_factory_reset_by_an_unauthorised_client_keeps_the_keys_above_it);
+        RUN_TEST(test_confirmed_restart_keeps_the_keys);
+        RUN_TEST(test_key_write_without_a_connection_is_ignored);
+    }
+#if KNX_FEATURE_NETIP
+    if (all || group == "routing") {
+        RUN_TEST(test_routing_group_written_by_ets_is_the_group_after_restart);
+        RUN_TEST(test_routing_group_written_again_unchanged_is_not_a_new_domain);
+        RUN_TEST(test_routing_group_that_is_not_multicast_is_refused);
+        RUN_TEST(test_routing_group_product_override_replaces_the_stored_one);
+        RUN_TEST(test_routing_group_written_by_serial_number_is_the_same_property);
+        RUN_TEST(test_routing_group_factory_reset_restores_the_default);
+        RUN_TEST(test_routing_group_factory_reset_without_ia_keeps_it);
+    }
+#endif
     return UNITY_END();
 }

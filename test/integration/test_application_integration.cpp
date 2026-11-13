@@ -155,7 +155,7 @@ void test_FullStack_MemoryService() {
 
 void test_FullStack_AuthorizationService() {
     AuthorizationKey key = {0x12, 0x34, 0x56, 0x78};
-    appLayer->authorizationService().setKeys(key, key, key);
+    TEST_ASSERT_TRUE(appLayer->authorizationService().setKey(0, key).isOk());
 
     // Inject AuthorizeRequest (payload is 4-byte key)
     datalink::LDataFrame rx;
@@ -180,8 +180,7 @@ void test_FullStack_AuthorizationService() {
     physLayer->injectFrame(encodeTp1(rx));
 
     // Authorization should be stored and response should be sent
-    TEST_ASSERT_EQUAL(static_cast<uint8_t>(AuthorizationLevel::Maximum),
-                      static_cast<uint8_t>(appLayer->authorizationService().getCurrentLevel(rx.source)));
+    TEST_ASSERT_EQUAL(0, appLayer->authorizationService().currentAccessLevel(rx.source));
 
     // The T_ACK for the request goes first; the answer is the frame after it.
     std::vector<uint8_t> wire;
@@ -231,7 +230,7 @@ void test_FullStack_MultipleServices() {
     appLayer->deviceDescriptorService().setDescriptor(desc);
     
     AuthorizationKey key = {0x11, 0x22, 0x33, 0x44};
-    appLayer->authorizationService().setKeys(key, key, key);
+    (void)appLayer->authorizationService().setKey(0, key);
     
     appLayer->restartService().setRestartCallback(
         [](application::RestartType) -> knx::util::Result<void> { return knx::util::Result<void>::ok(); }
@@ -298,9 +297,10 @@ void test_FullStack_DescriptorEncodeDecode() {
 }
 
 void test_FullStack_AuthorizationLevels() {
-    TEST_ASSERT_EQUAL(0x01, static_cast<uint8_t>(AuthorizationLevel::Management));
-    TEST_ASSERT_EQUAL(0x02, static_cast<uint8_t>(AuthorizationLevel::Configuration));
-    TEST_ASSERT_EQUAL(0x03, static_cast<uint8_t>(AuthorizationLevel::Maximum));
+    // 03/03/07 §3.5.7: 0 is maximum access, 15 minimum; keys for 0..14.
+    TEST_ASSERT_EQUAL(0, AuthorizationService::kMaximumAccessLevel);
+    TEST_ASSERT_EQUAL(15, AuthorizationService::kMinimumAccessLevel);
+    TEST_ASSERT_EQUAL(15, static_cast<int>(AuthorizationService::kKeyedLevelCount));
 }
 
 void test_FullStack_RestartTypes() {
@@ -324,7 +324,7 @@ void test_FullStack_CompleteCoverage() {
     
     // Authorization
     AuthorizationKey key = {0x12, 0x34, 0x56, 0x78};
-    appLayer->authorizationService().setKeys(key, key, key);
+    (void)appLayer->authorizationService().setKey(0, key);
     
     // Restart
     appLayer->restartService().setRestartCallback(

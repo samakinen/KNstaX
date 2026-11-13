@@ -420,6 +420,129 @@ void test_same_key_reapplied_keeps_the_timer_and_a_new_key_restarts_it(void)
     phys.close();
 }
 
+// --- E11 from a new routing multicast address (A7) ---------------------------
+
+void test_restart_sync_notifies_at_once_and_keeps_the_timer(void)
+{
+    FakeClock clock;
+    SecureRoutingSecurity sec(kKey, kSerialA, options(clock));
+    std::array<uint8_t, 64> out{};
+
+    // The Reconfigured start's notify, then the periodic wait (>= 10 s).
+    TEST_ASSERT_TRUE(sec.takeDueTimerNotify(out).value() > 0);
+    clock.now += 1000;
+    TEST_ASSERT_TRUE(sec.millisecondsUntilTimerNotify() > 0);
+    const uint64_t before = sec.mcTimer();
+
+    sec.restartSync();
+
+    // notify_timer = 0 (§2.2.2.3.2.8, not a power-up) ...
+    TEST_ASSERT_EQUAL_UINT32(0, sec.millisecondsUntilTimerNotify());
+    // ... and mc_timer goes on from where it was, not from 0.
+    TEST_ASSERT_EQUAL_UINT64(before, sec.mcTimer());
+}
+
+namespace {
+
+/// Counts the TIMER_NOTIFY frames (0955h) a physical puts on the group.
+class NotifyCountingSocket final : public platform::UdpSocket {
+public:
+    util::Result<void> open(uint16_t) override { open_ = true; return util::Result<void>::ok(); }
+    void close() override { open_ = false; }
+    bool isOpen() const override { return open_; }
+    util::Result<void> joinMulticast(IpAddress, IpAddress) override { return util::Result<void>::ok(); }
+    void leaveMulticast(IpAddress, IpAddress) override {}
+    util::Result<void> setMulticastInterface(IpAddress) override { return util::Result<void>::ok(); }
+    util::Result<void> setMulticastLoopback(platform::MulticastLoopbackMode) override { return util::Result<void>::ok(); }
+    util::Result<void> setMulticastTtl(uint8_t) override { return util::Result<void>::ok(); }
+    int send(IpAddress, uint16_t, std::span<const uint8_t> data) override
+    {
+        if (data.size() >= 4 && data[2] == 0x09 && data[3] == 0x55) {
+            ++*notifies;
+        }
+        return static_cast<int>(data.size());
+    }
+    int receive(std::span<uint8_t>) override { return -1; }
+    int receive(std::span<uint8_t>, IpAddress&, uint16_t&) override { return -1; }
+    size_t available() const override { return 0; }
+    uint16_t localPort() const override { return 3671; }
+
+    int* notifies{nullptr};
+
+private:
+    bool open_{false};
+};
+
+class NotifyCountingNetwork final : public platform::NetworkInterface {
+public:
+    util::Result<void> init() override { return util::Result<void>::ok(); }
+    bool isConnected() const override { return true; }
+    IpAddress ipAddress() const override { return IpAddress::fromOctets(127, 0, 0, 1); }
+    IpAddress subnetMask() const override { return IpAddress(0); }
+    IpAddress gateway() const override { return IpAddress(0); }
+    void macAddress(std::span<uint8_t> mac) const override { std::fill(mac.begin(), mac.end(), 0); }
+    std::unique_ptr<platform::UdpSocket> createUdpSocket() override
+    {
+        auto socket = std::make_unique<NotifyCountingSocket>();
+        socket->notifies = &notifies;
+        return socket;
+    }
+    int notifies{0};
+};
+
+/// One receive pass of the data link layer: due TIMER_NOTIFYs go out here.
+void pumpReceive(physical::IpRoutingPhysical& phys)
+{
+    (void)phys.beginReceive(0);
+    (void)phys.pollReceive();
+}
+
+}  // namespace
+
+void test_new_domain_restarts_the_sync_and_the_same_domain_does_not(void)
+{
+    FakeClock clock;
+    NotifyCountingNetwork net;
+    physical::IpRoutingPhysical phys;
+    phys.setNetworkInterface(&net);
+    phys.setTimingPlatform(&clock);
+    phys.setSecureRoutingSerial(kSerialA);
+    TEST_ASSERT_TRUE(phys.init().isOk());
+    TEST_ASSERT_TRUE(phys.applySecureRouting(kKey).isOk());
+
+    pumpReceive(phys);
+    TEST_ASSERT_EQUAL_INT(1, net.notifies);  // E11 from the key: notify at once
+    clock.now += 1000;
+    pumpReceive(phys);
+    TEST_ASSERT_EQUAL_INT(1, net.notifies);  // and then not for >= 10 s
+    const uint64_t timer = phys.secureRoutingTimer();
+
+    // E11 from PID_ROUTING_MULTICAST_ADDRESS (the BusAccessUnit reports only a
+    // new and different value; the same value is E12 and never gets here).
+    phys.restartMulticastTimerSync();
+    pumpReceive(phys);
+    TEST_ASSERT_EQUAL_INT(2, net.notifies);
+    TEST_ASSERT_TRUE(phys.secureRoutingTimer() >= timer);
+
+    phys.close();
+}
+
+void test_restarting_the_sync_without_secure_routing_does_nothing(void)
+{
+    FakeClock clock;
+    NotifyCountingNetwork net;
+    physical::IpRoutingPhysical phys;
+    phys.setNetworkInterface(&net);
+    phys.setTimingPlatform(&clock);
+    TEST_ASSERT_TRUE(phys.init().isOk());
+
+    phys.restartMulticastTimerSync();
+    pumpReceive(phys);
+    TEST_ASSERT_EQUAL_INT(0, net.notifies);
+    TEST_ASSERT_FALSE(phys.isSecureRoutingActive());
+    phys.close();
+}
+
 void test_key_applied_before_init_is_installed_at_init(void)
 {
     FakeClock clock;
@@ -499,6 +622,9 @@ int main(void)
     RUN_TEST(test_forged_timer_notify_is_ignored);
     RUN_TEST(test_due_timer_notify_is_authentic_and_carries_own_serial);
     RUN_TEST(test_same_key_reapplied_keeps_the_timer_and_a_new_key_restarts_it);
+    RUN_TEST(test_restart_sync_notifies_at_once_and_keeps_the_timer);
+    RUN_TEST(test_new_domain_restarts_the_sync_and_the_same_domain_does_not);
+    RUN_TEST(test_restarting_the_sync_without_secure_routing_does_nothing);
     RUN_TEST(test_key_applied_before_init_is_installed_at_init);
     RUN_TEST(test_latency_settings_reach_the_context);
     RUN_TEST(test_wrap_refuses_an_inner_datagram_that_overflows_the_length_field);

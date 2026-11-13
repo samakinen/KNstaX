@@ -228,6 +228,16 @@ bool SecureRoutingSecurity::usesKey(std::span<const uint8_t> key) const
     return security::constantTimeEqual(groupKey_, key);
 }
 
+void SecureRoutingSecurity::restartSync()
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    const uint32_t now = nowMs();
+    // The running timer, not the stored one: it is valid for this key and at
+    // least as new as anything persisted, so restarting from it loses nothing
+    // and adds no needless D (see the header).
+    sync_->start(now, sync_->timer(now), McTimerSync::StartReason::Reconfigured);
+}
+
 uint64_t SecureRoutingSecurity::mcTimer()
 {
     std::lock_guard<std::mutex> lock(mutex_);

@@ -3,7 +3,7 @@
 
 /**
  * @file test_authorization_service.cpp
- * @brief Unit tests for authorization service
+ * @brief A_Authorize and A_Key_Write (03/03/07 §3.5.7, §3.5.8)
  */
 
 #include "knx/application/authorization_service.hpp"
@@ -15,395 +15,300 @@ using namespace knx::application;
 void setUp(void) {}
 void tearDown(void) {}
 
+namespace {
+
+const AuthorizationKey kMaxKey = {0xAA, 0xBB, 0xCC, 0xDD};
+const AuthorizationKey kConfigKey = {0x55, 0x66, 0x77, 0x88};
+const AuthorizationKey kMgmtKey = {0x11, 0x22, 0x33, 0x44};
+
+/// Levels 0, 1 and 2 keyed; 3…14 have no key, so 3 is the free level.
+void keyThreeLevels(AuthorizationService& service)
+{
+    TEST_ASSERT_TRUE(service.setKey(0, kMaxKey).isOk());
+    TEST_ASSERT_TRUE(service.setKey(1, kConfigKey).isOk());
+    TEST_ASSERT_TRUE(service.setKey(2, kMgmtKey).isOk());
+}
+
+const knx::IndividualAddress kTool(1, 1, 254);
+const knx::IndividualAddress kStranger(1, 1, 5);
+
+} // namespace
+
 // ============================================================================
-// Authorization Service Tests
+// The key table
 // ============================================================================
 
-void test_AuthorizationService_Init(void) {
+void test_ex_factory_every_level_has_no_key(void)
+{
     AuthorizationService service;
-    
-    knx::IndividualAddress addr(1, 2, 3);
-    TEST_ASSERT_EQUAL(static_cast<int>(AuthorizationLevel::None), 
-                     static_cast<int>(service.getCurrentLevel(addr)));
+    for (const auto& key : service.keyTable()) {
+        TEST_ASSERT_TRUE(key == AuthorizationService::kNoKey);
+    }
+    TEST_ASSERT_FALSE(service.hasKeys());
 }
 
-void test_AuthorizationService_SetKeys(void) {
+void test_levels_zero_to_fourteen_take_a_key_and_fifteen_does_not(void)
+{
     AuthorizationService service;
-    
-    AuthorizationKey mgmtKey = {0x11, 0x22, 0x33, 0x44};
-    AuthorizationKey configKey = {0x55, 0x66, 0x77, 0x88};
-    AuthorizationKey maxKey = {0xAA, 0xBB, 0xCC, 0xDD};
-    
-    service.setKeys(mgmtKey, configKey, maxKey);
-
-    AuthorizationLevel level = AuthorizationLevel::None;
-    TEST_ASSERT_EQUAL(static_cast<int>(AuthorizationResult::Success), static_cast<int>(service.validateKey(mgmtKey, level)));
-    TEST_ASSERT_EQUAL(static_cast<int>(AuthorizationLevel::Management), static_cast<int>(level));
-
-    TEST_ASSERT_EQUAL(static_cast<int>(AuthorizationResult::Success), static_cast<int>(service.validateKey(configKey, level)));
-    TEST_ASSERT_EQUAL(static_cast<int>(AuthorizationLevel::Configuration), static_cast<int>(level));
-
-    TEST_ASSERT_EQUAL(static_cast<int>(AuthorizationResult::Success), static_cast<int>(service.validateKey(maxKey, level)));
-    TEST_ASSERT_EQUAL(static_cast<int>(AuthorizationLevel::Maximum), static_cast<int>(level));
+    TEST_ASSERT_TRUE(service.setKey(0, kMaxKey).isOk());
+    TEST_ASSERT_TRUE(service.setKey(14, kMgmtKey).isOk());
+    TEST_ASSERT_TRUE(service.setKey(15, kMgmtKey).isError());
+    TEST_ASSERT_TRUE(service.keyTable()[14] == kMgmtKey);
 }
 
-void test_AuthorizationService_ValidateManagementKey(void) {
+void test_key_table_round_trips_through_its_record(void)
+{
     AuthorizationService service;
-    
-    AuthorizationKey mgmtKey = {0x11, 0x22, 0x33, 0x44};
-    AuthorizationKey configKey = {0x55, 0x66, 0x77, 0x88};
-    AuthorizationKey maxKey = {0xAA, 0xBB, 0xCC, 0xDD};
-    
-    service.setKeys(mgmtKey, configKey, maxKey);
-    
-    AuthorizationLevel level;
-    auto result = service.validateKey(mgmtKey, level);
-    
-    TEST_ASSERT_EQUAL(static_cast<int>(AuthorizationResult::Success), static_cast<int>(result));
-    TEST_ASSERT_EQUAL(static_cast<int>(AuthorizationLevel::Management), static_cast<int>(level));
+    keyThreeLevels(service);
+    std::array<uint8_t, AuthorizationService::kSerializedKeyTableSize> record{};
+    AuthorizationService::serializeKeyTable(service.keyTable(), record);
+    TEST_ASSERT_EQUAL_HEX8(0xAA, record[0]);
+    TEST_ASSERT_EQUAL_HEX8(0x11, record[8]);
+    TEST_ASSERT_EQUAL_HEX8(0xFF, record[12]);
+
+    AuthorizationService restored;
+    restored.restoreKeyTable(AuthorizationService::deserializeKeyTable(record));
+    TEST_ASSERT_TRUE(restored.keyTable() == service.keyTable());
 }
 
-void test_AuthorizationService_ValidateConfigurationKey(void) {
+// ============================================================================
+// A_Authorize (§3.5.7)
+// ============================================================================
+
+// Habinari never keys a device; nothing may change for it.
+void test_unkeyed_device_grants_level_zero_whatever_the_key(void)
+{
     AuthorizationService service;
-    
-    AuthorizationKey mgmtKey = {0x11, 0x22, 0x33, 0x44};
-    AuthorizationKey configKey = {0x55, 0x66, 0x77, 0x88};
-    AuthorizationKey maxKey = {0xAA, 0xBB, 0xCC, 0xDD};
-    
-    service.setKeys(mgmtKey, configKey, maxKey);
-    
-    AuthorizationLevel level;
-    auto result = service.validateKey(configKey, level);
-    
-    TEST_ASSERT_EQUAL(static_cast<int>(AuthorizationResult::Success), static_cast<int>(result));
-    TEST_ASSERT_EQUAL(static_cast<int>(AuthorizationLevel::Configuration), static_cast<int>(level));
+    TEST_ASSERT_EQUAL_UINT8(0u, service.currentAccessLevel(kStranger));
+    TEST_ASSERT_EQUAL_UINT8(0u, service.levelForKey(AuthorizationService::kNoKey));
+    TEST_ASSERT_EQUAL_UINT8(0u, service.levelForKey({0x00, 0x00, 0x00, 0x00}));
+    TEST_ASSERT_EQUAL_UINT8(0u, service.levelForKey(kMaxKey));
+
+    service.handleRequest(kTool, {0x12, 0x34, 0x56, 0x78});
+    TEST_ASSERT_EQUAL_UINT8(0u, service.currentAccessLevel(kTool));
 }
 
-void test_AuthorizationService_ValidateMaximumKey(void) {
+void test_each_key_authorises_its_own_level(void)
+{
     AuthorizationService service;
-    
-    AuthorizationKey mgmtKey = {0x11, 0x22, 0x33, 0x44};
-    AuthorizationKey configKey = {0x55, 0x66, 0x77, 0x88};
-    AuthorizationKey maxKey = {0xAA, 0xBB, 0xCC, 0xDD};
-    
-    service.setKeys(mgmtKey, configKey, maxKey);
-    
-    AuthorizationLevel level;
-    auto result = service.validateKey(maxKey, level);
-    
-    TEST_ASSERT_EQUAL(static_cast<int>(AuthorizationResult::Success), static_cast<int>(result));
-    TEST_ASSERT_EQUAL(static_cast<int>(AuthorizationLevel::Maximum), static_cast<int>(level));
+    keyThreeLevels(service);
+
+    AccessLevel answered = 0xEE;
+    service.setResponseCallback([&](const knx::IndividualAddress&, AccessLevel level) { answered = level; });
+
+    service.handleRequest(kTool, kMgmtKey);
+    TEST_ASSERT_EQUAL_UINT8(2u, answered);
+    TEST_ASSERT_EQUAL_UINT8(2u, service.currentAccessLevel(kTool));
+    service.handleRequest(kTool, kConfigKey);
+    TEST_ASSERT_EQUAL_UINT8(1u, answered);
+    service.handleRequest(kTool, kMaxKey);
+    TEST_ASSERT_EQUAL_UINT8(0u, answered);
+    TEST_ASSERT_EQUAL_UINT8(0u, service.currentAccessLevel(kTool));
 }
 
-void test_AuthorizationService_InvalidKey(void) {
+void test_invalid_key_gets_the_minimum_level(void)
+{
     AuthorizationService service;
-    
-    AuthorizationKey mgmtKey = {0x11, 0x22, 0x33, 0x44};
-    AuthorizationKey configKey = {0x55, 0x66, 0x77, 0x88};
-    AuthorizationKey maxKey = {0xAA, 0xBB, 0xCC, 0xDD};
-    
-    service.setKeys(mgmtKey, configKey, maxKey);
-    
-    AuthorizationKey wrongKey = {0x99, 0x99, 0x99, 0x99};
-    AuthorizationLevel level;
-    auto result = service.validateKey(wrongKey, level);
-    
-    TEST_ASSERT_EQUAL(static_cast<int>(AuthorizationResult::Denied), static_cast<int>(result));
-    TEST_ASSERT_EQUAL(static_cast<int>(AuthorizationLevel::None), static_cast<int>(level));
+    keyThreeLevels(service);
+    service.handleRequest(kTool, {0x99, 0x99, 0x99, 0x99});
+    TEST_ASSERT_EQUAL_UINT8(15u, service.currentAccessLevel(kTool));
 }
 
-void test_AuthorizationService_GrantWithoutKeysConfigured(void) {
-    // Unsecured device (no keys configured) grants free access: ETS
-    // authorizes with the default key FF FF FF FF and expects access
-    // level 0 (maximum). Denying here would abort every download.
+// "If the communication partner does not authorize itself, the Remote
+// Management shall select the maximum access level protected with FFFFFFFFh";
+// authorising with FFFFFFFFh is how DM_Authorize asks for that same level.
+void test_no_authorisation_and_ffffffff_both_give_the_free_level(void)
+{
     AuthorizationService service;
+    keyThreeLevels(service);
+    TEST_ASSERT_EQUAL_UINT8(3u, service.freeAccessLevel());
+    TEST_ASSERT_EQUAL_UINT8(3u, service.currentAccessLevel(kStranger));
+    service.handleRequest(kTool, AuthorizationService::kNoKey);
+    TEST_ASSERT_EQUAL_UINT8(3u, service.currentAccessLevel(kTool));
 
-    AuthorizationLevel level = AuthorizationLevel::None;
-    AuthorizationKey zeroKey = {0x00, 0x00, 0x00, 0x00};
-    auto result = service.validateKey(zeroKey, level);
+    // A gap: level 1 without a key is the most privileged unprotected level.
+    TEST_ASSERT_TRUE(service.setKey(1, AuthorizationService::kNoKey).isOk());
+    TEST_ASSERT_EQUAL_UINT8(1u, service.currentAccessLevel(kStranger));
 
-    TEST_ASSERT_EQUAL(static_cast<int>(AuthorizationResult::Success), static_cast<int>(result));
-    TEST_ASSERT_EQUAL(static_cast<int>(AuthorizationLevel::Maximum), static_cast<int>(level));
+    // Every level keyed: nothing is free but the minimum.
+    AuthorizationService allKeyed;
+    for (AccessLevel level = 0; level < AuthorizationService::kKeyedLevelCount; ++level) {
+        TEST_ASSERT_TRUE(allKeyed.setKey(level, {0, 0, 0, level}).isOk());
+    }
+    TEST_ASSERT_EQUAL_UINT8(15u, allKeyed.currentAccessLevel(kStranger));
 }
 
-void test_AuthorizationService_HandleRequest(void) {
+void test_level_lasts_until_cleared(void)
+{
     AuthorizationService service;
-    
-    AuthorizationKey mgmtKey = {0x11, 0x22, 0x33, 0x44};
-    AuthorizationKey configKey = {0x55, 0x66, 0x77, 0x88};
-    AuthorizationKey maxKey = {0xAA, 0xBB, 0xCC, 0xDD};
-    
-    service.setKeys(mgmtKey, configKey, maxKey);
-    
-    bool responseSent = false;
-    AuthorizationLevel responseLevel = AuthorizationLevel::None;
-    
-    service.setResponseCallback([&](const knx::IndividualAddress& dest, AuthorizationLevel level) {
-        responseSent = true;
-        responseLevel = level;
-    });
-    
-    knx::IndividualAddress source(1, 2, 3);
-    auto result = service.handleRequest(source, configKey);
-    
-    TEST_ASSERT_TRUE(result.isOk());
-    TEST_ASSERT_TRUE(responseSent);
-    TEST_ASSERT_EQUAL(static_cast<int>(AuthorizationLevel::Configuration), 
-                     static_cast<int>(responseLevel));
-}
+    keyThreeLevels(service);
+    service.handleRequest(kTool, kMaxKey);
+    service.clearAuthorization(kTool);
+    TEST_ASSERT_EQUAL_UINT8(3u, service.currentAccessLevel(kTool));
 
-void test_AuthorizationService_StoreAuthorization(void) {
-    AuthorizationService service;
-    
-    AuthorizationKey mgmtKey = {0x11, 0x22, 0x33, 0x44};
-    AuthorizationKey configKey = {0x55, 0x66, 0x77, 0x88};
-    AuthorizationKey maxKey = {0xAA, 0xBB, 0xCC, 0xDD};
-    
-    service.setKeys(mgmtKey, configKey, maxKey);
-    
-    knx::IndividualAddress source(1, 2, 3);
-    (void)service.handleRequest(source, configKey);
-    
-    // Check that authorization is stored
-    auto level = service.getCurrentLevel(source);
-    TEST_ASSERT_EQUAL(static_cast<int>(AuthorizationLevel::Configuration), 
-                     static_cast<int>(level));
-}
-
-void test_AuthorizationService_ClearAuthorization(void) {
-    AuthorizationService service;
-    
-    AuthorizationKey maxKey = {0xAA, 0xBB, 0xCC, 0xDD};
-    service.setKeys(maxKey, maxKey, maxKey);
-    
-    knx::IndividualAddress source(1, 2, 3);
-    (void)service.handleRequest(source, maxKey);
-    
-    TEST_ASSERT_EQUAL(static_cast<int>(AuthorizationLevel::Maximum), 
-                     static_cast<int>(service.getCurrentLevel(source)));
-    
-    service.clearAuthorization(source);
-    
-    TEST_ASSERT_EQUAL(static_cast<int>(AuthorizationLevel::None), 
-                     static_cast<int>(service.getCurrentLevel(source)));
-}
-
-void test_AuthorizationService_ClearAllAuthorizations(void) {
-    AuthorizationService service;
-    
-    AuthorizationKey key = {0x11, 0x22, 0x33, 0x44};
-    service.setKeys(key, key, key);
-    
-    knx::IndividualAddress addr1(1, 1, 1);
-    knx::IndividualAddress addr2(2, 2, 2);
-    
-    (void)service.handleRequest(addr1, key);
-    (void)service.handleRequest(addr2, key);
-    
-    // When all keys are identical, Maximum level is granted (checked first)
-    TEST_ASSERT_EQUAL(static_cast<int>(AuthorizationLevel::Maximum), 
-                     static_cast<int>(service.getCurrentLevel(addr1)));
-    TEST_ASSERT_EQUAL(static_cast<int>(AuthorizationLevel::Maximum), 
-                     static_cast<int>(service.getCurrentLevel(addr2)));
-    
+    service.handleRequest(kTool, kMaxKey);
+    service.handleRequest(kStranger, kMaxKey);
     service.clearAllAuthorizations();
-    
-    TEST_ASSERT_EQUAL(static_cast<int>(AuthorizationLevel::None), 
-                     static_cast<int>(service.getCurrentLevel(addr1)));
-    TEST_ASSERT_EQUAL(static_cast<int>(AuthorizationLevel::None), 
-                     static_cast<int>(service.getCurrentLevel(addr2)));
+    TEST_ASSERT_EQUAL_UINT8(3u, service.currentAccessLevel(kTool));
+    TEST_ASSERT_EQUAL_UINT8(3u, service.currentAccessLevel(kStranger));
 }
 
-void test_AuthorizationService_CustomValidationCallback(void) {
+void test_authorisation_expiry(void)
+{
     AuthorizationService service;
-    
-    bool callbackInvoked = false;
-    
-    service.setValidationCallback([&](const knx::IndividualAddress& source, 
-                                      const AuthorizationKey& key) -> knx::util::Result<AuthorizationLevel> {
-        callbackInvoked = true;
-        // Custom logic: grant maximum level if key is all 0xFF
-        if (key[0] == 0xFF && key[1] == 0xFF && key[2] == 0xFF && key[3] == 0xFF) {
-            return AuthorizationLevel::Maximum;
-        }
-        return knx::util::ErrorCode::OperationNotSupported;
-    });
-    
-    AuthorizationKey customKey = {0xFF, 0xFF, 0xFF, 0xFF};
-    knx::IndividualAddress source(1, 2, 3);
-    
-    auto result = service.handleRequest(source, customKey);
-    
-    TEST_ASSERT_TRUE(result.isOk());
-    TEST_ASSERT_TRUE(callbackInvoked);
-    TEST_ASSERT_EQUAL(static_cast<int>(AuthorizationLevel::Maximum), 
-                     static_cast<int>(service.getCurrentLevel(source)));
-}
-
-void test_AuthorizationService_UpdateExistingAuthorization(void) {
-    AuthorizationService service;
-    
-    AuthorizationKey mgmtKey = {0x11, 0x22, 0x33, 0x44};
-    AuthorizationKey configKey = {0x55, 0x66, 0x77, 0x88};
-    AuthorizationKey maxKey = {0xAA, 0xBB, 0xCC, 0xDD};
-    
-    service.setKeys(mgmtKey, configKey, maxKey);
-    
-    knx::IndividualAddress source(1, 2, 3);
-    
-    // First authorization at management level
-    (void)service.handleRequest(source, mgmtKey);
-    TEST_ASSERT_EQUAL(static_cast<int>(AuthorizationLevel::Management), 
-                     static_cast<int>(service.getCurrentLevel(source)));
-    
-    // Upgrade to maximum level
-    (void)service.handleRequest(source, maxKey);
-    TEST_ASSERT_EQUAL(static_cast<int>(AuthorizationLevel::Maximum), 
-                     static_cast<int>(service.getCurrentLevel(source)));
-}
-
-void test_AuthorizationService_ExpiresAuthorizations(void) {
-    AuthorizationService service;
-
-    uint32_t currentTick = 10;
-    service.setTimeSource([&]() { return currentTick; });
+    keyThreeLevels(service);
+    uint32_t tick = 10;
+    service.setTimeSource([&]() { return tick; });
     service.setAuthorizationTimeout(5);
 
-    AuthorizationKey key = {0x11, 0x22, 0x33, 0x44};
-    service.setKeys(key, key, key);
-
-    knx::IndividualAddress source(1, 2, 3);
-    TEST_ASSERT_TRUE(service.handleRequest(source, key).isOk());
-    TEST_ASSERT_EQUAL(static_cast<int>(AuthorizationLevel::Maximum),
-                      static_cast<int>(service.getCurrentLevel(source)));
-
-    currentTick = 14;
-    TEST_ASSERT_EQUAL(static_cast<int>(AuthorizationLevel::Maximum),
-                      static_cast<int>(service.getCurrentLevel(source)));
-
-    currentTick = 15;
-    TEST_ASSERT_EQUAL(static_cast<int>(AuthorizationLevel::None),
-                      static_cast<int>(service.getCurrentLevel(source)));
+    service.handleRequest(kTool, kMaxKey);
+    tick = 14;
+    TEST_ASSERT_EQUAL_UINT8(0u, service.currentAccessLevel(kTool));
+    tick = 15;
+    TEST_ASSERT_EQUAL_UINT8(3u, service.currentAccessLevel(kTool));
 }
 
-void test_AuthorizationService_RefreshesTimestampOnUpdate(void) {
+void test_oldest_authorisation_is_evicted_when_full(void)
+{
     AuthorizationService service;
-
-    uint32_t currentTick = 100;
-    service.setTimeSource([&]() { return currentTick; });
-    service.setAuthorizationTimeout(10);
-
-    AuthorizationKey mgmtKey = {0x11, 0x22, 0x33, 0x44};
-    AuthorizationKey maxKey = {0xAA, 0xBB, 0xCC, 0xDD};
-    service.setKeys(mgmtKey, mgmtKey, maxKey);
-
-    knx::IndividualAddress source(1, 2, 3);
-    TEST_ASSERT_TRUE(service.handleRequest(source, mgmtKey).isOk());
-
-    currentTick = 108;
-    TEST_ASSERT_TRUE(service.handleRequest(source, maxKey).isOk());
-    TEST_ASSERT_EQUAL(static_cast<int>(AuthorizationLevel::Maximum),
-                      static_cast<int>(service.getCurrentLevel(source)));
-
-    currentTick = 117;
-    TEST_ASSERT_EQUAL(static_cast<int>(AuthorizationLevel::Maximum),
-                      static_cast<int>(service.getCurrentLevel(source)));
-
-    currentTick = 118;
-    TEST_ASSERT_EQUAL(static_cast<int>(AuthorizationLevel::None),
-                      static_cast<int>(service.getCurrentLevel(source)));
-}
-
-void test_AuthorizationService_EvictsOldestAuthorization(void) {
-    AuthorizationService service;
-
-    uint32_t currentTick = 1;
-    service.setTimeSource([&]() { return currentTick; });
-
-    AuthorizationKey key = {0x11, 0x22, 0x33, 0x44};
-    service.setKeys(key, key, key);
+    keyThreeLevels(service);
+    uint32_t tick = 1;
+    service.setTimeSource([&]() { return tick; });
 
     for (uint16_t device = 1; device <= 16; ++device) {
-        TEST_ASSERT_TRUE(service.handleRequest(knx::IndividualAddress(1, 1, device), key).isOk());
-        ++currentTick;
+        service.handleRequest(knx::IndividualAddress(1, 1, device), kMaxKey);
+        ++tick;
     }
+    service.handleRequest(knx::IndividualAddress(1, 1, 17), kMaxKey);
 
-    const knx::IndividualAddress oldest(1, 1, 1);
-    const knx::IndividualAddress newest(1, 1, 16);
-    TEST_ASSERT_EQUAL(static_cast<int>(AuthorizationLevel::Maximum),
-                      static_cast<int>(service.getCurrentLevel(oldest)));
-    TEST_ASSERT_EQUAL(static_cast<int>(AuthorizationLevel::Maximum),
-                      static_cast<int>(service.getCurrentLevel(newest)));
-
-    TEST_ASSERT_TRUE(service.handleRequest(knx::IndividualAddress(1, 1, 17), key).isOk());
-
-    TEST_ASSERT_EQUAL(static_cast<int>(AuthorizationLevel::None),
-                      static_cast<int>(service.getCurrentLevel(oldest)));
-    TEST_ASSERT_EQUAL(static_cast<int>(AuthorizationLevel::Maximum),
-                      static_cast<int>(service.getCurrentLevel(newest)));
-    TEST_ASSERT_EQUAL(static_cast<int>(AuthorizationLevel::Maximum),
-                      static_cast<int>(service.getCurrentLevel(knx::IndividualAddress(1, 1, 17))));
+    TEST_ASSERT_EQUAL_UINT8(3u, service.currentAccessLevel(knx::IndividualAddress(1, 1, 1)));
+    TEST_ASSERT_EQUAL_UINT8(0u, service.currentAccessLevel(knx::IndividualAddress(1, 1, 16)));
+    TEST_ASSERT_EQUAL_UINT8(0u, service.currentAccessLevel(knx::IndividualAddress(1, 1, 17)));
 }
 
 // ============================================================================
-// Test Runner
+// A_Key_Write (§3.5.8)
 // ============================================================================
 
-// ============================================================================
-// Current access level (03/03/07 §3.5.7), what the access checks compare
-// ============================================================================
-
-void test_AuthorizationService_UnkeyedDeviceGrantsLevelZeroToEveryone(void) {
+void test_key_write_at_a_sufficient_level_is_stored_and_answered_with_the_level(void)
+{
     AuthorizationService service;
-    // Nobody authorised, and nobody needs to: the gate must not change
-    // anything on a device that was never keyed.
-    TEST_ASSERT_EQUAL_UINT8(0u, service.currentAccessLevel(knx::IndividualAddress(1, 1, 5)));
+    int changes = 0;
+    service.setKeyTableChangedCallback([&](const AuthorizationService::KeyTable&) { ++changes; });
+
+    // Unkeyed: everybody is at level 0, so level 0 itself may be keyed.
+    TEST_ASSERT_EQUAL_UINT8(0u, service.handleKeyWrite(kTool, 0, kMaxKey));
+    TEST_ASSERT_TRUE(service.keyTable()[0] == kMaxKey);
+    TEST_ASSERT_EQUAL_INT(1, changes);
+
+    // Level 0 is protected now, so kTool, which never authorised, is at the
+    // free level 1 and may no longer touch it ...
+    TEST_ASSERT_EQUAL_UINT8(0xFFu, service.handleKeyWrite(kTool, 0, {1, 2, 3, 4}));
+    // ... until it authorises. The same key again changes nothing to store,
+    // but is still answered.
+    service.handleRequest(kTool, kMaxKey);
+    TEST_ASSERT_EQUAL_UINT8(0u, service.handleKeyWrite(kTool, 0, kMaxKey));
+    TEST_ASSERT_EQUAL_INT(1, changes);
 }
 
-void test_AuthorizationService_KeyedDeviceUsesGrantedOrUnprotectedLevel(void) {
+void test_key_write_above_the_current_level_is_refused_with_ff(void)
+{
     AuthorizationService service;
-    const AuthorizationKey management = {0x00, 0x00, 0x00, 0x02};
-    const AuthorizationKey configuration = {0x00, 0x00, 0x00, 0x01};
-    const AuthorizationKey maximum = {0x00, 0x00, 0x00, 0x00};
-    service.setKeys(management, configuration, maximum);
+    keyThreeLevels(service);
+    int changes = 0;
+    service.setKeyTableChangedCallback([&](const AuthorizationService::KeyTable&) { ++changes; });
 
-    const knx::IndividualAddress stranger(1, 1, 5);
-    const knx::IndividualAddress tool(1, 1, 254);
-    // Every level protected: an unauthorised partner has minimal access.
-    TEST_ASSERT_EQUAL_UINT8(15u, service.currentAccessLevel(stranger));
+    // kTool holds level 2; level 1 and 0 are more privileged.
+    service.handleRequest(kTool, kMgmtKey);
+    TEST_ASSERT_EQUAL_UINT8(0xFFu, service.handleKeyWrite(kTool, 1, {1, 2, 3, 4}));
+    TEST_ASSERT_EQUAL_UINT8(0xFFu, service.handleKeyWrite(kTool, 0, {1, 2, 3, 4}));
+    TEST_ASSERT_TRUE(service.keyTable()[1] == kConfigKey);
+    TEST_ASSERT_EQUAL_INT(0, changes);
 
-    TEST_ASSERT_TRUE(service.handleRequest(tool, configuration).isOk());
-    TEST_ASSERT_EQUAL_UINT8(1u, service.currentAccessLevel(tool));
-    TEST_ASSERT_EQUAL_UINT8(15u, service.currentAccessLevel(stranger));
-
-    // "The maximum access level protected with FFFFFFFFh" is what an
-    // unauthorised partner gets.
-    AuthorizationService partlyKeyed;
-    partlyKeyed.setKeys({0xFF, 0xFF, 0xFF, 0xFF}, configuration, maximum);
-    TEST_ASSERT_EQUAL_UINT8(2u, partlyKeyed.currentAccessLevel(stranger));
+    // Its own level and less privileged ones it may change.
+    TEST_ASSERT_EQUAL_UINT8(2u, service.handleKeyWrite(kTool, 2, {1, 2, 3, 4}));
+    TEST_ASSERT_EQUAL_UINT8(5u, service.handleKeyWrite(kTool, 5, {5, 5, 5, 5}));
+    TEST_ASSERT_EQUAL_INT(2, changes);
 }
 
-int main(void) {
+void test_key_write_for_a_level_without_a_key_slot_is_refused(void)
+{
+    AuthorizationService service;
+    TEST_ASSERT_EQUAL_UINT8(0xFFu, service.handleKeyWrite(kTool, 15, {1, 2, 3, 4}));
+    TEST_ASSERT_EQUAL_UINT8(0xFFu, service.handleKeyWrite(kTool, 0x80, {1, 2, 3, 4}));
+    TEST_ASSERT_FALSE(service.hasKeys());
+}
+
+void test_key_write_of_ffffffff_removes_the_key(void)
+{
+    AuthorizationService service;
+    keyThreeLevels(service);
+    service.handleRequest(kTool, kMaxKey);
+
+    TEST_ASSERT_EQUAL_UINT8(2u, service.handleKeyWrite(kTool, 2, AuthorizationService::kNoKey));
+    TEST_ASSERT_TRUE(service.keyTable()[2] == AuthorizationService::kNoKey);
+    // Level 2 is now the most privileged level without a key.
+    TEST_ASSERT_EQUAL_UINT8(2u, service.currentAccessLevel(kStranger));
+    // And the old key no longer authorises anything.
+    service.handleRequest(kStranger, kMgmtKey);
+    TEST_ASSERT_EQUAL_UINT8(15u, service.currentAccessLevel(kStranger));
+}
+
+void test_keyed_level_then_gates_a_partner_that_does_not_authorise(void)
+{
+    AuthorizationService service;
+    // ETS on an unkeyed device protects level 0 ...
+    TEST_ASSERT_EQUAL_UINT8(0u, service.handleKeyWrite(kTool, 0, kMaxKey));
+    // ... after which a partner that does not authorise is at level 1, and
+    // one that authorises with the key is back at 0.
+    TEST_ASSERT_EQUAL_UINT8(1u, service.currentAccessLevel(kStranger));
+    service.handleRequest(kStranger, kMaxKey);
+    TEST_ASSERT_EQUAL_UINT8(0u, service.currentAccessLevel(kStranger));
+}
+
+// ============================================================================
+// Master Reset (03/05/02 §3.7.1.2.3.2.3)
+// ============================================================================
+
+void test_reset_clears_the_requesters_level_and_less_privileged_ones(void)
+{
+    AuthorizationService service;
+    keyThreeLevels(service);
+    int changes = 0;
+    service.setKeyTableChangedCallback([&](const AuthorizationService::KeyTable&) { ++changes; });
+
+    service.resetKeysFrom(1);
+    TEST_ASSERT_TRUE(service.keyTable()[0] == kMaxKey);
+    TEST_ASSERT_TRUE(service.keyTable()[1] == AuthorizationService::kNoKey);
+    TEST_ASSERT_TRUE(service.keyTable()[2] == AuthorizationService::kNoKey);
+    TEST_ASSERT_EQUAL_INT(1, changes);
+
+    // Nothing left to reset at or above 1: no change to persist.
+    service.resetKeysFrom(1);
+    TEST_ASSERT_EQUAL_INT(1, changes);
+
+    service.resetKeysFrom(0);
+    TEST_ASSERT_FALSE(service.hasKeys());
+}
+
+int main(void)
+{
     UNITY_BEGIN();
-    RUN_TEST(test_AuthorizationService_UnkeyedDeviceGrantsLevelZeroToEveryone);
-    RUN_TEST(test_AuthorizationService_KeyedDeviceUsesGrantedOrUnprotectedLevel);
-
-    RUN_TEST(test_AuthorizationService_Init);
-    RUN_TEST(test_AuthorizationService_SetKeys);
-    RUN_TEST(test_AuthorizationService_ValidateManagementKey);
-    RUN_TEST(test_AuthorizationService_ValidateConfigurationKey);
-    RUN_TEST(test_AuthorizationService_ValidateMaximumKey);
-    RUN_TEST(test_AuthorizationService_InvalidKey);
-    RUN_TEST(test_AuthorizationService_GrantWithoutKeysConfigured);
-    RUN_TEST(test_AuthorizationService_HandleRequest);
-    RUN_TEST(test_AuthorizationService_StoreAuthorization);
-    RUN_TEST(test_AuthorizationService_ClearAuthorization);
-    RUN_TEST(test_AuthorizationService_ClearAllAuthorizations);
-    RUN_TEST(test_AuthorizationService_CustomValidationCallback);
-    RUN_TEST(test_AuthorizationService_UpdateExistingAuthorization);
-    RUN_TEST(test_AuthorizationService_ExpiresAuthorizations);
-    RUN_TEST(test_AuthorizationService_RefreshesTimestampOnUpdate);
-    RUN_TEST(test_AuthorizationService_EvictsOldestAuthorization);
-    
+    RUN_TEST(test_ex_factory_every_level_has_no_key);
+    RUN_TEST(test_levels_zero_to_fourteen_take_a_key_and_fifteen_does_not);
+    RUN_TEST(test_key_table_round_trips_through_its_record);
+    RUN_TEST(test_unkeyed_device_grants_level_zero_whatever_the_key);
+    RUN_TEST(test_each_key_authorises_its_own_level);
+    RUN_TEST(test_invalid_key_gets_the_minimum_level);
+    RUN_TEST(test_no_authorisation_and_ffffffff_both_give_the_free_level);
+    RUN_TEST(test_level_lasts_until_cleared);
+    RUN_TEST(test_authorisation_expiry);
+    RUN_TEST(test_oldest_authorisation_is_evicted_when_full);
+    RUN_TEST(test_key_write_at_a_sufficient_level_is_stored_and_answered_with_the_level);
+    RUN_TEST(test_key_write_above_the_current_level_is_refused_with_ff);
+    RUN_TEST(test_key_write_for_a_level_without_a_key_slot_is_refused);
+    RUN_TEST(test_key_write_of_ffffffff_removes_the_key);
+    RUN_TEST(test_keyed_level_then_gates_a_partner_that_does_not_authorise);
+    RUN_TEST(test_reset_clears_the_requesters_level_and_less_privileged_ones);
     return UNITY_END();
 }

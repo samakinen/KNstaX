@@ -148,6 +148,20 @@ public:
 
     bool isSecureRoutingActive() const;
 
+    /**
+     * Restart the multicast timer synchronisation for the key in force (A7).
+     *
+     * 03_08_09 §2.2.2.3.2.5 E11 is "PID_BACKBONE_KEY and/or
+     * PID_MULTICAST_ADDRESS is set to a new and different value", and the
+     * transition table answers E11 with A7 from either state. A new key is
+     * handled by applySecureRouting(); this is the address half, for a key
+     * that stays the same. The synchronisation restarts in SCHED_PERIODIC
+     * with notify_timer = 0, and mc_timer carries on from its current value:
+     * it is at least the persisted one §2.2.2.3.2.8 restarts from, and it is
+     * valid for this key. No-op without Secure Routing.
+     */
+    void restartMulticastTimerSync();
+
     /// Current mc_timer, or 0 without Secure Routing. Diagnostic.
     uint64_t secureRoutingTimer() const;
 #endif
@@ -183,6 +197,21 @@ public:
     /// True once the routing group has been joined. A device that is open but
     /// not joined can transmit and cannot receive.
     [[nodiscard]] bool multicastJoined() const;
+
+    /**
+     * Use a different routing multicast group, before or after init().
+     *
+     * Before init() this only replaces the group setMulticast() gave. After
+     * it, the open endpoint leaves the old group, sends to the new one from
+     * then on, and joins it (see netip::RoutingEndpoint::setMulticastGroup()).
+     * The product calls it at start-up when the KNXnet/IP Parameter Object
+     * holds a group ETS downloaded, which is only known once the stored
+     * properties are back — after the socket has opened.
+     */
+    util::Result<void> setMulticastGroup(IpAddress multicastGroup);
+
+    /// The routing multicast group in force.
+    [[nodiscard]] IpAddress multicastGroup() const;
 
     /**
      * @brief Counters for the routing socket
@@ -266,7 +295,10 @@ private:
 
     platform::NetworkInterface* network_;
 
-    IpAddress multicastGroup_;
+    /// IpAddress::raw of the group in force. Written by setMulticast() and
+    /// setMulticastGroup() on the stack task, read by multicastGroup() from
+    /// the discovery responder on the receive task.
+    std::atomic<uint32_t> multicastGroup_;
     NetIpPort port_;
     IpAddress interfaceAddress_;
 

@@ -94,6 +94,16 @@ public:
     /// from the same key written again, which is not an event.
     [[nodiscard]] bool usesKey(std::span<const uint8_t> key) const;
 
+    /**
+     * A7 for a new domain under the same key (E11 from a changed routing
+     * multicast address, 03_08_09 §2.2.2.3.2.7): restart the synchronisation
+     * in SCHED_PERIODIC with notify_timer = 0 (§2.2.2.3.2.8, not a power-up).
+     * mc_timer resumes from its running value — §2.2.2.3.2.8 restarts from the
+     * persisted value plus an offset only because a power-up has lost the
+     * running one. A new key is a new context instead, with mc_timer at 0.
+     */
+    void restartSync();
+
     /// Current mc_timer. Diagnostic, and asserted in tests.
     [[nodiscard]] uint64_t mcTimer();
 

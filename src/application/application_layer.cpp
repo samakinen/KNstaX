@@ -735,12 +735,9 @@ void ApplicationLayer::wireServiceCallbacks() {
         });
 
     _authorizationService->setResponseCallback(
-        [this](const IndividualAddress& destination, AuthorizationLevel level) {
-            // KNX access levels are inverted relative to privilege on the
-            // wire: 0 = maximum access … 15 = no access.
-            const uint8_t wireLevel = AuthorizationService::toWireLevel(level);
+        [this](const IndividualAddress& destination, AccessLevel level) {
             ResponsePayload payload;
-            if (!appendPayloadByte(payload, wireLevel)) {
+            if (!appendPayloadByte(payload, level)) {
                 logOversizedServiceResponse("Authorize", 1u);
                 return;
             }
@@ -830,8 +827,8 @@ void ApplicationLayer::wireAccessPolicy() {
 
     // A_Authorize levels (03/03/07 §3.5.7). The authorisation service holds
     // the current level of each partner; the services compare it with what
-    // the addressed Resource requires. With no keys set every partner is at
-    // level 0, so a device nobody has keyed behaves exactly as before.
+    // the addressed Resource requires. With no key on any level every partner
+    // is at level 0, so a device nobody has keyed is not gated at all.
     _propertyServices->setAccessLevelQuery([this](const IndividualAddress& source) {
         return _authorizationService->currentAccessLevel(source);
     });
@@ -1144,7 +1141,48 @@ void ApplicationLayer::handleAuthorizeRequest(const ADataFrame& frame) {
     } else {
         return;
     }
-    (void)_authorizationService->handleRequest(frame.source, key);
+    _authorizationService->handleRequest(frame.source, key);
+}
+
+void ApplicationLayer::handleKeyWrite(const ADataFrame& frame) {
+    // 03/03/07 §3.5.8 Figure 89: the level, then the four-octet key.
+    if (frame.data.size() < 5) {
+        return;
+    }
+    AuthorizationKey key{};
+    std::copy(frame.data.begin() + 1, frame.data.begin() + 5, key.begin());
+    const AccessLevel answered = _authorizationService->handleKeyWrite(frame.source, frame.data[0], key);
+
+    // Figure 90: A_Key_Response carries one octet, the level set, or FFh.
+    ResponsePayload payload;
+    if (!appendPayloadByte(payload, answered)) {
+        logOversizedServiceResponse("Key", 1u);
+        return;
+    }
+    (void)sendToIndividual(frame.source, APCIService::KeyResponse, payload, _serviceResponseSendOptions);
+}
+
+void ApplicationLayer::setManagementServerHooks(ManagementServerHooks hooks) {
+    if (_restartService) {
+        // 03/05/02 §3.7.1.2.3.2.3: Erase Codes 02h and 07h "set the
+        // Authorisation Keys of the access level to which the requesting MaC
+        // is authorised and higher level (higher numerical value) to their
+        // default settings"; the other codes leave them alone. The keys are
+        // this layer's, so they are reset here before the owner of the other
+        // Resources does its part.
+        _restartService->setMasterResetCallback(
+            [this, reset = std::move(hooks.masterReset)](EraseCode eraseCode) -> util::Result<void> {
+                if (eraseCode == EraseCode::FactoryReset
+                    || eraseCode == EraseCode::FactoryResetWithoutIndividualAddress) {
+                    _authorizationService->resetKeysFrom(_masterResetRequesterLevel);
+                }
+                return reset ? reset(eraseCode) : util::Result<void>::ok();
+            });
+    }
+    if (_memoryService) {
+        _memoryService->setVerifyModeProvider(std::move(hooks.verifyMode));
+    }
+    _authorizationService->setKeyTableChangedCallback(std::move(hooks.authorizationKeysChanged));
 }
 
 void ApplicationLayer::handleRestart(const ADataFrame& frame) {
@@ -1189,6 +1227,9 @@ void ApplicationLayer::handleRestart(const ADataFrame& frame) {
 
     const uint8_t eraseCode = frame.data[0];
     const uint8_t channel = frame.data[1];
+    // Taken now: the reset runs later, and by then the connection — and the
+    // level that came with it — may be gone.
+    _masterResetRequesterLevel = _authorizationService->currentAccessLevel(frame.source);
     const RestartErrorCode errorCode =
         _restartService->handleMasterResetRequest(frame.source, eraseCode, channel);
     const bool accepted = (errorCode == RestartErrorCode::NoError);
@@ -1765,6 +1806,10 @@ void ApplicationLayer::dispatchService(const ADataFrame& aFrame) {
 
         case APCIService::AuthorizeRequest:
             handleAuthorizeRequest(aFrame);
+            return;
+
+        case APCIService::KeyWrite:
+            handleKeyWrite(aFrame);
             return;
 
         case APCIService::Restart:

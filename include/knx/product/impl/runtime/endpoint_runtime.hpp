@@ -293,11 +293,27 @@ public:
         return _bau->link().refreshMulticastMembership();
     }
 
-    /// See bau::ManagementControl::setDomainAddressWriteCallback.
-    void setDomainAddressWriteCallback(application::DomainAddressWriteCallback callback)
+    /// See bau::BusAccessUnit::adoptRoutingMulticastAddress. Returns
+    /// `productDefault` before start().
+    IpAddress adoptRoutingMulticastAddress(IpAddress productDefault, bool productDefaultWins)
+    {
+        if (!_bau) {
+            return productDefault;
+        }
+        return _bau->management().adoptRoutingMulticastAddress(productDefault, productDefaultWins);
+    }
+
+    /// See bau::BusAccessUnit::routingMulticastAddress.
+    [[nodiscard]] IpAddress routingMulticastAddress() const
+    {
+        return _bau ? _bau->management().routingMulticastAddress() : IpAddress(0);
+    }
+
+    /// See bau::BusAccessUnit::setRoutingMulticastAddressCallback.
+    void setRoutingMulticastAddressCallback(bau::ManagementControl::RoutingMulticastAddressCallback callback)
     {
         if (_bau) {
-            _bau->management().setDomainAddressWriteCallback(std::move(callback));
+            _bau->management().setRoutingMulticastAddressCallback(std::move(callback));
         }
     }
 #endif

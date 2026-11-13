@@ -47,7 +47,8 @@ at the end is not proof that an area is complete.
 | A_FunctionPropertyExtState_Read / _Response | 0x1D5 / 0x1D6 | Return code precedes the data, unlike the value services. Reaches the same object functions as the classic services, but addressed by object type + instance and answering in the unified return-code space of §3.4.8.3 — the two sets are different code spaces, not the same numbers at different widths |
 | A_NetworkParameter_Read / _Response / _Write | 0x3DA / 0x3DB / 0x3E4 | Silent when the device does not expose the parameter |
 | A_SystemNetworkParameter_Read / _Response | 0x1C8 / 0x1C9 | `NM_Read_SerialNumber_By_ProgrammingMode` (03/05/02 §2.17.1.4) — how ETS scans for devices in programming mode. Answers only in programming mode, only for Device Object / PID_SERIAL_NUMBER / operand 01h; silent otherwise. Sends immediately instead of the specified random 0–1 s wait |
-| A_Authorize_Request / _Response | 0x3D1 / 0x3D2 | |
+| A_Authorize_Request / _Response | 0x3D1 / 0x3D2 | Connection-oriented only. Levels 0 (maximum) to 15 (minimum); the key of a level grants it, FFFFFFFFh and no authorisation both give the most privileged level without a key, any other key the minimum level (03/03/07 §3.5.7). A device with no key on any level grants level 0 to everyone |
+| A_Key_Write / A_Key_Response | 0x3D3 / 0x3D4 | Connection-oriented only. One key per level for levels 0–14; FFFFFFFFh removes it. Answered with the level set, or FFh when the requester's current level is numerically above the one written (03/03/07 §3.5.8). The table is persisted as a device Resource of its own and reset by Master Reset 02h/07h from the requester's level up (03/05/02 §3.7.1.2.3.2.3) |
 | A_Restart | 0x380 | Basic and Master Reset |
 | A_ADC_Read / _Response | 0x180 / 0x1C0 | channel_nr in the APCI data field, read_count and the 2-octet sum in the payload. The converter itself is supplied by the product through `ApplicationLayer::setAdcReadProvider`; with none installed every channel is answered with `read_count = 0`, which §3.5.2 defines as "wrong channel number". The answer is the point: the request arrives on a transport connection, and silence costs the client its full timeout |
 
@@ -156,7 +157,7 @@ than a client's declaration.
 
 | Type | # | Status |
 |---|---|---|
-| KNXnet/IP Parameter | 11 | Auto-registered on IP builds; individual address, installation id and friendly name are seeded at start-up. The address-bearing properties — current IP address, subnet mask, gateway, routing multicast address, TTL, MAC, assignment method and device capabilities — are supplied by the firmware through `applyKnxNetIpConfiguration()`, since none of them is knowable before the interface has a lease and most change again when one is renewed. `PID_BACKBONE_KEY` is not inert storage: writing it applies a Secure Routing group key to the live socket. |
+| KNXnet/IP Parameter | 11 | Auto-registered on IP builds; individual address, installation id and friendly name are seeded at start-up. The address-bearing properties — current IP address, subnet mask, gateway, TTL, MAC, assignment method and device capabilities — are supplied by the firmware through `applyKnxNetIpConfiguration()`, since none of them is knowable before the interface has a lease and most change again when one is renewed. `PID_BACKBONE_KEY` is not inert storage: writing it applies a Secure Routing group key to the live socket. `PID_ROUTING_MULTICAST_ADDRESS` belongs to ETS: it is persisted, a value that is not in 224.0.0.0/4 is refused, and a written value becomes the routing group at the next restart (03_08_03 §2.5.17); the product's configured group only fills it on the first start and after Factory Reset (Erase Code 02h, 03/05/02 Table 6). A_DomainAddressSerialNumber_Write with the 4-octet KNX IP plain format writes the same property. A new value is E11 for Secure Routing and restarts the multicast timer synchronisation (A7); the same value written again is E12 and changes nothing. |
 | Router | 6 | Published by `BusAccessUnit::configureRouterRole()`. Opt-in on purpose: a plain end device advertising a Router Object would claim routing it does not perform. Once declared, `PID_ROUTETABLE_CONTROL` (a Function Property) applies ETS filter-table downloads to the coupler's live `FilterTable`, and `PID_*_LCCONFIG` / `PID_*_LCGRPCONFIG` reach the live `CouplerRoutingPolicy` via `syncRouterRoutingConfig()`. |
 | cEMI Server | 8 | Declared, no live wiring. |
 | Interface Program, LTE routing, Polling Master, File Server, RF Medium, E-mode objects | 4, 7, 10, 13, 19, … | Declarations only, via `setReferenceInterfaceObjectTypes()`. |
@@ -272,8 +273,8 @@ device:
    services compare the partner's current level with the described write level
    in wire numbering (0 = maximum access; refused when the partner's level is
    numerically higher), so populating the levels means carrying wire-order
-   numbers through the property handlers and `describeProperty`. The internal
-   `AuthorizationLevel` enum is privilege-ordered; do not mix the two.
+   numbers through the property handlers and `describeProperty`; the
+   authorisation service already works in wire numbering.
 6. **Coupler profile is implemented, untested, and not complete.** None of the
    routing actions below has been exercised against real hardware or a real
    two-line installation; what follows describes implemented code and host

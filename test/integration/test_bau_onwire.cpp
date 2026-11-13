@@ -1572,9 +1572,8 @@ void test_bau_domain_address_read_answers_with_the_routing_group(void) {
 
     // Seed the KNXnet/IP configuration the way the firmware does at start-up:
     // the Domain Address follows the routing multicast address.
-    knx::netip::KnxNetIpConfiguration config{};
-    config.routingMulticastAddress = knx::IpAddress::fromOctets(224, 0, 23, 12);
-    (void)bauInstance->management().applyKnxNetIpConfiguration(config);
+    (void)bauInstance->management().adoptRoutingMulticastAddress(
+        knx::IpAddress::fromOctets(224, 0, 23, 12), false);
 
     auto frame = domainAddressReadFrame(serial);
     frame[1] = 0xE0;  // group-addressed, hop count 6

@@ -340,25 +340,22 @@ public:
      */
     struct ManagementServerHooks {
         /// Performs Erase Codes 02h…07h of a Master Reset (see RestartService).
+        /// The authorisation keys are this layer's and are reset here first.
         RestartService::MasterResetCallback masterReset;
         /// PID_DEVICE_CONTROL bit 2, which makes A_Memory_Write confirmed.
         MemoryService::VerifyModeProvider verifyMode;
+        /// The authorisation key table changed (A_Key_Write, or a Master
+        /// Reset); the owner of persistent storage saves it.
+        AuthorizationService::KeyTableChangedCallback authorizationKeysChanged;
     };
 
-    void setManagementServerHooks(ManagementServerHooks hooks) {
-        if (_restartService) {
-            _restartService->setMasterResetCallback(std::move(hooks.masterReset));
-        }
-        if (_memoryService) {
-            _memoryService->setVerifyModeProvider(std::move(hooks.verifyMode));
-        }
-    }
+    void setManagementServerHooks(ManagementServerHooks hooks);
 
     /**
      * @brief Access level (wire numbering, 0 = maximum) a requester needs for
      *        A_Memory_Write and A_MemoryExtended_Write. Default 2, the write
      *        level 03/05/01 gives the configuration Resources. Only bites once
-     *        authorizationService().setKeys() has protected a level.
+     *        a level has a key (A_Key_Write, or authorizationService().setKey()).
      */
     void setMemoryWriteAccessLevel(uint8_t level) { _memoryWriteAccessLevel = level; }
 
@@ -442,6 +439,10 @@ private:
     std::unique_ptr<PropertyExtServices> _propertyExtServices;
     std::unique_ptr<MemoryService> _memoryService;
     std::unique_ptr<AuthorizationService> _authorizationService;
+    /// The current access level of whoever requested the pending Master
+    /// Reset, taken when it was requested: 03/05/02 §3.7.1.2.3.2.3 resets the
+    /// authorisation keys from that level up.
+    AccessLevel _masterResetRequesterLevel{AuthorizationService::kMinimumAccessLevel};
     std::unique_ptr<RestartService> _restartService;
     std::unique_ptr<FunctionPropertyServices> _functionPropertyServices;
     std::unique_ptr<NetworkParameterService> _networkParameterService;
@@ -532,6 +533,7 @@ private:
     void handlePropertyExtDescriptionRead(const ADataFrame& frame);
     void handleFunctionPropertyExt(const ADataFrame& frame, FunctionPropertyInvocation invocation);
     void handleAuthorizeRequest(const ADataFrame& frame);
+    void handleKeyWrite(const ADataFrame& frame);
     void handleRestart(const ADataFrame& frame);
     void handleAdcRead(const ADataFrame& frame);
     void handleIndividualAddressRead(const ADataFrame& frame);

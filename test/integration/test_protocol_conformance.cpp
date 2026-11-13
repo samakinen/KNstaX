@@ -841,97 +841,100 @@ void test_group_value_response(void) {
 // Per KNX Spec 03/06/03 Section 3.11
 // ============================
 
+namespace {
+/// Three keyed levels, the way the old three-level API laid them out:
+/// level 2 management, level 1 configuration, level 0 maximum.
+void keyThreeLevels(AuthorizationService& authService,
+                    const AuthorizationKey& managementKey,
+                    const AuthorizationKey& configKey,
+                    const AuthorizationKey& maxKey)
+{
+    TEST_ASSERT_TRUE(authService.setKey(2, managementKey).isOk());
+    TEST_ASSERT_TRUE(authService.setKey(1, configKey).isOk());
+    TEST_ASSERT_TRUE(authService.setKey(0, maxKey).isOk());
+}
+}  // namespace
+
 void test_authorization_request(void) {
     // Test A_Authorize_Request service
     // Required for accessing protected features
-    
+
     AuthorizationService authService;
-    
+
     AuthorizationKey managementKey = {0x12, 0x34, 0x56, 0x78};
     AuthorizationKey configKey = {0x11, 0x22, 0x33, 0x44};
     AuthorizationKey maxKey = {0xAA, 0xBB, 0xCC, 0xDD};
-    
-    authService.setKeys(managementKey, configKey, maxKey);
-    
+    keyThreeLevels(authService, managementKey, configKey, maxKey);
+
     bool responseSent = false;
-    AuthorizationLevel receivedLevel = AuthorizationLevel::None;
-    
-    authService.setResponseCallback([&](const IndividualAddress& dest, AuthorizationLevel level) {
+    AccessLevel receivedLevel = 0xEE;
+
+    authService.setResponseCallback([&](const IndividualAddress&, AccessLevel level) {
         responseSent = true;
         receivedLevel = level;
     });
-    
+
     IndividualAddress source(1, 1, 1);
-    auto result = authService.handleRequest(source, managementKey);
-    
-    TEST_ASSERT_TRUE(result.isOk());
+    authService.handleRequest(source, managementKey);
+
     TEST_ASSERT_TRUE(responseSent);
-    TEST_ASSERT_EQUAL(static_cast<uint8_t>(AuthorizationLevel::Management), static_cast<uint8_t>(receivedLevel));
+    TEST_ASSERT_EQUAL_UINT8(2, receivedLevel);
 }
 
 void test_authorization_invalid_key(void) {
-    // Invalid key should be rejected
-    
+    // 03/03/07 §3.5.7: an invalid key gets the minimal level (15), while
+    // FFFFFFFFh gets "the maximum access level protected with FFFFFFFFh".
+
     AuthorizationService authService;
-    
+
     AuthorizationKey managementKey = {0x12, 0x34, 0x56, 0x78};
     AuthorizationKey configKey = {0x11, 0x22, 0x33, 0x44};
     AuthorizationKey maxKey = {0xAA, 0xBB, 0xCC, 0xDD};
-    
-    authService.setKeys(managementKey, configKey, maxKey);
-    
+    keyThreeLevels(authService, managementKey, configKey, maxKey);
+
     bool responseSent = false;
-    AuthorizationLevel receivedLevel = AuthorizationLevel::Maximum;
-    
-    authService.setResponseCallback([&](const IndividualAddress& dest, AuthorizationLevel level) {
+    AccessLevel receivedLevel = 0;
+
+    authService.setResponseCallback([&](const IndividualAddress&, AccessLevel level) {
         responseSent = true;
         receivedLevel = level;
     });
-    
+
     IndividualAddress source(1, 1, 1);
-    AuthorizationKey invalidKey = {0xFF, 0xFF, 0xFF, 0xFF};
-    
-    auto result = authService.handleRequest(source, invalidKey);
-    
-    TEST_ASSERT_FALSE(result.isOk());
+    authService.handleRequest(source, AuthorizationKey{0xDE, 0xAD, 0xBE, 0xEF});
     TEST_ASSERT_TRUE(responseSent);
-    TEST_ASSERT_EQUAL(static_cast<uint8_t>(AuthorizationLevel::None), static_cast<uint8_t>(receivedLevel));
+    TEST_ASSERT_EQUAL_UINT8(15, receivedLevel);
+    TEST_ASSERT_EQUAL_UINT8(15, authService.currentAccessLevel(source));
+
+    authService.handleRequest(source, AuthorizationService::kNoKey);
+    TEST_ASSERT_EQUAL_UINT8(3, receivedLevel);
 }
 
 void test_authorization_level_access(void) {
-    // Different authorization levels provide different access rights
-    // Level 0 (default), Level 15 (full access)
-    
+    // Each key authorises for its own level; 0 is maximum access.
+
     AuthorizationService authService;
-    
-    // Configure multiple authorization levels
+
     AuthorizationKey managementKey = {0x11, 0x11, 0x11, 0x11};
     AuthorizationKey configKey = {0x22, 0x22, 0x22, 0x22};
     AuthorizationKey maxKey = {0x33, 0x33, 0x33, 0x33};
-    
-    authService.setKeys(managementKey, configKey, maxKey);
-    
-    AuthorizationLevel receivedLevel = AuthorizationLevel::None;
-    authService.setResponseCallback([&](const IndividualAddress& dest, AuthorizationLevel level) {
+    keyThreeLevels(authService, managementKey, configKey, maxKey);
+
+    AccessLevel receivedLevel = 0xEE;
+    authService.setResponseCallback([&](const IndividualAddress&, AccessLevel level) {
         receivedLevel = level;
     });
-    
+
     IndividualAddress source(1, 1, 1);
-    
-    // Test Management level
-    auto result1 = authService.handleRequest(source, managementKey);
-    TEST_ASSERT_TRUE(result1.isOk());
-    TEST_ASSERT_EQUAL(static_cast<uint8_t>(AuthorizationLevel::Management), static_cast<uint8_t>(receivedLevel));
-    
-    // Test Configuration level
-    auto result2 = authService.handleRequest(source, configKey);
-    TEST_ASSERT_TRUE(result2.isOk());
-    TEST_ASSERT_EQUAL(static_cast<uint8_t>(AuthorizationLevel::Configuration), static_cast<uint8_t>(receivedLevel));
-    
-    // Test Maximum level
-    auto result3 = authService.handleRequest(source, maxKey);
-    TEST_ASSERT_TRUE(result3.isOk());
-    TEST_ASSERT_EQUAL(static_cast<uint8_t>(AuthorizationLevel::Maximum), static_cast<uint8_t>(receivedLevel));
+
+    authService.handleRequest(source, managementKey);
+    TEST_ASSERT_EQUAL_UINT8(2, receivedLevel);
+
+    authService.handleRequest(source, configKey);
+    TEST_ASSERT_EQUAL_UINT8(1, receivedLevel);
+
+    authService.handleRequest(source, maxKey);
+    TEST_ASSERT_EQUAL_UINT8(0, receivedLevel);
 }
 
 // ============================

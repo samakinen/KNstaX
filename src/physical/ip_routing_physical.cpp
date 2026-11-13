@@ -32,7 +32,7 @@ static const char* TAG = "KNX.IpRouting";
 
 IpRoutingPhysical::IpRoutingPhysical()
     : network_(nullptr)
-    , multicastGroup_(IpAddress::fromOctets(224, 0, 23, 12))
+    , multicastGroup_(IpAddress::fromOctets(224, 0, 23, 12).raw)
     , port_(NetIpPort(netip::config::kDefaultPort))
     , interfaceAddress_(IpAddress(0))
     , multicastTtl_(1)
@@ -206,7 +206,7 @@ void IpRoutingPhysical::setMulticast(IpAddress multicastGroup,
                                     NetIpPort port,
                                     IpAddress interfaceAddress) {
     if (initialized_.load()) return;
-    multicastGroup_ = multicastGroup;
+    multicastGroup_.store(multicastGroup.raw);
     port_ = port;
     interfaceAddress_ = interfaceAddress;
 }
@@ -369,6 +369,13 @@ util::Result<void> IpRoutingPhysical::applySecureRouting(std::span<const uint8_t
     return util::Result<void>::ok();
 }
 
+void IpRoutingPhysical::restartMulticastTimerSync() {
+    std::lock_guard<std::mutex> lock(secureRoutingMutex_);
+    if (routingSecurity_) {
+        routingSecurity_->restartSync();
+    }
+}
+
 bool IpRoutingPhysical::isSecureRoutingActive() const {
     std::lock_guard<std::mutex> lock(secureRoutingMutex_);
     return secureRoutingEnabled_;
@@ -403,7 +410,7 @@ util::Result<void> IpRoutingPhysical::init() {
 #endif
     endpoint_ = std::make_unique<netip::RoutingEndpoint>();
     netip::RoutingEndpoint::Options opt;
-    opt.multicastGroup = multicastGroup_;
+    opt.multicastGroup = IpAddress(multicastGroup_.load());
     opt.port = port_;
     opt.interfaceAddress = interfaceAddress_;
     opt.ttl = multicastTtl_;
@@ -466,6 +473,22 @@ util::Result<void> IpRoutingPhysical::refreshMulticastMembership() {
         return util::ErrorCode::NotInitialized;
     }
     return endpoint_->refreshMulticastMembership();
+}
+
+util::Result<void> IpRoutingPhysical::setMulticastGroup(IpAddress multicastGroup) {
+    if (multicastGroup.isZero()) {
+        return util::ErrorCode::InvalidAddress;
+    }
+    multicastGroup_.store(multicastGroup.raw);
+    if (!initialized_.load() || !endpoint_) {
+        // Picked up by init().
+        return util::Result<void>::ok();
+    }
+    return endpoint_->setMulticastGroup(multicastGroup);
+}
+
+IpAddress IpRoutingPhysical::multicastGroup() const {
+    return IpAddress(multicastGroup_.load());
 }
 
 bool IpRoutingPhysical::multicastJoined() const {

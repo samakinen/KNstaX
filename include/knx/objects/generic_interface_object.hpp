@@ -64,13 +64,28 @@ public:
      * multicasting in the clear while its project believes it is secured.
      *
      * The observer runs on the stack task that handled the write, after the
-     * value is stored and outside the value mutex, and is given a copy rather
-     * than a reference into storage. Keep it short — it sits inside the
-     * property service's response path.
+     * value is stored and outside the value mutex, and is given copies of the
+     * value before and after the write rather than references into storage —
+     * which is what lets it tell a change from the same value written again
+     * (03_08_09 §2.2.2.3.2.5: E11 against E12). Keep it short — it sits
+     * inside the property service's response path.
      */
     using WriteObserver = util::InplaceFunction<void(application::PropertyID propertyId,
+                                                     std::span<const uint8_t> previous,
                                                      std::span<const uint8_t> value), 64>;
     void setWriteObserver(WriteObserver observer);
+
+    /**
+     * @brief Called before a remote write is stored; an error refuses it.
+     *
+     * Given the whole value the write would leave behind. A refused write
+     * changes nothing and is reported to the writer the way any other invalid
+     * value is. Runs under the value mutex, so it must not reach back into
+     * this object.
+     */
+    using WriteValidator = util::InplaceFunction<util::Result<void>(application::PropertyID propertyId,
+                                                                    std::span<const uint8_t> value), 32>;
+    void setWriteValidator(WriteValidator validator);
 
 private:
     static util::Result<void> readGeneric(
@@ -106,6 +121,7 @@ private:
     util::FixedVector<GenericPropertyInfo, kMaxRegistrationCount> _handlerInfo;
     util::FixedVector<PropertyHandler, kMaxHandlerCount> _handlers;
     WriteObserver _writeObserver{};
+    WriteValidator _writeValidator{};
     ValidationPolicy _validationPolicy{ValidationPolicy::OnWrite};
     mutable bool _handlersValidated{false};
     mutable bool _handlersValid{true};

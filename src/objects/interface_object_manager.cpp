@@ -78,10 +78,10 @@ std::span<const InterfaceObjectManager::PersistedProperty> InterfaceObjectManage
     constexpr auto associationTable = InterfaceObjectType::associationTable();
     constexpr auto applicationProgram = InterfaceObjectType::applicationProgram();
     constexpr auto security = InterfaceObjectType::security();
-    // The KNXnet/IP Parameter Object is here for its Secure Routing settings
-    // (backbone key, latency tolerance, sync fraction): without them a device
-    // that ETS commissioned for Secure Routing fell back to plain routing at
-    // the next boot. On a device without that object the reads fail and
+    // The KNXnet/IP Parameter Object is here for its routing multicast
+    // address and its Secure Routing settings (backbone key, latency
+    // tolerance, sync fraction): without them a device that ETS commissioned
+    // for Secure Routing fell back to plain routing at the next boot. On a device without that object the reads fail and
     // nothing is stored for it.
     constexpr auto knxNetIp = InterfaceObjectType::knxNetIpParameter();
 
@@ -129,11 +129,26 @@ std::span<const InterfaceObjectManager::PersistedProperty> InterfaceObjectManage
         // it is downloaded alongside the key tables and is just as useless if
         // it does not survive the restart that immediately follows.
         {security, static_cast<PID>(SecurityProperty::GoSecurityFlags)},
+        // PID_ROUTING_MULTICAST_ADDRESS: 03_08_03 §2.5.17 lets it be set at
+        // run time and makes the new value active "after a reset", so a value
+        // that did not survive that reset would never become active at all.
+        {knxNetIp, static_cast<PID>(66)},
         {knxNetIp, static_cast<PID>(91)},  // PID_BACKBONE_KEY
         {knxNetIp, static_cast<PID>(95)},  // PID_MULTICAST_LATENCY_TOLERANCE
         {knxNetIp, static_cast<PID>(96)},  // PID_SYNC_LATENCY_FRACTION
     };
     return kPersisted;
+}
+
+bool InterfaceObjectManager::isPersistedProperty(InterfaceObjectType objectType,
+                                                 application::PropertyID propertyId)
+{
+    for (const auto& property : persistedProperties()) {
+        if (property.objectType == objectType && property.propertyId == propertyId) {
+            return true;
+        }
+    }
+    return false;
 }
 
 const InterfaceObjectManager::RegisteredObject* InterfaceObjectManager::findRegisteredObject(InterfaceObjectType objectType,
@@ -716,6 +731,26 @@ bool InterfaceObjectManager::loadSecuritySequenceState() {
     }
     _securityObjectPtr->clearSequenceStateDirty();
     return true;
+}
+
+bool InterfaceObjectManager::saveAuthorizationKeyTable(std::span<const uint8_t> record) {
+    if (!_persistenceEnabled || !_persistenceManager) {
+        return false;
+    }
+    if (record.empty()) {
+        const auto erased = _persistence->eraseById(kAuthorizationKeyTableKeyId);
+        return erased == PersistenceResult::Success || erased == PersistenceResult::NotFound;
+    }
+    return _persistence->saveById(kAuthorizationKeyTableKeyId, record) == PersistenceResult::Success;
+}
+
+std::vector<uint8_t> InterfaceObjectManager::loadAuthorizationKeyTable() {
+    std::vector<uint8_t> stored;
+    if (!_persistenceEnabled || !_persistenceManager ||
+        _persistence->loadById(kAuthorizationKeyTableKeyId, stored) != PersistenceResult::Success) {
+        stored.clear();
+    }
+    return stored;
 }
 
 PropertyAccessResult InterfaceObjectManager::readProperty(

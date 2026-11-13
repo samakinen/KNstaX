@@ -676,6 +676,41 @@ private:
     void setBackboneKeyCallback(BackboneKeyCallback callback);
 
     /**
+     * Settle the routing multicast group at start-up and return it.
+     *
+     * PID_ROUTING_MULTICAST_ADDRESS is ETS's to set (03_08_03 §2.5.17: it
+     * "may be set at run-time. A changed value shall become active after a
+     * reset"), so a value restored with the KNXnet/IP Parameter Object is the
+     * one in force and `productDefault` only fills an object that holds none —
+     * a device's first start, or the one after a Factory Reset (03/05/02
+     * Table 6 resets the IP multicast address with Erase Code 02h).
+     * `productDefaultWins` reverses that, for a product whose own
+     * configuration channel has set the group since ETS last did; the default
+     * is then stored as if written.
+     *
+     * Also sets the Domain Address, which on KNX IP plain is the routing
+     * multicast address (03/03/07 §3.3.7). A restored value is not E11.
+     */
+    IpAddress adoptRoutingMulticastAddress(IpAddress productDefault, bool productDefaultWins);
+
+    /// The group in PID_ROUTING_MULTICAST_ADDRESS: the one in force after
+    /// adoptRoutingMulticastAddress(), or one written since and active after
+    /// the next restart. 0.0.0.0 before adoption.
+    [[nodiscard]] IpAddress routingMulticastAddress() const;
+
+    /**
+     * Notified when PID_ROUTING_MULTICAST_ADDRESS is set to a new and
+     * different value, by property write or A_DomainAddressSerialNumber_Write
+     * — 03_08_09 §2.2.2.3.2.5 E11. The same value written again is E12 and is
+     * not reported. Runs on the stack task that handled the write.
+     *
+     * The new group is not to be joined here (§2.5.17 above): the receiver of
+     * this is the multicast timer synchronisation, which E11 restarts (A7).
+     */
+    using RoutingMulticastAddressCallback = util::InplaceFunction<void(IpAddress address), 32>;
+    void setRoutingMulticastAddressCallback(RoutingMulticastAddressCallback callback);
+
+    /**
      * @brief Accept or refuse a security requirement on a KNXnet/IP service family
      *
      * 03/08/09 §2.3.1.5: ETS uses PID_SECURED_SERVICE_FAMILIES to say which of
@@ -700,6 +735,15 @@ private:
 
     BackboneKeyCallback _backboneKeyCallback{};
     SecuredServiceFamilyCallback _securedServiceFamilyCallback{};
+    RoutingMulticastAddressCallback _routingMulticastAddressCallback{};
+    /// What adoptRoutingMulticastAddress() was given; restored by Factory Reset.
+    IpAddress _routingMulticastDefault{IpAddress(0)};
+
+    /// Store a routing multicast address written by A_DomainAddressSerialNumber_Write.
+    util::Result<void> writeRoutingMulticastAddress(std::span<const uint8_t> value);
+    /// After PID_ROUTING_MULTICAST_ADDRESS has changed by any remote path.
+    void onRoutingMulticastAddressWritten(std::span<const uint8_t> previous,
+                                          std::span<const uint8_t> value);
 
     /// Indexed by the three securable families; see kSecurableServiceFamilies.
     std::array<uint8_t, 3> _securedServiceFamilyVersions{};
@@ -713,6 +757,13 @@ private:
     /// is not published in this build. Defined in bau.cpp, where the property
     /// bridge is a complete type.
     objects::GenericInterfaceObject* referenceInterfaceObject(InterfaceObjectType objectType);
+
+    /// Have the persisted state saved on the next flush. Defined in bau.cpp,
+    /// where the property bridge is a complete type.
+    void markPersistenceDirty();
+
+    /// Store the A_Key_Write key table now. Defined in bau.cpp.
+    void saveAuthorizationKeyTable(const application::AuthorizationService::KeyTable& keys);
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -855,20 +906,18 @@ public:
         return _bau.securedServiceFamilyVersion(serviceFamilyId);
     }
 
-    /// See application::DomainAddressWriteCallback.
-    using DomainAddressWriteCallback = application::DomainAddressWriteCallback;
+    /// See BusAccessUnit::adoptRoutingMulticastAddress.
+    IpAddress adoptRoutingMulticastAddress(IpAddress productDefault, bool productDefaultWins) {
+        return _bau.adoptRoutingMulticastAddress(productDefault, productDefaultWins);
+    }
 
-    /**
-     * @brief Decide whether a Domain Address written by serial number is applied.
-     *
-     * On KNX IP the Domain Address is the routing multicast address, so
-     * accepting one means re-joining a different group. Only the owner knows
-     * whether it can do that, and returning an error refuses the change — which
-     * is the honest answer for a device whose group is fixed at start-up.
-     * Without a callback the write is refused.
-     */
-    void setDomainAddressWriteCallback(DomainAddressWriteCallback callback) {
-        _bau.setStackPortDomainAddressWriteCallback(std::move(callback));
+    /// See BusAccessUnit::routingMulticastAddress.
+    [[nodiscard]] IpAddress routingMulticastAddress() const { return _bau.routingMulticastAddress(); }
+
+    /// See BusAccessUnit::RoutingMulticastAddressCallback.
+    using RoutingMulticastAddressCallback = BusAccessUnit::RoutingMulticastAddressCallback;
+    void setRoutingMulticastAddressCallback(RoutingMulticastAddressCallback callback) {
+        _bau.setRoutingMulticastAddressCallback(std::move(callback));
     }
 #endif
 
@@ -910,6 +959,10 @@ public:
     const std::vector<InterfaceObjectType>& referenceInterfaceObjectTypes() const {
         return _bau.referenceInterfaceObjectTypes();
     }
+#if KNX_FEATURE_NETIP
+    /// See BusAccessUnit::routingMulticastAddress.
+    [[nodiscard]] IpAddress routingMulticastAddress() const { return _bau.routingMulticastAddress(); }
+#endif
 
 private:
     const BusAccessUnit& _bau;
@@ -1028,6 +1081,9 @@ public:
     /// application::NetworkParameterService::setDomainAddress. A port without
     /// an application layer has nowhere to put it.
     virtual void setDomainAddress(std::span<const uint8_t> domainAddress) { (void)domainAddress; }
+    /// Adopt the authorisation key table restored from storage (03/03/07
+    /// §3.5.8). A port without an application layer has nowhere to put it.
+    virtual void setAuthorizationKeys(const application::AuthorizationService::KeyTable& keys) { (void)keys; }
     virtual void setDomainAddressWriteCallback(application::DomainAddressWriteCallback callback) {
         (void)callback;
     }

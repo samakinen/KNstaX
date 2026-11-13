@@ -222,7 +222,9 @@ util::Result<void> GenericInterfaceObject::writeGeneric(
         return res;
     }
 
+    std::vector<uint8_t> previous;
     std::vector<uint8_t> observed;
+    bool notify = false;
     {
         std::lock_guard<std::mutex> lock(domain->_valuesMutex);
         auto it = domain->_values.find(info->id);
@@ -230,28 +232,47 @@ util::Result<void> GenericInterfaceObject::writeGeneric(
             return util::Result<void>::err(util::ErrorCode::OperationNotSupported);
         }
 
-        auto& updated = it->second;
-        if (offset > updated.size()) {
+        auto& stored = it->second;
+        if (offset > stored.size()) {
             return util::Result<void>::err(util::ErrorCode::OutOfRange);
         }
+        std::vector<uint8_t> updated = stored;
         if (offset + count > updated.size()) {
             updated.resize(offset + count, 0);
         }
         std::copy(chunk.begin(), chunk.end(), updated.begin() + offset);
 
+        // Checked against the whole value the write would leave behind, so a
+        // property written in parts is judged as it will be read.
+        if (domain->_writeValidator) {
+            const auto verdict = domain->_writeValidator(info->id, updated);
+            if (verdict.isError()) {
+                return verdict;
+            }
+        }
+
         if (domain->_writeObserver) {
+            notify = true;
+            previous = stored;
             observed = updated;
         }
+        stored = std::move(updated);
     }
 
     // Outside the mutex, and on a copy: an observer that reaches back into the
     // object — to read a sibling property, say — would otherwise deadlock on a
     // lock this thread already holds.
-    if (domain->_writeObserver) {
-        domain->_writeObserver(info->id, observed);
+    if (notify) {
+        domain->_writeObserver(info->id, previous, observed);
     }
 
     return util::Result<void>::ok();
+}
+
+void GenericInterfaceObject::setWriteValidator(WriteValidator validator)
+{
+    std::lock_guard<std::mutex> lock(_valuesMutex);
+    _writeValidator = std::move(validator);
 }
 
 void GenericInterfaceObject::setWriteObserver(WriteObserver observer)

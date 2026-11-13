@@ -3,229 +3,182 @@
 
 /**
  * @file authorization_service.hpp
- * @brief KNX Authorization Service (A_Authorize_Request/Response)
- * 
- * Implements authorization services per KNX spec 3/5/2 (Management Procedures).
- * Provides key-based authorization for secure device access.
+ * @brief A_Authorize and A_Key_Write: access levels and the keys that grant them
+ *
+ * 03/03/07 §3.5.7 and §3.5.8. Access levels are numbered as on the wire: 0 is
+ * maximum access, 15 minimum. Each of levels 0…14 can hold one four-octet key
+ * (§3.5.8 Figure 88); FFFFFFFFh means "no key" for that level. The table is
+ * device configuration: the BusAccessUnit persists it and restores it at
+ * start-up, and Master Reset 02h/07h resets part of it.
  */
 
 #pragma once
 
-#include "knx/application/apci_services.hpp"
 #include "knx/types.hpp"
 #include "knx/util/result.hpp"
-#include <cstdint>
+
 #include <array>
+#include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <span>
-#include <vector>
 
 namespace knx {
 namespace application {
 
-/**
- * @brief Authorization key (4 bytes per KNX spec)
- */
+/// A four-octet authorisation key, most significant octet first.
 using AuthorizationKey = std::array<uint8_t, 4>;
 
-/**
- * @brief Authorization level
- */
-enum class AuthorizationLevel : uint8_t {
-    None = 0x00,          ///< No authorization
-    Management = 0x01,    ///< Management level (read params)
-    Configuration = 0x02, ///< Configuration level (read/write params)
-    Maximum = 0x03        ///< Maximum level (unrestricted access)
-};
+/// An access level in wire numbering: 0 = maximum access, 15 = minimum.
+using AccessLevel = uint8_t;
 
 /**
- * @brief Authorization request structure
- */
-struct AuthorizationRequest {
-    AuthorizationKey key;  ///< Authorization key (4 bytes)
-};
-
-/**
- * @brief Authorization response structure
- */
-struct AuthorizationResponse {
-    AuthorizationLevel level;  ///< Granted authorization level
-};
-
-/**
- * @brief Authorization result codes
- */
-enum class AuthorizationResult : uint8_t {
-    Success = 0,          ///< Authorization successful
-    Denied = 1,           ///< Authorization denied (wrong key)
-    NotSupported = 2,     ///< Authorization not supported
-    InvalidKey = 3        ///< Invalid key format
-};
-
-/**
- * @brief Authorization Service Handler
- * 
- * Handles A_Authorize_Request and A_Authorize_Response services.
- * Manages device authorization keys and access levels.
+ * @brief Access levels and their keys, and each partner's current level.
+ *
+ * @thread_safety Owner-context only (the application layer's task).
  */
 class AuthorizationService {
 public:
-    /// Default authorization key (all zeros)
-    static constexpr AuthorizationKey DEFAULT_KEY = {0x00, 0x00, 0x00, 0x00};
-    static constexpr uint32_t NO_TIMEOUT = 0u;
-    
-    /**
-     * @brief Authorization validation callback
-     * @param source Source address
-     * @param key Authorization key
-     * @param level Output authorization level
-     * @return true if key is valid
-     */
-    using ValidationCallback = std::function<util::Result<AuthorizationLevel>(
-        const IndividualAddress& source,
-        const AuthorizationKey& key)>;
-    
-    /**
-     * @brief Authorization response callback
-     * @param dest Destination address
-     * @param level Granted authorization level
-     */
-    using ResponseCallback = std::function<void(const IndividualAddress& dest, 
-                                               AuthorizationLevel level)>;
+    /// 03/03/07 §3.5.7: "0 (maximum level, i.e. maximum access rights) and 15
+    /// (minimum level, i.e. minimum access rights)".
+    static constexpr AccessLevel kMaximumAccessLevel = 0u;
+    static constexpr AccessLevel kMinimumAccessLevel = 15u;
 
-    /**
-     * @brief Time source for authorization timestamps.
-     *
-     * Returns a monotonically increasing tick value. When not set, the service
-     * falls back to an internal logical clock so timestamps are never left as
-     * placeholder zeros.
-     */
+    /// §3.5.8 Figure 88: a key for each of levels 0…N-1, and level N, here the
+    /// minimum, reached without one ("None — N (free access)").
+    static constexpr size_t kKeyedLevelCount = kMinimumAccessLevel;
+
+    /// §3.5.8: a key of FFFFFFFFh means "there shall be no key associated to
+    /// the corresponding level any more". Also the ex-factory value (03/05/02
+    /// §3.7.1.2.3.2.3 NOTE 15).
+    static constexpr AuthorizationKey kNoKey = {0xFFu, 0xFFu, 0xFFu, 0xFFu};
+
+    /// §3.5.8: the level returned in A_Key_Response when the requester's
+    /// current access level does not allow the write.
+    static constexpr AccessLevel kKeyWriteRefused = 0xFFu;
+
+    using KeyTable = std::array<AuthorizationKey, kKeyedLevelCount>;
+
+    /// Size of a key table in persistent storage: the keys in level order.
+    static constexpr size_t kSerializedKeyTableSize = kKeyedLevelCount * 4u;
+
+    /// Sends A_Authorize_Response(level) to @p destination.
+    using ResponseCallback = std::function<void(const IndividualAddress& destination, AccessLevel level)>;
+
+    /// The key table changed through a management service; persist it.
+    using KeyTableChangedCallback = std::function<void(const KeyTable& keys)>;
+
+    /// Monotonic ticks for the optional authorisation expiry.
     using TimeSource = std::function<uint32_t()>;
-    
-    /**
-     * @brief Initialize authorization service
-     */
+    static constexpr uint32_t NO_TIMEOUT = 0u;
+
     AuthorizationService();
-    
-    /**
-     * @brief Set key validation callback
-     */
-    void setValidationCallback(ValidationCallback callback) { _validationCallback = callback; }
-    
-    /**
-     * @brief Set response callback
-     */
-    void setResponseCallback(ResponseCallback callback) { _responseCallback = callback; }
 
-    /**
-     * @brief Set authorization time source.
-     */
-    void setTimeSource(TimeSource timeSource) { _timeSource = std::move(timeSource); }
-
-    /**
-     * @brief Set authorization timeout in ticks.
-     *
-     * `NO_TIMEOUT` disables expiry.
-     */
-    void setAuthorizationTimeout(uint32_t timeoutTicks) { _authorizationTimeout = timeoutTicks; }
-    
-    /**
-     * @brief Set device authorization keys
-     * @param managementKey Key for management level
-     * @param configurationKey Key for configuration level
-     * @param maximumKey Key for maximum level
-     */
-    void setKeys(const AuthorizationKey& managementKey,
-                const AuthorizationKey& configurationKey,
-                const AuthorizationKey& maximumKey);
-    
-    /**
-     * @brief Handle A_Authorize_Request
-     * @param source Source address
-     * @param key Authorization key
-    * @return Result<void> indicating success or error
-     */
-    util::Result<void> handleRequest(const IndividualAddress& source, const AuthorizationKey& key);
-    
-    /**
-     * @brief Get current authorization level for a device
-     * @param address Device address
-     * @return Current authorization level
-     */
-    AuthorizationLevel getCurrentLevel(const IndividualAddress& address) const;
-
-    /// @p level as it travels in A_Authorize_Response and in the property
-    /// descriptions: 0 is maximum access, a larger number is less access.
-    static constexpr uint8_t toWireLevel(AuthorizationLevel level) noexcept {
-        switch (level) {
-            case AuthorizationLevel::Maximum:       return 0u;
-            case AuthorizationLevel::Configuration: return 1u;
-            case AuthorizationLevel::Management:    return 2u;
-            case AuthorizationLevel::None:          break;
-        }
-        return 15u;
+    void setResponseCallback(ResponseCallback callback) { _responseCallback = std::move(callback); }
+    void setKeyTableChangedCallback(KeyTableChangedCallback callback) {
+        _keyTableChangedCallback = std::move(callback);
     }
+    void setTimeSource(TimeSource timeSource) { _timeSource = std::move(timeSource); }
+    /// `NO_TIMEOUT` (the default) keeps an authorisation until the connection
+    /// is released, which is what §3.5.7 says.
+    void setAuthorizationTimeout(uint32_t timeoutTicks) { _authorizationTimeout = timeoutTicks; }
+
+    // --- The key table ------------------------------------------------------
+
+    /// Set the key of @p level (0…14); kNoKey removes it. A local
+    /// configuration path, so the change callback is not called.
+    util::Result<void> setKey(AccessLevel level, const AuthorizationKey& key);
+
+    [[nodiscard]] const KeyTable& keyTable() const { return _keys; }
+
+    /// Adopt a table restored from storage. Does not call the change callback.
+    void restoreKeyTable(const KeyTable& keys) { _keys = keys; }
+
+    /// True once at least one level has a key.
+    [[nodiscard]] bool hasKeys() const;
 
     /**
-     * @brief The access level, in wire numbering, that @p address currently holds
+     * @brief Master Reset 02h/07h: levels @p fromLevel and higher (numerically)
+     *        back to "no key".
      *
-     * This is what access checks compare against a required level. 03/03/07
-     * §3.5.7 "Error and exception handling":
-     * - a partner that authorised keeps the level it was granted;
-     * - a partner that did not authorise gets "the maximum access level
-     *   protected with FFFFFFFFh", i.e. the most privileged level whose key is
-     *   still the default.
-     *
-     * Without setKeys() every level is unprotected, so every partner holds
-     * level 0 whether or not it authorised: nothing is gated on a device that
-     * nobody has keyed.
+     * 03/05/02 §3.7.1.2.3.2.3: "the MaS shall set the Authorisation Keys of
+     * the access level to which the requesting MaC is authorised and higher
+     * level (higher numerical value) to their default settings". Calls the
+     * change callback when anything changed.
      */
-    uint8_t currentAccessLevel(const IndividualAddress& address) const;
-    
+    void resetKeysFrom(AccessLevel fromLevel);
+
+    static void serializeKeyTable(const KeyTable& keys, std::span<uint8_t, kSerializedKeyTableSize> out);
+    static KeyTable deserializeKeyTable(std::span<const uint8_t, kSerializedKeyTableSize> in);
+
+    // --- The services -------------------------------------------------------
+
+    /// A_Authorize_Request.ind (§3.5.7): store and answer the level @p key grants.
+    void handleRequest(const IndividualAddress& source, const AuthorizationKey& key);
+
     /**
-     * @brief Clear authorization for a device
-     * @param address Device address
+     * @brief A_Key_Write.ind (§3.5.8); returns the level for A_Key_Response.
+     *
+     * "The current access level shall be less or equal to the access level
+     * indicated in the A_Key_Write.ind primitive, otherwise the remote
+     * application process shall return FFh". A level this device has no key
+     * for (15 and above) is answered the same way: nothing was stored.
      */
+    AccessLevel handleKeyWrite(const IndividualAddress& source, AccessLevel level, const AuthorizationKey& key);
+
+    /**
+     * @brief The level @p key authorises for (§3.5.7).
+     *
+     * The level whose key it is, the most privileged one when several share
+     * it; for FFFFFFFFh that is the free access level. A key that matches no
+     * level is invalid and gets the minimum level ("If ... the communication
+     * partner authorizes itself with an invalid key, the Remote Management
+     * shall select the minimal access level").
+     *
+     * A device with no key at all does not support authorisation in the sense
+     * of that clause: every key, like none, gives level 0.
+     */
+    [[nodiscard]] AccessLevel levelForKey(const AuthorizationKey& key) const;
+
+    /// "the maximum access level protected with FFFFFFFFh" (§3.5.7): the most
+    /// privileged level without a key, or the minimum level when all have one.
+    [[nodiscard]] AccessLevel freeAccessLevel() const;
+
+    /**
+     * @brief The level @p address holds now, for the access checks.
+     *
+     * The level it was granted by its last A_Authorize on the current
+     * connection; otherwise the free access level (§3.5.7, "if the
+     * communication partner does not authorize itself"). On a device nobody
+     * has keyed that is level 0 for everyone, so nothing is gated.
+     */
+    [[nodiscard]] AccessLevel currentAccessLevel(const IndividualAddress& address) const;
+
+    /// Forget @p address's level; it is back to the free access level.
     void clearAuthorization(const IndividualAddress& address);
-    
-    /**
-     * @brief Clear all authorizations
-     */
     void clearAllAuthorizations();
-    
-    /**
-     * @brief Validate authorization key
-     * @param key Key to validate
-     * @param level Output authorization level if valid
-     * @return Validation result
-     */
-    AuthorizationResult validateKey(const AuthorizationKey& key, AuthorizationLevel& level) const;
-    
+
 private:
     struct AuthorizedDevice {
         IndividualAddress address;
-        AuthorizationLevel level;
-        uint32_t timestamp;
+        AccessLevel level{kMinimumAccessLevel};
+        uint32_t timestamp{0};
     };
-    
+
     static constexpr size_t MAX_AUTHORIZED_DEVICES = 16;
-    
-    AuthorizationKey _managementKey;
-    AuthorizationKey _configurationKey;
-    AuthorizationKey _maximumKey;
-    bool _keysConfigured{false};
+
+    KeyTable _keys;
 
     AuthorizedDevice _authorizedDevices[MAX_AUTHORIZED_DEVICES];
-    size_t _authorizedCount;
-    uint32_t _authorizationTimeout;
-    mutable uint32_t _logicalClock;
-    
-    ValidationCallback _validationCallback;
+    size_t _authorizedCount{0};
+    uint32_t _authorizationTimeout{NO_TIMEOUT};
+    mutable uint32_t _logicalClock{0};
+
     ResponseCallback _responseCallback;
+    KeyTableChangedCallback _keyTableChangedCallback;
     TimeSource _timeSource;
-    
-    void sendResponse(const IndividualAddress& dest, AuthorizationLevel level);
-    void storeAuthorization(const IndividualAddress& address, AuthorizationLevel level);
+
+    void storeAuthorization(const IndividualAddress& address, AccessLevel level);
     AuthorizedDevice* findAuthorizedDevice(const IndividualAddress& address);
     const AuthorizedDevice* findAuthorizedDevice(const IndividualAddress& address) const;
     uint32_t currentTime_() const;

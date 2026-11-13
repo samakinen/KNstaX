@@ -162,6 +162,24 @@ public:
     /// open() that found no interface and the refresh that completes it.
     [[nodiscard]] bool multicastJoined() const { return joined_; }
 
+    /**
+     * Move the open endpoint to another routing multicast group.
+     *
+     * Leaves the current group, makes `multicastGroup` the destination of
+     * every send from now on, and joins it. A join that fails (no interface)
+     * still leaves the new group in force; refreshMulticastMembership()
+     * completes it, exactly as after an open() without an interface.
+     *
+     * Safe against the receive task, which refreshes the membership on its
+     * own, and against sends in progress on the stack task, which read the
+     * group once per datagram. Returns NotInitialized when the socket is not
+     * open and InvalidAddress for 0.0.0.0.
+     */
+    util::Result<void> setMulticastGroup(IpAddress multicastGroup);
+
+    /// The routing multicast group sends go to; 0.0.0.0 when closed.
+    [[nodiscard]] IpAddress multicastGroup() const;
+
     uint64_t routingLostMessagesSeen() const { return lostMessagesSeen_.load(); }
     uint64_t routingLostCountTotal() const { return lostCountTotal_.load(); }
     uint64_t routingBusySeen() const { return busySeen_.load(); }
@@ -185,13 +203,22 @@ private:
 
     std::unique_ptr<platform::UdpSocket> sock_;
     Options options_;
-    IpAddress multicastAddr_{IpAddress(0)};
+    IpAddress group() const { return IpAddress(multicastRaw_.load()); }
+
+    /// The routing group, as IpAddress::raw. Read by every send (stack task)
+    /// and TIMER_NOTIFY (receive task) and moved by setMulticastGroup().
+    std::atomic<uint32_t> multicastRaw_{0};
+    /// Serialises the join/leave pairs of open(), close(),
+    /// refreshMulticastMembership() and setMulticastGroup(), which run on the
+    /// stack task and, for the idle-time refresh, on the receive task. Guards
+    /// joined_ and interfaceAddr_ for the same reason.
+    mutable std::mutex membershipMutex_;
     IpAddress interfaceAddr_{IpAddress(0)};
     IpAddress localAddr_{IpAddress(0)};
     /// Kept so a membership refresh can re-read the address the interface holds
     /// now. The caller owns it and outlives the endpoint.
     platform::NetworkInterface* network_{nullptr};
-    bool joined_{false};
+    std::atomic<bool> joined_{false};
 
     DatagramBuffer<config::kUdpBufferSize> rxBuffer_{};
     DatagramBuffer<config::kUdpBufferSize> txBuffer_{};

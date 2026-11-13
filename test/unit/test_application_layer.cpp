@@ -1398,7 +1398,10 @@ void test_MemoryWriteAnsweredOnlyInVerifyMode() {
 // device keeps accepting everybody (covered by the test above).
 void test_MemoryWriteNeedsAccessLevelOnKeyedDevice() {
     registerTestMemory();
-    appLayer->authorizationService().setKeys({0, 0, 0, 2}, {0, 0, 0, 1}, {0, 0, 0, 0});
+    auto& keys = appLayer->authorizationService();
+    TEST_ASSERT_TRUE(keys.setKey(0, {0, 0, 0, 0}).isOk());
+    TEST_ASSERT_TRUE(keys.setKey(1, {0, 0, 0, 1}).isOk());
+    TEST_ASSERT_TRUE(keys.setKey(2, {0, 0, 0, 2}).isOk());
 
     const std::array<uint8_t, 3> write = {0x40, 0x03, 0x77};
     auto frame = makeRequest(kOwn, knx::AddressType::Individual, APCIService::MemoryWrite, 1, write);
@@ -1416,11 +1419,13 @@ void test_MemoryWriteNeedsAccessLevelOnKeyedDevice() {
 // The next connection from the same partner starts unauthorised again.
 void test_AccessLevelEndsWithTheConnection() {
     auto& auth = appLayer->authorizationService();
-    auth.setKeys({0, 0, 0, 2}, {0, 0, 0, 1}, {0, 0, 0, 0});
+    TEST_ASSERT_TRUE(auth.setKey(0, {0, 0, 0, 0}).isOk());
+    TEST_ASSERT_TRUE(auth.setKey(1, {0, 0, 0, 1}).isOk());
+    TEST_ASSERT_TRUE(auth.setKey(2, {0, 0, 0, 2}).isOk());
     const uint8_t unauthorised = auth.currentAccessLevel(kManagementClient);
 
     openManagementConnection();
-    TEST_ASSERT_TRUE(auth.handleRequest(kManagementClient, {0, 0, 0, 0}).isOk());
+    auth.handleRequest(kManagementClient, {0, 0, 0, 0});
     TEST_ASSERT_EQUAL_UINT8(0, auth.currentAccessLevel(kManagementClient));
 
     knx::network::NDataFrame disconnect;

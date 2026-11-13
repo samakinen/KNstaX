@@ -50,9 +50,10 @@ util::Result<void> RoutingEndpoint::open(platform::NetworkInterface& network, co
         security_ = options_.security;
     }
 
-    multicastAddr_ = options_.multicastGroup;
+    std::lock_guard<std::mutex> membershipLock(membershipMutex_);
+    multicastRaw_.store(options_.multicastGroup.raw);
     interfaceAddr_ = options_.interfaceAddress;
-    if (multicastAddr_.isZero()) {
+    if (options_.multicastGroup.isZero()) {
         uint8_t a = 0, b = 0, c = 0, d = 0;
         options_.multicastGroup.toOctets(a, b, c, d);
         KNX_LOGE(TAG, "Invalid multicast group '%u.%u.%u.%u'",
@@ -82,7 +83,7 @@ util::Result<void> RoutingEndpoint::open(platform::NetworkInterface& network, co
     // unstarted until someone reboots the device. The socket is bound and
     // usable; what is missing is the group membership, and
     // refreshMulticastMembership() completes it when the interface arrives.
-    auto joinRes = sock_->joinMulticast(multicastAddr_, interfaceAddr_);
+    auto joinRes = sock_->joinMulticast(group(), interfaceAddr_);
     joined_ = !joinRes.isError();
     if (!joined_) {
         KNX_LOGW(TAG, "Routing group not joined yet (no interface?) -- the socket is "
@@ -99,6 +100,7 @@ util::Result<void> RoutingEndpoint::open(platform::NetworkInterface& network, co
 
 util::Result<void> RoutingEndpoint::refreshMulticastMembership()
 {
+    std::lock_guard<std::mutex> membershipLock(membershipMutex_);
     if (!sock_ || !sock_->isOpen()) {
         return util::ErrorCode::NotInitialized;
     }
@@ -108,13 +110,13 @@ util::Result<void> RoutingEndpoint::refreshMulticastMembership()
     // joining again on top of it is a no-op rather than a repair. Leaving a
     // group that was never joined is what the flag guards against.
     if (joined_) {
-        sock_->leaveMulticast(multicastAddr_, interfaceAddr_);
+        sock_->leaveMulticast(group(), interfaceAddr_);
         joined_ = false;
     }
 
     (void)sock_->setMulticastInterface(interfaceAddr_);
 
-    auto joinRes = sock_->joinMulticast(multicastAddr_, interfaceAddr_);
+    auto joinRes = sock_->joinMulticast(group(), interfaceAddr_);
     if (joinRes.isError()) {
         return joinRes.error();
     }
@@ -129,10 +131,50 @@ util::Result<void> RoutingEndpoint::refreshMulticastMembership()
     return util::Result<void>::ok();
 }
 
+util::Result<void> RoutingEndpoint::setMulticastGroup(IpAddress multicastGroup)
+{
+    if (multicastGroup.isZero()) {
+        return util::ErrorCode::InvalidAddress;
+    }
+    std::lock_guard<std::mutex> membershipLock(membershipMutex_);
+    if (!sock_ || !sock_->isOpen()) {
+        return util::ErrorCode::NotInitialized;
+    }
+    if (multicastGroup == group()) {
+        return util::Result<void>::ok();
+    }
+
+    // Leave first: a membership kept on the old group goes on delivering an
+    // installation this device no longer belongs to, and every one of those
+    // datagrams would reach the stack as if it were addressed here.
+    if (joined_) {
+        sock_->leaveMulticast(group(), interfaceAddr_);
+        joined_ = false;
+    }
+    // Sends pick the new group up from here on, joined or not: the group is
+    // the device's configuration, the membership only its reception.
+    multicastRaw_.store(multicastGroup.raw);
+
+    auto joinRes = sock_->joinMulticast(multicastGroup, interfaceAddr_);
+    if (joinRes.isError()) {
+        // As in open(): the interface may be down. refreshMulticastMembership()
+        // joins the new group once it is back.
+        return joinRes.error();
+    }
+    joined_ = true;
+    return util::Result<void>::ok();
+}
+
+IpAddress RoutingEndpoint::multicastGroup() const
+{
+    return group();
+}
+
 void RoutingEndpoint::close()
 {
+    std::lock_guard<std::mutex> membershipLock(membershipMutex_);
     if (sock_ && joined_) {
-        sock_->leaveMulticast(multicastAddr_, interfaceAddr_);
+        sock_->leaveMulticast(group(), interfaceAddr_);
     }
     if (sock_) {
         sock_->close();
@@ -140,7 +182,7 @@ void RoutingEndpoint::close()
     }
     joined_ = false;
     network_ = nullptr;
-    multicastAddr_ = IpAddress(0);
+    multicastRaw_.store(0u);
     interfaceAddr_ = IpAddress(0);
     localAddr_ = IpAddress(0);
     {
@@ -181,7 +223,7 @@ void RoutingEndpoint::sendDueTimerNotify(RoutingSecurity& security)
     // is its own authentication. It is not a ROUTING_INDICATION, so it is not
     // charged to the routing egress budget either.
     const auto frame = std::span<const uint8_t>(notify).first(due.value());
-    if (sock_->send(multicastAddr_, options_.port.value(), frame) == static_cast<int>(frame.size())) {
+    if (sock_->send(group(), options_.port.value(), frame) == static_cast<int>(frame.size())) {
         timerNotifiesSent_.fetch_add(1);
     }
 }
@@ -227,9 +269,9 @@ util::Result<void> RoutingEndpoint::sendToGroup(std::span<const uint8_t> datagra
                                                *security,
                                                secureWrapBuffer_.span(),
                                                securePlainBuffer_.span());
-        result = secureChannel.send(UdpDatagramEndpoint{multicastAddr_, options_.port}, datagram);
+        result = secureChannel.send(UdpDatagramEndpoint{group(), options_.port}, datagram);
     } else {
-        const int sent = sock_->send(multicastAddr_, options_.port.value(), datagram);
+        const int sent = sock_->send(group(), options_.port.value(), datagram);
         if (sent != static_cast<int>(datagram.size())) {
             result = util::Result<void>::err(util::ErrorCode::TransmissionFailed);
         }

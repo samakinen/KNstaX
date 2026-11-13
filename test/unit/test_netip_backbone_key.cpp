@@ -61,7 +61,8 @@ void test_property_write_reaches_the_observer(void)
     knx::application::PropertyID seenProperty{};
     std::vector<uint8_t> seenValue;
     int callCount = 0;
-    paramObj.setWriteObserver([&](knx::application::PropertyID id, std::span<const uint8_t> value) {
+    paramObj.setWriteObserver([&](knx::application::PropertyID id, std::span<const uint8_t>,
+                                  std::span<const uint8_t> value) {
         seenProperty = id;
         seenValue.assign(value.begin(), value.end());
         ++callCount;
@@ -88,7 +89,8 @@ void test_observer_reports_which_property_changed(void)
     mgr.registerReferenceObject(paramObj);
 
     std::vector<uint8_t> observedProperties;
-    paramObj.setWriteObserver([&](knx::application::PropertyID id, std::span<const uint8_t>) {
+    paramObj.setWriteObserver([&](knx::application::PropertyID id, std::span<const uint8_t>,
+                                  std::span<const uint8_t>) {
         observedProperties.push_back(static_cast<uint8_t>(id));
     });
 

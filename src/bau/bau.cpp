@@ -193,6 +193,36 @@ public:
     // on every secured telegram, so they get their own two-record checkpoint
     // rather than riding on the full save.
 
+    /// See InterfaceObjectManager::saveAuthorizationKeyTable.
+    bool saveAuthorizationKeyTable(const application::AuthorizationService::KeyTable& keys) {
+        if (!_interfaceObjectManager) {
+            return false;
+        }
+        const bool anyKey = std::any_of(keys.begin(), keys.end(), [](const application::AuthorizationKey& key) {
+            return key != application::AuthorizationService::kNoKey;
+        });
+        if (!anyKey) {
+            return _interfaceObjectManager->saveAuthorizationKeyTable({});
+        }
+        std::array<uint8_t, application::AuthorizationService::kSerializedKeyTableSize> record{};
+        application::AuthorizationService::serializeKeyTable(keys, record);
+        return _interfaceObjectManager->saveAuthorizationKeyTable(record);
+    }
+
+    /// The stored key table, or nullopt when none (or a malformed one) is stored.
+    std::optional<application::AuthorizationService::KeyTable> loadAuthorizationKeyTable() {
+        if (!_interfaceObjectManager) {
+            return std::nullopt;
+        }
+        const auto record = _interfaceObjectManager->loadAuthorizationKeyTable();
+        if (record.size() != application::AuthorizationService::kSerializedKeyTableSize) {
+            return std::nullopt;
+        }
+        return application::AuthorizationService::deserializeKeyTable(
+            std::span<const uint8_t, application::AuthorizationService::kSerializedKeyTableSize>(
+                record.data(), record.size()));
+    }
+
     bool loadSecuritySequenceState() {
         return _interfaceObjectManager && _interfaceObjectManager->loadSecuritySequenceState();
     }
@@ -392,6 +422,9 @@ public:
             markPersistenceDirty();
             syncSecurityKeyTables();
         }
+        if (objects::isReferenceObjectType(objectType)) {
+            afterReferenceObjectWrite(objectType, propertyId);
+        }
         return util::Result<void>::ok();
     }
 
@@ -549,7 +582,21 @@ private:
         if (isTableObject(*objectType)) {
             afterTableObjectWrite(*objectType, request);
         }
+        if (objects::isReferenceObjectType(*objectType)) {
+            afterReferenceObjectWrite(*objectType, request.propertyId);
+        }
         return util::Result<void>::ok();
+    }
+
+    // A reference object's persisted properties (the KNXnet/IP Parameter
+    // Object's routing multicast address and Secure Routing settings) are
+    // written by ETS like any other and are just as useless if the restart
+    // that ends the download loses them. Relying on some other write in the
+    // same download to have marked the state dirty is what this replaces.
+    void afterReferenceObjectWrite(InterfaceObjectType objectType, application::PropertyID propertyId) {
+        if (objects::InterfaceObjectManager::isPersistedProperty(objectType, propertyId)) {
+            markPersistenceDirty();
+        }
     }
 
     // The Security Interface Object holds the credentials for every
@@ -947,7 +994,24 @@ util::Result<void> BusAccessUnit::init(const IndividualAddress& ownAddress,
             // property and is restored from its own record (03/05/01 §6.2).
             (void)_propertyAccessBridge->loadSecuritySequenceState();
 
+            // The A_Key_Write key table (03/03/07 §3.5.8) is application
+            // layer state; without it a device keyed by ETS would be open
+            // again after every restart.
+            if (const auto keys = _propertyAccessBridge->loadAuthorizationKeyTable()) {
+                _stackPort->setAuthorizationKeys(*keys);
+            }
+
             _propertyAccessBridge->bind(*_stackPort);
+
+            // The reference objects only exist from the bridge's init() above,
+            // but wireManagementServices() published the medium objects before
+            // it, when there was nothing yet to seed or to hang the write
+            // hooks on: the KNXnet/IP Parameter Object then answered ETS with
+            // zeros and PID_BACKBONE_KEY / PID_ROUTING_MULTICAST_ADDRESS
+            // writes went unobserved. Published again now that they exist,
+            // and after the restore, so the seeds see the restored address and
+            // the stored values coming back are not mistaken for writes.
+            publishMediumInterfaceObjects();
         }
     }
 
@@ -1102,6 +1166,18 @@ util::Result<void> BusAccessUnit::applyMasterReset(application::EraseCode eraseC
                                          static_cast<application::PropertyID>(91u),
                                          noBackboneKey);
         _securedServiceFamilyVersions.fill(0u);
+
+        // 03/05/02 Table 6: the "IP multicast address" "shall be reset" by
+        // Erase Code 02h and "shall NOT be reset" by 07h. Reset means back to
+        // the product's default, which is the group the device then starts on.
+        if (eraseCode == EraseCode::FactoryReset && !_routingMulticastDefault.isZero()) {
+            std::array<uint8_t, 4> octets{};
+            _routingMulticastDefault.toOctets(octets[0], octets[1], octets[2], octets[3]);
+            (void)setReferenceObjectProperty(InterfaceObjectType::knxNetIpParameter(),
+                                             static_cast<application::PropertyID>(66u),
+                                             octets);
+            setDomainAddress(octets);
+        }
 #endif
     }
 
@@ -1135,6 +1211,18 @@ util::Result<void> BusAccessUnit::setReferenceObjectProperty(InterfaceObjectType
         return util::ErrorCode::InvalidAddress;
     }
     return object->setPropertyValue(propertyId, value);
+}
+
+void BusAccessUnit::saveAuthorizationKeyTable(const application::AuthorizationService::KeyTable& keys) {
+    if (_propertyAccessBridge && !_propertyAccessBridge->saveAuthorizationKeyTable(keys)) {
+        KNX_LOGW(TAG, "Authorisation key table could not be stored");
+    }
+}
+
+void BusAccessUnit::markPersistenceDirty() {
+    if (_propertyAccessBridge) {
+        _propertyAccessBridge->markPersistenceDirty();
+    }
 }
 
 objects::GenericInterfaceObject* BusAccessUnit::referenceInterfaceObject(InterfaceObjectType objectType) {

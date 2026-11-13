@@ -21,6 +21,7 @@
 #include "knx/platform/platform.hpp"
 #include "knx/product/endpoint.hpp"
 #include "knx/util/inplace_function.hpp"
+#include "knx/util/log.hpp"
 #include "knx/network/two_port_coupler.hpp"
 #include "knx/util/result.hpp"
 
@@ -836,8 +837,26 @@ struct IpRoutingSecureOptions {
 
 /// Options for starting a commissioned product over KNXnet/IP Routing (multicast).
 struct IpRoutingOptions {
-    /// Required: KNX multicast group address.  Standard KNX default: 224.0.23.12.
+    /**
+     * Required: the product's routing multicast group. Standard KNX default:
+     * 224.0.23.12 (03_08_03 §2.5.17: the default "shall be equal to the
+     * KNXnet/IP System Setup Multicast Address").
+     *
+     * A default, not the group in force: PID_ROUTING_MULTICAST_ADDRESS is
+     * ETS's to set, and the value it last wrote is persisted and used from the
+     * next start on. This group is used when none is stored — the first start,
+     * and the one after a Factory Reset.
+     */
     IpAddress multicastGroup{};
+
+    /**
+     * Use multicastGroup even when the device has a stored group.
+     *
+     * For a product with a configuration channel of its own, set once after
+     * that channel changed the group, so the latest change wins whichever side
+     * made it. The group is then stored as if ETS had written it.
+     */
+    bool multicastGroupOverridesStored{false};
     /// UDP port (default 3671).
     NetIpPort port{NetIpPort(3671)};
     /// Egress/join interface address.  Use IpAddress(0) for the system default.
@@ -1457,16 +1476,19 @@ public:
             {netip::service_family::kRouting, 2},
         };
 
-        const IpAddress multicastGroup = options.multicastGroup;
         std::string friendlyName = options.friendlyName;
 
+        // The physical owns the responder this provider lives in, so the
+        // reference cannot outlive it.
         physical.setCoreDiscovery(
-            [this, &network, multicastGroup, friendlyName]() {
+            [this, &network, &physical, friendlyName]() {
                 netip::CoreDeviceDescription description{};
                 description.medium = static_cast<uint8_t>(MediumType::IP);
                 description.programmingMode = _runtime.isProgrammingModeActive();
                 description.individualAddress = _runtime.individualAddress();
-                description.routingMulticastAddress = multicastGroup;
+                // The group the device is on now, which after a start with a
+                // stored group is not the one in the options.
+                description.routingMulticastAddress = physical.multicastGroup();
                 description.maxLocalApduLength = _runtime.compiledDefinition().identity.maxApduLength;
                 // The same mask version setDeviceMedium() puts in the Device
                 // Descriptor, from the same table — ETS cross-checks the two.
@@ -1536,6 +1558,43 @@ public:
         _transportPath = CommissionedTransportPath::IpRoutingManaged;
         _secureOptions = options.secure;
         applySecureOptions();
+
+        // The socket opened on the product's group, before the stored
+        // KNXnet/IP Parameter Object came back. A group ETS downloaded before
+        // the last restart is in there now, and 03_08_03 §2.5.17 makes it the
+        // one in force from this start on. Settled before anything is sent:
+        // all sending happens from the stack task's loop(), which has not run.
+        {
+            const IpAddress group = _runtime.adoptRoutingMulticastAddress(
+                options.multicastGroup, options.multicastGroupOverridesStored);
+            if (group != options.multicastGroup) {
+                const auto moved = routing->setMulticastGroup(group);
+                char text[16] = {0};
+                group.toString(text);
+                if (moved.isError()) {
+                    // Still the group sends go to; the join completes on the
+                    // next membership refresh, as at an open() without an
+                    // interface.
+                    KNX_LOGW("KNX.Product", "Routing group %s not joined yet: %s", text,
+                             util::errorCodeToString(moved.error()));
+                } else {
+                    KNX_LOGI("KNX.Product", "Routing on the stored group %s", text);
+                }
+            }
+        }
+
+        // A group written while running is stored and becomes active after the
+        // next restart (§2.5.17) — moving now would strand the management
+        // connection ETS is writing it over. What a new group does change at
+        // once is the multicast timer: E11, answered with A7 (03_08_09
+        // §2.2.2.3.2.7).
+        _runtime.setRoutingMulticastAddressCallback([routing](IpAddress) {
+#if KNX_SECURE_ENABLED
+            routing->restartMulticastTimerSync();
+#else
+            (void)routing;
+#endif
+        });
 
 #if KNX_SECURE_ENABLED
         // ETS enables KNX/IP Secure Routing by downloading the backbone key as
@@ -1627,19 +1686,16 @@ public:
     }
 
     /**
-     * @brief Decide whether ETS may move this device to another routing group.
+     * @brief The routing multicast group in PID_ROUTING_MULTICAST_ADDRESS.
      *
-     * On KNX IP the Domain Address is the routing multicast address, and ETS
-     * writes it by serial number during commissioning (03/03/07 §3.3.7). Only
-     * the firmware knows whether it can re-join a different group, so returning
-     * an error refuses the change and the device keeps answering with the
-     * address it is actually listening on. Without a callback the write is
-     * refused, which is the safe default: a recorded address the device is not
-     * reachable on is worse than a refusal.
+     * The group the device is routing on, unless ETS (by property write or
+     * A_DomainAddressSerialNumber_Write) has set another since start, which
+     * becomes the group in force at the next restart (03_08_03 §2.5.17).
+     * 0.0.0.0 on a product not running KNXnet/IP routing.
      */
-    void onDomainAddressWrite(application::DomainAddressWriteCallback callback)
+    [[nodiscard]] IpAddress routingMulticastAddress() const
     {
-        _runtime.setDomainAddressWriteCallback(std::move(callback));
+        return _runtime.routingMulticastAddress();
     }
 #endif
 

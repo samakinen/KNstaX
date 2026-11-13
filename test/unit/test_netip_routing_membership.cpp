@@ -15,6 +15,7 @@
 #include "unity.h"
 
 #include "knx/netip/routing_endpoint.hpp"
+#include "knx/physical/ip_routing_physical.hpp"
 #include "knx/platform/network_interface.hpp"
 
 #include <cstring>
@@ -37,20 +38,25 @@ public:
     void close() override { open_ = false; }
     bool isOpen() const override { return open_; }
 
-    util::Result<void> joinMulticast(IpAddress, IpAddress) override {
+    util::Result<void> joinMulticast(IpAddress group, IpAddress) override {
         ++joinAttempts;
         if (!interfaceUp) return util::ErrorCode::OperationFailed;
         ++joinsAccepted;
+        joined.push_back(group);
         return util::Result<void>::ok();
     }
 
-    void leaveMulticast(IpAddress, IpAddress) override { ++leaves; }
+    void leaveMulticast(IpAddress group, IpAddress) override {
+        ++leaves;
+        left.push_back(group);
+    }
 
     util::Result<void> setMulticastInterface(IpAddress) override { return util::Result<void>::ok(); }
     util::Result<void> setMulticastLoopback(platform::MulticastLoopbackMode) override { return util::Result<void>::ok(); }
     util::Result<void> setMulticastTtl(uint8_t) override { return util::Result<void>::ok(); }
 
-    int send(IpAddress, uint16_t, std::span<const uint8_t> data) override {
+    int send(IpAddress to, uint16_t, std::span<const uint8_t> data) override {
+        lastSentTo = to;
         return open_ ? static_cast<int>(data.size()) : -1;
     }
 
@@ -65,6 +71,9 @@ public:
     int joinAttempts{0};
     int joinsAccepted{0};
     int leaves{0};
+    std::vector<IpAddress> joined;
+    std::vector<IpAddress> left;
+    IpAddress lastSentTo{IpAddress(0)};
 
 private:
     bool open_{false};
@@ -189,6 +198,112 @@ void test_refresh_on_a_closed_endpoint_is_not_initialized(void)
     TEST_ASSERT_TRUE(result.error() == util::ErrorCode::NotInitialized);
 }
 
+// --- Moving to another routing group ------------------------------------------
+//
+// The group ETS downloaded into PID_ROUTING_MULTICAST_ADDRESS is only known
+// once the stored KNXnet/IP Parameter Object is back, which is after the socket
+// opened on the product's default. The endpoint has to move without a reopen.
+
+namespace {
+const IpAddress kDefaultGroup = IpAddress::fromOctets(224, 0, 23, 12);
+const IpAddress kProjectGroup = IpAddress::fromOctets(239, 1, 2, 3);
+
+/// A routing indication; the content is irrelevant, only where it goes.
+const std::vector<uint8_t> kIndication{0x06, 0x10, 0x05, 0x30, 0x00, 0x11, 0x29, 0x00, 0xBC, 0xE0,
+                                       0x11, 0x0A, 0x23, 0x01, 0x01, 0x00, 0x81};
+}  // namespace
+
+void test_moving_group_leaves_the_old_joins_the_new_and_sends_there(void)
+{
+    TestNetwork net;
+    RoutingEndpoint ep;
+    TEST_ASSERT_TRUE(ep.open(net, defaultOptions()).isOk());
+    net.sock->interfaceUp = true;
+    TEST_ASSERT_TRUE(ep.refreshMulticastMembership().isOk());
+
+    TEST_ASSERT_TRUE(ep.setMulticastGroup(kProjectGroup).isOk());
+
+    TEST_ASSERT_TRUE(ep.multicastJoined());
+    TEST_ASSERT_EQUAL_HEX32(kProjectGroup.raw, ep.multicastGroup().raw);
+    TEST_ASSERT_EQUAL_HEX32(kDefaultGroup.raw, net.sock->left.back().raw);
+    TEST_ASSERT_EQUAL_HEX32(kProjectGroup.raw, net.sock->joined.back().raw);
+
+    TEST_ASSERT_TRUE(ep.sendRoutingIndication(std::span<const uint8_t>(kIndication).subspan(6)).isOk());
+    TEST_ASSERT_EQUAL_HEX32(kProjectGroup.raw, net.sock->lastSentTo.raw);
+
+    ep.close();
+}
+
+void test_moving_to_the_same_group_touches_nothing(void)
+{
+    TestNetwork net;
+    RoutingEndpoint ep;
+    TEST_ASSERT_TRUE(ep.open(net, defaultOptions()).isOk());
+    net.sock->interfaceUp = true;
+    TEST_ASSERT_TRUE(ep.refreshMulticastMembership().isOk());
+    const int leaves = net.sock->leaves;
+    const int joins = net.sock->joinsAccepted;
+
+    TEST_ASSERT_TRUE(ep.setMulticastGroup(kDefaultGroup).isOk());
+
+    TEST_ASSERT_EQUAL_INT(leaves, net.sock->leaves);
+    TEST_ASSERT_EQUAL_INT(joins, net.sock->joinsAccepted);
+    ep.close();
+}
+
+void test_group_moved_without_an_interface_is_joined_by_the_next_refresh(void)
+{
+    TestNetwork net;
+    RoutingEndpoint ep;
+    TEST_ASSERT_TRUE(ep.open(net, defaultOptions()).isOk());
+
+    // Nothing joined, nothing to leave; the join itself fails, and the group
+    // is still the one in force.
+    TEST_ASSERT_TRUE(ep.setMulticastGroup(kProjectGroup).isError());
+    TEST_ASSERT_EQUAL_INT(0, net.sock->leaves);
+    TEST_ASSERT_EQUAL_HEX32(kProjectGroup.raw, ep.multicastGroup().raw);
+
+    net.sock->interfaceUp = true;
+    TEST_ASSERT_TRUE(ep.refreshMulticastMembership().isOk());
+    TEST_ASSERT_EQUAL_HEX32(kProjectGroup.raw, net.sock->joined.back().raw);
+    ep.close();
+}
+
+void test_moving_to_no_group_is_refused(void)
+{
+    TestNetwork net;
+    RoutingEndpoint ep;
+    TEST_ASSERT_TRUE(ep.open(net, defaultOptions()).isOk());
+    TEST_ASSERT_TRUE(ep.setMulticastGroup(IpAddress(0)).isError());
+    TEST_ASSERT_EQUAL_HEX32(kDefaultGroup.raw, ep.multicastGroup().raw);
+    ep.close();
+}
+
+void test_physical_takes_a_group_before_and_after_init(void)
+{
+    TestNetwork net;
+    physical::IpRoutingPhysical phys;
+    phys.setNetworkInterface(&net);
+    phys.setMulticast(kDefaultGroup, NetIpPort(netip::config::kDefaultPort));
+
+    // Before init: replaces the configured group, which init() then joins.
+    const IpAddress early = IpAddress::fromOctets(239, 9, 9, 9);
+    TEST_ASSERT_TRUE(phys.setMulticastGroup(early).isOk());
+    TEST_ASSERT_TRUE(phys.init().isOk());
+    TEST_ASSERT_EQUAL_HEX32(early.raw, phys.multicastGroup().raw);
+
+    net.sock->interfaceUp = true;
+    TEST_ASSERT_TRUE(phys.refreshMulticastMembership().isOk());
+    TEST_ASSERT_EQUAL_HEX32(early.raw, net.sock->joined.back().raw);
+
+    // After init: the open socket moves.
+    TEST_ASSERT_TRUE(phys.setMulticastGroup(kProjectGroup).isOk());
+    TEST_ASSERT_EQUAL_HEX32(kProjectGroup.raw, phys.multicastGroup().raw);
+    TEST_ASSERT_EQUAL_HEX32(early.raw, net.sock->left.back().raw);
+    TEST_ASSERT_EQUAL_HEX32(kProjectGroup.raw, net.sock->joined.back().raw);
+    phys.close();
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -197,5 +312,10 @@ int main(void)
     RUN_TEST(test_refresh_rejoins_a_membership_that_already_exists);
     RUN_TEST(test_refresh_reports_a_still_absent_interface);
     RUN_TEST(test_refresh_on_a_closed_endpoint_is_not_initialized);
+    RUN_TEST(test_moving_group_leaves_the_old_joins_the_new_and_sends_there);
+    RUN_TEST(test_moving_to_the_same_group_touches_nothing);
+    RUN_TEST(test_group_moved_without_an_interface_is_joined_by_the_next_refresh);
+    RUN_TEST(test_moving_to_no_group_is_refused);
+    RUN_TEST(test_physical_takes_a_group_before_and_after_init);
     return UNITY_END();
 }

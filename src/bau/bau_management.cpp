@@ -239,6 +239,20 @@ std::array<uint8_t, 4> ipOctets(IpAddress address)
     address.toOctets(octets[0], octets[1], octets[2], octets[3]);
     return octets;
 }
+
+/// PID_ROUTING_MULTICAST_ADDRESS is PDT_UNSIGNED_LONG holding "the KNXnet/IP
+/// Routing Multicast Address" (03_08_03 §2.5.17), so anything that is not a
+/// four-octet IPv4 multicast address (224.0.0.0/4) is refused rather than
+/// stored as a group the device could never join.
+bool isRoutingMulticastAddress(std::span<const uint8_t> value)
+{
+    return value.size() == 4u && (value[0] & 0xF0u) == 0xE0u;
+}
+
+IpAddress ipAddressFromOctets(std::span<const uint8_t> value)
+{
+    return IpAddress::fromOctets(value[0], value[1], value[2], value[3]);
+}
 #endif
 
 }  // namespace
@@ -328,12 +342,34 @@ void BusAccessUnit::publishMediumInterfaceObjects()
         // something when written rather than merely recording it. ETS
         // downloads the KNX/IP Secure Routing group key here, and it is meant
         // to take effect without a restart.
+        //
+        // PID_ROUTING_MULTICAST_ADDRESS is the other: storing it is most of
+        // the job (it becomes active after a reset, 03_08_03 §2.5.17), but a
+        // new value is E11 for the multicast timer (03_08_09 §2.2.2.3.2.5),
+        // and a value that is not a multicast group is refused outright.
         if (auto* object = referenceInterfaceObject(InterfaceObjectType::knxNetIpParameter())) {
+            object->setWriteValidator([](application::PropertyID propertyId,
+                                         std::span<const uint8_t> value) -> util::Result<void> {
+                if (static_cast<uint8_t>(propertyId) == kPidKnxNetIpRoutingMulticastAddress &&
+                    !isRoutingMulticastAddress(value)) {
+                    return util::ErrorCode::InvalidParameter;
+                }
+                return util::Result<void>::ok();
+            });
             object->setWriteObserver([this](application::PropertyID propertyId,
+                                            std::span<const uint8_t> previous,
                                             std::span<const uint8_t> value) {
-                if (static_cast<uint8_t>(propertyId) != kPidKnxNetIpBackboneKey) return;
-                if (_backboneKeyCallback) {
-                    _backboneKeyCallback(value);
+                switch (static_cast<uint8_t>(propertyId)) {
+                    case kPidKnxNetIpBackboneKey:
+                        if (_backboneKeyCallback) {
+                            _backboneKeyCallback(value);
+                        }
+                        break;
+                    case kPidKnxNetIpRoutingMulticastAddress:
+                        onRoutingMulticastAddressWritten(previous, value);
+                        break;
+                    default:
+                        break;
                 }
             });
         }
@@ -890,7 +926,27 @@ void BusAccessUnit::wireManagementServices()
         constexpr uint8_t kVerifyModeBit = 0x04u;
         return (_deviceObject.getDeviceControl() & kVerifyModeBit) != 0u;
     };
+    // The A_Key_Write key table. Saved on the spot: the A_Key_Response that
+    // follows tells the client the key is set, and a key lost to a restart
+    // before the next coalesced save would leave the client locked out of the
+    // level it believes it protected — or the level open that it closed.
+    hooks.authorizationKeysChanged = [this](const application::AuthorizationService::KeyTable& keys) {
+        saveAuthorizationKeyTable(keys);
+    };
     _stackPort->setManagementServerHooks(std::move(hooks));
+
+#if KNX_FEATURE_NETIP
+    // 03/03/07 §3.3.7: on KNX IP plain the Domain Address is the routing
+    // multicast address, so A_DomainAddressSerialNumber_Write is a second way
+    // of writing PID_ROUTING_MULTICAST_ADDRESS and goes down the same path:
+    // stored, persisted, E11 when it changes, active after the next restart.
+    // The service only hands over a write whose width matches the Domain
+    // Address in force, which is empty until a KNX IP product adopts its
+    // group (adoptRoutingMulticastAddress), so a TP1 device never gets here.
+    setStackPortDomainAddressWriteCallback([this](std::span<const uint8_t> domainAddress) {
+        return writeRoutingMulticastAddress(domainAddress);
+    });
+#endif
 
     // --- Serial-number-addressed commissioning ----------------------------
     // PID_SERIAL_NUMBER already carries the device's KNX serial number (this
@@ -924,6 +980,108 @@ void BusAccessUnit::setBackboneKeyCallback(BackboneKeyCallback callback)
     _backboneKeyCallback = std::move(callback);
 }
 
+void BusAccessUnit::setRoutingMulticastAddressCallback(RoutingMulticastAddressCallback callback)
+{
+    _routingMulticastAddressCallback = std::move(callback);
+}
+
+IpAddress BusAccessUnit::adoptRoutingMulticastAddress(IpAddress productDefault, bool productDefaultWins)
+{
+    _routingMulticastDefault = productDefault;
+
+    const auto pid = static_cast<application::PropertyID>(kPidKnxNetIpRoutingMulticastAddress);
+    const auto stored = referenceObjectPropertyValue(InterfaceObjectType::knxNetIpParameter(), pid);
+    // A stored value that is not a multicast group cannot be here: the write
+    // validator refuses it on restore as on any other write, and the
+    // property then reads as zeros, which fails this test too.
+    const bool haveStored = isRoutingMulticastAddress(stored);
+
+    const IpAddress inForce =
+        (haveStored && !productDefaultWins) ? ipAddressFromOctets(stored) : productDefault;
+    const auto octets = ipOctets(inForce);
+
+    if (!haveStored || !std::equal(octets.begin(), octets.end(), stored.begin(), stored.end())) {
+        // Through the seeding path, not the write path: this is the device
+        // settling its own configuration, not ETS joining it to a new domain.
+        // Persisted now, so the group a device first came up on stays its
+        // group until ETS, the product or a Factory Reset changes it - a
+        // firmware update with a different default does not move a device
+        // off the installation it was commissioned into.
+        // Saved at once rather than at the next quiet window: a product
+        // that asked for its own group to win clears that request as soon
+        // as start-up returns, and a restart before the deferred save would
+        // then come back on the old group.
+        if (setReferenceObjectProperty(InterfaceObjectType::knxNetIpParameter(), pid, octets).isOk()) {
+            markPersistenceDirty();
+            flushPendingPersistence();
+        }
+    }
+
+    // 03/03/07 §3.3.7: "For KNX IP plain this shall be a 4 octet value that
+    // shall consist of the IP multicast address only." The Domain Address and
+    // the routing multicast address are one value on this medium, so they are
+    // set from one place rather than left to drift apart.
+    setDomainAddress(octets);
+    return inForce;
+}
+
+IpAddress BusAccessUnit::routingMulticastAddress() const
+{
+    const auto stored = referenceObjectPropertyValue(
+        InterfaceObjectType::knxNetIpParameter(),
+        static_cast<application::PropertyID>(kPidKnxNetIpRoutingMulticastAddress));
+    return isRoutingMulticastAddress(stored) ? ipAddressFromOctets(stored) : IpAddress(0);
+}
+
+util::Result<void> BusAccessUnit::writeRoutingMulticastAddress(std::span<const uint8_t> value)
+{
+    if (!isRoutingMulticastAddress(value)) {
+        return util::ErrorCode::InvalidParameter;
+    }
+    const auto pid = static_cast<application::PropertyID>(kPidKnxNetIpRoutingMulticastAddress);
+    const auto previous = referenceObjectPropertyValue(InterfaceObjectType::knxNetIpParameter(), pid);
+    auto stored = setReferenceObjectProperty(InterfaceObjectType::knxNetIpParameter(), pid, value);
+    if (stored.isError()) {
+        return stored;
+    }
+    markPersistenceDirty();
+    onRoutingMulticastAddressWritten(previous, value);
+    return util::Result<void>::ok();
+}
+
+void BusAccessUnit::onRoutingMulticastAddressWritten(std::span<const uint8_t> previous,
+                                                     std::span<const uint8_t> value)
+{
+    // Restoring the stored object at start-up writes through the same path,
+    // and a restored address is the device's own configuration coming back,
+    // not it joining a new domain.
+    if (_restoringPersistentState || !isRoutingMulticastAddress(value)) {
+        return;
+    }
+
+    // 03/03/07 §3.3.7 (see adoptRoutingMulticastAddress): one value.
+    setDomainAddress(value);
+
+    // 03_08_09 §2.2.2.3.2.3: "Setting this to the same value as before
+    // generated event E12", for which the transition table has no entry.
+    if (std::equal(previous.begin(), previous.end(), value.begin(), value.end())) {
+        return;
+    }
+
+    const IpAddress address = ipAddressFromOctets(value);
+    KNX_LOGI(TAG, "Routing multicast address set to %u.%u.%u.%u; active after the next restart "
+                  "(03_08_03 §2.5.17)",
+             static_cast<unsigned>(value[0]), static_cast<unsigned>(value[1]),
+             static_cast<unsigned>(value[2]), static_cast<unsigned>(value[3]));
+
+    // E11: "Device joins new domain. PID_BACKBONE_KEY and/or
+    // PID_MULTICAST_ADDRESS is set to a new and different value (via property
+    // access or DomainAddressSerialNumber_Write)."
+    if (_routingMulticastAddressCallback) {
+        _routingMulticastAddressCallback(address);
+    }
+}
+
 util::Result<void> BusAccessUnit::applyKnxNetIpConfiguration(const netip::KnxNetIpConfiguration& config)
 {
     const auto objectType = InterfaceObjectType::knxNetIpParameter();
@@ -947,15 +1105,6 @@ util::Result<void> BusAccessUnit::applyKnxNetIpConfiguration(const netip::KnxNet
     record(write(kPidKnxNetIpCurrentIpAddress, ipOctets(config.currentIpAddress)));
     record(write(kPidKnxNetIpCurrentSubnetMask, ipOctets(config.currentSubnetMask)));
     record(write(kPidKnxNetIpCurrentDefaultGateway, ipOctets(config.currentDefaultGateway)));
-    record(write(kPidKnxNetIpRoutingMulticastAddress, ipOctets(config.routingMulticastAddress)));
-
-    // 03/03/07 §3.3.7: "For KNX IP plain this shall be a 4 octet value that
-    // shall consist of the IP multicast address only." The Domain Address and
-    // the routing multicast address are the same thing on this medium, so they
-    // are set from one place rather than left to drift apart — which is what
-    // made the device answer A_IndividualAddressSerialNumber_Read with a domain
-    // address of zero while ETS was busy writing it a real one.
-    setDomainAddress(ipOctets(config.routingMulticastAddress));
     record(write(kPidKnxNetIpSystemSetupMulticastAddress, ipOctets(config.systemSetupMulticastAddress)));
 
     const std::array<uint8_t, 1> ttl{config.timeToLive};

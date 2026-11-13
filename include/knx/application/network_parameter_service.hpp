@@ -96,10 +96,10 @@ using DomainAddressResponseCallback = util::InplaceFunction<
 /**
  * @brief Applies a Domain Address addressed by serial number.
  *
- * Returning an error refuses the change and leaves the stored value alone. A
- * device that cannot move media — a KNX IP device would have to re-join a
- * different multicast group — should refuse rather than record an address it
- * is not actually listening on.
+ * Returning an error refuses the change and leaves the stored value alone.
+ * On KNX IP the BusAccessUnit installs one that stores the address as
+ * PID_ROUTING_MULTICAST_ADDRESS (03/03/07 §3.3.7), active after the next
+ * restart like any other write of that property.
  */
 using DomainAddressWriteCallback = util::InplaceFunction<
     util::Result<void>(std::span<const uint8_t> domainAddress), 64>;

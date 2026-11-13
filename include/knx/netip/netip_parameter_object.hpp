@@ -18,8 +18,7 @@ namespace netip {
  *
  * The KNXnet/IP Parameter Object (interface object type 11) is where ETS looks
  * for everything about a device that is specific to it living on IP: which
- * address it currently answers on, which multicast group it routes to, what it
- * is called in a device list. The stack registers the object itself, but only
+ * address it currently answers on, what it is called in a device list. The stack registers the object itself, but only
  * the firmware knows the answers — the addresses come from DHCP, and none of it
  * exists until the interface is up.
  *
@@ -34,8 +33,11 @@ struct KnxNetIpConfiguration {
     IpAddress currentSubnetMask{IpAddress(0)};
     IpAddress currentDefaultGateway{IpAddress(0)};
 
-    /// PID_ROUTING_MULTICAST_ADDRESS. 0.0.0.0 for a device that does not route.
-    IpAddress routingMulticastAddress{IpAddress(0)};
+    // PID_ROUTING_MULTICAST_ADDRESS is deliberately not here. It is not part
+    // of the interface's identity but configuration ETS owns (03_08_03
+    // §2.5.17: it "may be set at run-time" and becomes active "after a
+    // reset"), so republishing the identity on every lease renewal must not
+    // overwrite it. See ManagementControl::adoptRoutingMulticastAddress().
     /// PID_SYSTEM_SETUP_MULTICAST_ADDRESS. Fixed at 224.0.23.12 by the
     /// standard — it is the address discovery happens on, so it is not the
     /// installation's to change even when routing has moved elsewhere.

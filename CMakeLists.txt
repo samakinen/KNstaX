@@ -796,7 +796,16 @@ else()
         # BAU on-wire golden tests
         knx_add_test(test_bau_onwire SOURCES test/integration/test_bau_onwire.cpp LABELS integration)
         # Connection-oriented ETS session
-        knx_add_test(test_ets_connected_session SOURCES test/integration/test_ets_connected_session.cpp TIMEOUT 30 LABELS integration)
+        knx_add_test(test_ets_connected_session SOURCES test/integration/test_ets_connected_session.cpp
+            ARGS session TIMEOUT 30 LABELS integration)
+        # The same binary, A_Key_Write / A_Authorize group
+        knx_add_test(test_ets_connected_session_keys COMMAND $<TARGET_FILE:test_ets_connected_session>
+            ARGS keys TIMEOUT 30 LABELS integration)
+        if(KNX_FEATURE_NETIP)
+            # The same binary, PID_ROUTING_MULTICAST_ADDRESS group
+            knx_add_test(test_ets_connected_session_routing COMMAND $<TARGET_FILE:test_ets_connected_session>
+                ARGS routing TIMEOUT 30 LABELS integration)
+        endif()
         # Started product runtime
         knx_add_test(test_product_runtime SOURCES test/integration/test_product_runtime.cpp LABELS integration)
         # Conformance evidence, commissioned path
