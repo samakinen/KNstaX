@@ -321,9 +321,52 @@ void test_product_runtime_thermostat_derives_read_response_and_state_updates_whe
     runtime.stop();
 }
 
+// Configuration given to the runtime before start() is kept and applied when
+// the BAU is created (before its init()); what needs the started device refuses.
+void test_product_runtime_keeps_configuration_set_before_start(void)
+{
+    bool programmingMode = false;
+    auto bindings = EndpointBindings<decltype(kSwitchDefinition)>{}
+                        .provideState<SwitchPort::RelayState>([]() { return false; })
+                        .onProgrammingModeChanged([&](bool enabled) { programmingMode = enabled; });
+    auto stackPort = test::createTp1TestStackPort(*gPlatform, std::make_unique<test::MockPhysicalLayer>());
+
+    EndpointRuntime<decltype(kSwitchDefinition)> runtime(
+        kSwitchDefinition,
+        std::move(bindings),
+        EndpointInstanceConfig{
+            .defaultIndividualAddress = IndividualAddress(1, 1, 41),
+            .persistenceNamespace = "switch_runtime_preinit",
+            .restoreKnxStateOnBoot = true,
+        });
+
+    const std::array<uint8_t, 16> factoryKey{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+                                             0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10};
+    const auto notReady = static_cast<int>(util::ErrorCode::OperationNotReady);
+    TEST_ASSERT_EQUAL_INT(notReady, static_cast<int>(runtime.applyToolKey(factoryKey).error()));
+    TEST_ASSERT_EQUAL_INT(notReady, static_cast<int>(runtime.enableSecurityMode().error()));
+
+    TEST_ASSERT_TRUE(runtime.setFactorySecurityDefaults(true, factoryKey).isOk());
+    runtime.toggleProgrammingMode();
+    TEST_ASSERT_TRUE(programmingMode);
+
+    TEST_ASSERT_TRUE(runtime.start(*gPlatform, std::move(stackPort)).isOk());
+    TEST_ASSERT_TRUE(runtime.isSecurityEnabled());
+    TEST_ASSERT_TRUE(runtime.toolKeyMatches(factoryKey));
+    TEST_ASSERT_TRUE(runtime.isProgrammingModeActive());
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(util::ErrorCode::AlreadyInitialized),
+                          static_cast<int>(runtime.setFactorySecurityDefaults(false, std::nullopt).error()));
+    TEST_ASSERT_TRUE(runtime.applyToolKey(factoryKey).isOk());
+
+    runtime.stop();
+    std::error_code error;
+    (void)std::filesystem::remove_all(knx::objects::persistenceNamespaceDir("switch_runtime_preinit"), error);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
+    RUN_TEST(test_product_runtime_keeps_configuration_set_before_start);
     RUN_TEST(test_product_runtime_switch_runs_through_started_runtime);
     RUN_TEST(test_product_runtime_thermostat_derives_read_response_and_state_updates_when_started);
     return UNITY_END();

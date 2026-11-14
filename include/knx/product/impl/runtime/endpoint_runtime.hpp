@@ -299,12 +299,13 @@ public:
         return _bau->link().refreshMulticastMembership();
     }
 
-    /// See bau::BusAccessUnit::adoptRoutingMulticastAddress. Returns
-    /// `productDefault` before start().
+    /// See bau::BusAccessUnit::adoptRoutingMulticastAddress. Needs the
+    /// restored KNXnet/IP Parameter Object, so before start() nothing is
+    /// adopted and 0.0.0.0 is returned.
     IpAddress adoptRoutingMulticastAddress(IpAddress productDefault, bool productDefaultWins)
     {
         if (!_bau) {
-            return productDefault;
+            return IpAddress(0);
         }
         return _bau->management().adoptRoutingMulticastAddress(productDefault, productDefaultWins);
     }
@@ -315,12 +316,15 @@ public:
         return _bau ? _bau->management().routingMulticastAddress() : IpAddress(0);
     }
 
-    /// See bau::BusAccessUnit::setRoutingMulticastAddressCallback.
+    /// See bau::BusAccessUnit::setRoutingMulticastAddressCallback. Kept when
+    /// set before start(), and installed then.
     void setRoutingMulticastAddressCallback(bau::ManagementControl::RoutingMulticastAddressCallback callback)
     {
         if (_bau) {
             _bau->management().setRoutingMulticastAddressCallback(std::move(callback));
+            return;
         }
+        _pendingRoutingMulticastAddressCallback = std::move(callback);
     }
 #endif
 
@@ -525,12 +529,15 @@ public:
         return _bau->management().applyKnxNetIpConfiguration(config);
     }
 
-    /// Observe ETS downloading the KNX/IP Secure Routing backbone key.
+    /// Observe ETS downloading the KNX/IP Secure Routing backbone key. Kept
+    /// when set before start(), and installed then.
     void setBackboneKeyCallback(bau::ManagementControl::BackboneKeyCallback callback)
     {
         if (_bau) {
             _bau->management().setBackboneKeyCallback(std::move(callback));
+            return;
         }
+        _pendingBackboneKeyCallback = std::move(callback);
     }
 
     /// Current value of a property of the KNXnet/IP Parameter Object (or any
@@ -680,31 +687,61 @@ public:
     // Security passthrough helpers
     //
     // These thin wrappers keep the SecurityInterfaceObject internals out of the
-    // commissioned_product.hpp layer.  Must be called after a successful start().
+    // commissioned_product.hpp layer. They act on the started device and
+    // return OperationNotReady before start(); the configuration a device
+    // starts with goes through setFactorySecurityDefaults() instead.
     // -----------------------------------------------------------------------
 
-    /// Enable KNX Data Secure mode on the Security Interface Object.
-    void enableSecurityMode()
+    /**
+     * @brief The Security Mode and Tool Key this device has ex-factory.
+     *
+     * Applied when start() creates the BAU, before init(): they are the
+     * factory default, and what init() restores from persistence (an ETS
+     * download, or the device's own earlier state) takes precedence. A Factory
+     * Reset returns to them. See the rule on bau::BusAccessUnit::init().
+     *
+     * Only before start(); AlreadyInitialized after it.
+     */
+    util::Result<void> setFactorySecurityDefaults(bool securityModeEnabled,
+                                                  std::optional<std::array<uint8_t, 16>> toolKey)
     {
         if (_bau) {
-            _bau->securityObject().setSecurityMode(objects::SecurityMode::Enabled);
+            return util::ErrorCode::AlreadyInitialized;
         }
+        _factorySecurityModeEnabled = securityModeEnabled;
+        _factoryToolKey = toolKey;
+        return util::Result<void>::ok();
     }
 
-    /// Apply an ETS tool key to the device's Security Interface Object.
-    void applyToolKey(const std::array<uint8_t, 16>& key)
+    /// Enable KNX Data Secure mode on the started device's Security Interface Object.
+    util::Result<void> enableSecurityMode()
     {
-        if (_bau) {
-            _bau->securityObject().setToolKey(key);
+        if (!_bau) {
+            return util::ErrorCode::OperationNotReady;
         }
+        _bau->securityObject().setSecurityMode(objects::SecurityMode::Enabled);
+        return util::Result<void>::ok();
     }
 
-    /// Apply a group key for a specific group address.
-    void applyGroupKey(GroupAddress address, const std::array<uint8_t, 16>& key)
+    /// Put @p key in force as the started device's Tool Key.
+    util::Result<void> applyToolKey(const std::array<uint8_t, 16>& key)
     {
-        if (_bau) {
-            _bau->securityObject().setGroupKey(address, key);
+        if (!_bau) {
+            return util::ErrorCode::OperationNotReady;
         }
+        _bau->securityObject().setToolKey(key);
+        return util::Result<void>::ok();
+    }
+
+    /// Set a firmware-provided group key on the started device; see
+    /// objects::SecurityInterfaceObject::setGroupKey for when it is in force.
+    util::Result<void> applyGroupKey(GroupAddress address, const std::array<uint8_t, 16>& key)
+    {
+        if (!_bau) {
+            return util::ErrorCode::OperationNotReady;
+        }
+        _bau->securityObject().setGroupKey(address, key);
+        return util::Result<void>::ok();
     }
 
     /// Returns true if the ETS tool key has been set (non-zero).
@@ -792,6 +829,7 @@ public:
     util::Result<void> finishStart()
     {
         applyIdentity();
+        applyPreStartConfiguration();
 
         // Apply any transmit-shaping configured before start() (the BAU only
         // exists now). The time source also drives cyclic sends via BAU loop().
@@ -888,6 +926,33 @@ public:
             static_cast<uint8_t>(_compiled.identity.applicationVersion & 0xFFu),
         };
         program.setProgramVersionBlock(programVersionBlock);
+    }
+
+    // What was configured on the runtime before the BAU existed. Applied
+    // before init(): the security values are factory defaults, which init()'s
+    // restore takes precedence over.
+    void applyPreStartConfiguration()
+    {
+        if (_factorySecurityModeEnabled) {
+            _bau->securityObject().setSecurityMode(objects::SecurityMode::Enabled);
+        }
+        if (_factoryToolKey.has_value()) {
+            _bau->securityObject().setToolKey(*_factoryToolKey);
+        }
+        if (_programmingModeActive) {
+            (void)_bau->management().setCommissioningMode(true);
+        }
+#if KNX_FEATURE_NETIP
+        if (_pendingBackboneKeyCallback) {
+            _bau->management().setBackboneKeyCallback(std::move(_pendingBackboneKeyCallback));
+            _pendingBackboneKeyCallback = {};
+        }
+        if (_pendingRoutingMulticastAddressCallback) {
+            _bau->management().setRoutingMulticastAddressCallback(
+                std::move(_pendingRoutingMulticastAddressCallback));
+            _pendingRoutingMulticastAddressCallback = {};
+        }
+#endif
     }
 
     util::Result<void> registerGroupObjects()
@@ -1074,6 +1139,12 @@ public:
     bool _hadImmediateWork{false};
     bau::BusAccessUnit::TimeSourceFn _timeSource{};
     application::TelegramRateLimitConfig _telegramRateLimit{};
+    bool _factorySecurityModeEnabled{false};
+    std::optional<std::array<uint8_t, 16>> _factoryToolKey{};
+#if KNX_FEATURE_NETIP
+    bau::ManagementControl::BackboneKeyCallback _pendingBackboneKeyCallback{};
+    bau::ManagementControl::RoutingMulticastAddressCallback _pendingRoutingMulticastAddressCallback{};
+#endif
     std::unique_ptr<bau::BusAccessUnit> _bau;
 };
 

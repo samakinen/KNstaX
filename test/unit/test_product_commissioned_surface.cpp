@@ -3,11 +3,15 @@
 
 #include "unity.h"
 
+#include "knx/bau/bau.hpp"
+#include "knx/objects/object_persistence.hpp"
+#include "knx/objects/security_interface_object.hpp"
 #include "knx/physical/null_tp1_medium_backend.hpp"
 #include "knx/physical/tp1_mac_physical.hpp"
 #include "knx/platform/linux_platform.hpp"
 #include "knx/product/commissioned_product.hpp"
 
+#include <filesystem>
 #include <memory>
 #include <string>
 
@@ -370,6 +374,85 @@ void test_product_commissioned_apply_ets_group_key_post_start(void)
     TEST_ASSERT_TRUE(r.isOk());
 }
 
+void test_product_commissioned_secure_options_yield_to_the_stored_tool_key(void)
+{
+    // SecureCommissioningOptions are the device's factory defaults: what ETS
+    // downloaded and the device stored comes back over them at every start.
+    // Applied after start(), as they used to be, they put the device back on
+    // its factory key and Security Mode behind ETS's back on every boot.
+    const std::array<uint8_t, 16> kFactoryKey = {
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+        0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
+    };
+    const std::array<uint8_t, 16> kEtsKey = {
+        0x4E, 0x51, 0xA5, 0xC0, 0xA1, 0xA0, 0x4A, 0xB8,
+        0x74, 0xED, 0xDB, 0xC0, 0xF6, 0xF1, 0xE9, 0x7C,
+    };
+    const std::string kNamespace = "secure_defaults_surface";
+    std::error_code ec;
+    (void)std::filesystem::remove_all(objects::persistenceNamespaceDir(kNamespace), ec);
+
+    {
+        // A device ETS commissioned with Security Mode left off and its own
+        // Tool Key, as the store holds it after the download.
+        platform::LinuxPlatform platform;
+        bau::BusAccessUnit device(platform, makeNullBackend());
+        TEST_ASSERT_TRUE(device.init(IndividualAddress(1, 1, 45), kNamespace, 3).isOk());
+        TEST_ASSERT_TRUE(device.writeProperty(
+            InterfaceObjectType::security(), InterfaceObjectInstance(1),
+            static_cast<application::PropertyID>(objects::SecurityProperty::ToolKey), 1,
+            std::span<const uint8_t>(kEtsKey)).isOk());
+        device.flushPendingPersistence();
+        device.close();
+    }
+
+    platform::LinuxPlatform platform;
+    auto result = startCommissionedProduct(
+        platform,
+        kCommissionedSurfaceProduct,
+        makeCommissionedBindings(kCommissionedSurfaceProduct),
+        CommissionedProductOptions{
+            .persistence = {.storageNamespace = kNamespace},
+            .mediumBackend = makeNullBackend(),
+            .secure = SecureCommissioningOptions{
+                .enabled = true,
+                .toolKey = kFactoryKey,
+            },
+        });
+    TEST_ASSERT_TRUE(result.isOk());
+    auto runtime = std::move(result.value());
+
+    TEST_ASSERT_TRUE(runtime->toolKeyInForceIs(kEtsKey));
+    TEST_ASSERT_FALSE(runtime->toolKeyInForceIs(kFactoryKey));
+    TEST_ASSERT_FALSE(runtime->isSecurityEnabled());
+
+    runtime.reset();
+    (void)std::filesystem::remove_all(objects::persistenceNamespaceDir(kNamespace), ec);
+}
+
+void test_product_commissioned_security_helpers_refuse_before_start(void)
+{
+    // They act on the started device. Before start() they used to return ok
+    // having done nothing; the values a device starts with are
+    // SecureCommissioningOptions.
+    using runtime_type = CommissionedProductRuntime<decltype(kCommissionedSurfaceProduct)>;
+    auto endpointBindings = endpoint::makeEndpointBindings(kCommissionedSurfaceProduct.endpointDefinition);
+    runtime_type runtime(
+        kCommissionedSurfaceProduct,
+        std::move(endpointBindings),
+        detail::ParameterCallbacks<typename runtime_type::parameter_schema_type>{},
+        {},
+        CommissionedProductOptions{});
+
+    const std::array<uint8_t, 16> kKey{};
+    const auto notReady = static_cast<int>(util::ErrorCode::OperationNotReady);
+    TEST_ASSERT_EQUAL_INT(notReady, static_cast<int>(runtime.applyEtsToolKey(kKey).error()));
+    TEST_ASSERT_EQUAL_INT(notReady, static_cast<int>(runtime.installFactoryToolKey(kKey).error()));
+    TEST_ASSERT_EQUAL_INT(notReady, static_cast<int>(runtime.enableSecurityMode().error()));
+    TEST_ASSERT_EQUAL_INT(notReady,
+                          static_cast<int>(runtime.applyEtsGroupKey(GroupAddress(1, 2, 3), kKey).error()));
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // IP managed transport path tests
 // ──────────────────────────────────────────────────────────────────────────────
@@ -523,6 +606,8 @@ int main(void)
     RUN_TEST(test_product_commissioned_secure_options_enabled_no_key);
     RUN_TEST(test_product_commissioned_apply_ets_tool_key_post_start);
     RUN_TEST(test_product_commissioned_apply_ets_group_key_post_start);
+    RUN_TEST(test_product_commissioned_secure_options_yield_to_the_stored_tool_key);
+    RUN_TEST(test_product_commissioned_security_helpers_refuse_before_start);
     RUN_TEST(test_product_commissioned_support_tier_values);
 #if KNX_IP_TUNNELING
     RUN_TEST(test_product_commissioned_ip_tunneling_zero_host_returns_invalid_parameter);

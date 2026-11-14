@@ -376,6 +376,24 @@ int main(int argc, char** argv)
 
     BusAccessUnit bau(platform, std::move(stackPort));
 
+#if KNX_SECURE_ENABLED
+    // Before init(), as a product would: what is configured here is the
+    // factory default, which BusAccessUnit::init() keeps (the group key stays
+    // in force while no downloaded group key table is; persisted state, of
+    // which this per-process store has none, would take precedence).
+    if (args.dataSecure || args.dataSecureKeySet) {
+        if (!args.dataSecureKeySet) {
+            std::cerr << "--data-secure requires --data-secure-key-hex\n";
+            return 2;
+        }
+        bau.securityObject().setSecurityMode(objects::SecurityMode::Enabled);
+        bau.securityObject().setGroupKey(ga, args.dataSecureKey);
+        bau.securityObject().setSendingSequence(args.dataSecureSendSeq);
+        // Receiving sequence starts at 0; replay window accepts first seen seq.
+        bau.securityObject().setReceivingSequence(0);
+    }
+#endif
+
     std::atomic<bool> gotWrite{false};
     std::atomic<bool> gotRead{false};
     // Set this once we're fully ready to wait for traffic (after printing READY).
@@ -401,26 +419,6 @@ int main(int argc, char** argv)
         bau.close();
         return 3;
     }
-
-#if KNX_SECURE_ENABLED
-    // After init(), not before: init() restores the interface objects from
-    // persistence and rebuilds the derived key maps from the stored key
-    // tables (BusAccessUnit::init, applySecurityKeyTables), so a group key set
-    // on the Security Object beforehand is gone by the time the first frame
-    // arrives and every secured telegram is rejected with "Unknown Key".
-    if (args.dataSecure || args.dataSecureKeySet) {
-        if (!args.dataSecureKeySet) {
-            std::cerr << "--data-secure requires --data-secure-key-hex\n";
-            bau.close();
-            return 2;
-        }
-        bau.securityObject().setSecurityMode(objects::SecurityMode::Enabled);
-        bau.securityObject().setGroupKey(ga, args.dataSecureKey);
-        bau.securityObject().setSendingSequence(args.dataSecureSendSeq);
-        // Receiving sequence starts at 0; replay window accepts first seen seq.
-        bau.securityObject().setReceivingSequence(0);
-    }
-#endif
 
     bau.setGroupObjectWriteCallback([&](knx::GroupObjectIndex, std::span<const uint8_t> data) {
         gotData.assign(data.begin(), data.end());

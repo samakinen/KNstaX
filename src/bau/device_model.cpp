@@ -296,6 +296,11 @@ util::Result<void> DeviceModel::setReferenceObjectProperty(InterfaceObjectType o
                                                            application::PropertyID propertyId,
                                                            std::span<const uint8_t> value)
 {
+    // Reference objects are created by init(); before it there is nothing to
+    // hold the value, and the restore would replace it anyway.
+    if (!_interfaceObjectManager) {
+        return util::ErrorCode::NotInitialized;
+    }
     auto* object = referenceObject(objectType);
     if (object == nullptr) {
         return util::ErrorCode::InvalidAddress;
@@ -719,6 +724,48 @@ std::optional<application::AuthorizationService::KeyTable> DeviceModel::loadAuth
             record.data(), record.size()));
 }
 
+void DeviceModel::captureFactorySecurityDefaults()
+{
+    // Once: a BAU closed and initialised again must not take what the first
+    // restore brought back for the firmware's own defaults.
+    if (_factorySecurityCaptured) {
+        return;
+    }
+    _factorySecurity.toolKey = _securityObject.getToolKey();
+    _factorySecurity.securityMode = _securityObject.getSecurityMode();
+    _factorySecurity.sendingSequence = _securityObject.getSendingSequenceThreadSafe();
+    _factorySecurityCaptured = true;
+}
+
+void DeviceModel::settleRestoredSecurityState()
+{
+    const auto& factoryKey = _factorySecurity.toolKey;
+    const bool factoryKeySet = std::any_of(factoryKey.begin(), factoryKey.end(),
+                                           [](uint8_t b) { return b != 0u; });
+    if (factoryKeySet && !_securityObject.hasToolKey()) {
+        // Every save stores PID_TOOL_KEY, so a device that ran without a key
+        // (an older firmware, or one that sets it after init()) has zeros on
+        // record. Zeros are the absence of a key, not one ETS installed.
+        _securityObject.setToolKeySilent(factoryKey);
+        KNX_LOGI(TAG, "Factory Tool Key in force (none stored)");
+    }
+    if (_factorySecurity.sendingSequence > _securityObject.getSendingSequenceThreadSafe()) {
+        // A sequence number already used must not be used again; whichever
+        // side is ahead wins, as for the Last Valid SeqNr values.
+        _securityObject.setSendingSequenceSilent(_factorySecurity.sendingSequence);
+    }
+}
+
+void DeviceModel::restoreFactorySecurityDefaults()
+{
+    // §3.7.1.2.3.2.2 requires the key tables dropped whole, so that the FDSK
+    // cannot be used to read back what a previous owner downloaded.
+    _securityObject.loadControlReset();
+    _securityObject.setToolKey(_factorySecurity.toolKey);
+    _securityObject.setSecurityMode(_factorySecurity.securityMode);
+    applySecurityKeyTables();
+}
+
 void DeviceModel::applySecurityKeyTables()
 {
     using objects::SecurityProperty;
@@ -734,10 +781,14 @@ void DeviceModel::applySecurityKeyTables()
         return static_cast<uint16_t>((static_cast<uint16_t>(blob[offset]) << 8) | blob[offset + 1]);
     };
 
-    // The maps are a derived view: start empty so an entry ETS deleted in the
-    // project does not linger as a usable key.
-    _securityObject.clearGroupKeys();
-    _securityObject.clearDeviceKeys();
+    // The maps are a derived view, rebuilt from empty so an entry ETS deleted
+    // in the project does not linger as a usable key. Firmware-provided keys
+    // are not part of it: the Security Interface Object keeps them apart and
+    // puts them in force when the downloaded table holds no entries.
+    objects::SecurityInterfaceObject::KeyMap resolvedGroupKeys;
+    objects::SecurityInterfaceObject::KeyMap resolvedDeviceKeys;
+    bool groupKeyTableHasEntries = false;
+    bool p2pKeyTableHasEntries = false;
 
     // §6.3.7: the 2-octet field is the GA_Index — the TSAP, i.e. the 1-based
     // index into the Group Address Table — and NOT the group address itself.
@@ -746,6 +797,7 @@ void DeviceModel::applySecurityKeyTables()
     size_t groupKeys = 0;
     size_t unresolvedGroupKeys = 0;
     if (const auto* blob = _securityObject.findExtraProperty(SecurityProperty::GroupKeyTable)) {
+        groupKeyTableHasEntries = blob->size() >= kGroupKeyEntryBytes;
         for (size_t offset = 0; offset + kGroupKeyEntryBytes <= blob->size();
              offset += kGroupKeyEntryBytes) {
             const uint16_t gaIndex = readIndex(*blob, offset);
@@ -759,7 +811,7 @@ void DeviceModel::applySecurityKeyTables()
             }
             std::array<uint8_t, kKeyBytes> key{};
             std::copy_n(blob->begin() + static_cast<ptrdiff_t>(offset + 2), kKeyBytes, key.begin());
-            _securityObject.setGroupKey(address, key);
+            resolvedGroupKeys[address.raw] = key;
             ++groupKeys;
         }
     }
@@ -784,6 +836,7 @@ void DeviceModel::applySecurityKeyTables()
     size_t deviceKeys = 0;
     size_t unresolvedDeviceKeys = 0;
     if (const auto* blob = _securityObject.findExtraProperty(SecurityProperty::P2PKeyTable)) {
+        p2pKeyTableHasEntries = blob->size() >= kP2PKeyEntryBytes;
         for (size_t offset = 0; offset + kP2PKeyEntryBytes <= blob->size();
              offset += kP2PKeyEntryBytes) {
             // IA_Index is 1-based, like every other KNX table index.
@@ -798,10 +851,13 @@ void DeviceModel::applySecurityKeyTables()
             // no Role model beyond Tool/Unlisted, and silently honouring a
             // subset of the 16 configured Roles would be worse than ignoring
             // them, because the refusals would look arbitrary.
-            _securityObject.setDeviceKey(securityAddresses[iaIndex - 1u], key);
+            resolvedDeviceKeys[securityAddresses[iaIndex - 1u].raw] = key;
             ++deviceKeys;
         }
     }
+
+    _securityObject.applyDownloadedGroupKeys(std::move(resolvedGroupKeys), groupKeyTableHasEntries);
+    _securityObject.applyDownloadedDeviceKeys(std::move(resolvedDeviceKeys), p2pKeyTableHasEntries);
 
     if (groupKeys != 0 || deviceKeys != 0 || unresolvedGroupKeys != 0 || unresolvedDeviceKeys != 0) {
         KNX_LOGI(TAG,
@@ -809,7 +865,9 @@ void DeviceModel::applySecurityKeyTables()
                  "%zu security IA entries (%zu group / %zu device entries unresolved)",
                  groupKeys, deviceKeys, securityAddresses.size(),
                  unresolvedGroupKeys, unresolvedDeviceKeys);
-    } else if (_securityObject.isSecurityEnabled()) {
+    } else if (_securityObject.isSecurityEnabled()
+               && _securityObject.groupKeyCount() == 0u
+               && _securityObject.deviceKeyCount() == 0u) {
         // Worth saying out loud: with Security Mode on and no group key, every
         // group telegram this device sends goes out in plain and every secured
         // one it receives is dropped as "unknown key".

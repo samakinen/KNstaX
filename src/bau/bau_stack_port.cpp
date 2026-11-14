@@ -28,6 +28,7 @@
 #include "knx/network/two_port_coupler.hpp"
 
 #include <algorithm>
+#include <optional>
 #include <array>
 #include <cstdint>
 #include <memory>
@@ -150,6 +151,10 @@ public:
         if (!dlInit) {
             return dlInit;
         }
+        // Asked for before init(), when there was no data link to tell.
+        if (_promiscuousMode.has_value()) {
+            _dataLink->setPromiscuousMode(*_promiscuousMode);
+        }
 
         for (const auto& address : groupAddresses) {
             auto addResult = _dataLink->addGroupAddress(address);
@@ -179,6 +184,7 @@ public:
     }
 
     void setDataLinkPromiscuousMode(datalink::PromiscuousMode mode) {
+        _promiscuousMode = mode;
         if (_dataLink) {
             _dataLink->setPromiscuousMode(mode);
         }
@@ -247,6 +253,7 @@ private:
     std::unique_ptr<testing::MockTp1Physical> _testPhysical;
 #endif
     std::unique_ptr<datalink::Tp1DataLinkLayer> _dataLink;
+    std::optional<datalink::PromiscuousMode> _promiscuousMode;
 };
 
 // ---------------------------------------------------------------------------

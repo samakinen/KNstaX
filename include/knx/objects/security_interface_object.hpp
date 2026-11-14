@@ -95,6 +95,10 @@ public:
     
     /**
      * @brief Set security mode
+     *
+     * Before BusAccessUnit::init() this is the factory default, which a
+     * restored PID_SECURITY_MODE takes precedence over; after it, in force at
+     * once. See the rule on BusAccessUnit::init().
      */
     void setSecurityMode(SecurityMode mode);
     void setSecurityModeSilent(SecurityMode mode);
@@ -113,6 +117,10 @@ public:
     
     /**
      * @brief Set security tool key
+     *
+     * Before BusAccessUnit::init() this is the factory Tool Key (FDSK): in
+     * force unless a non-zero PID_TOOL_KEY is restored, and what a Factory
+     * Reset returns to. After it, in force at once.
      */
     void setToolKey(const std::array<uint8_t, 16>& key);
     void setToolKeySilent(const std::array<uint8_t, 16>& key);
@@ -122,72 +130,83 @@ public:
      */
     bool hasToolKey() const;
 
-    // === Individual Device Keys ===
-    
+    // === Group and device keys ===
+    //
+    // Two sources feed the keys the Secure Application Layer looks up:
+    //
+    //  - firmware-provided keys, set with setGroupKey() / setDeviceKey(); and
+    //  - the downloaded tables PID_GRP_KEY_TABLE / PID_P2P_KEY_TABLE, which the
+    //    BAU resolves against the address tables after every download and
+    //    every restore (applyDownloadedGroupKeys / applyDownloadedDeviceKeys).
+    //
+    // Precedence is per table, the same "factory default vs downloaded" rule
+    // as the Tool Key (see BusAccessUnit::init): firmware keys are the
+    // factory default, in force while the corresponding downloaded table
+    // holds no entries. Once ETS has downloaded entries into it, that table
+    // alone is in force — a firmware key for an address the project left
+    // plain would otherwise make the device demand security there — and the
+    // firmware keys come back only if the table is emptied again (Unload,
+    // Master Reset). Firmware keys are kept across BusAccessUnit::init(), so
+    // they can be set before or after it.
+
     /**
-     * @brief Set security key for an individual device
-     * @param address Individual address
-     * @param key 16-byte AES-128 key
+     * @brief Set a firmware-provided key for an individual device
+     *
+     * In force immediately while no downloaded P2P key table is; otherwise
+     * recorded and logged, and in force again once that table is emptied.
      */
     void setDeviceKey(const IndividualAddress& address, const std::array<uint8_t, 16>& key);
-    
+
     /**
-     * @brief Get security key for an individual device
-     * @param address Individual address
-     * @param key Output buffer for key
-    * @return Result<void> indicating success or missing key
+     * @brief Get the key in force for an individual device
+     * @return ok, or ResourceUnavailable when no key is in force
      */
     util::Result<void> getDeviceKey(const IndividualAddress& address, std::array<uint8_t, 16>& key) const;
-    
-    /**
-     * @brief Remove device key
-     */
+
+    /// Remove a firmware-provided device key (downloaded keys are ETS's).
     void removeDeviceKey(const IndividualAddress& address);
-    
-    /**
-     * @brief Get count of device keys
-     */
+
+    /// Number of device keys in force.
     uint16_t deviceKeyCount() const;
 
-    // === Group Address Keys ===
-    
     /**
-     * @brief Set security key for a group address
-     * @param address Group address
-     * @param key 16-byte AES-128 key
+     * @brief Set a firmware-provided key for a group address
+     *
+     * In force immediately while no downloaded group key table is; otherwise
+     * recorded and logged, and in force again once that table is emptied.
      */
     void setGroupKey(const GroupAddress& address, const std::array<uint8_t, 16>& key);
-    
-    /**
-     * @brief Get security key for a group address
-     * @param address Group address
-     * @param key Output buffer for key
-    * @return Result<void> indicating success or missing key
-     */
-    util::Result<void> getGroupKey(const GroupAddress& address, std::array<uint8_t, 16>& key) const;
-    
-    /**
-     * @brief Remove group key
-     */
-    void removeGroupKey(const GroupAddress& address);
-    
-    /**
-     * @brief Get count of group keys
-     */
-    uint16_t groupKeyCount() const;
 
     /**
-     * @brief Drop every group / device key without touching the Tool Key.
-     *
-     * The live maps are a derived view of PID_GRP_KEY_TABLE / PID_P2P_KEY_TABLE,
-     * which arrive as opaque array properties and are re-resolved against the
-     * Group Address and Security Individual Address tables after every
-     * download.  Rebuilding starts from empty so an entry ETS removed does not
-     * survive; clearAllKeys() cannot be used for that because it also wipes the
-     * Tool Key, which is not part of either table.
+     * @brief Get the key in force for a group address
+     * @return ok, or ResourceUnavailable when no key is in force
      */
-    void clearGroupKeys();
-    void clearDeviceKeys();
+    util::Result<void> getGroupKey(const GroupAddress& address, std::array<uint8_t, 16>& key) const;
+
+    /// Remove a firmware-provided group key (downloaded keys are ETS's).
+    void removeGroupKey(const GroupAddress& address);
+
+    /// Number of group keys in force.
+    uint16_t groupKeyCount() const;
+
+    using KeyMap = std::map<uint16_t, std::array<uint8_t, 16>>;
+
+    /**
+     * @brief Install the keys resolved from PID_GRP_KEY_TABLE.
+     *
+     * @p tableHasEntries says whether the downloaded table holds any entry at
+     * all, resolved or not: a table whose GA_Index values do not resolve yet
+     * (mid-download) is still ETS's table, and the firmware keys stay out of
+     * force. With no entries, the firmware keys are in force instead.
+     */
+    void applyDownloadedGroupKeys(KeyMap resolved, bool tableHasEntries);
+    /// The same for PID_P2P_KEY_TABLE and the firmware device keys.
+    void applyDownloadedDeviceKeys(KeyMap resolved, bool tableHasEntries);
+
+    /// True while the downloaded group (device) key table, not the firmware
+    /// keys, is what is in force.
+    bool downloadedGroupKeysInForce() const { return _downloadedGroupKeysInForce; }
+    bool downloadedDeviceKeysInForce() const { return _downloadedDeviceKeysInForce; }
 
     // === Sequence Number Management ===
     
@@ -217,6 +236,9 @@ public:
     
     /**
      * @brief Set sending sequence (for initialization)
+     *
+     * Before BusAccessUnit::init(), the higher of this and the restored
+     * PID_SEQUENCE_NUMBER_SENDING is kept: a used number is never reused.
      */
     void setSendingSequence(uint64_t seq);
     void setSendingSequenceSilent(uint64_t seq);
@@ -292,7 +314,10 @@ public:
     // === Bulk Operations ===
     
     /**
-     * @brief Clear all keys
+     * @brief Clear every key: the Tool Key, the keys in force and the
+     * firmware-provided ones. A full wipe, not a Master Reset — the BAU's
+     * Master Reset goes back to the factory defaults instead (see
+     * BusAccessUnit::init for what those are).
      */
     void clearAllKeys();
     
@@ -318,15 +343,23 @@ public:
     // key: the tool key is the credential ETS is *currently* using to talk to
     // this device, and it is provisioned from the device's own RNG/FDSK rather
     // than downloaded. Clearing it here would sever the secure link mid-download.
+    // With the tables gone, the firmware-provided group and device keys are
+    // the ones in force again.
     void loadControlReset();
 
 private:
     SecurityMode _securityMode;
     std::array<uint8_t, 16> _toolKey;
     
-    // Key storage: address -> key
-    std::map<uint16_t, std::array<uint8_t, 16>> _deviceKeys;  // Individual address keys
-    std::map<uint16_t, std::array<uint8_t, 16>> _groupKeys;   // Group address keys
+    // Keys in force (looked up by the Secure Application Layer): address -> key.
+    KeyMap _deviceKeys;  // Individual address keys
+    KeyMap _groupKeys;   // Group address keys
+    // Firmware-provided keys: the factory default for each table, in force
+    // while the downloaded table holds no entries.
+    KeyMap _firmwareDeviceKeys;
+    KeyMap _firmwareGroupKeys;
+    bool _downloadedDeviceKeysInForce{false};
+    bool _downloadedGroupKeysInForce{false};
     
     // Sequence numbers (48-bit in KNX spec, using 64-bit for safety)
     uint64_t _sendingSequence;

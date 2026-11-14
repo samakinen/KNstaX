@@ -738,11 +738,16 @@ struct SecureCommissioningOptions {
     /// Enable KNX Data Secure mode.  When false (default) the Security
     /// Interface Object is left in its factory-default disabled state and no
     /// key material is written.  Non-secure products must leave this false.
+    ///
+    /// Both fields are factory defaults (the rule on bau::BusAccessUnit::init):
+    /// they are applied before the stack restores its persisted state, so a
+    /// Security Mode or Tool Key that ETS downloaded, or that the device
+    /// stored on an earlier start, takes precedence, and a Factory Reset
+    /// returns to them.
     bool enabled{false};
 
-    /// ETS tool key (16-byte AES-128).  Written to the SecurityInterfaceObject
-    /// on start() when `enabled` is true.  Allows ETS to open a secure
-    /// management session without the device needing a pre-provisioned key.
+    /// Factory Tool Key (FDSK, 16-byte AES-128), in force while no other Tool
+    /// Key is stored. Lets ETS open the first secure management session.
     std::optional<std::array<uint8_t, 16>> toolKey{};
 };
 
@@ -1240,13 +1245,13 @@ public:
             return util::ErrorCode::InvalidParameter;
         }
 
+        applySecureOptions();  // factory defaults: before init(), restore wins
         auto startResult = _runtime.start(platform, std::move(mediumBackend));
         if (startResult.isError()) {
             return startResult.error();
         }
 
         _transportPath = CommissionedTransportPath::Tp1MediumBackend;
-        applySecureOptions();
 
         _runtime.wireParameterDataCallback([this](std::span<const uint8_t> data) {
             _parametersState.applyFromBytes(data);
@@ -1278,14 +1283,14 @@ public:
             std::make_unique<physical::Tp1MacPhysical>(std::move(options.primary)),
             std::make_unique<physical::Tp1MacPhysical>(std::move(options.secondary)));
 
+        _secureOptions = options.secure;
+        applySecureOptions();  // factory defaults: before init(), restore wins
         auto startResult = _runtime.start(platform, std::move(stackPort));
         if (startResult.isError()) {
             return startResult.error();
         }
 
         _transportPath = CommissionedTransportPath::Tp1Coupler;
-        _secureOptions = options.secure;
-        applySecureOptions();
 
         if (options.publishRouterObject) {
             // The filter table and routing policy are left null on purpose:
@@ -1318,13 +1323,13 @@ public:
         }
 
 
+        applySecureOptions();  // factory defaults: before init(), restore wins
         auto startResult = _runtime.start(platform, std::move(physical));
         if (startResult.isError()) {
             return startResult.error();
         }
 
         _transportPath = CommissionedTransportPath::Tp1MacPhysical;
-        applySecureOptions();
 
         _runtime.wireParameterDataCallback([this](std::span<const uint8_t> data) {
             _parametersState.applyFromBytes(data);
@@ -1346,13 +1351,13 @@ public:
             return util::ErrorCode::InvalidParameter;
         }
 
+        applySecureOptions();  // factory defaults: before init(), restore wins
         auto startResult = _runtime.start(platform, std::move(physical));
         if (startResult.isError()) {
             return startResult.error();
         }
 
         _transportPath = CommissionedTransportPath::IpTunneling;
-        applySecureOptions();
 
         _runtime.wireParameterDataCallback([this](std::span<const uint8_t> data) {
             _parametersState.applyFromBytes(data);
@@ -1374,13 +1379,13 @@ public:
             return util::ErrorCode::InvalidParameter;
         }
 
+        applySecureOptions();  // factory defaults: before init(), restore wins
         auto startResult = _runtime.start(platform, std::move(physical));
         if (startResult.isError()) {
             return startResult.error();
         }
 
         _transportPath = CommissionedTransportPath::IpRouting;
-        applySecureOptions();
 
         _runtime.wireParameterDataCallback([this](std::span<const uint8_t> data) {
             _parametersState.applyFromBytes(data);
@@ -1417,14 +1422,14 @@ public:
         physical->setNetworkInterface(network);
         physical->setGateway(options.host, options.port);
 
+        _secureOptions = options.secure;
+        applySecureOptions();  // factory defaults: before init(), restore wins
         auto startResult = _runtime.start(platform, std::move(physical));
         if (startResult.isError()) {
             return startResult.error();
         }
 
         _transportPath = CommissionedTransportPath::IpTunnelingManaged;
-        _secureOptions = options.secure;
-        applySecureOptions();
 
         _runtime.wireParameterDataCallback([this](std::span<const uint8_t> data) {
             _parametersState.applyFromBytes(data);
@@ -1527,14 +1532,14 @@ public:
         // reach it after start().
         auto* routing = physical.get();
 
+        _secureOptions = options.secure;
+        applySecureOptions();  // factory defaults: before init(), restore wins
         auto startResult = _runtime.start(platform, std::move(physical));
         if (startResult.isError()) {
             return startResult.error();
         }
 
         _transportPath = CommissionedTransportPath::IpRoutingManaged;
-        _secureOptions = options.secure;
-        applySecureOptions();
 
         // The socket opened on the product's group, before the stored
         // KNXnet/IP Parameter Object came back. A group ETS downloaded before
@@ -1945,8 +1950,9 @@ public:
     // KNX Data Secure helpers (Phase C key provisioning API)
     //
     // These convenience methods remove the need for firmware code to know
-    // about SecurityInterfaceObject internals.  They must be called after a
-    // successful start().
+    // about SecurityInterfaceObject internals.  They act on the started
+    // device and return OperationNotReady before start(); the values a device
+    // starts with are SecureCommissioningOptions.
     // -----------------------------------------------------------------------
 
     /// Apply an ETS tool key (16-byte AES-128) to this device.
@@ -1958,9 +1964,11 @@ public:
     /// Must be called after start().
     util::Result<void> applyEtsToolKey(const std::array<uint8_t, 16>& key)
     {
-        _runtime.enableSecurityMode();
-        _runtime.applyToolKey(key);
-        return util::Result<void>::ok();
+        const auto enabled = _runtime.enableSecurityMode();
+        if (enabled.isError()) {
+            return enabled;
+        }
+        return _runtime.applyToolKey(key);
     }
 
     /// Apply a group key for a specific group address (16-byte AES-128).
@@ -1971,8 +1979,7 @@ public:
     /// Must be called after start().
     util::Result<void> applyEtsGroupKey(GroupAddress address, const std::array<uint8_t, 16>& key)
     {
-        _runtime.applyGroupKey(address, key);
-        return util::Result<void>::ok();
+        return _runtime.applyGroupKey(address, key);
     }
 
     /// Install the factory Tool Key (FDSK) without asserting Security Mode.
@@ -1992,8 +1999,7 @@ public:
     /// Must be called after start().
     util::Result<void> installFactoryToolKey(const std::array<uint8_t, 16>& key)
     {
-        _runtime.applyToolKey(key);
-        return util::Result<void>::ok();
+        return _runtime.applyToolKey(key);
     }
 
     /// Turn on KNX Data Secure without touching the Tool Key.
@@ -2005,8 +2011,7 @@ public:
     /// Must be called after start().
     util::Result<void> enableSecurityMode()
     {
-        _runtime.enableSecurityMode();
-        return util::Result<void>::ok();
+        return _runtime.enableSecurityMode();
     }
 
     /// Returns true if KNX Data Secure mode is currently enabled on this device.
@@ -2168,15 +2173,17 @@ private:
     }
 #endif
 
+    // SecureCommissioningOptions describe the device ex-factory, so they go
+    // in before init() as factory defaults: what ETS downloaded (Security
+    // Mode, its own Tool Key) and the device stored comes back over them at
+    // every start. Applying them after start(), as this used to, put the
+    // device back on its factory Tool Key behind ETS's back at every boot.
     void applySecureOptions()
     {
         if (!_secureOptions.enabled) {
             return;
         }
-        _runtime.enableSecurityMode();
-        if (_secureOptions.toolKey.has_value()) {
-            _runtime.applyToolKey(_secureOptions.toolKey.value());
-        }
+        (void)_runtime.setFactorySecurityDefaults(true, _secureOptions.toolKey);
     }
 };
 

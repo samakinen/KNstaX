@@ -402,15 +402,14 @@ util::Result<void> DeviceManagement::applyMasterReset(application::EraseCode era
 
     if (factoryReset) {
         // Ex-factory, a Data Secure device has Security Mode off and only its
-        // FDSK as Tool Key (03/05/03 §1.5.4.1). A cleared Tool Key is what a
-        // product's boot path reads as "no key yet" and replaces with the FDSK
-        // (Habinari: installFactoryToolKey). The key tables are dropped whole,
-        // which §3.7.1.2.3.2.2 requires so that the FDSK cannot be used to
-        // read back what a previous owner downloaded.
-        auto& securityObject = _model.securityObject();
-        securityObject.loadControlReset();
-        securityObject.clearAllKeys();
-        securityObject.setSecurityMode(objects::SecurityMode::Disabled);
+        // FDSK as Tool Key (03/05/03 §1.5.4.1): back to what the firmware set
+        // before init(), which is all-zero and Disabled unless it set
+        // something. An all-zero Tool Key is what a product that installs its
+        // FDSK after start-up reads as "no key yet" (Habinari:
+        // installFactoryToolKey). The key tables are dropped whole, which
+        // §3.7.1.2.3.2.2 requires so that the FDSK cannot be used to read back
+        // what a previous owner downloaded.
+        _model.restoreFactorySecurityDefaults();
 #if KNX_FEATURE_NETIP
         // Table 6 resets the IP Resources with Erase Code 02h and keeps them
         // with 07h; the backbone key is the KNX IP Secure credential and goes
@@ -1101,6 +1100,15 @@ void DeviceManagement::setRoutingMulticastAddressCallback(ManagementControl::Rou
 
 IpAddress DeviceManagement::adoptRoutingMulticastAddress(IpAddress productDefault, bool productDefaultWins)
 {
+    // Before init() there is neither the restored KNXnet/IP Parameter Object
+    // to compare with nor an application layer to take the Domain Address:
+    // adopting then answered with the product default, set nothing, and the
+    // restore that followed brought back a different group behind the
+    // caller's back.
+    if (!_running) {
+        KNX_LOGE(TAG, "adoptRoutingMulticastAddress() before init(): nothing adopted");
+        return IpAddress(0);
+    }
     _routingMulticastDefault = productDefault;
 
     const auto pid = static_cast<application::PropertyID>(kPidKnxNetIpRoutingMulticastAddress);

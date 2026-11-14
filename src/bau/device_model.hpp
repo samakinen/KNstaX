@@ -182,6 +182,25 @@ public:
     /// Subscribe every group address of the address table at the data link.
     void resubscribeGroupAddresses();
 
+    // --- Factory defaults vs restored state (BusAccessUnit::init) ------------
+    //
+    // What firmware sets on the Security Interface Object before init() is its
+    // factory default. init() records it before the restore and settles the
+    // precedence after it; a Factory Reset goes back to it. See the rule on
+    // BusAccessUnit::init().
+
+    /// Record the Tool Key, Security Mode and Sequence Number Sending in force
+    /// now as the factory defaults. Called once, before the first restore.
+    void captureFactorySecurityDefaults();
+    /// After the restore: an all-zero restored Tool Key is "no key", not a
+    /// key, so the factory Tool Key stays; Sequence Number Sending never moves
+    /// backwards, so the higher of the factory and restored values is kept.
+    void settleRestoredSecurityState();
+    /// Master Reset (Factory Reset): the key tables dropped, the factory Tool
+    /// Key and Security Mode back in force, firmware group and device keys in
+    /// force again. Sequence Number Sending is not touched (03/03/07 §5).
+    void restoreFactorySecurityDefaults();
+
 private:
     void instantiateReferenceObjects();
     void checkpointSecuritySequenceState();
@@ -205,6 +224,14 @@ private:
     std::vector<InterfaceObjectType> _referenceObjectTypes;
     std::vector<InterfaceObjectType> _indexToTypeMap;
     bool _restoring{false};
+
+    struct FactorySecurityDefaults {
+        std::array<uint8_t, 16> toolKey{};
+        objects::SecurityMode securityMode{objects::SecurityMode::Disabled};
+        uint64_t sendingSequence{0};
+    };
+    FactorySecurityDefaults _factorySecurity{};
+    bool _factorySecurityCaptured{false};
 
     // Deferred-persistence bookkeeping. Quiet window is short enough that the
     // flush still lands well inside the gap between ETS download steps. A

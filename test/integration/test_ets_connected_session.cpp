@@ -34,6 +34,7 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -60,6 +61,9 @@ public:
 
 std::unique_ptr<RecordingPlatform> gPlatform;
 std::unique_ptr<knx::bau::BusAccessUnit> gBau;
+/// What the firmware configures before init() at every boot: its factory
+/// defaults. Empty unless a test sets it.
+std::function<void(knx::bau::BusAccessUnit&)> gBeforeInit;
 /// E11 reports from PID_ROUTING_MULTICAST_ADDRESS since the last (re)boot.
 int gRoutingGroupChanges = 0;
 
@@ -200,6 +204,7 @@ std::vector<uint8_t> runDownloadPrologue(size_t dropAckFromRequest) {
 
 void setUp(void) {
     clearPersistenceStore();
+    gBeforeInit = nullptr;
 
     gPlatform = std::make_unique<RecordingPlatform>();
     auto ownedPhysical = std::make_unique<MockPhysicalLayer>();
@@ -582,6 +587,9 @@ void rebootFromPersistence() {
     gRoutingGroupChanges = 0;
     gBau->management().setRoutingMulticastAddressCallback([](IpAddress) { ++gRoutingGroupChanges; });
 #endif
+    if (gBeforeInit) {
+        gBeforeInit(*gBau);
+    }
     TEST_ASSERT_TRUE(gBau->init(kUnaddressed).isOk());
     gBau->link().setPromiscuousMode(knx::datalink::PromiscuousMode::Enable);
     (void)pumpAndCollect(20);
@@ -621,6 +629,51 @@ void test_master_reset_factory_reset_restores_ex_factory_state(void) {
     TEST_ASSERT_EQUAL_UINT32(0u, gBau->applicationProgram().getProgramData().size());
     TEST_ASSERT_TRUE(toolKeyCleared());
     TEST_ASSERT_FALSE(gBau->securityObject().isSecurityEnabled());
+    TEST_ASSERT_TRUE(gBau->securityObject().getSendingSequence() >= kSequenceNumberSending);
+}
+
+// A product that sets a factory Tool Key and firmware group keys before init()
+// gets them back from a Factory Reset: they are its ex-factory state. The
+// downloaded tables go, the ETS Tool Key goes, and the reset state is stored,
+// so the next boot comes up on it whatever that firmware sets.
+void test_master_reset_factory_reset_returns_to_the_firmware_factory_defaults(void) {
+    const std::array<uint8_t, 16> factoryKey{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+                                             0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10};
+    const std::array<uint8_t, 16> firmwareGroupKey{0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28,
+                                                   0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F, 0x30};
+    const GroupAddress group(0x0A03u);
+    gBeforeInit = [&](knx::bau::BusAccessUnit& bau) {
+        bau.securityObject().setToolKey(factoryKey);
+        bau.securityObject().setGroupKey(group, firmwareGroupKey);
+    };
+    const auto groupKeyIs = [&](const std::array<uint8_t, 16>& expected) {
+        std::array<uint8_t, 16> key{};
+        return gBau->securityObject().getGroupKey(group, key).isOk() && key == expected;
+    };
+
+    startUnaddressed();
+    TEST_ASSERT_TRUE(gBau->securityObject().getToolKey() == factoryKey);
+    TEST_ASSERT_TRUE(groupKeyIs(firmwareGroupKey));
+
+    commissionForReset();  // address table holds the group at GA_Index 1
+    std::vector<uint8_t> table{0x00, 0x01};
+    table.insert(table.end(), kEtsToolKey.begin(), kEtsToolKey.end());  // any 16 octets
+    TEST_ASSERT_TRUE(gBau->writeProperty(
+        InterfaceObjectType::security(), InterfaceObjectInstance(1),
+        static_cast<application::PropertyID>(objects::SecurityProperty::GroupKeyTable), 1,
+        std::span<const uint8_t>(table)).isOk());
+    TEST_ASSERT_TRUE(gBau->securityObject().getToolKey() == kEtsToolKey);
+    TEST_ASSERT_TRUE(groupKeyIs(kEtsToolKey));
+
+    TEST_ASSERT_EQUAL_INT(0x00, restartErrorCode(masterReset(0x02)));
+    TEST_ASSERT_TRUE(gBau->securityObject().getToolKey() == factoryKey);
+    TEST_ASSERT_TRUE(groupKeyIs(firmwareGroupKey));
+    TEST_ASSERT_FALSE(gBau->securityObject().isSecurityEnabled());
+
+    gBeforeInit = nullptr;  // a firmware that sets nothing: what was stored
+    rebootFromPersistence();
+    TEST_ASSERT_TRUE(gBau->securityObject().getToolKey() == factoryKey);
+    TEST_ASSERT_FALSE(gBau->securityObject().downloadedGroupKeysInForce());
     TEST_ASSERT_TRUE(gBau->securityObject().getSendingSequence() >= kSequenceNumberSending);
 }
 
@@ -1078,6 +1131,7 @@ int main(int argc, char** argv) {
         RUN_TEST(test_full_ets_commissioning_sequence_with_verify_mode);
         RUN_TEST(test_management_writes_on_the_wrong_mode_are_ignored);
         RUN_TEST(test_master_reset_factory_reset_restores_ex_factory_state);
+        RUN_TEST(test_master_reset_factory_reset_returns_to_the_firmware_factory_defaults);
         RUN_TEST(test_master_reset_factory_reset_without_ia_keeps_the_address);
         RUN_TEST(test_master_reset_reset_ia_resets_only_the_address);
         RUN_TEST(test_master_reset_reset_ap_and_param_drop_the_parameters);

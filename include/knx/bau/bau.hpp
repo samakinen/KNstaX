@@ -198,13 +198,50 @@ public:
     BusAccessUnit& operator=(BusAccessUnit&&) = delete;
 
     // Initialization
-    /// @param persistenceSchemaVersion Layout version of the commissioned state
-    ///        this firmware understands.  Persisted state written by a
-    ///        different version is discarded rather than reinterpreted: the
-    ///        parameter block and interface-object blobs are positional, so
-    ///        reading a stale layout mis-parameterises the device silently.
-    ///        Bump it whenever a parameter or port is added, removed or
-    ///        reordered.
+    /**
+     * @brief Start the stack and restore the commissioned state.
+     *
+     * **Configuration before init() — the rule.** Whatever the firmware
+     * configures before init() is the device's *factory default*. init() keeps
+     * it, and state restored from persistence takes precedence over it where
+     * there is any: an ETS download, or what the device stored on an earlier
+     * start. Nothing set before init() is dropped without one of the reasons
+     * below, and a setter that cannot hold a value before init() returns an
+     * error instead of succeeding into nothing. A Factory Reset (Master Reset
+     * erase code 02h/07h) returns to the factory defaults.
+     *
+     * In detail:
+     *  - Security Mode, Tool Key, key tables and every other persisted
+     *    property (addresses, association table, parameters, ...): the
+     *    restored value wins, property by property. An all-zero restored Tool
+     *    Key counts as no key, so a factory Tool Key set before init() stays.
+     *  - Group and device keys set with SecurityInterfaceObject::setGroupKey /
+     *    setDeviceKey: in force while the downloaded PID_GRP_KEY_TABLE /
+     *    PID_P2P_KEY_TABLE holds no entries; the downloaded table alone once it
+     *    does. They are kept either way (see SecurityInterfaceObject).
+     *  - Sequence numbers (Sequence Number Sending, Tool Access, Last Valid
+     *    SeqNr per partner): the higher of the set and restored values.
+     *  - Not persisted (callbacks, group objects and their values, transmit
+     *    shaping, programming mode, device medium, router role, reference
+     *    object types, promiscuous mode): kept as set.
+     *  - The individual address is @p ownAddress; one set on the Device Object
+     *    beforehand is replaced by it (logged). PID_DEVICE_CONTROL is cleared
+     *    and the run state set to Running, as 03/05/01 requires at start-up.
+     *  - Need the started stack, so refuse before init(): writeProperty /
+     *    readProperty and ManagementControl::setReferenceObjectProperty /
+     *    applyKnxNetIpConfiguration (NotInitialized), sends (NotInitialized),
+     *    adoptRoutingMulticastAddress (nothing adopted, returns 0.0.0.0).
+     *
+     * @param ownAddress The factory-default individual address; a restored
+     *        one takes precedence.
+     * @param persistenceSchemaVersion Layout version of the commissioned state
+     *        this firmware understands.  Persisted state written by a
+     *        different version is discarded rather than reinterpreted: the
+     *        parameter block and interface-object blobs are positional, so
+     *        reading a stale layout mis-parameterises the device silently.
+     *        Bump it whenever a parameter or port is added, removed or
+     *        reordered.
+     */
     virtual util::Result<void> init(const IndividualAddress& ownAddress,
                                       std::string_view persistenceNamespace = {},
                                       uint16_t persistenceSchemaVersion = 1);

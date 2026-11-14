@@ -90,6 +90,16 @@ util::Result<void> BusAccessUnit::init(const IndividualAddress& ownAddress,
     _groups->resetWorkAvailability();
 
     // Phase 2 — the lower stack, on the address the product starts with.
+    // `ownAddress` is the factory-default individual address; a restored one
+    // replaces it in phase 6. One set on the Device Object before init() has
+    // no place in that order, so it is replaced too — said out loud rather
+    // than dropped quietly.
+    if (const auto preset = _deviceObject.readIndividualAddress();
+        preset.raw != 0u && preset != ownAddress) {
+        KNX_LOGW(TAG, "Individual address 0x%04X set before init() replaced by init()'s 0x%04X; "
+                      "pass the factory-default address to init()",
+                 static_cast<unsigned>(preset.raw), static_cast<unsigned>(ownAddress.raw));
+    }
     _deviceObject.setIndividualAddress(ownAddress);
     _management->setDefaultIndividualAddress(ownAddress);
 
@@ -124,8 +134,13 @@ util::Result<void> BusAccessUnit::init(const IndividualAddress& ownAddress,
         KNX_LOGE(TAG, "Interface object manager init failed: %s", util::errorCodeToString(modelInit.error()));
     } else {
         // Restore KNX tables (address/association/group object) saved from a
-        // previous ETS commissioning session.
+        // previous ETS commissioning session. What the firmware configured
+        // before init() is the factory default: recorded first, so that the
+        // restore can take precedence over it and a Factory Reset can return
+        // to it (see the rule on BusAccessUnit::init()).
+        _model->captureFactorySecurityDefaults();
         const size_t loaded = _model->restore();
+        _model->settleRestoredSecurityState();
         KNX_LOGI(TAG, "Restored %zu properties from persistence", loaded);
 
         const auto restoredAddress = _deviceObject.readIndividualAddress();

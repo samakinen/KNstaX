@@ -55,16 +55,24 @@ bool SecurityInterfaceObject::hasToolKey() const {
     return isKeyNonZero(_toolKey);
 }
 
-// === Individual Device Keys ===
+// === Group and device keys ===
 
-void SecurityInterfaceObject::setDeviceKey(const IndividualAddress& address, 
+void SecurityInterfaceObject::setDeviceKey(const IndividualAddress& address,
                                            const std::array<uint8_t, 16>& key) {
+    _firmwareDeviceKeys[address.raw] = key;
+    if (_downloadedDeviceKeysInForce) {
+        KNX_LOGW("KNX.Security",
+                 "Firmware device key for %d.%d.%d recorded, not in force: the P2P key table "
+                 "ETS downloaded is",
+                 address.area(), address.line(), address.device());
+        return;
+    }
     _deviceKeys[address.raw] = key;
-    KNX_LOGD("KNX.Security", "Device key set for %d.%d.%d", 
+    KNX_LOGD("KNX.Security", "Device key set for %d.%d.%d",
              address.area(), address.line(), address.device());
 }
 
-util::Result<void> SecurityInterfaceObject::getDeviceKey(const IndividualAddress& address, 
+util::Result<void> SecurityInterfaceObject::getDeviceKey(const IndividualAddress& address,
                                            std::array<uint8_t, 16>& key) const {
     auto it = _deviceKeys.find(address.raw);
     if (it != _deviceKeys.end()) {
@@ -75,8 +83,11 @@ util::Result<void> SecurityInterfaceObject::getDeviceKey(const IndividualAddress
 }
 
 void SecurityInterfaceObject::removeDeviceKey(const IndividualAddress& address) {
-    _deviceKeys.erase(address.raw);
-    KNX_LOGD("KNX.Security", "Device key removed for %d.%d.%d", 
+    _firmwareDeviceKeys.erase(address.raw);
+    if (!_downloadedDeviceKeysInForce) {
+        _deviceKeys.erase(address.raw);
+    }
+    KNX_LOGD("KNX.Security", "Device key removed for %d.%d.%d",
              address.area(), address.line(), address.device());
 }
 
@@ -84,16 +95,22 @@ uint16_t SecurityInterfaceObject::deviceKeyCount() const {
     return static_cast<uint16_t>(_deviceKeys.size());
 }
 
-// === Group Address Keys ===
-
-void SecurityInterfaceObject::setGroupKey(const GroupAddress& address, 
+void SecurityInterfaceObject::setGroupKey(const GroupAddress& address,
                                           const std::array<uint8_t, 16>& key) {
+    _firmwareGroupKeys[address.raw] = key;
+    if (_downloadedGroupKeysInForce) {
+        KNX_LOGW("KNX.Security",
+                 "Firmware group key for %d/%d/%d recorded, not in force: the group key table "
+                 "ETS downloaded is",
+                 address.main(), address.middle(), address.sub());
+        return;
+    }
     _groupKeys[address.raw] = key;
-    KNX_LOGD("KNX.Security", "Group key set for %d/%d/%d", 
+    KNX_LOGD("KNX.Security", "Group key set for %d/%d/%d",
              address.main(), address.middle(), address.sub());
 }
 
-util::Result<void> SecurityInterfaceObject::getGroupKey(const GroupAddress& address, 
+util::Result<void> SecurityInterfaceObject::getGroupKey(const GroupAddress& address,
                                           std::array<uint8_t, 16>& key) const {
     auto it = _groupKeys.find(address.raw);
     if (it != _groupKeys.end()) {
@@ -104,8 +121,11 @@ util::Result<void> SecurityInterfaceObject::getGroupKey(const GroupAddress& addr
 }
 
 void SecurityInterfaceObject::removeGroupKey(const GroupAddress& address) {
-    _groupKeys.erase(address.raw);
-    KNX_LOGD("KNX.Security", "Group key removed for %d/%d/%d", 
+    _firmwareGroupKeys.erase(address.raw);
+    if (!_downloadedGroupKeysInForce) {
+        _groupKeys.erase(address.raw);
+    }
+    KNX_LOGD("KNX.Security", "Group key removed for %d/%d/%d",
              address.main(), address.middle(), address.sub());
 }
 
@@ -113,12 +133,32 @@ uint16_t SecurityInterfaceObject::groupKeyCount() const {
     return static_cast<uint16_t>(_groupKeys.size());
 }
 
-void SecurityInterfaceObject::clearGroupKeys() {
-    _groupKeys.clear();
+void SecurityInterfaceObject::applyDownloadedGroupKeys(KeyMap resolved, bool tableHasEntries) {
+    _downloadedGroupKeysInForce = tableHasEntries;
+    if (tableHasEntries) {
+        _groupKeys = std::move(resolved);
+        if (!_firmwareGroupKeys.empty()) {
+            KNX_LOGI("KNX.Security",
+                     "%zu firmware group key(s) not in force: the downloaded group key table is",
+                     _firmwareGroupKeys.size());
+        }
+    } else {
+        _groupKeys = _firmwareGroupKeys;
+    }
 }
 
-void SecurityInterfaceObject::clearDeviceKeys() {
-    _deviceKeys.clear();
+void SecurityInterfaceObject::applyDownloadedDeviceKeys(KeyMap resolved, bool tableHasEntries) {
+    _downloadedDeviceKeysInForce = tableHasEntries;
+    if (tableHasEntries) {
+        _deviceKeys = std::move(resolved);
+        if (!_firmwareDeviceKeys.empty()) {
+            KNX_LOGI("KNX.Security",
+                     "%zu firmware device key(s) not in force: the downloaded P2P key table is",
+                     _firmwareDeviceKeys.size());
+        }
+    } else {
+        _deviceKeys = _firmwareDeviceKeys;
+    }
 }
 
 // === Sequence Number Management ===
@@ -707,13 +747,18 @@ void SecurityInterfaceObject::clearAllKeys() {
     _toolKey.fill(0);
     _deviceKeys.clear();
     _groupKeys.clear();
+    _firmwareDeviceKeys.clear();
+    _firmwareGroupKeys.clear();
     KNX_LOGI("KNX.Security", "All security keys cleared");
 }
 
 void SecurityInterfaceObject::loadControlReset() {
-    // Tool key intentionally preserved — see the declaration for why.
-    _deviceKeys.clear();
-    _groupKeys.clear();
+    // Tool key intentionally preserved — see the declaration for why. With
+    // the tables gone, the firmware-provided keys are in force again.
+    _deviceKeys = _firmwareDeviceKeys;
+    _groupKeys = _firmwareGroupKeys;
+    _downloadedDeviceKeysInForce = false;
+    _downloadedGroupKeysInForce = false;
     _extraProperties.erase(SecurityProperty::P2PKeyTable);
     _extraProperties.erase(SecurityProperty::GroupKeyTable);
     _extraProperties.erase(SecurityProperty::SecurityIndividualAddressTable);

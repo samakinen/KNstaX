@@ -802,6 +802,9 @@ else()
         knx_add_test(test_netip_socket_wait SOURCES test/unit/test_netip_socket_wait.cpp LABELS unit TIMEOUT 20)
         # BAU on-wire golden tests
         knx_add_test(test_bau_onwire SOURCES test/integration/test_bau_onwire.cpp LABELS integration)
+        # Configuration set before BusAccessUnit::init(): factory default vs restored state
+        knx_add_test(test_bau_preinit_configuration SOURCES test/integration/test_bau_preinit_configuration.cpp
+            LABELS integration)
         if(KNX_SECURE_ENABLED)
             # Data Secure end to end on the TP1 path: a whole device on the
             # virtual bit-bang bus, secured group write and Tool Access

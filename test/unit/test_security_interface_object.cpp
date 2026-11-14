@@ -175,12 +175,12 @@ void test_SecurityInterfaceObject_LoadStateControl() {
     TEST_ASSERT_EQUAL_UINT8(1, out.size());
     TEST_ASSERT_EQUAL_UINT8(loadstate::kUnloaded, out[0]);
 
-    // Populate loadable content plus a tool key.
+    // Populate downloaded content plus a tool key.
     std::array<uint8_t, 16> key;
     key.fill(0xAB);
     sec.setToolKey(key);
-    sec.setGroupKey(GroupAddress(1, 2, 3), key);
-    sec.setDeviceKey(IndividualAddress(1, 1, 5), key);
+    sec.applyDownloadedGroupKeys({{GroupAddress(1, 2, 3).raw, key}}, true);
+    sec.applyDownloadedDeviceKeys({{IndividualAddress(1, 1, 5).raw, key}}, true);
     TEST_ASSERT_EQUAL_UINT16(1, sec.groupKeyCount());
     TEST_ASSERT_EQUAL_UINT16(1, sec.deviceKeyCount());
 
@@ -190,6 +190,7 @@ void test_SecurityInterfaceObject_LoadStateControl() {
     TEST_ASSERT_TRUE(writeSecurityProperty(sec, pid, startLoading).isOk());
     TEST_ASSERT_EQUAL_UINT16(0, sec.groupKeyCount());
     TEST_ASSERT_EQUAL_UINT16(0, sec.deviceKeyCount());
+    TEST_ASSERT_FALSE(sec.downloadedGroupKeysInForce());
     TEST_ASSERT_TRUE(sec.hasToolKey());
 
     out.clear();
@@ -210,11 +211,17 @@ void test_SecurityInterfaceObject_LoadStateControl() {
     TEST_ASSERT_TRUE(readSecurityProperty(sec, pid, 1, out).isOk());
     TEST_ASSERT_EQUAL_UINT8(loadstate::kLoaded, out[0]);
 
-    // Unload clears the tables again and returns to Unloaded.
-    sec.setGroupKey(GroupAddress(1, 2, 3), key);
+    // Unload clears the tables again and returns to Unloaded. A firmware key
+    // is the factory default and is what is in force once the table is gone.
+    sec.setGroupKey(GroupAddress(1, 2, 4), key);
+    sec.applyDownloadedGroupKeys({{GroupAddress(1, 2, 3).raw, key}}, true);
+    std::array<uint8_t, 16> found{};
+    TEST_ASSERT_FALSE(sec.getGroupKey(GroupAddress(1, 2, 4), found).isOk());
     const uint8_t unload[] = {loadstate::kEventUnload};
     TEST_ASSERT_TRUE(writeSecurityProperty(sec, pid, unload).isOk());
-    TEST_ASSERT_EQUAL_UINT16(0, sec.groupKeyCount());
+    TEST_ASSERT_EQUAL_UINT16(1, sec.groupKeyCount());
+    TEST_ASSERT_FALSE(sec.getGroupKey(GroupAddress(1, 2, 3), found).isOk());
+    TEST_ASSERT_TRUE(sec.getGroupKey(GroupAddress(1, 2, 4), found).isOk());
     out.clear();
     TEST_ASSERT_TRUE(readSecurityProperty(sec, pid, 1, out).isOk());
     TEST_ASSERT_EQUAL_UINT8(loadstate::kUnloaded, out[0]);

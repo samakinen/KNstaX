@@ -199,6 +199,37 @@ Do not discard a `Result` from a persistence or send path with `(void)` unless
 the call is genuinely fire-and-forget (a transport ACK, a coupler forward the
 protocol repeats anyway). Otherwise log the failure (`KNX_LOGW`) or return it.
 
+### Configuration before `init()` / `start()`
+
+A setter must never succeed into nothing. Configuration a product applies
+before `BusAccessUnit::init()` (or before `EndpointRuntime::start()`, which
+applies its own pre-start configuration just before `init()`) is the device's
+**factory default**:
+
+- `init()` keeps it. It does not reset, rebuild or overwrite what the firmware
+  set, except where state is restored.
+- State restored from persistence takes precedence, property by property: an
+  ETS download, or what the device stored on an earlier start, wins over a
+  firmware default. "Nothing stored" includes an all-zero Tool Key.
+- Firmware-provided group / device keys are a factory default per table: in
+  force while the downloaded `PID_GRP_KEY_TABLE` / `PID_P2P_KEY_TABLE` holds no
+  entries, and not at all once it does.
+- Sequence numbers take the higher of the set and restored value; a used
+  number is never reused.
+- A Factory Reset (Master Reset 02h / 07h) returns to the factory defaults.
+- A setter that cannot hold its value before `init()`, because it needs the
+  started stack or an object `init()` creates, returns an error
+  (`NotInitialized`, or `OperationNotReady` on the product runtime) instead.
+
+Derived state that `init()` rebuilds (key maps, subscriptions, published
+objects) must keep the firmware's inputs apart from what it derives, so the
+rebuild cannot discard them. The full rule, with every case, is on
+`BusAccessUnit::init()` in `include/knx/bau/bau.hpp`; a new setter documents
+which case it falls under and gets a test in
+`test/integration/test_bau_preinit_configuration.cpp` (or the product runtime
+tests) that sets it before `init()` and checks the outcome with and without
+persisted state.
+
 ---
 
 ## C++ style
@@ -458,6 +489,7 @@ Before committing:
 - Stubs marked `[STUB]` with a TODO, and absent from feature claims
 - Specification compliance verified against a cited clause
 - Docs updated alongside the code
+- A new setter follows the configuration-before-`init()` rule and says which case it is
 
 For a TP1 change, additionally:
 
