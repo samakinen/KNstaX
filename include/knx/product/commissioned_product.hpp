@@ -730,25 +730,28 @@ constexpr auto makeCommissionedProduct(EndpointDefinitionT endpointDefinition,
     };
 }
 
-/// Options for enabling KNX Data Secure on this device.
+/// The KNX Data Secure state this device has ex-factory.
 ///
-/// All fields default to off/empty — existing non-secure products require no
-/// change.  Security is only activated when `enabled` is true.
+/// Both fields are factory defaults (the rule on bau::BusAccessUnit::init and
+/// DEVELOPMENT_GUIDELINES.md "Configuration before init() / start()"): they
+/// are applied before the stack restores its persisted state, so a Tool Key
+/// or Security Mode that ETS downloaded, or that the device stored on an
+/// earlier start, takes precedence, and a Factory Reset returns to them.
+///
+/// They are independent. What a Data Secure device ships as is a factory Tool
+/// Key with Security Mode off: ETS opens its first secure session with the
+/// FDSK, installs its own Tool Key and turns the mode on at the end of a
+/// secure download (03/05/01 §6.3.5), while a project that does not use
+/// security commissions the device in plain. Defaults are off/empty, so a
+/// non-secure product needs no change.
 struct SecureCommissioningOptions {
-    /// Enable KNX Data Secure mode.  When false (default) the Security
-    /// Interface Object is left in its factory-default disabled state and no
-    /// key material is written.  Non-secure products must leave this false.
-    ///
-    /// Both fields are factory defaults (the rule on bau::BusAccessUnit::init):
-    /// they are applied before the stack restores its persisted state, so a
-    /// Security Mode or Tool Key that ETS downloaded, or that the device
-    /// stored on an earlier start, takes precedence, and a Factory Reset
-    /// returns to them.
-    bool enabled{false};
-
     /// Factory Tool Key (FDSK, 16-byte AES-128), in force while no other Tool
     /// Key is stored. Lets ETS open the first secure management session.
-    std::optional<std::array<uint8_t, 16>> toolKey{};
+    std::optional<std::array<uint8_t, 16>> factoryToolKey{};
+
+    /// PID_SECURITY_MODE on a fresh device and after a Factory Reset. Leave
+    /// it false for an ETS-commissioned product: the mode belongs to ETS.
+    bool securityModeAtFactoryReset{false};
 };
 
 struct CommissionedProductOptions {
@@ -1108,7 +1111,8 @@ private:
     friend auto startCommissionedProduct(platform::Platform& platform,
                                          const DefinitionT& definition,
                                          CommissionedBindingsBuilder<DefinitionT, Cap>&& bindings,
-                                         std::unique_ptr<physical::Tp1MacPhysical> physical)
+                                         std::unique_ptr<physical::Tp1MacPhysical> physical,
+                                         SecureCommissioningOptions secure)
         -> util::Result<CommissionedProductHandle<DefinitionT, Cap>>;
 
     template <typename DefinitionT, size_t Cap>
@@ -2180,10 +2184,8 @@ private:
     // device back on its factory Tool Key behind ETS's back at every boot.
     void applySecureOptions()
     {
-        if (!_secureOptions.enabled) {
-            return;
-        }
-        (void)_runtime.setFactorySecurityDefaults(true, _secureOptions.toolKey);
+        (void)_runtime.setFactorySecurityDefaults(_secureOptions.securityModeAtFactoryReset,
+                                                  _secureOptions.factoryToolKey);
     }
 };
 
@@ -2280,23 +2282,27 @@ auto startCommissionedProduct(platform::Platform& platform,
     return runtime;
 }
 
-/// Overload: assemble with a TP1 MAC physical layer (the bit-bang backend).
+/// Overload: assemble with a TP1 MAC physical layer (the bit-bang backend),
+/// with the device's ex-factory Data Secure state.
 template <typename ProductDefinitionT, size_t BindingCapacity>
 auto startCommissionedProduct(platform::Platform& platform,
                               const ProductDefinitionT& definition,
                               CommissionedBindingsBuilder<ProductDefinitionT, BindingCapacity>&& bindings,
-                              std::unique_ptr<physical::Tp1MacPhysical> physical)
+                              std::unique_ptr<physical::Tp1MacPhysical> physical,
+                              SecureCommissioningOptions secure)
     -> util::Result<CommissionedProductHandle<ProductDefinitionT, BindingCapacity>>
 {
     // Built directly in its final heap storage: the runtime is far too large to
     // pass through a stack frame, and it cannot be moved: its callbacks
     // capture `this`.
+    CommissionedProductOptions options{};
+    options.secure = std::move(secure);
     auto runtime = std::make_unique<CommissionedProductRuntime<ProductDefinitionT, BindingCapacity>>(
         definition,
         std::move(bindings)._endpointBindings,
         std::move(bindings)._parameterCallbacks,
         std::move(bindings)._lifecycleCallback,
-        CommissionedProductOptions{});
+        std::move(options));
 
     auto startResult = runtime->start(platform, std::move(physical));
     if (startResult.isError()) {
@@ -2304,6 +2310,18 @@ auto startCommissionedProduct(platform::Platform& platform,
     }
 
     return runtime;
+}
+
+/// Overload: assemble with a TP1 MAC physical layer, no Data Secure defaults.
+template <typename ProductDefinitionT, size_t BindingCapacity>
+auto startCommissionedProduct(platform::Platform& platform,
+                              const ProductDefinitionT& definition,
+                              CommissionedBindingsBuilder<ProductDefinitionT, BindingCapacity>&& bindings,
+                              std::unique_ptr<physical::Tp1MacPhysical> physical)
+    -> util::Result<CommissionedProductHandle<ProductDefinitionT, BindingCapacity>>
+{
+    return startCommissionedProduct(platform, definition, std::move(bindings), std::move(physical),
+                                    SecureCommissioningOptions{});
 }
 
 #if KNX_IP_TUNNELING

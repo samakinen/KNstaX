@@ -547,6 +547,30 @@ size_t TunnelingServerEndpoint::activeChannelCount() const
     return active;
 }
 
+std::span<const IndividualAddress> TunnelingServerEndpoint::tunnelAddresses() const
+{
+    if (!isOpen()) {
+        return {};
+    }
+    return std::span<const IndividualAddress>(options_.tunnelAddresses).first(channels_.size());
+}
+
+IndividualAddress TunnelingServerEndpoint::tunnelAddressOf(ChannelId channelId) const
+{
+    const auto* slot = findChannelById(channelId);
+    return slot != nullptr ? slot->info.tunnelAddress : IndividualAddress(0);
+}
+
+ChannelId TunnelingServerEndpoint::channelForTunnelAddress(IndividualAddress address) const
+{
+    for (const auto& slot : channels_) {
+        if (slot.active && slot.info.tunnelAddress == address) {
+            return slot.info.channelId;
+        }
+    }
+    return ChannelId::invalid();
+}
+
 std::vector<TunnelingServerEndpoint::ChannelInfo> TunnelingServerEndpoint::activeChannels() const
 {
     std::vector<ChannelInfo> out;

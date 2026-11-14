@@ -637,6 +637,22 @@ void Tp1DataLinkLayer::publishAckGroupAddresses() {
                                        std::span<const uint16_t>(raw.data(), count));
 }
 
+util::Result<void> Tp1DataLinkLayer::setAdditionalIndividualAddresses(std::span<const IndividualAddress> addresses) {
+    if (addresses.size() > MAX_ADDITIONAL_INDIVIDUAL_ADDRESSES) {
+        return util::ErrorCode::BufferTooSmall;
+    }
+    _additionalAddresses.clear();
+    for (const auto& address : addresses) {
+        (void)_additionalAddresses.push_back(address.raw);
+    }
+    if (_physicalPort.setAckIndividualAddresses) {
+        _physicalPort.setAckIndividualAddresses(
+            _physicalPort.context,
+            std::span<const uint16_t>(_additionalAddresses.data(), _additionalAddresses.size()));
+    }
+    return util::Result<void>::ok();
+}
+
 void Tp1DataLinkLayer::setPromiscuousMode(PromiscuousMode mode) {
     _promiscuousMode = (mode == PromiscuousMode::Enable);
     KNX_LOGI(TAG, "Promiscuous mode: %s", _promiscuousMode ? "enabled" : "disabled");
@@ -717,7 +733,9 @@ bool Tp1DataLinkLayer::isAddressMatch(const GroupAddress& address, AddressType a
         if (isIndividualBroadcastAddress(indAddr)) {
             return true;
         }
-        return indAddr == _ownAddress;
+        return indAddr == _ownAddress
+            || std::find(_additionalAddresses.begin(), _additionalAddresses.end(), indAddr.raw)
+                   != _additionalAddresses.end();
     }
 }
 

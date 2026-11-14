@@ -18,6 +18,7 @@ set(KNX_SOURCES_CORE
     # Network Layer
     "src/network/network_layer.cpp"
     "src/network/filter_table.cpp"
+    "src/network/filter_table_load_control.cpp"
     "src/network/routing_table_control.cpp"
     "src/network/coupler_routing.cpp"
     "src/network/two_port_coupler.cpp"

@@ -173,7 +173,9 @@ util::Result<void> GenericInterfaceObject::readGeneric(
     const size_t count = static_cast<size_t>(elementCount) * info->elementSize;
 
     std::vector<uint8_t> data;
-    {
+    if (const auto* binding = domain->findBinding(info->id); binding != nullptr && binding->read) {
+        data = binding->read();
+    } else {
         std::lock_guard<std::mutex> lock(domain->_valuesMutex);
         auto it = domain->_values.find(info->id);
         if (it == domain->_values.end()) {
@@ -204,6 +206,19 @@ util::Result<void> GenericInterfaceObject::writeGeneric(
         return util::Result<void>::err(util::ErrorCode::InvalidParameter);
     }
 
+    const auto* binding = domain->findBinding(info->id);
+    if (binding != nullptr && binding->write
+        && info->type == application::PropertyDataType::Control) {
+        // The kernel hands a PDT_CONTROL write over as the whole control
+        // block (elementCount = octets), whatever maxElements says.
+        std::vector<uint8_t> block(elementCount, 0);
+        auto res = in.readBytes(block);
+        if (res.isError()) {
+            return res;
+        }
+        return binding->write(block);
+    }
+
     const uint32_t endIndexExclusive = static_cast<uint32_t>(startIndex.value) + static_cast<uint32_t>(elementCount);
     if (endIndexExclusive > info->maxElements) {
         return util::Result<void>::err(util::ErrorCode::OutOfRange);
@@ -220,6 +235,18 @@ util::Result<void> GenericInterfaceObject::writeGeneric(
     auto res = in.readBytes(chunk);
     if (res.isError()) {
         return res;
+    }
+
+    if (binding != nullptr && binding->write) {
+        std::vector<uint8_t> updated = binding->read ? binding->read() : std::vector<uint8_t>{};
+        if (offset > updated.size()) {
+            return util::Result<void>::err(util::ErrorCode::OutOfRange);
+        }
+        if (offset + count > updated.size()) {
+            updated.resize(offset + count, 0);
+        }
+        std::copy(chunk.begin(), chunk.end(), updated.begin() + static_cast<std::ptrdiff_t>(offset));
+        return binding->write(updated);
     }
 
     std::vector<uint8_t> previous;
@@ -267,6 +294,37 @@ util::Result<void> GenericInterfaceObject::writeGeneric(
     }
 
     return util::Result<void>::ok();
+}
+
+util::Result<void> GenericInterfaceObject::bindProperty(application::PropertyID propertyId,
+                                                        PropertyBinding binding)
+{
+    bool declared = false;
+    for (const auto& candidate : _handlerInfo) {
+        declared = declared || candidate.id == propertyId;
+    }
+    if (!declared) {
+        return util::ErrorCode::InvalidParameter;
+    }
+    for (auto& entry : _bindings) {
+        if (entry.first == propertyId) {
+            entry.second = std::move(binding);
+            return util::Result<void>::ok();
+        }
+    }
+    _bindings.emplace_back(propertyId, std::move(binding));
+    return util::Result<void>::ok();
+}
+
+const GenericInterfaceObject::PropertyBinding* GenericInterfaceObject::findBinding(
+    application::PropertyID propertyId) const
+{
+    for (const auto& entry : _bindings) {
+        if (entry.first == propertyId) {
+            return &entry.second;
+        }
+    }
+    return nullptr;
 }
 
 void GenericInterfaceObject::setWriteValidator(WriteValidator validator)

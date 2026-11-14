@@ -46,6 +46,7 @@ cmake --build build -j
 
 export KNSTAX_TUNNEL_PEER_BIN=build/interop/bin/knstax_tunnel_peer
 export KNSTAX_ROUTING_PEER_BIN=build/interop/bin/knstax_routing_peer
+export KNSTAX_INTERFACE_PEER_BIN=build/interop/bin/knstax_interface_peer  # optional: defaults to the routing peer's directory
 pytest -q interop/python/tests
 ```
 

@@ -73,6 +73,9 @@ public:
     /// Forwarded to the backend's timing domain (ISR/hardware), where the
     /// per-telegram ACK decision is made.
     void setAckGroupAddresses(std::span<const uint16_t> addresses);
+    /// Publish the Individual Addresses the medium should L_ACK besides the
+    /// own one (tunnel addresses of a KNXnet/IP interface).
+    void setAckIndividualAddresses(std::span<const uint16_t> addresses);
 #if KNX_FEATURE_COUPLER
     void setGroupAckFilter(const GroupAckFilter* filter);
 #endif

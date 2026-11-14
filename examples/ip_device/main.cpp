@@ -85,7 +85,7 @@ int main() {
         IpTunnelingOptions{
             .host = kGatewayHost,
             // .port = NetIpPort(3671),   // default — omit unless non-standard
-            // .secure = SecureCommissioningOptions{ .enabled = true, ... },
+            // .secure = SecureCommissioningOptions{ .factoryToolKey = kFdsk },
         });
 
     if (appResult.isError()) {

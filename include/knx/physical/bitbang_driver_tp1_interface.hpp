@@ -28,6 +28,10 @@ public:
     // t_ack deadline. There is deliberately no per-telegram ACK submission
     // API: a task-scheduled decision can never reliably beat that deadline.
     virtual void setAckGroupAddresses(std::span<const uint16_t> addresses) = 0;
+    /// Individual Addresses acknowledged besides the own one (a KNXnet/IP
+    /// interface's tunnel addresses, 03_08_04 §2.2.2). Defaulted for drivers
+    /// that never serve an interface.
+    virtual void setAckIndividualAddresses(std::span<const uint16_t> addresses) { (void)addresses; }
     virtual void setLocalBusy(bool busy) = 0;
 #if KNX_FEATURE_COUPLER
     virtual void setGroupAckFilter(const GroupAckFilter* filter) { (void)filter; }

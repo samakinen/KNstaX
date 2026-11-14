@@ -22,7 +22,10 @@
 #include "knx/bau/bau.hpp"
 #include "knx/application/function_property_services.hpp"
 
+#include "knx/network/filter_table_load_control.hpp"
+
 #include <array>
+#include <memory>
 #include <cstdint>
 #include <span>
 #include <vector>
@@ -79,6 +82,7 @@ public:
     util::Result<void> configureRouterRole(const RouterRoleConfig& config);
     util::Result<void> syncRouterRoutingConfig();
     bool hasRouterRole() const { return _routerRole.filterTable != nullptr; }
+    network::FilterTableLoadControl* filterTableLoadControl() { return _filterTableLoad.get(); }
 
 #if KNX_FEATURE_NETIP
     util::Result<void> applyKnxNetIpConfiguration(const netip::KnxNetIpConfiguration& config);
@@ -98,6 +102,13 @@ private:
     /// Register and seed the Router Object; called from
     /// publishMediumInterfaceObjects() when a coupler role is declared.
     void publishRouterObject();
+
+    /// Bind the Router Object's PID_LOAD_STATE_CONTROL, PID_TABLE_REFERENCE
+    /// and PID_MCB_TABLE to the Filter Table load state machine and register
+    /// the table's memory window (03/05/01 §5.3.1).
+    void bindFilterTableLoadControl();
+    /// Follow a load state change in the forwarding path (§5.3.1.4).
+    void applyFilterTableLoadState(bool loaded);
 
     util::Result<application::FunctionPropertyResult> handleRouterFunctionProperty(
         const application::FunctionPropertyRequest& request);
@@ -140,6 +151,9 @@ private:
     MediumType _deviceMedium{MediumType::TP1};
     /// Coupler role, if declared.  A null filterTable means "end device".
     RouterRoleConfig _routerRole{};
+    /// Realisation Type 3 loading of _routerRole.filterTable; couplers only.
+    std::unique_ptr<network::FilterTableLoadControl> _filterTableLoad{};
+    bool _filterTableRegionRegistered{false};
 
 #if KNX_FEATURE_NETIP
     ManagementControl::BackboneKeyCallback _backboneKeyCallback{};

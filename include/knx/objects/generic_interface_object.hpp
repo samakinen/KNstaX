@@ -87,7 +87,27 @@ public:
                                                                     std::span<const uint8_t> value), 32>;
     void setWriteValidator(WriteValidator validator);
 
+    /**
+     * @brief Back a declared property with runtime state instead of storage.
+     *
+     * For properties that are behaviour, not data: the Router Object's
+     * PID_LOAD_STATE_CONTROL (a read returns the load state, a write is a
+     * load event), PID_TABLE_REFERENCE and PID_MCB_TABLE are owned by the
+     * Filter Table's load state machine. @p read supplies the whole current
+     * value; @p write receives the whole value the write leaves behind (for
+     * PDT_CONTROL, the control block as written). Neither observer nor
+     * validator runs for a bound property. Bind before the object is
+     * reachable by the management services.
+     */
+    struct PropertyBinding {
+        util::InplaceFunction<std::vector<uint8_t>(), 32> read{};
+        util::InplaceFunction<util::Result<void>(std::span<const uint8_t> value), 32> write{};
+    };
+    util::Result<void> bindProperty(application::PropertyID propertyId, PropertyBinding binding);
+
 private:
+    const PropertyBinding* findBinding(application::PropertyID propertyId) const;
+
     static util::Result<void> readGeneric(
         const PropertyContext& context,
         DomainIndex startIndex,
@@ -122,6 +142,7 @@ private:
     util::FixedVector<PropertyHandler, kMaxHandlerCount> _handlers;
     WriteObserver _writeObserver{};
     WriteValidator _writeValidator{};
+    std::vector<std::pair<application::PropertyID, PropertyBinding>> _bindings{};
     ValidationPolicy _validationPolicy{ValidationPolicy::OnWrite};
     mutable bool _handlersValidated{false};
     mutable bool _handlersValid{true};

@@ -20,6 +20,7 @@
 #include "knx/network/coupler_routing.hpp"
 #include "knx/network/two_port_coupler.hpp"
 #include "knx/network/routing_table_control.hpp"
+#include "knx/application/address_space.hpp"
 #include "knx/objects/generic_interface_object.hpp"
 #include "knx/objects/security_interface_object.hpp"
 #include "knx/util/log.hpp"
@@ -213,6 +214,9 @@ enum : uint8_t {
     kPidKnxNetIpBackboneKey = 91,
     kPidKnxNetIpSecuredServiceFamilies = 94,
 
+    kPidRouterLoadStateControl = 5,
+    kPidRouterTableReference = 7,
+    kPidRouterMcbTable = 27,
     kPidRouterLineStatus = 51,
     kPidRouterMainLcConfig = 52,
     kPidRouterSubLcConfig = 53,
@@ -684,10 +688,88 @@ void DeviceManagement::publishRouterObject()
     seedByte(kPidRouterMainLcGrpConfig, mainLcGrpConfig);
     seedByte(kPidRouterSubLcGrpConfig, subLcGrpConfig);
 
+    bindFilterTableLoadControl();
+
     KNX_LOGI(TAG, "Router Object published (medium=%u, hop count=%u, filter table %s)",
              static_cast<unsigned>(_routerRole.subMedium),
              static_cast<unsigned>(_routerRole.hopCount),
              _routerRole.filterTableInUse ? "in use" : "bypassed");
+}
+
+void DeviceManagement::bindFilterTableLoadControl()
+{
+    auto* router = _model.referenceObject(InterfaceObjectType::router());
+    if (router == nullptr || _routerRole.filterTable == nullptr) {
+        return;
+    }
+    if (_filterTableRegionRegistered) {
+        // The memory window is registered once; a role re-declared with a
+        // different table cannot move it.
+        return;
+    }
+
+    _filterTableLoad = std::make_unique<network::FilterTableLoadControl>(*_routerRole.filterTable);
+    _filterTableLoad->setStateListener([this](bool loaded) { applyFilterTableLoadState(loaded); });
+    auto* load = _filterTableLoad.get();
+
+    using Binding = objects::GenericInterfaceObject::PropertyBinding;
+    const auto bind = [&](uint8_t pid, Binding binding) {
+        const auto result = router->bindProperty(static_cast<application::PropertyID>(pid), std::move(binding));
+        if (result.isError()) {
+            KNX_LOGE(TAG, "Router Object PID %u could not be bound", static_cast<unsigned>(pid));
+        }
+    };
+    // PID_LOAD_STATE_CONTROL: read = load state, write = load event (§4.2.5).
+    bind(kPidRouterLoadStateControl, Binding{
+        .read = [load]() { return std::vector<uint8_t>{static_cast<uint8_t>(load->state())}; },
+        .write = [load](std::span<const uint8_t> block) {
+            load->applyEvent(block);
+            return util::Result<void>::ok();
+        }});
+    // PID_TABLE_REFERENCE: 4-octet pointer, zero while unallocated (§4.2.7).
+    bind(kPidRouterTableReference, Binding{
+        .read = [load]() {
+            const uint32_t reference = load->tableReference();
+            return std::vector<uint8_t>{static_cast<uint8_t>(reference >> 24), static_cast<uint8_t>(reference >> 16),
+                                        static_cast<uint8_t>(reference >> 8), static_cast<uint8_t>(reference)};
+        },
+        .write = {}});
+    // PID_MCB_TABLE: one 8-octet element (§4.2.27).
+    bind(kPidRouterMcbTable, Binding{
+        .read = [load]() {
+            const auto mcb = load->mcb();
+            return std::vector<uint8_t>(mcb.begin(), mcb.end());
+        },
+        .write = [load](std::span<const uint8_t> value) { return load->writeMcb(value); }});
+
+    if (_stackPort != nullptr) {
+        const auto region = application::MemoryRegion{MemoryAddress(load->memoryAddress()),
+                                                      static_cast<uint32_t>(network::FilterTable::kOctets),
+                                                      application::MemoryAccessMode::ReadWrite, "FilterTable"};
+        const auto result = _stackPort->registerMemoryRegion(region, load->memory());
+        if (result.isError()) {
+            KNX_LOGE(TAG, "Filter Table memory window not registered: %s",
+                     util::errorCodeToString(result.error()));
+        } else {
+            _filterTableRegionRegistered = true;
+        }
+    }
+}
+
+void DeviceManagement::applyFilterTableLoadState(bool loaded)
+{
+    auto* coupler = _stackPort != nullptr ? _stackPort->coupler() : nullptr;
+    network::CouplerRoutingPolicy* policy = _routerRole.routingPolicy;
+    if (policy == nullptr && coupler != nullptr && &coupler->filterTable() == _routerRole.filterTable) {
+        policy = &coupler->policy();
+    }
+    // §5.3.1.4: in any state but Loaded the evaluation is negative.
+    if (policy != nullptr) {
+        policy->setFilterTableLoaded(loaded);
+    }
+    if (coupler != nullptr && &coupler->policy() == policy) {
+        coupler->refreshAckFilters();
+    }
 }
 
 util::Result<void> DeviceManagement::syncRouterRoutingConfig()
@@ -1266,6 +1348,11 @@ bool ManagementControl::commissioningModeEnabled() const { return _management.co
 util::Result<void> ManagementControl::configureRouterRole(const RouterRoleConfig& config) { return _management.configureRouterRole(config); }
 util::Result<void> ManagementControl::syncRouterRoutingConfig() { return _management.syncRouterRoutingConfig(); }
 bool ManagementControl::hasRouterRole() const { return _management.hasRouterRole(); }
+
+network::FilterTableLoadControl* ManagementControl::filterTableLoadControl()
+{
+    return _management.filterTableLoadControl();
+}
 
 util::Result<void> ManagementControl::setReferenceObjectProperty(InterfaceObjectType objectType,
                                                                  application::PropertyID propertyId,

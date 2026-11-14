@@ -272,8 +272,8 @@ void test_product_commissioned_security_off_by_default(void)
 
 void test_product_commissioned_secure_options_wires_tool_key(void)
 {
-    // Setting SecureCommissioningOptions.enabled + toolKey must activate
-    // KNX Data Secure mode and register the key.
+    // A factory Tool Key with Security Mode on at Factory Reset: both in
+    // force on a fresh device.
     platform::LinuxPlatform platform;
 
     const std::array<uint8_t, 16> kToolKey = {
@@ -288,8 +288,8 @@ void test_product_commissioned_secure_options_wires_tool_key(void)
         CommissionedProductOptions{
             .mediumBackend = makeNullBackend(),
             .secure = SecureCommissioningOptions{
-                .enabled = true,
-                .toolKey = kToolKey,
+                .factoryToolKey = kToolKey,
+                .securityModeAtFactoryReset = true,
             },
         });
 
@@ -302,8 +302,8 @@ void test_product_commissioned_secure_options_wires_tool_key(void)
 
 void test_product_commissioned_secure_options_enabled_no_key(void)
 {
-    // enabled=true without a toolKey activates security mode but leaves the
-    // tool key unset — valid for devices that receive keys via ETS later.
+    // Security Mode without a factory Tool Key leaves the key unset — valid
+    // for devices that receive keys via ETS later.
     platform::LinuxPlatform platform;
 
     auto result = startCommissionedProduct(
@@ -313,7 +313,7 @@ void test_product_commissioned_secure_options_enabled_no_key(void)
         CommissionedProductOptions{
             .mediumBackend = makeNullBackend(),
             .secure = SecureCommissioningOptions{
-                .enabled = true,
+                .securityModeAtFactoryReset = true,
             },
         });
 
@@ -415,8 +415,8 @@ void test_product_commissioned_secure_options_yield_to_the_stored_tool_key(void)
             .persistence = {.storageNamespace = kNamespace},
             .mediumBackend = makeNullBackend(),
             .secure = SecureCommissioningOptions{
-                .enabled = true,
-                .toolKey = kFactoryKey,
+                .factoryToolKey = kFactoryKey,
+                .securityModeAtFactoryReset = true,
             },
         });
     TEST_ASSERT_TRUE(result.isOk());
@@ -428,6 +428,116 @@ void test_product_commissioned_secure_options_yield_to_the_stored_tool_key(void)
 
     runtime.reset();
     (void)std::filesystem::remove_all(objects::persistenceNamespaceDir(kNamespace), ec);
+}
+
+// What a Data Secure device ships as: the FDSK installed, Security Mode off
+// until ETS turns it on. Three moments of its life, with the same options at
+// every start: fresh, after an ETS secure download, after a Factory Reset.
+namespace {
+
+constexpr std::array<uint8_t, 16> kFdsk = {
+    0x0F, 0x0E, 0x0D, 0x0C, 0x0B, 0x0A, 0x09, 0x08,
+    0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, 0x00,
+};
+constexpr std::array<uint8_t, 16> kDownloadedToolKey = {
+    0x4E, 0x51, 0xA5, 0xC0, 0xA1, 0xA0, 0x4A, 0xB8,
+    0x74, 0xED, 0xDB, 0xC0, 0xF6, 0xF1, 0xE9, 0x7C,
+};
+const std::string kFdskNamespace = "secure_fdsk_surface";
+
+auto startFdskProduct(platform::LinuxPlatform& platform)
+{
+    auto result = startCommissionedProduct(
+        platform,
+        kCommissionedSurfaceProduct,
+        makeCommissionedBindings(kCommissionedSurfaceProduct),
+        CommissionedProductOptions{
+            .persistence = {.storageNamespace = kFdskNamespace},
+            .mediumBackend = makeNullBackend(),
+            .secure = SecureCommissioningOptions{.factoryToolKey = kFdsk},
+        });
+    TEST_ASSERT_TRUE(result.isOk());
+    return std::move(result.value());
+}
+
+void eraseFdskStore()
+{
+    std::error_code ec;
+    (void)std::filesystem::remove_all(objects::persistenceNamespaceDir(kFdskNamespace), ec);
+}
+
+} // namespace
+
+void test_product_fdsk_fresh_device_has_the_fdsk_and_mode_off(void)
+{
+    eraseFdskStore();
+    {
+        platform::LinuxPlatform platform;
+        auto runtime = startFdskProduct(platform);
+        TEST_ASSERT_TRUE(runtime->toolKeyInForceIs(kFdsk));
+        TEST_ASSERT_FALSE(runtime->isSecurityEnabled());
+    }
+    eraseFdskStore();
+}
+
+void test_product_fdsk_yields_to_the_ets_download_across_restarts(void)
+{
+    eraseFdskStore();
+    {
+        platform::LinuxPlatform platform;
+        auto runtime = startFdskProduct(platform);
+        TEST_ASSERT_TRUE(runtime->toolKeyInForceIs(kFdsk));
+    }
+    {
+        // The end of an ETS secure download, as it lands in the store: ETS's
+        // own Tool Key and Security Mode on.
+        platform::LinuxPlatform platform;
+        bau::BusAccessUnit device(platform, makeNullBackend());
+        TEST_ASSERT_TRUE(device.init(IndividualAddress(1, 1, 46), kFdskNamespace, 3).isOk());
+        device.securityObject().setSecurityMode(objects::SecurityMode::Enabled);
+        TEST_ASSERT_TRUE(device.writeProperty(
+            InterfaceObjectType::security(), InterfaceObjectInstance(1),
+            static_cast<application::PropertyID>(objects::SecurityProperty::ToolKey), 1,
+            std::span<const uint8_t>(kDownloadedToolKey)).isOk());
+        device.flushPendingPersistence();
+        device.close();
+    }
+    for (int boot = 0; boot < 2; ++boot) {
+        platform::LinuxPlatform platform;
+        auto runtime = startFdskProduct(platform);
+        TEST_ASSERT_TRUE(runtime->toolKeyInForceIs(kDownloadedToolKey));
+        TEST_ASSERT_FALSE(runtime->toolKeyInForceIs(kFdsk));
+        TEST_ASSERT_TRUE(runtime->isSecurityEnabled());
+    }
+    eraseFdskStore();
+}
+
+void test_product_fdsk_returns_after_a_factory_reset(void)
+{
+    eraseFdskStore();
+    {
+        platform::LinuxPlatform platform;
+        bau::BusAccessUnit device(platform, makeNullBackend());
+        TEST_ASSERT_TRUE(device.init(IndividualAddress(1, 1, 46), kFdskNamespace, 3).isOk());
+        device.securityObject().setSecurityMode(objects::SecurityMode::Enabled);
+        TEST_ASSERT_TRUE(device.writeProperty(
+            InterfaceObjectType::security(), InterfaceObjectInstance(1),
+            static_cast<application::PropertyID>(objects::SecurityProperty::ToolKey), 1,
+            std::span<const uint8_t>(kDownloadedToolKey)).isOk());
+        device.flushPendingPersistence();
+        device.close();
+    }
+    // A local Factory Reset erases the stored state (Habinari's
+    // control_service_factory_reset); a KNX Master Reset 02h leaves the
+    // factory state stored instead, covered in test_ets_connected_session.
+    eraseFdskStore();
+    {
+        platform::LinuxPlatform platform;
+        auto runtime = startFdskProduct(platform);
+        TEST_ASSERT_TRUE(runtime->toolKeyInForceIs(kFdsk));
+        TEST_ASSERT_FALSE(runtime->isSecurityEnabled());
+    }
+    eraseFdskStore();
 }
 
 void test_product_commissioned_security_helpers_refuse_before_start(void)
@@ -607,6 +717,9 @@ int main(void)
     RUN_TEST(test_product_commissioned_apply_ets_tool_key_post_start);
     RUN_TEST(test_product_commissioned_apply_ets_group_key_post_start);
     RUN_TEST(test_product_commissioned_secure_options_yield_to_the_stored_tool_key);
+    RUN_TEST(test_product_fdsk_fresh_device_has_the_fdsk_and_mode_off);
+    RUN_TEST(test_product_fdsk_yields_to_the_ets_download_across_restarts);
+    RUN_TEST(test_product_fdsk_returns_after_a_factory_reset);
     RUN_TEST(test_product_commissioned_security_helpers_refuse_before_start);
     RUN_TEST(test_product_commissioned_support_tier_values);
 #if KNX_IP_TUNNELING

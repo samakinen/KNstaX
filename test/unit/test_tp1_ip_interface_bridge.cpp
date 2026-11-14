@@ -207,111 +207,267 @@ uint8_t connectSingleChannel(TunnelingServerEndpoint& endpoint, TestUdpSocket& u
     return connectResponse.value().channelId;
 }
 
+std::vector<uint8_t> buildTunnelingAck(uint8_t channelId, uint8_t sequence)
+{
+    std::array<uint8_t, 32> bytes{};
+    PacketWriter writer{std::span<uint8_t>(bytes)};
+    auto result = control_packet::Codec::encodeTunnelingAck(writer, channelId, sequence, control_packet::kStatusNoError);
+    TEST_ASSERT_TRUE(result.isOk());
+    return std::vector<uint8_t>(writer.span().begin(), writer.span().end());
+}
+
+constexpr IndividualAddress kTunnelA(0x110A);
+constexpr IndividualAddress kTunnelB(0x110B);
+constexpr uint16_t kPortA = 49011;
+constexpr uint16_t kPortB = 49012;
+
+/// A decoded TUNNELLING_REQUEST the server sent to a client.
+struct ServerCemi {
+    uint16_t port{0};
+    uint8_t channelId{0};
+    uint8_t sequence{0};
+    uint8_t messageCode{0};
+    datalink::LDataFrame frame{};
+};
+
+std::vector<ServerCemi> serverCemis(const TestUdpSocket& udp)
+{
+    std::vector<ServerCemi> out;
+    for (const auto& tx : udp.tx()) {
+        auto request = control_packet::Codec::decodeTunnelingRequest(tx.payload);
+        if (request.isError()) {
+            continue;
+        }
+        ServerCemi item;
+        item.port = tx.destinationPort;
+        item.channelId = request.value().channelId;
+        item.sequence = request.value().sequence;
+        TEST_ASSERT_TRUE(decodeCemiLData(request.value().cemi, item.frame, item.messageCode).isOk());
+        out.push_back(item);
+    }
+    return out;
+}
+
+struct Fixture {
+    mocks::MockTp1DataLinkLayer tp1;
+    TestNetwork network;
+    TunnelingServerEndpoint server;
+    std::unique_ptr<network::Tp1IpInterfaceBridge> bridge;
+    uint8_t channelA{0};
+    uint8_t channelB{0};
+
+    explicit Fixture(bool twoClients)
+    {
+        TEST_ASSERT_TRUE(server.open(network, TunnelingServerEndpoint::Options{
+                                                  .tunnelAddresses = {kTunnelA, kTunnelB}}).isOk());
+        bridge = std::make_unique<network::Tp1IpInterfaceBridge>(tp1, server);
+        TEST_ASSERT_TRUE(bridge->init().isOk());
+        channelA = connectSingleChannel(server, *network.udp, kPortA);
+        network.udp->clearTx();
+        if (twoClients) {
+            channelB = connectSingleChannel(server, *network.udp, kPortB);
+            network.udp->clearTx();
+        }
+    }
+
+    void clientSends(uint8_t channelId, uint16_t port, uint8_t sequence, const datalink::LDataFrame& frame,
+                     uint8_t messageCode = 0x11)
+    {
+        std::array<uint8_t, kMaxCemiLDataSize> cemi{};
+        auto cemiResult = encodeCemiLData(frame, messageCode, cemi);
+        TEST_ASSERT_TRUE(cemiResult.isOk());
+        const auto request = buildTunnelingRequest(channelId, sequence,
+                                                   std::span<const uint8_t>(cemi.data(), cemiResult.value()));
+        network.udp->pushRx(IpAddress::fromOctets(127, 0, 0, 1), port, request);
+        auto poll = server.poll(0);
+        TEST_ASSERT_TRUE(poll.isOk());
+        bridge->poll();
+    }
+
+    void clientAcks(uint8_t channelId, uint16_t port, uint8_t sequence)
+    {
+        const auto ack = buildTunnelingAck(channelId, sequence);
+        network.udp->pushRx(IpAddress::fromOctets(127, 0, 0, 1), port, ack);
+        TEST_ASSERT_TRUE(server.poll(0).isOk());
+        bridge->poll();
+    }
+};
+
+datalink::LDataFrame makeClientRequest(IndividualAddress source, uint16_t destination, bool group)
+{
+    datalink::LDataFrame frame = makeTp1Frame();
+    frame.source = source;
+    if (group) {
+        frame.setDestination(GroupAddress(destination));
+    } else {
+        frame.setDestination(IndividualAddress(destination));
+    }
+    return frame;
+}
+
 } // namespace
 
 void test_tp1_ip_interface_bridge_forwards_tp1_to_ip_clients(void)
 {
-    mocks::MockTp1DataLinkLayer tp1;
-    TestNetwork network;
-    TunnelingServerEndpoint server;
-
-    auto openResult = server.open(network, TunnelingServerEndpoint::Options{.tunnelAddresses = {knx::IndividualAddress(0x110A), knx::IndividualAddress(0x110B)}});
-    TEST_ASSERT_TRUE(openResult.isOk());
-
-    network::Tp1IpInterfaceBridge bridge(tp1, server);
-    auto initResult = bridge.init();
-    TEST_ASSERT_TRUE(initResult.isOk());
-
-    constexpr uint16_t kClientPort = 49001;
-    const uint8_t channelId = connectSingleChannel(server, *network.udp, kClientPort);
-    TEST_ASSERT_EQUAL_UINT8(1u, channelId);
-
-    network.udp->clearTx();
+    Fixture f(false);
 
     const auto tp1Frame = makeTp1Frame();
-    tp1.injectRxFrame(tp1Frame);
+    f.tp1.injectRxFrame(tp1Frame);
+    // Indications are handed over on the tunnelling task.
+    TEST_ASSERT_EQUAL_UINT32(0u, static_cast<uint32_t>(f.network.udp->tx().size()));
+    f.bridge->poll();
 
-    const auto stats = bridge.statistics();
+    const auto stats = f.bridge->statistics();
     TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(stats.tp1ToIpForwarded));
     TEST_ASSERT_EQUAL_UINT32(0u, static_cast<uint32_t>(stats.tp1ToIpDropped));
 
-    TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(network.udp->tx().size()));
-    auto tunneled = control_packet::Codec::decodeTunnelingRequest(network.udp->tx()[0].payload);
-    TEST_ASSERT_TRUE(tunneled.isOk());
-
-    datalink::LDataFrame decoded;
-    uint8_t msgCode = 0;
-    auto decodeResult = decodeCemiLData(tunneled.value().cemi, decoded, msgCode);
-    TEST_ASSERT_TRUE(decodeResult.isOk());
-    TEST_ASSERT_EQUAL_HEX16(tp1Frame.destination.raw, decoded.destination.raw);
+    const auto sent = serverCemis(*f.network.udp);
+    TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(sent.size()));
+    TEST_ASSERT_EQUAL_HEX8(0x29u, sent[0].messageCode);
+    TEST_ASSERT_EQUAL_HEX16(tp1Frame.destination.raw, sent[0].frame.destination.raw);
 }
 
 void test_tp1_ip_interface_bridge_forwards_ip_cemi_to_tp1(void)
 {
-    mocks::MockTp1DataLinkLayer tp1;
-    TestNetwork network;
-    TunnelingServerEndpoint server;
-
-    auto openResult = server.open(network, TunnelingServerEndpoint::Options{.tunnelAddresses = {knx::IndividualAddress(0x110A), knx::IndividualAddress(0x110B)}});
-    TEST_ASSERT_TRUE(openResult.isOk());
-
-    network::Tp1IpInterfaceBridge bridge(tp1, server);
-    TEST_ASSERT_TRUE(bridge.init().isOk());
-
-    constexpr uint16_t kClientPort = 49002;
-    const uint8_t channelId = connectSingleChannel(server, *network.udp, kClientPort);
-    network.udp->clearTx();
+    Fixture f(false);
 
     const auto frame = makeTp1Frame();
-    std::array<uint8_t, kMaxCemiLDataSize> cemi{};
-    auto cemiResult = encodeCemiLData(frame, 0x29, cemi);
-    TEST_ASSERT_TRUE(cemiResult.isOk());
+    f.clientSends(f.channelA, kPortA, 0, frame);
 
-    const auto request = buildTunnelingRequest(channelId, 0, std::span<const uint8_t>(cemi.data(), cemiResult.value()));
-    network.udp->pushRx(IpAddress::fromOctets(127, 0, 0, 1), kClientPort, request);
-
-    auto poll = server.poll(0);
-    TEST_ASSERT_TRUE(poll.isOk());
-    TEST_ASSERT_TRUE(poll.value());
-
-    TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(tp1.getSentFrameCount()));
-    const auto sentFrame = tp1.getLastSentFrame();
+    TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(f.tp1.getSentFrameCount()));
+    const auto sentFrame = f.tp1.getLastSentFrame();
     TEST_ASSERT_EQUAL_HEX16(frame.destination.raw, sentFrame.destination.raw);
+    // A source other than 0000h goes onto the line unchanged (03_08_04 2.2.2).
+    TEST_ASSERT_EQUAL_HEX16(frame.source.raw, sentFrame.source.raw);
 
-    const auto stats = bridge.statistics();
+    const auto stats = f.bridge->statistics();
     TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(stats.ipToTp1Forwarded));
     TEST_ASSERT_EQUAL_UINT32(0u, static_cast<uint32_t>(stats.ipToTp1Dropped));
 }
 
+// 03_08_04 2.2.2: an L_Data.req with Source Address 0000h is sent with the
+// connection's tunnel address. 03_06_03 4.1.5.3.4: the L_Data.con carries
+// the requested frame's addresses and Confirm flag 0 on success.
+void test_tp1_ip_interface_bridge_fills_tunnel_address_and_confirms_positively(void)
+{
+    Fixture f(true);
+
+    f.clientSends(f.channelB, kPortB, 0, makeClientRequest(IndividualAddress(0), 0x2201, true));
+
+    TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(f.tp1.getSentFrameCount()));
+    TEST_ASSERT_EQUAL_HEX16(kTunnelB.raw, f.tp1.getLastSentFrame().source.raw);
+
+    const auto sent = serverCemis(*f.network.udp);
+    // The L_Data.con to the sender, and the frame indicated to the other
+    // connection as any device on the line would see it.
+    TEST_ASSERT_EQUAL_UINT32(2u, static_cast<uint32_t>(sent.size()));
+    TEST_ASSERT_EQUAL_UINT16(kPortB, sent[0].port);
+    TEST_ASSERT_EQUAL_HEX8(0x2Eu, sent[0].messageCode);
+    TEST_ASSERT_FALSE(sent[0].frame.confirmation); // C = 0: no error
+    TEST_ASSERT_EQUAL_HEX16(kTunnelB.raw, sent[0].frame.source.raw);
+    TEST_ASSERT_EQUAL_HEX16(0x2201u, sent[0].frame.destination.raw);
+    TEST_ASSERT_TRUE(sent[0].frame.destinationType == AddressType::Group);
+    TEST_ASSERT_EQUAL_UINT16(kPortA, sent[1].port);
+    TEST_ASSERT_EQUAL_HEX8(0x29u, sent[1].messageCode);
+    TEST_ASSERT_EQUAL_HEX16(kTunnelB.raw, sent[1].frame.source.raw);
+
+    TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(f.bridge->statistics().positiveConfirmations));
+}
+
+// NAK, BUSY or no acknowledge after the repetitions: Confirm flag 1.
+void test_tp1_ip_interface_bridge_confirms_negatively_when_the_line_fails(void)
+{
+    using State = datalink::Tp1DataLinkLayer::TxProgressState;
+    const State failures[] = {State::Timeout, State::TransmissionFailed, State::Busy};
+    for (State failure : failures) {
+        Fixture f(true);
+        f.tp1.setTxOutcome(failure);
+
+        f.clientSends(f.channelA, kPortA, 0, makeClientRequest(IndividualAddress(0), 0x1105, false));
+
+        const auto sent = serverCemis(*f.network.udp);
+        // Only the confirmation: a frame that did not make it is not
+        // indicated to anyone.
+        TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(sent.size()));
+        TEST_ASSERT_EQUAL_UINT16(kPortA, sent[0].port);
+        TEST_ASSERT_EQUAL_HEX8(0x2Eu, sent[0].messageCode);
+        TEST_ASSERT_TRUE(sent[0].frame.confirmation); // C = 1: error
+        TEST_ASSERT_EQUAL_HEX16(kTunnelA.raw, sent[0].frame.source.raw);
+        TEST_ASSERT_EQUAL_HEX16(0x1105u, sent[0].frame.destination.raw);
+        TEST_ASSERT_TRUE(sent[0].frame.destinationType == AddressType::Individual);
+        const auto stats = f.bridge->statistics();
+        TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(stats.negativeConfirmations));
+        TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(stats.ipToTp1Dropped));
+    }
+}
+
+// Point-to-point frames from TP1 go only to the connection whose tunnel
+// address they are for; group frames to all (03_08_04 2.2.2).
+void test_tp1_ip_interface_bridge_routes_indications_by_tunnel_address(void)
+{
+    Fixture f(true);
+
+    auto toB = makeTp1Frame();
+    toB.setDestination(kTunnelB);
+    f.tp1.injectRxFrame(toB);
+    auto toSomeoneElse = makeTp1Frame();
+    toSomeoneElse.setDestination(IndividualAddress(0x1150));
+    f.tp1.injectRxFrame(toSomeoneElse);
+    f.bridge->poll();
+
+    auto sent = serverCemis(*f.network.udp);
+    TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(sent.size()));
+    TEST_ASSERT_EQUAL_UINT16(kPortB, sent[0].port);
+    TEST_ASSERT_EQUAL_HEX16(kTunnelB.raw, sent[0].frame.destination.raw);
+
+    f.clientAcks(f.channelB, kPortB, sent[0].sequence);
+    f.network.udp->clearTx();
+    f.tp1.injectRxFrame(makeTp1Frame());
+    f.bridge->poll();
+    sent = serverCemis(*f.network.udp);
+    TEST_ASSERT_EQUAL_UINT32(2u, static_cast<uint32_t>(sent.size()));
+    TEST_ASSERT_TRUE(sent[0].port != sent[1].port);
+}
+
+// Requests are confirmed one at a time in arrival order.
+void test_tp1_ip_interface_bridge_confirms_requests_in_order(void)
+{
+    Fixture f(false);
+
+    f.clientSends(f.channelA, kPortA, 0, makeClientRequest(IndividualAddress(0), 0x0901, true));
+    auto first = serverCemis(*f.network.udp);
+    TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(first.size()));
+    f.clientAcks(f.channelA, kPortA, first[0].sequence);
+    f.network.udp->clearTx();
+
+    f.clientSends(f.channelA, kPortA, 1, makeClientRequest(IndividualAddress(0), 0x0902, true));
+    auto second = serverCemis(*f.network.udp);
+    TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(second.size()));
+    TEST_ASSERT_EQUAL_HEX8(0x2Eu, second[0].messageCode);
+    TEST_ASSERT_EQUAL_HEX16(0x0902u, second[0].frame.destination.raw);
+    TEST_ASSERT_EQUAL_UINT32(2u, static_cast<uint32_t>(f.tp1.getSentFrameCount()));
+}
+
 void test_tp1_ip_interface_bridge_drops_invalid_ip_cemi(void)
 {
-    mocks::MockTp1DataLinkLayer tp1;
-    TestNetwork network;
-    TunnelingServerEndpoint server;
-
-    auto openResult = server.open(network, TunnelingServerEndpoint::Options{.tunnelAddresses = {knx::IndividualAddress(0x110A), knx::IndividualAddress(0x110B)}});
-    TEST_ASSERT_TRUE(openResult.isOk());
-
-    network::Tp1IpInterfaceBridge bridge(tp1, server);
-    TEST_ASSERT_TRUE(bridge.init().isOk());
-
-    constexpr uint16_t kClientPort = 49003;
-    const uint8_t channelId = connectSingleChannel(server, *network.udp, kClientPort);
-    network.udp->clearTx();
+    Fixture f(false);
 
     const std::array<uint8_t, 3> invalidCemi{0x01, 0x02, 0x03};
-    const auto request = buildTunnelingRequest(channelId, 0, invalidCemi);
-    network.udp->pushRx(IpAddress::fromOctets(127, 0, 0, 1), kClientPort, request);
-
-    auto poll = server.poll(0);
+    const auto request = buildTunnelingRequest(f.channelA, 0, invalidCemi);
+    f.network.udp->pushRx(IpAddress::fromOctets(127, 0, 0, 1), kPortA, request);
+    auto poll = f.server.poll(0);
     TEST_ASSERT_TRUE(poll.isOk());
     TEST_ASSERT_TRUE(poll.value());
+    f.bridge->poll();
 
-    TEST_ASSERT_EQUAL_UINT32(0u, static_cast<uint32_t>(tp1.getSentFrameCount()));
+    // An L_Data.ind from the client is not a request either.
+    f.clientSends(f.channelA, kPortA, 1, makeTp1Frame(), 0x29);
 
-    const auto stats = bridge.statistics();
+    TEST_ASSERT_EQUAL_UINT32(0u, static_cast<uint32_t>(f.tp1.getSentFrameCount()));
+
+    const auto stats = f.bridge->statistics();
     TEST_ASSERT_EQUAL_UINT32(0u, static_cast<uint32_t>(stats.ipToTp1Forwarded));
-    TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(stats.ipToTp1Dropped));
+    TEST_ASSERT_EQUAL_UINT32(2u, static_cast<uint32_t>(stats.ipToTp1Dropped));
 }
 
 int main(void)
@@ -319,6 +475,10 @@ int main(void)
     UNITY_BEGIN();
     RUN_TEST(test_tp1_ip_interface_bridge_forwards_tp1_to_ip_clients);
     RUN_TEST(test_tp1_ip_interface_bridge_forwards_ip_cemi_to_tp1);
+    RUN_TEST(test_tp1_ip_interface_bridge_fills_tunnel_address_and_confirms_positively);
+    RUN_TEST(test_tp1_ip_interface_bridge_confirms_negatively_when_the_line_fails);
+    RUN_TEST(test_tp1_ip_interface_bridge_routes_indications_by_tunnel_address);
+    RUN_TEST(test_tp1_ip_interface_bridge_confirms_requests_in_order);
     RUN_TEST(test_tp1_ip_interface_bridge_drops_invalid_ip_cemi);
     return UNITY_END();
 }

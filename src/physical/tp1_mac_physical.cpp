@@ -74,6 +74,10 @@ void Tp1MacPhysical::setAckGroupAddresses(std::span<const uint16_t> addresses) {
     _backend->setAckGroupAddresses(addresses);
 }
 
+void Tp1MacPhysical::setAckIndividualAddresses(std::span<const uint16_t> addresses) {
+    _backend->setAckIndividualAddresses(addresses);
+}
+
 #if KNX_FEATURE_COUPLER
 void Tp1MacPhysical::setGroupAckFilter(const GroupAckFilter* filter) {
     _backend->setGroupAckFilter(filter);

@@ -176,6 +176,10 @@ public:
                                    static_cast<uint8_t>(addresses.size()));
     }
 
+    void setAckIndividualAddresses(std::span<const uint16_t> addresses) override {
+        _core.setAckIndividualAddresses(addresses.data(), addresses.size());
+    }
+
     void setLocalBusy(bool busy) override {
         _core.setLocalBusy(busy);
     }

@@ -609,6 +609,29 @@ void test_addressed_correct_frame_is_acknowledged()
     TEST_ASSERT_EQUAL_INT(BitBangDriverTimerIsr::ACK_BYTE_ACK, sentAckByte(drainMessages()));
 }
 
+// A KNXnet/IP interface acknowledges its tunnel addresses as well as its own
+// (03_08_04 2.2.2); nothing else individually addressed.
+void test_additional_individual_addresses_are_acknowledged()
+{
+    driver.setOwnAddress(kOwnAddressRaw);
+    const uint16_t tunnels[] = {0x110B, 0x110C};
+    driver.setAckIndividualAddresses(tunnels, 2u);
+
+    receiveTelegram(makeStandardFrame(kRemoteAddressRaw, 0x110C, false));
+    TEST_ASSERT_EQUAL_INT(BitBangDriverTimerIsr::ACK_BYTE_ACK, sentAckByte(drainMessages()));
+    receiveTelegram(makeStandardFrame(kRemoteAddressRaw, kOwnAddressRaw, false));
+    TEST_ASSERT_EQUAL_INT(BitBangDriverTimerIsr::ACK_BYTE_ACK, sentAckByte(drainMessages()));
+    receiveTelegram(makeStandardFrame(kRemoteAddressRaw, 0x110D, false));
+    TEST_ASSERT_EQUAL_INT(-1, sentAckByte(drainMessages()));
+    // A group frame with the same raw value is not one of them.
+    receiveTelegram(makeStandardFrame(kRemoteAddressRaw, 0x110C, true));
+    TEST_ASSERT_EQUAL_INT(-1, sentAckByte(drainMessages()));
+
+    driver.setAckIndividualAddresses(nullptr, 0u);
+    receiveTelegram(makeStandardFrame(kRemoteAddressRaw, 0x110C, false));
+    TEST_ASSERT_EQUAL_INT(-1, sentAckByte(drainMessages()));
+}
+
 // A frame whose check octet is wrong has no character error, so only the
 // parity/framing test was applied and it was acknowledged: the sender never
 // repeated a frame this device then discarded.
@@ -880,6 +903,7 @@ int main()
     RUN_TEST(test_late_mid_byte_timer_callback_keeps_rx_sample_grid);
     RUN_TEST(test_back_to_back_unaddressed_telegrams_carry_no_ack_state_forward);
     RUN_TEST(test_addressed_correct_frame_is_acknowledged);
+    RUN_TEST(test_additional_individual_addresses_are_acknowledged);
     RUN_TEST(test_addressed_frame_with_bad_check_octet_is_nakked);
     RUN_TEST(test_addressed_frame_shorter_than_eight_octets_is_nakked);
     RUN_TEST(test_group_address_beyond_the_64th_is_acknowledged);

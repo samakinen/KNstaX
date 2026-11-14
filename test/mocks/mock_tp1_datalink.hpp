@@ -70,11 +70,16 @@ public:
             _sentFrames.push_back(_pendingFrame);
             _txStarted = true;
             _txActive = false;
-            return datalink::Tp1DataLinkLayer::TxProgressState::Success;
+            return _txOutcome;
         }
 
         _txActive = false;
-        return datalink::Tp1DataLinkLayer::TxProgressState::Success;
+        return _txOutcome;
+    }
+
+    /// The data link outcome pollTransmit() reports for the next frames.
+    void setTxOutcome(datalink::Tp1DataLinkLayer::TxProgressState outcome) {
+        _txOutcome = outcome;
     }
 
     void setReceiveCallback(datalink::LDataCallback callback) override {
@@ -116,6 +121,8 @@ private:
     datalink::LDataFrame _pendingFrame;
     bool _txActive{false};
     bool _txStarted{false};
+    datalink::Tp1DataLinkLayer::TxProgressState _txOutcome{
+        datalink::Tp1DataLinkLayer::TxProgressState::Success};
 };
 
 } // namespace mocks

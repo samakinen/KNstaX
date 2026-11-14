@@ -59,6 +59,7 @@ class MockTp1Physical;
 
 namespace network {
 class FilterTable;
+class FilterTableLoadControl;
 class CouplerRoutingPolicy;
 class TwoPortCoupler;
 }
@@ -598,6 +599,14 @@ public:
      */
     util::Result<void> syncRouterRoutingConfig();
     bool hasRouterRole() const;
+
+    /**
+     * The Router Object's Filter Table load state machine (Realisation Type
+     * 3, 03/05/01 §5.3.1): PID_LOAD_STATE_CONTROL, PID_TABLE_REFERENCE,
+     * PID_MCB_TABLE and the memory window the table is written through.
+     * Null until the Router Object is published.
+     */
+    network::FilterTableLoadControl* filterTableLoadControl();
 
 #if KNX_FEATURE_NETIP
     /**

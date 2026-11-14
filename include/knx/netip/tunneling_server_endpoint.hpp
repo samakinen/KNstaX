@@ -95,6 +95,16 @@ public:
     size_t activeChannelCount() const;
     std::vector<ChannelInfo> activeChannels() const;
 
+    /// The Individual Addresses the server assumes for its connections, one
+    /// per connection slot, whether a connection is open on it or not
+    /// (03/08/04 §2.2.2: they are permanent and acknowledged on the KNX
+    /// side). Empty while closed.
+    std::span<const IndividualAddress> tunnelAddresses() const;
+    /// The tunnel address of an open connection, or 0.0.0 for none.
+    IndividualAddress tunnelAddressOf(ChannelId channelId) const;
+    /// The open connection that uses @p address, or ChannelId::invalid().
+    ChannelId channelForTunnelAddress(IndividualAddress address) const;
+
 private:
     struct ChannelSlot {
         bool active{false};

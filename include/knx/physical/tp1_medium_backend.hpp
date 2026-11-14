@@ -136,6 +136,11 @@ public:
     virtual void setAckGroupAddresses(std::span<const uint16_t> addresses) {
         (void)addresses;
     }
+    /// Individual Addresses acknowledged besides the own one (a KNXnet/IP
+    /// interface's tunnel addresses, 03_08_04 §2.2.2).
+    virtual void setAckIndividualAddresses(std::span<const uint16_t> addresses) {
+        (void)addresses;
+    }
     virtual void setLocalBusy(bool busy) { (void)busy; }
 #if KNX_FEATURE_COUPLER
     /// A coupler's group acknowledge rule (see GroupAckFilter); null clears it.

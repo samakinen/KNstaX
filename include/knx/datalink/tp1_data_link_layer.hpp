@@ -395,6 +395,18 @@ public:
      */
     void setPromiscuousMode(PromiscuousMode mode);
 
+    /// Maximum number of additional Individual Addresses.
+    static constexpr size_t MAX_ADDITIONAL_INDIVIDUAL_ADDRESSES = 16;
+
+    /**
+     * @brief Individual Addresses this line assumes besides its own: the
+     *        tunnel addresses of a KNXnet/IP interface, which it
+     *        acknowledges on the medium (03_08_04 §2.2.2) and accepts in the
+     *        receive filter. Replaces the previous set; at most
+     *        MAX_ADDITIONAL_INDIVIDUAL_ADDRESSES entries.
+     */
+    util::Result<void> setAdditionalIndividualAddresses(std::span<const IndividualAddress> addresses);
+
 #if KNX_FEATURE_COUPLER
     /**
      * @brief Install a coupler's group acknowledge rule in the physical
@@ -465,6 +477,7 @@ private:
         util::Result<void> (*setBusMonitorMode)(void*, Toggle){nullptr};
         util::Result<void> (*setOwnAddress)(void*, uint16_t){nullptr};
         void (*setAckGroupAddresses)(void*, std::span<const uint16_t>){nullptr};
+        void (*setAckIndividualAddresses)(void*, std::span<const uint16_t>){nullptr};
 #if KNX_FEATURE_COUPLER
         void (*setGroupAckFilter)(void*, const physical::GroupAckFilter*){nullptr};
 #endif
@@ -544,6 +557,14 @@ private:
                     (void)addresses;
                 }
             },
+            .setAckIndividualAddresses = [] (void* context, std::span<const uint16_t> addresses) {
+                if constexpr (requires(ConcretePhysical* p) { p->setAckIndividualAddresses(addresses); }) {
+                    static_cast<ConcretePhysical*>(context)->setAckIndividualAddresses(addresses);
+                } else {
+                    (void)context;
+                    (void)addresses;
+                }
+            },
 #if KNX_FEATURE_COUPLER
             .setGroupAckFilter = [] (void* context, const physical::GroupAckFilter* filter) {
                 if constexpr (requires(ConcretePhysical* p) { p->setGroupAckFilter(filter); }) {
@@ -573,6 +594,7 @@ private:
     platform::TimingPlatform* _timingPlatform;
     IndividualAddress _ownAddress;
     util::FixedVector<GroupAddress, MAX_GROUP_ADDRESSES> _groupAddresses;
+    util::FixedVector<uint16_t, MAX_ADDITIONAL_INDIVIDUAL_ADDRESSES> _additionalAddresses;
     bool _promiscuousMode;
     bool _initialized;
     

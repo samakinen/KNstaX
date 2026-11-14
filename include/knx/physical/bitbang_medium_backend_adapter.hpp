@@ -38,6 +38,7 @@ public:
     util::Result<void> setOwnAddress(uint16_t addressRaw) override;
 
     void setAckGroupAddresses(std::span<const uint16_t> addresses) override;
+    void setAckIndividualAddresses(std::span<const uint16_t> addresses) override;
     void setLocalBusy(bool busy) override;
 #if KNX_FEATURE_COUPLER
     void setGroupAckFilter(const GroupAckFilter* filter) override;

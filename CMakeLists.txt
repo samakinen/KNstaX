@@ -650,7 +650,8 @@ else()
         endif()
 
         # Smoke test: TP1 <-> IP interface bridge path
-        knx_add_test(test_tp1_ip_interface SOURCES test/integration/test_tp1_ip_interface.cpp LABELS integration)
+        knx_add_test(test_tp1_ip_interface SOURCES test/integration/test_tp1_ip_interface.cpp
+            LABELS integration tp1 virtual TIMEOUT 30)
         knx_add_test(test_netip_routing_multicast SOURCES test/integration/test_netip_routing_multicast.cpp
             LABELS integration)
 
@@ -720,6 +721,13 @@ else()
         target_link_libraries(knstax_routing_peer PRIVATE
             knx_core
         )
+        # KNXnet/IP interface (tunnelling server + TP1 bridge) on a scripted line
+        add_executable(knstax_interface_peer
+            interop/knstax_peer/knstax_interface_peer.cpp
+        )
+        target_link_libraries(knstax_interface_peer PRIVATE
+            knx_core
+        )
 
         option(ENABLE_INTEROP_TESTS "Build and register the interop Python harness tests" OFF)
         if(ENABLE_INTEROP_TESTS AND NOT KNX_FEATURE_TUNNELING)
@@ -734,6 +742,8 @@ else()
             set_target_properties(knstax_tunnel_peer PROPERTIES
                 RUNTIME_OUTPUT_DIRECTORY ${INTEROP_BIN_DIR})
             set_target_properties(knstax_routing_peer PROPERTIES
+                RUNTIME_OUTPUT_DIRECTORY ${INTEROP_BIN_DIR})
+            set_target_properties(knstax_interface_peer PROPERTIES
                 RUNTIME_OUTPUT_DIRECTORY ${INTEROP_BIN_DIR})
 
             # Detect whether pytest is available in the selected Python interpreter.
@@ -750,6 +760,7 @@ else()
                     ENVIRONMENT
                         KNSTAX_TUNNEL_PEER_BIN=${INTEROP_BIN_DIR}/knstax_tunnel_peer
                         KNSTAX_ROUTING_PEER_BIN=${INTEROP_BIN_DIR}/knstax_routing_peer
+                        KNSTAX_INTERFACE_PEER_BIN=${INTEROP_BIN_DIR}/knstax_interface_peer
                     LABELS Interop Integration Long
                     TIMEOUT 900
                     WORKING_DIRECTORY ${SRC_DIR})
@@ -785,6 +796,7 @@ else()
         knx_add_test(test_group_object_table SOURCES test/unit/test_group_object_table.cpp)
         knx_add_test(test_security_interface_object SOURCES test/unit/test_security_interface_object.cpp)
         knx_add_test(test_filter_table SOURCES test/unit/test_filter_table.cpp)
+        knx_add_test(test_filter_table_load_control SOURCES test/unit/test_filter_table_load_control.cpp LABELS unit)
 
         # Datapoint types
         knx_add_test(test_dpt2_3_4 SOURCES test/unit/test_dpt2_3_4.cpp)
@@ -804,6 +816,9 @@ else()
         knx_add_test(test_bau_onwire SOURCES test/integration/test_bau_onwire.cpp LABELS integration)
         # Configuration set before BusAccessUnit::init(): factory default vs restored state
         knx_add_test(test_bau_preinit_configuration SOURCES test/integration/test_bau_preinit_configuration.cpp
+            LABELS integration)
+        # Filter Table Realisation Type 3 download through the Router Object
+        knx_add_test(test_filter_table_type3_download SOURCES test/integration/test_filter_table_type3_download.cpp
             LABELS integration)
         if(KNX_SECURE_ENABLED)
             # Data Secure end to end on the TP1 path: a whole device on the

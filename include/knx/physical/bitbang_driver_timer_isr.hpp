@@ -124,6 +124,9 @@ public:
     /// left every address beyond it unacknowledged, so senders repeated each
     /// of those frames three times and reported failure.
     static constexpr uint16_t MAX_ACK_GROUP_ADDRESSES = 256;
+    /// Additional Individual Addresses acknowledged besides the own one
+    /// (tunnel addresses of a KNXnet/IP interface).
+    static constexpr uint8_t MAX_ACK_INDIVIDUAL_ADDRESSES = 16;
 
     /// Tries for one send() before a frame that keeps losing bitwise
     /// arbitration is abandoned. Losing arbitration is normal TP1 bus access,
@@ -169,6 +172,22 @@ public:
         _isrHal.lockFromTask();
         std::copy_n(sorted.begin(), count, _ackGroupAddresses.begin());
         _ackGroupAddressCount = static_cast<uint16_t>(count);
+        _isrHal.unlockFromTask();
+    }
+
+    /// Publish the further Individual Addresses the device assumes besides
+    /// its own and therefore acknowledges: a KNXnet/IP Tunnelling server's
+    /// tunnel addresses, which "shall generate Layer-2 acknowledge frames for
+    /// these additionally assumed KNX Individual Addresses" (03_08_04 §2.2.2).
+    /// Same publication rule as setAckGroupAddresses(); at most
+    /// MAX_ACK_INDIVIDUAL_ADDRESSES entries, searched linearly.
+    void setAckIndividualAddresses(const uint16_t* addresses, size_t count) {
+        if (count > MAX_ACK_INDIVIDUAL_ADDRESSES) {
+            count = MAX_ACK_INDIVIDUAL_ADDRESSES;
+        }
+        _isrHal.lockFromTask();
+        std::copy_n(addresses, count, _ackIndividualAddresses.begin());
+        _ackIndividualAddressCount = static_cast<uint8_t>(count);
         _isrHal.unlockFromTask();
     }
 
@@ -333,6 +352,8 @@ private:
     // Sorted ascending by setAckGroupAddresses(); armEarlyAckIfAddressed()
     // binary-searches it.
     std::array<uint16_t, MAX_ACK_GROUP_ADDRESSES> _ackGroupAddresses{};
+    volatile uint8_t _ackIndividualAddressCount{0};
+    std::array<uint16_t, MAX_ACK_INDIVIDUAL_ADDRESSES> _ackIndividualAddresses{};
 #if KNX_FEATURE_COUPLER
     const GroupAckFilter* volatile _groupAckFilter{nullptr};
 #endif
@@ -654,6 +675,17 @@ private:
         return false;
     }
 
+    [[gnu::always_inline]] bool ackIndividualTableContains(uint16_t destRaw) const noexcept
+    {
+        const uint8_t count = _ackIndividualAddressCount;
+        for (uint8_t i = 0; i < count; ++i) {
+            if (_ackIndividualAddresses[i] == destRaw) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     // ISR-side DL-ACK decision, evaluated the instant the destination address
     // is fully known (mid-frame). Latches the ACK/BUSY intent that the DL-ACK
     // slot alarm transmits after t_ack; rxHandleTelegramComplete() downgrades
@@ -683,9 +715,9 @@ private:
         } else {
             // Individually-addressed frames: always ACK when they match our
             // address; the individual broadcast 0xFFFF is never acknowledged.
-            addressed = _ownAddressRaw != 0
-                && destRaw != 0xFFFFu
-                && destRaw == _ownAddressRaw;
+            addressed = destRaw != 0xFFFFu
+                && ((_ownAddressRaw != 0 && destRaw == _ownAddressRaw)
+                    || ackIndividualTableContains(destRaw));
         }
 
         if (addressed) {

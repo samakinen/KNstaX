@@ -20,11 +20,14 @@
 #include "unity.h"
 
 #include "knx/bau/bau.hpp"
+#include "knx/network/filter_table_load_control.hpp"
 #include "knx/network/two_port_coupler.hpp"
 #include "knx/physical/null_tp1_medium_backend.hpp"
 #include "knx/physical/tp1_mac_physical.hpp"
 #include "knx/platform/linux_platform.hpp"
 
+#include <algorithm>
+#include <array>
 #include <memory>
 
 using namespace knx;
@@ -206,6 +209,40 @@ void test_downloaded_coupler_configuration_reaches_the_policy(void)
                           coupler->policy().lineConfig(network::CouplerPort::Secondary).physFrame));
 }
 
+void test_filter_table_load_state_drives_the_routing_policy(void)
+{
+    // 03/05/01 §5.3.1.4: the Filter Table evaluation is negative in every
+    // load state but Loaded. The Router Object's PID_LOAD_STATE_CONTROL is
+    // a property write; the coupler has to follow it.
+    platform::LinuxPlatform platform;
+    auto stackPort = makeCouplerStackPort(platform);
+    auto* stackPortRaw = stackPort.get();
+
+    BusAccessUnit bau(platform, std::move(stackPort));
+    TEST_ASSERT_TRUE(bau.init(IndividualAddress(ia(1, 1, 0)), "knx_coupler_test", 1).isOk());
+    TEST_ASSERT_TRUE(bau.management().configureRouterRole({}).isOk());
+    auto* coupler = stackPortRaw->coupler();
+    auto* load = bau.management().filterTableLoadControl();
+    TEST_ASSERT_NOT_NULL(coupler);
+    TEST_ASSERT_NOT_NULL(load);
+    TEST_ASSERT_TRUE(coupler->policy().isFilterTableLoaded());
+
+    const auto loadEvent = [&](std::initializer_list<uint8_t> block) {
+        std::array<uint8_t, 10> data{};
+        std::copy(block.begin(), block.end(), data.begin());
+        load->applyEvent(data);
+    };
+    loadEvent({0x04});
+    TEST_ASSERT_FALSE(coupler->policy().isFilterTableLoaded());
+    loadEvent({0x01});
+    loadEvent({0x03, 0x0B, 0x00, 0x00, 0x20, 0x00, 0x01, 0x00});
+    TEST_ASSERT_FALSE(coupler->policy().isFilterTableLoaded());
+    load->memory()[0x0801u >> 3] = static_cast<uint8_t>(1u << (0x0801u & 7u));
+    loadEvent({0x02});
+    TEST_ASSERT_TRUE(coupler->policy().isFilterTableLoaded());
+    TEST_ASSERT_TRUE(coupler->filterTable().passes(GroupAddress(0x0801)));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -216,5 +253,6 @@ int main(void)
     RUN_TEST(test_the_router_object_binds_to_the_couplers_own_filter_table);
     RUN_TEST(test_configure_router_role_still_refuses_on_a_non_coupler);
     RUN_TEST(test_downloaded_coupler_configuration_reaches_the_policy);
+    RUN_TEST(test_filter_table_load_state_drives_the_routing_policy);
     return UNITY_END();
 }

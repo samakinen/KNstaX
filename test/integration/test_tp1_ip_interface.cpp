@@ -3,7 +3,15 @@
 
 #include "unity.h"
 
+#include "../common/virtual_bitbang_tp1_driver.hpp"
+#include "../common/virtual_tp1_test_scheduler.hpp"
 #include "../mocks/mock_tp1_datalink.hpp"
+
+#include "knx/datalink/frame_codec.hpp"
+#include "knx/physical/bitbang_medium_backend_adapter.hpp"
+#include "knx/physical/tp1_mac_physical.hpp"
+#include "knx/physical/virtual_tp1_bus_peer.hpp"
+#include "knx/physical/virtual_tp1_test_runtime.hpp"
 
 #include "knx/netip/cemi.hpp"
 #include "knx/netip/control_packet_codec.hpp"
@@ -16,6 +24,7 @@
 #include <deque>
 #include <memory>
 #include <span>
+#include <utility>
 #include <vector>
 
 using namespace knx;
@@ -221,6 +230,7 @@ void test_tp1_ip_interface_smoke_bidirectional_forwarding(void)
 
     const auto tp1Frame = makeTp1Frame();
     tp1.injectRxFrame(tp1Frame);
+    bridge.poll();
 
     TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(network.udp->tx().size()));
 
@@ -228,7 +238,7 @@ void test_tp1_ip_interface_smoke_bidirectional_forwarding(void)
     TEST_ASSERT_TRUE(outgoingTunnel.isOk());
 
     std::array<uint8_t, kMaxCemiLDataSize> cemi{};
-    auto cemiResult = encodeCemiLData(tp1Frame, 0x29, cemi);
+    auto cemiResult = encodeCemiLData(tp1Frame, 0x11, cemi); // L_Data.req
     TEST_ASSERT_TRUE(cemiResult.isOk());
 
     const auto inboundReq = buildTunnelingRequest(channelId, 0, std::span<const uint8_t>(cemi.data(), cemiResult.value()));
@@ -237,6 +247,7 @@ void test_tp1_ip_interface_smoke_bidirectional_forwarding(void)
     auto pollTunnel = server.poll(0);
     TEST_ASSERT_TRUE(pollTunnel.isOk());
     TEST_ASSERT_TRUE(pollTunnel.value());
+    bridge.poll();
 
     TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(tp1.getSentFrameCount()));
 
@@ -245,9 +256,231 @@ void test_tp1_ip_interface_smoke_bidirectional_forwarding(void)
     TEST_ASSERT_TRUE(stats.ipToTp1Forwarded >= 1u);
 }
 
+// ── The bridge on the virtual TP1 bus ─────────────────────────────────────
+// The production line underneath: Tp1DataLinkLayer, Tp1MacPhysical and the
+// bit-bang ISR core, in bit cells on the virtual bus.
+
+namespace {
+
+constexpr IndividualAddress kInterfaceAddress(0x1100); // 1.1.0
+constexpr IndividualAddress kTunnel1(0x110A);          // 1.1.10
+constexpr IndividualAddress kTunnel2(0x110B);          // 1.1.11
+constexpr IndividualAddress kBusDevice(0x1114);        // 1.1.20
+
+struct VirtualInterface {
+    physical::VirtualTp1TestRuntime runtime;
+    physical::VirtualTp1BusPeer busPeer{runtime.bus()};
+    testsupport::VirtualBitBangTp1Driver driver{runtime.bus()};
+    std::unique_ptr<physical::Tp1MacPhysical> mac;
+    std::unique_ptr<datalink::Tp1DataLinkLayer> line;
+    std::unique_ptr<testsupport::VirtualTp1TestScheduler> scheduler;
+    TestNetwork network;
+    TunnelingServerEndpoint server;
+    std::unique_ptr<network::Tp1IpInterfaceBridge> bridge;
+
+    VirtualInterface()
+    {
+        mac = std::make_unique<physical::Tp1MacPhysical>(
+            std::make_unique<physical::BitBangMediumBackendAdapter>(driver, driver));
+        mac->setTimingPlatform(&runtime.platform());
+        auto config = datalink::Tp1DataLinkConfig::defaults();
+        config.enableRxTask = false;
+        line = std::make_unique<datalink::Tp1DataLinkLayer>(runtime.platform(), *mac, config);
+        TEST_ASSERT_TRUE(line->init(kInterfaceAddress).isOk());
+        mac->setReceiveCallback(nullptr, nullptr);
+        scheduler = std::make_unique<testsupport::VirtualTp1TestScheduler>(runtime, busPeer, driver);
+
+        TEST_ASSERT_TRUE(server.open(network, TunnelingServerEndpoint::Options{
+                                                  .tunnelAddresses = {kTunnel1, kTunnel2}}).isOk());
+        bridge = std::make_unique<network::Tp1IpInterfaceBridge>(*line, server);
+        TEST_ASSERT_TRUE(bridge->init().isOk());
+        runtime.advanceTimeMs(10u);
+        driver.clearSentFrames();
+    }
+
+    ~VirtualInterface()
+    {
+        bridge->close();
+        server.close();
+        line->close();
+        mac->close();
+        driver.close();
+    }
+
+    uint8_t connect(uint16_t clientPort)
+    {
+        network.udp->clearTx();
+        network.udp->pushRx(IpAddress::fromOctets(127, 0, 0, 1), clientPort, buildConnectRequest(clientPort));
+        TEST_ASSERT_TRUE(server.poll(0).isOk());
+        auto response = control_packet::Codec::decodeChannelStatusResponse(
+            network.udp->tx().back().payload, control_packet::kServiceConnectionResponse);
+        TEST_ASSERT_TRUE(response.isOk());
+        TEST_ASSERT_EQUAL_UINT8(0x00u, response.value().status);
+        network.udp->clearTx();
+        return response.value().channelId;
+    }
+
+    void request(uint8_t channelId, uint16_t clientPort, uint8_t sequence, const datalink::LDataFrame& frame)
+    {
+        std::array<uint8_t, kMaxCemiLDataSize> cemi{};
+        auto cemiResult = encodeCemiLData(frame, 0x11, cemi);
+        TEST_ASSERT_TRUE(cemiResult.isOk());
+        network.udp->pushRx(IpAddress::fromOctets(127, 0, 0, 1), clientPort,
+                            buildTunnelingRequest(channelId, sequence,
+                                                  std::span<const uint8_t>(cemi.data(), cemiResult.value())));
+        TEST_ASSERT_TRUE(server.poll(0).isOk());
+        bridge->poll();
+    }
+
+    /// The cEMI frames the server sent, with the client port they went to.
+    std::vector<std::pair<uint16_t, std::pair<uint8_t, datalink::LDataFrame>>> sentCemis() const
+    {
+        std::vector<std::pair<uint16_t, std::pair<uint8_t, datalink::LDataFrame>>> out;
+        for (const auto& tx : network.udp->tx()) {
+            auto decoded = control_packet::Codec::decodeTunnelingRequest(tx.payload);
+            if (decoded.isError()) {
+                continue;
+            }
+            datalink::LDataFrame frame;
+            uint8_t code = 0;
+            TEST_ASSERT_TRUE(decodeCemiLData(decoded.value().cemi, frame, code).isOk());
+            out.push_back({tx.destinationPort, {code, frame}});
+        }
+        return out;
+    }
+
+    template <typename Done>
+    bool run(Done done, uint32_t ms)
+    {
+        for (uint32_t i = 0; i < ms; ++i) {
+            bridge->poll();
+            if (done()) {
+                return true;
+            }
+            runtime.advanceTimeMs(1u);
+        }
+        bridge->poll();
+        return done();
+    }
+
+    datalink::LDataFrame sentOnBus(size_t index) const
+    {
+        const auto raw = driver.sentFrame(index);
+        datalink::LDataFrame frame;
+        TEST_ASSERT_TRUE(datalink::FrameCodec::decodeFrame(raw, frame).isOk());
+        return frame;
+    }
+};
+
+datalink::LDataFrame makeRequest(uint16_t destination, bool group)
+{
+    datalink::LDataFrame frame = makeTp1Frame();
+    frame.source = IndividualAddress(0);
+    if (group) {
+        frame.setDestination(GroupAddress(destination));
+    } else {
+        frame.setDestination(IndividualAddress(destination));
+    }
+    return frame;
+}
+
+} // namespace
+
+// A request with Source Address 0000h goes onto the bus from the tunnel
+// address; the bus device's L2 ACK gives a positive L_Data.con.
+void test_tp1_ip_interface_virtual_bus_positive_confirmation(void)
+{
+    VirtualInterface vi;
+    constexpr uint16_t kPort = 50101;
+    const uint8_t channel = vi.connect(kPort);
+
+    vi.request(channel, kPort, 0, makeRequest(kBusDevice.raw, false));
+    TEST_ASSERT_TRUE(vi.run([&] { return vi.driver.sentFrameCount() >= 1u; }, 200u));
+    const auto onBus = vi.sentOnBus(0);
+    TEST_ASSERT_EQUAL_HEX16(kTunnel1.raw, onBus.source.raw);
+    TEST_ASSERT_EQUAL_HEX16(kBusDevice.raw, onBus.destination.raw);
+    // Nothing is confirmed before the line has an outcome.
+    TEST_ASSERT_EQUAL_UINT32(0u, static_cast<uint32_t>(vi.sentCemis().size()));
+
+    TEST_ASSERT_TRUE(vi.scheduler->driveTxOutcomeForSentFrame(0u, testsupport::VirtualTp1PeerResponse::Ack));
+    TEST_ASSERT_TRUE(vi.run([&] { return !vi.sentCemis().empty(); }, 200u));
+
+    const auto sent = vi.sentCemis();
+    TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(sent.size()));
+    TEST_ASSERT_EQUAL_UINT16(kPort, sent[0].first);
+    TEST_ASSERT_EQUAL_HEX8(0x2Eu, sent[0].second.first);
+    TEST_ASSERT_FALSE(sent[0].second.second.confirmation);
+    TEST_ASSERT_EQUAL_HEX16(kTunnel1.raw, sent[0].second.second.source.raw);
+    TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(vi.driver.sentFrameCount()));
+}
+
+// Nobody acknowledges: the data link repeats the frame three times
+// (03_02_02), then the client gets a negative L_Data.con.
+void test_tp1_ip_interface_virtual_bus_negative_confirmation_without_ack(void)
+{
+    VirtualInterface vi;
+    constexpr uint16_t kPort = 50102;
+    const uint8_t channel = vi.connect(kPort);
+
+    vi.request(channel, kPort, 0, makeRequest(kBusDevice.raw, false));
+    TEST_ASSERT_TRUE(vi.run([&] { return !vi.sentCemis().empty(); }, 2000u));
+
+    const auto sent = vi.sentCemis();
+    TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(sent.size()));
+    TEST_ASSERT_EQUAL_HEX8(0x2Eu, sent[0].second.first);
+    TEST_ASSERT_TRUE(sent[0].second.second.confirmation);
+    TEST_ASSERT_EQUAL_HEX16(kBusDevice.raw, sent[0].second.second.destination.raw);
+    TEST_ASSERT_EQUAL_UINT32(4u, static_cast<uint32_t>(vi.driver.sentFrameCount()));
+    TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(vi.bridge->statistics().negativeConfirmations));
+}
+
+// The ISR acknowledges a frame for a tunnel address, and the bridge hands it
+// only to the connection that has that address. A frame for an address the
+// interface does not assume is neither acknowledged nor forwarded.
+void test_tp1_ip_interface_virtual_bus_acknowledges_and_routes_tunnel_addresses(void)
+{
+    VirtualInterface vi;
+    constexpr uint16_t kPort1 = 50103;
+    constexpr uint16_t kPort2 = 50104;
+    (void)vi.connect(kPort1);
+    (void)vi.connect(kPort2);
+
+    auto toTunnel2 = makeTp1Frame();
+    toTunnel2.source = kBusDevice;
+    toTunnel2.setDestination(kTunnel2);
+    vi.runtime.bus().clearCapturedTxTransitions();
+    TEST_ASSERT_TRUE(vi.scheduler->injectLDataFrame(toTunnel2));
+    vi.runtime.advanceTimeMs(5u);
+    TEST_ASSERT_FALSE(vi.runtime.bus().capturedTxTransitions().empty()); // the L2 ACK
+    (void)vi.line->processRxAvailable(0u);
+    vi.bridge->poll();
+
+    auto sent = vi.sentCemis();
+    TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(sent.size()));
+    TEST_ASSERT_EQUAL_UINT16(kPort2, sent[0].first);
+    TEST_ASSERT_EQUAL_HEX8(0x29u, sent[0].second.first);
+    TEST_ASSERT_EQUAL_HEX16(kTunnel2.raw, sent[0].second.second.destination.raw);
+
+    vi.network.udp->clearTx();
+    vi.runtime.advanceTimeMs(10u);
+    auto toOther = makeTp1Frame();
+    toOther.source = kBusDevice;
+    toOther.setDestination(IndividualAddress(0x1150));
+    vi.runtime.bus().clearCapturedTxTransitions();
+    TEST_ASSERT_TRUE(vi.scheduler->injectLDataFrame(toOther));
+    vi.runtime.advanceTimeMs(5u);
+    TEST_ASSERT_TRUE(vi.runtime.bus().capturedTxTransitions().empty());
+    (void)vi.line->processRxAvailable(0u);
+    vi.bridge->poll();
+    TEST_ASSERT_EQUAL_UINT32(0u, static_cast<uint32_t>(vi.sentCemis().size()));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_tp1_ip_interface_smoke_bidirectional_forwarding);
+    RUN_TEST(test_tp1_ip_interface_virtual_bus_positive_confirmation);
+    RUN_TEST(test_tp1_ip_interface_virtual_bus_negative_confirmation_without_ack);
+    RUN_TEST(test_tp1_ip_interface_virtual_bus_acknowledges_and_routes_tunnel_addresses);
     return UNITY_END();
 }
