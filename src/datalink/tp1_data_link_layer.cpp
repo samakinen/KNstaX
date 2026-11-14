@@ -179,10 +179,17 @@ bool Tp1DataLinkLayer::isOpen() const {
 }
 
 void Tp1DataLinkLayer::finishTxOperation() {
-    if (_txOperation.active && _txMutex.handle()) {
+    // Cleared while the TX mutex is still held. Releasing it first let a task
+    // waiting in beginTransmit() take the mutex and set up its own frame before
+    // this reset ran, which then wiped that frame: the waiter's pollTransmit()
+    // found no operation, and the mutex it held was never released, so every
+    // later transmit on the line timed out.
+    const bool ownsMutex = _txOperation.active;
+    _txOperation = TxOperationState{};
+    _txBusy.store(false, std::memory_order_release);
+    if (ownsMutex && _txMutex.handle()) {
         _platform.unlockMutex(_txMutex.handle());
     }
-    _txOperation = TxOperationState{};
 }
 
 void Tp1DataLinkLayer::finishRxOperation() {
@@ -206,7 +213,7 @@ util::Result<void> Tp1DataLinkLayer::beginTransmit(const LDataFrame& frame) {
         return util::ErrorCode::NotInitialized;
     }
 
-    if (_txOperation.active) {
+    if (_txBusy.load(std::memory_order_acquire)) {
         KNX_LOGW(TAG, "TX operation already active");
         return util::ErrorCode::Busy;
     }
@@ -227,6 +234,7 @@ util::Result<void> Tp1DataLinkLayer::beginTransmit(const LDataFrame& frame) {
     }
 
     _txOperation.active = true;
+    _txBusy.store(true, std::memory_order_release);
     _txOperation.waitingPhysicalOutcome = false;
     _txOperation.usingPhysicalProgression = false;
     _txOperation.busyAttempt = 0u;

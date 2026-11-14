@@ -8,12 +8,16 @@
 
 #include "unity.h"
 #include "knx/types.hpp"
+#include "knx/datalink/frame_codec.hpp"
 #include "knx/datalink/tp1_data_link_layer.hpp"
 #include "knx/application/apci_services.hpp"
 #include "knx/platform/linux_platform.hpp"
 #include "../mocks/mock_physical_layer.hpp"
+#include <atomic>
+#include <functional>
 #include <mutex>
 #include <memory>
+#include <thread>
 #include <vector>
 
 using namespace knx;
@@ -259,6 +263,125 @@ void test_address_comparison_in_frame(void) {
     TEST_ASSERT_NOT_EQUAL(addr1.raw, addr3.raw);
 }
 
+namespace {
+
+/// A host platform that lets a second task run at the two points where an
+/// RTOS may switch tasks on the TX path: right after the first one has taken
+/// the TX mutex, and right after it has given it back. Each hook runs once,
+/// on the thread that installed it.
+class InterleavingPlatform final : public knx::platform::LinuxPlatform {
+public:
+    std::thread::id owner{std::this_thread::get_id()};
+    std::function<void()> afterLock;
+    std::function<void()> afterUnlock;
+    std::atomic<bool> otherWaitsForMutex{false};
+
+    knx::util::Result<void> lockMutex(knx::platform::MutexHandle mutex, uint32_t timeoutMs) override
+    {
+        if (std::this_thread::get_id() != owner) {
+            otherWaitsForMutex.store(true);
+            return LinuxPlatform::lockMutex(mutex, timeoutMs);
+        }
+        auto result = LinuxPlatform::lockMutex(mutex, timeoutMs);
+        if (result.isOk() && afterLock) {
+            auto hook = std::move(afterLock);
+            afterLock = nullptr;
+            hook();
+        }
+        return result;
+    }
+
+    void unlockMutex(knx::platform::MutexHandle mutex) override
+    {
+        LinuxPlatform::unlockMutex(mutex);
+        if (std::this_thread::get_id() == owner && afterUnlock) {
+            auto hook = std::move(afterUnlock);
+            afterUnlock = nullptr;
+            hook();
+        }
+    }
+};
+
+} // namespace
+
+// Two tasks transmit on one line: task B checks for an open operation, finds
+// none, and waits for the TX mutex that task A has just taken. When A
+// finishes and releases the mutex, B takes it and starts its frame at once,
+// as it does on an RTOS where B runs on the other core or has the higher
+// priority. A's own clean-up must not touch B's operation after that. It
+// used to: A released the mutex and only then cleared the operation, which
+// was by then B's, so B's frame was never sent and the mutex B held was never
+// released.
+void test_tx_handover_to_a_waiting_task_keeps_its_frame(void) {
+    InterleavingPlatform platform;
+    knx::testing::MockTp1Physical physical;
+    datalink::Tp1DataLinkConfig config = datalink::Tp1DataLinkConfig::defaults();
+    config.enableRxTask = false;
+    config.txMutexTimeout = 200;
+    datalink::Tp1DataLinkLayer layer(platform, physical, config);
+    TEST_ASSERT_TRUE(layer.init(IndividualAddress(1, 1, 10)).isOk());
+
+    const auto frameTo = [](GroupAddress destination) {
+        datalink::LDataFrame frame;
+        frame.source = IndividualAddress(1, 1, 10);
+        frame.destination = destination;
+        frame.destinationType = AddressType::Group;
+        frame.priority = Priority::Normal;
+        frame.hopCount = 6;
+        frame.setTpdu(knx::protocol::TPCI::UnnumberedData, application::APCIService::GroupValueWrite, {0x01});
+        return frame;
+    };
+    const auto frameA = frameTo(GroupAddress(1, 0, 1));
+    const auto frameB = frameTo(GroupAddress(1, 0, 2));
+
+    std::atomic<bool> bBegun{false};
+    knx::util::Result<void> bBegin = knx::util::ErrorCode::OperationFailed;
+    std::thread taskB;
+
+    platform.afterLock = [&]() {
+        taskB = std::thread([&]() {
+            bBegin = layer.beginTransmit(frameB);
+            bBegun.store(true);
+        });
+        while (!platform.otherWaitsForMutex.load()) {
+            std::this_thread::yield();
+        }
+    };
+    platform.afterUnlock = [&]() {
+        while (!bBegun.load()) {
+            std::this_thread::yield();
+        }
+    };
+
+    TEST_ASSERT_TRUE(layer.sendFrame(frameA).isOk());
+    taskB.join();
+    TEST_ASSERT_TRUE(bBegin.isOk());
+
+    // B's operation is intact: it completes, and its frame is what went out.
+    knx::util::Result<datalink::Tp1DataLinkLayer::TxProgressState> progress =
+        datalink::Tp1DataLinkLayer::TxProgressState::Pending;
+    for (int poll = 0; poll < 100; ++poll) {
+        progress = layer.pollTransmit();
+        if (progress.isError() || progress.value() != datalink::Tp1DataLinkLayer::TxProgressState::Pending) {
+            break;
+        }
+    }
+    TEST_ASSERT_TRUE(progress.isOk());
+    TEST_ASSERT_EQUAL(static_cast<int>(datalink::Tp1DataLinkLayer::TxProgressState::Success),
+                      static_cast<int>(progress.value()));
+    TEST_ASSERT_EQUAL_UINT32(2u, static_cast<uint32_t>(physical.transmittedFrameCount()));
+    std::vector<uint8_t> sent;
+    TEST_ASSERT_TRUE(physical.tryGetSentFrame(sent));
+    TEST_ASSERT_TRUE(physical.tryGetSentFrame(sent));
+    datalink::LDataFrame decoded;
+    TEST_ASSERT_TRUE(datalink::FrameCodec::decodeFrame(std::span<const uint8_t>(sent), decoded).isOk());
+    TEST_ASSERT_EQUAL_UINT16(frameB.destination.raw, decoded.destination.raw);
+
+    // And the mutex came back: the line still transmits.
+    TEST_ASSERT_TRUE(layer.sendFrame(frameA).isOk());
+    layer.close();
+}
+
 // Test run
 int run_all_tp1_integration_tests(void) {
     UNITY_BEGIN();
@@ -275,6 +398,7 @@ int run_all_tp1_integration_tests(void) {
     RUN_TEST(test_frame_with_multiple_data_bytes);
     RUN_TEST(test_hop_count_management);
     RUN_TEST(test_address_comparison_in_frame);
+    RUN_TEST(test_tx_handover_to_a_waiting_task_keeps_its_frame);
     
     return UNITY_END();
 }

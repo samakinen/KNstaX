@@ -658,6 +658,12 @@ private:
         constexpr std::span<const uint8_t> filledSpan() const noexcept {return std::span<const uint8_t>(buffer).first(length);}
     };
     TxOperationState _txOperation{};
+    /// Whether a TX operation is open: _txOperation.active, readable without
+    /// the TX mutex. beginTransmit() answers Busy on it straight away rather
+    /// than waiting for the mutex, and it is called from more than one task
+    /// (the RX task answers management requests, the application sends group
+    /// values), so the plain field it used to read was a data race.
+    std::atomic<bool> _txBusy{false};
 
     struct RxOperationState {
         bool active{false};
