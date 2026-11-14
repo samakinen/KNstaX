@@ -290,8 +290,8 @@ bool CouplerRoutingPolicy::groupRoutingCondition(CouplerPort origin,
 {
     const GroupCouplerConfig& config = groupConfig(origin);
 
-    // 03/05/01 §4.4.5 splits the group address space at 0x6FFF because ETS only
-    // ever downloads filter table entries for the lower range.
+    // 03/05/01 §4.5.6: GROUP_6FFF governs addresses ≤ 6FFFh, GROUP_7000 the
+    // ones ≥ 7000h.
     const GroupHandling handling =
         destination.raw <= 0x6FFFu ? config.group6FFF : config.group7000;
 
@@ -303,14 +303,56 @@ bool CouplerRoutingPolicy::groupRoutingCondition(CouplerPort origin,
         case GroupHandling::Route:
             break;
     }
+    return filterTableEvaluation(destination.raw);
+}
 
-    // PID_FILTER_TABLE_USE = 0, or no table wired up at all. Routing everything
-    // is the only safe fallback: a coupler that has not been given a filter
-    // table yet must not cut the line in half.
-    if (!_filterTableInUse || _filterTable == nullptr) {
-        return true;
+bool CouplerRoutingPolicy::filterTableUsable() const
+{
+    // 03/03/03 §2.4.2.4.5.2.2, Figure 5, once the parameters leave the routing
+    // condition unknown (GROUP_ROUT): Device Object not Loaded -> FALSE;
+    // Filter Table not Loaded -> FALSE; Filter Table Use = False -> FALSE
+    // (03/05/01 §4.5.13.3: "this evaluation shall return negative for all
+    // Group Addresses"). A coupler without a table has nothing to evaluate.
+    return _deviceLoaded && _filterTableLoaded && _filterTableInUse && _filterTable != nullptr;
+}
+
+bool CouplerRoutingPolicy::filterTableEvaluation(uint16_t address) const
+{
+    return filterTableUsable() && _filterTable->passes(GroupAddress(address));
+}
+
+physical::GroupAckFilter CouplerRoutingPolicy::groupAckFilter(CouplerPort origin) const
+{
+    using Mode = physical::GroupAckFilter::Mode;
+    physical::GroupAckFilter filter{};
+    filter.filterTable = _filterTable != nullptr ? _filterTable->octets().data() : nullptr;
+
+    // GROUP_IACK_ROUT = 0: "all multicast frames will be acknowledged,
+    // independently of the routing" (03/05/01 §4.5.5, bit 5).
+    if (!lineConfig(origin).groupAckRoutedOnly) {
+        filter.low = Mode::Always;
+        filter.high = Mode::Always;
+        return filter;
     }
-    return _filterTable->checkFilter(destination) == FilterAction::Allow;
+
+    // GROUP_IACK_ROUT = 1: acknowledge what will be routed. The hop count does
+    // not enter: a frame whose routing condition is TRUE but whose hop count
+    // is spent is IGNORE_ACKED, still acknowledged.
+    const auto modeFor = [this](GroupHandling handling) {
+        switch (handling) {
+            case GroupHandling::Unlock:
+                return Mode::Always;
+            case GroupHandling::Lock:
+                return Mode::Never;
+            case GroupHandling::Route:
+                break;
+        }
+        return filterTableUsable() ? Mode::FilterTable : Mode::Never;
+    };
+    const GroupCouplerConfig& config = groupConfig(origin);
+    filter.low = modeFor(config.group6FFF);
+    filter.high = modeFor(config.group7000);
+    return filter;
 }
 
 RoutingAction CouplerRoutingPolicy::decideMulticast(CouplerPort origin,

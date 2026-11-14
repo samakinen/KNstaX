@@ -728,6 +728,13 @@ util::Result<void> DeviceManagement::syncRouterRoutingConfig()
         policy.setFilterTableInUse((*raw & 0x01u) != 0u);
     }
 
+    // The layer-2 group acknowledge is derived from the same configuration.
+    if (_stackPort != nullptr) {
+        if (auto* coupler = _stackPort->coupler(); coupler != nullptr && &coupler->policy() == &policy) {
+            coupler->refreshAckFilters();
+        }
+    }
+
     KNX_LOGI(TAG, "Router routing configuration synced from Router Object");
     return util::Result<void>::ok();
 }

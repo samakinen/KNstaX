@@ -56,6 +56,48 @@ struct TunnelingRequest {
     std::span<const uint8_t> cemi{};
 };
 
+/// Status codes of CONNECT_RESPONSE / TUNNELLING_ACK used by the tunnelling
+/// client and server (03/08/02 §7.3, §7.8.2; 03/08/04 §5.4.3).
+inline constexpr uint8_t kStatusNoError = 0x00;
+inline constexpr uint8_t kStatusSequenceNumber = 0x04;
+inline constexpr uint8_t kStatusConnectionId = 0x21;
+inline constexpr uint8_t kStatusConnectionType = 0x22;
+inline constexpr uint8_t kStatusConnectionOption = 0x23;
+inline constexpr uint8_t kStatusNoMoreConnections = 0x24;
+inline constexpr uint8_t kStatusTunnellingLayer = 0x29;
+inline constexpr uint8_t kStatusNoTunnellingAddress = 0x2D;
+inline constexpr uint8_t kStatusConnectionInUse = 0x2E;
+
+/// CONNECT_REQUEST (03/08/02 §7.8.1, CRI per 03/08/04 §5.4.3).
+struct ConnectRequest {
+    HpaiEndpoint controlEndpoint{};
+    HpaiEndpoint dataEndpoint{};
+    uint8_t connectionType{0};
+    uint8_t knxLayer{0};
+    /// Extended CRI (length 6): the Individual Address the client asks for.
+    bool hasRequestedAddress{false};
+    uint16_t requestedAddress{0};
+};
+
+/// CONNECT_RESPONSE (03/08/02 §7.8.2, Figure 49): channel ID and status, and
+/// on success the server's data endpoint HPAI and the CRD. For a tunnelling
+/// connection the CRD carries the Individual Address assigned to it
+/// (03/08/04 §5.4.4).
+struct ConnectResponse {
+    uint8_t channelId{0};
+    uint8_t status{0};
+    HpaiEndpoint dataEndpoint{};
+    uint8_t connectionType{0};
+    uint16_t tunnelAddress{0};
+};
+
+/// CONNECTIONSTATE_REQUEST / DISCONNECT_REQUEST: channel ID and the sender's
+/// control endpoint.
+struct ChannelEndpointRequest {
+    uint8_t channelId{0};
+    HpaiEndpoint controlEndpoint{};
+};
+
 class Codec {
 public:
     static constexpr uint8_t kHpaiLength = 0x08;
@@ -193,6 +235,150 @@ public:
                                                         [](std::span<const uint8_t> frame) {
                                                             return TunnelingRequest{frame[7], frame[8], frame.subspan(10)};
                                                         });
+    }
+
+    /// CONNECT_RESPONSE. On success the body is channel ID, status, the data
+    /// endpoint HPAI and the CRD (03/08/02 §7.8.2, Figure 49); on failure the
+    /// server may send just channel ID and status.
+    static inline util::Result<void> encodeConnectResponse(PacketWriter& writer,
+                                                           uint8_t channelId,
+                                                           uint8_t status,
+                                                           const HpaiEndpoint& dataEndpoint,
+                                                           uint16_t tunnelAddress)
+    {
+        auto resetResult = writer.reset(KnxNetIpCodec::kHeaderLen);
+        if (resetResult.isError()) return resetResult.error();
+
+        const std::array<uint8_t, 2> prefix{channelId, status};
+        auto prefixResult = writer.write(prefix);
+        if (prefixResult.isError()) return prefixResult.error();
+
+        if (status == kStatusNoError) {
+            auto hpaiResult = appendHpai(writer, dataEndpoint);
+            if (hpaiResult.isError()) return hpaiResult.error();
+            const std::array<uint8_t, 4> crd{
+                kCriLength,
+                kConnectionTypeTunnel,
+                static_cast<uint8_t>(tunnelAddress >> 8),
+                static_cast<uint8_t>(tunnelAddress & 0xFF),
+            };
+            auto crdResult = writer.write(crd);
+            if (crdResult.isError()) return crdResult.error();
+        }
+        return encodePacketHeader(writer.span(), kServiceConnectionResponse);
+    }
+
+    /// CONNECT_RESPONSE. A successful response must carry the data endpoint
+    /// HPAI and a tunnelling CRD; one that does not is malformed, since the
+    /// client could not know where to send data or which address it has.
+    static inline util::Result<ConnectResponse> decodeConnectResponse(std::span<const uint8_t> data)
+    {
+        auto channelStatus = decodeChannelStatusResponse(data, kServiceConnectionResponse);
+        if (channelStatus.isError()) return channelStatus.error();
+
+        ConnectResponse response{};
+        response.channelId = channelStatus.value().channelId;
+        response.status = channelStatus.value().status;
+        if (response.status != kStatusNoError) {
+            return response;
+        }
+
+        KnxNetIpHeader header;
+        (void)KnxNetIpCodec::decodeHeader(data, header);
+        const auto frame = data.first(header.totalLength);
+        size_t position = 8;
+        auto hpai = decodeHpai(frame, position);
+        if (hpai.isError()) return hpai.error();
+        response.dataEndpoint = hpai.value();
+
+        // CRD: length, connection type, then type-specific data. For a
+        // tunnelling connection that is the 2-octet Individual Address.
+        if (position + 2 > frame.size()) return util::ErrorCode::InvalidFrameSize;
+        const uint8_t crdLength = frame[position];
+        if (crdLength < 2 || position + crdLength > frame.size()) return util::ErrorCode::InvalidFrameSize;
+        response.connectionType = frame[position + 1];
+        if (response.connectionType == kConnectionTypeTunnel) {
+            if (crdLength != kCriLength) return util::ErrorCode::DecodeFailed;
+            response.tunnelAddress = static_cast<uint16_t>((static_cast<uint16_t>(frame[position + 2]) << 8)
+                                                           | frame[position + 3]);
+        }
+        return response;
+    }
+
+    /// CONNECT_REQUEST: control HPAI, data HPAI, CRI (basic, length 4, or
+    /// extended, length 6, with a requested Individual Address).
+    static inline util::Result<ConnectRequest> decodeConnectRequest(std::span<const uint8_t> data)
+    {
+        KnxNetIpHeader header;
+        auto headerResult = KnxNetIpCodec::decodeHeader(data, header);
+        if (headerResult.isError()) return headerResult.error();
+        if (header.serviceType != kServiceConnectionRequest) return util::ErrorCode::DecodeFailed;
+        if (header.totalLength > data.size()) return util::ErrorCode::InvalidFrameSize;
+        const auto frame = data.first(header.totalLength);
+
+        ConnectRequest request{};
+        size_t position = KnxNetIpCodec::kHeaderLen;
+        auto control = decodeHpai(frame, position);
+        if (control.isError()) return control.error();
+        auto dataHpai = decodeHpai(frame, position);
+        if (dataHpai.isError()) return dataHpai.error();
+        request.controlEndpoint = control.value();
+        request.dataEndpoint = dataHpai.value();
+
+        if (position + 2 > frame.size()) return util::ErrorCode::InvalidFrameSize;
+        const uint8_t criLength = frame[position];
+        if (criLength < 2 || position + criLength > frame.size()) return util::ErrorCode::InvalidFrameSize;
+        request.connectionType = frame[position + 1];
+        if (criLength >= 3) request.knxLayer = frame[position + 2];
+        if (criLength == 6) {
+            request.hasRequestedAddress = true;
+            request.requestedAddress = static_cast<uint16_t>((static_cast<uint16_t>(frame[position + 4]) << 8)
+                                                             | frame[position + 5]);
+        }
+        return request;
+    }
+
+    /// CONNECTIONSTATE_REQUEST / DISCONNECT_REQUEST: channel ID, reserved,
+    /// control endpoint HPAI.
+    static inline util::Result<ChannelEndpointRequest> decodeChannelEndpointRequest(std::span<const uint8_t> data,
+                                                                                    NetIpServiceType expectedServiceType)
+    {
+        KnxNetIpHeader header;
+        auto headerResult = KnxNetIpCodec::decodeHeader(data, header);
+        if (headerResult.isError()) return headerResult.error();
+        if (header.serviceType != expectedServiceType) return util::ErrorCode::DecodeFailed;
+        if (header.totalLength > data.size() || header.totalLength < 16) return util::ErrorCode::InvalidFrameSize;
+        const auto frame = data.first(header.totalLength);
+
+        ChannelEndpointRequest request{};
+        request.channelId = frame[6];
+        size_t position = 8;
+        auto hpai = decodeHpai(frame, position);
+        if (hpai.isError()) return hpai.error();
+        request.controlEndpoint = hpai.value();
+        return request;
+    }
+
+    /// The channel-status responses (CONNECTIONSTATE_RESPONSE,
+    /// DISCONNECT_RESPONSE, a failed CONNECT_RESPONSE): channel ID + status.
+    static inline util::Result<void> encodeChannelStatusResponse(PacketWriter& writer,
+                                                                 NetIpServiceType serviceType,
+                                                                 uint8_t channelId,
+                                                                 uint8_t status)
+    {
+        auto resetResult = writer.reset(KnxNetIpCodec::kHeaderLen);
+        if (resetResult.isError()) return resetResult.error();
+        const std::array<uint8_t, 2> body{channelId, status};
+        auto bodyResult = writer.write(body);
+        if (bodyResult.isError()) return bodyResult.error();
+        return encodePacketHeader(writer.span(), serviceType);
+    }
+
+    /// True for the "Route Back" HPAI 0.0.0.0:0 (03/08/02 §8.6.2.2): the
+    /// reply goes to the source address and port of the received packet.
+    static inline bool isRouteBack(const HpaiEndpoint& endpoint)
+    {
+        return endpoint.address.isZero() && endpoint.port == 0;
     }
 
 private:

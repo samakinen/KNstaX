@@ -39,8 +39,8 @@ KNX_DPT_CATALOG_ENTRY(DateTime, DateTime, 0, DateTime, Dpt19Value, Dpt19, "DPT-1
 KNX_DPT_CATALOG_ENTRY(HvacMode, HvacMode, 0, HvacMode, Dpt20Mode, Dpt20, "DPT-20", "HVAC mode")
 KNX_DPT_CATALOG_ENTRY(RgbColor, RgbColor, 0, RgbColor, Dpt232Value, Dpt232, "DPT-232", "RGB color")
 KNX_DPT_CATALOG_ENTRY(XyYColor, XyYColor, 0, XyYColor, Dpt242Value, Dpt242, "DPT-242", "xyY color")
-KNX_DPT_CATALOG_ENTRY(HsvColor, HsvColor, 0, HsvColor, Dpt243Value, Dpt243, "DPT-243", "HSV color")
-KNX_DPT_CATALOG_ENTRY(ColorTransition, ColorTransition, 0, ColorTransition, Dpt244Value, Dpt244, "DPT-244", "color transition")
+KNX_DPT_CATALOG_ENTRY(ColourTransitionXyY, ColourTransitionXyY, 0, ColourTransitionXyY, Dpt243Value, Dpt243, "DPT-243", "colour transition xyY")
+KNX_DPT_CATALOG_ENTRY(ConverterStatus, ConverterStatus, 0, ConverterStatus, Dpt244Value, Dpt244, "DPT-244", "converter status")
 
 /* Common Float (2-byte) subtypes */
 KNX_DPT_CATALOG_ENTRY(Temperature, Float2Byte, 1, Float2Byte, float, Dpt9, "DPT-9.001", "Temperature (°C)")

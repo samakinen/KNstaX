@@ -64,8 +64,35 @@ public:
     CouplerRole role() const { return policy_.role(); }
 
     /// The routing policy, for configuring LCCONFIG / LCGRPCONFIG behaviour.
+    /// After changing it, call @ref refreshAckFilters so the layer-2
+    /// acknowledge follows.
     CouplerRoutingPolicy& policy() { return policy_; }
     const CouplerRoutingPolicy& policy() const { return policy_; }
+
+    /**
+     * @brief Re-derive the group acknowledge rule of each port from the
+     *        policy and install it in the data link layers.
+     *
+     * The TP1 acknowledge is sent from the receive ISR about 15 bit times
+     * after the frame, so it cannot wait for @ref CouplerRoutingPolicy::decide.
+     * Instead each port gets a @ref physical::GroupAckFilter (GROUP_IACK_ROUT,
+     * GROUP_6FFF/GROUP_7000, Filter Table Use and Load States reduced to a
+     * per-range mode plus the Filter Table bits). Filter Table edits need no
+     * refresh — the ISR reads the table itself — but configuration changes do.
+     * Without KNX_FEATURE_COUPLER the hook is not built and this is a no-op.
+     */
+#if KNX_FEATURE_COUPLER
+    void refreshAckFilters();
+
+
+    /// The group acknowledge rule currently installed for frames arriving on
+    /// @p origin.
+    const physical::GroupAckFilter& ackFilter(Port origin) const {
+        return ackFilters_[static_cast<size_t>(origin)];
+    }
+#else
+    void refreshAckFilters() {}
+#endif
 
     /// Master switch. When off, nothing is forwarded in either direction;
     /// frames addressed to the coupler are still delivered locally, so a
@@ -73,9 +100,13 @@ public:
     void setRoutingEnabled(Toggle enabled) { routingEnabled_.store(isEnabled(enabled)); }
     bool isRoutingEnabled() const { return routingEnabled_.load(); }
 
-    /// PID_FILTER_TABLE_USE. When off, GROUP_ROUT passes everything rather than
-    /// blocking it — see @ref CouplerRoutingPolicy::setFilterTableInUse.
-    void setFilteringEnabled(Toggle enabled) { policy_.setFilterTableInUse(isEnabled(enabled)); }
+    /// PID_FILTER_TABLE_USE. When off, the Filter Table evaluation is negative
+    /// for every address, so GROUP_ROUT blocks — see
+    /// @ref CouplerRoutingPolicy::setFilterTableInUse.
+    void setFilteringEnabled(Toggle enabled) {
+        policy_.setFilterTableInUse(isEnabled(enabled));
+        refreshAckFilters();
+    }
     bool isFilteringEnabled() const { return policy_.isFilterTableInUse(); }
 
     FilterTable& filterTable() { return filterTable_; }
@@ -144,6 +175,10 @@ private:
 
     CouplerRoutingPolicy policy_;
     FilterTable filterTable_;
+#if KNX_FEATURE_COUPLER
+    /// Per origin port; read by the receive ISRs once installed.
+    std::array<physical::GroupAckFilter, 2> ackFilters_{};
+#endif
 
     PortCallback onFrameForwarded_;
     PortCallback onFrameFiltered_;

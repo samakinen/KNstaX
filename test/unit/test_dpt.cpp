@@ -158,7 +158,7 @@ void test_dpt9_known_wire_vectors(void) {
         {-0.01f, {0x87, 0xFF}},
         {-20.48f, {0x80, 0x00}},
         {knx::constants::dpt::DPT9_MIN_VALUE, {0xF8, 0x00}},
-        {knx::constants::dpt::DPT9_MAX_VALUE, {0x7F, 0xFF}},
+        {knx::constants::dpt::DPT9_MAX_VALUE, {0x7F, 0xFE}},
     }};
 
     for (const auto& vector : vectors) {
@@ -176,7 +176,7 @@ void test_dpt9_known_wire_vectors(void) {
 // DPT 9 - Boundary conditions per KNX Spec 03/07/02
 // Format: SEEE EMMM MMMM MMMM (S=sign, E=4-bit exponent, M=signed 11-bit mantissa)
 // Value = (0.01 * M) * 2^E
-// Range: -671088.64 to 670760.96
+// Range: -671088.64 to 670433.28 (7FFFh denotes invalid data)
 
 void test_dpt9_minimum_value(void) {
     const float min_value = knx::constants::dpt::DPT9_MIN_VALUE;
@@ -199,7 +199,7 @@ void test_dpt9_maximum_value(void) {
     auto data = encodePayload([&](std::span<uint8_t> out) { return Dpt9::encode(max_value, out); });
     TEST_ASSERT_EQUAL(2, data.size());
     TEST_ASSERT_EQUAL_UINT8(0x7F, data[0]);
-    TEST_ASSERT_EQUAL_UINT8(0xFF, data[1]);
+    TEST_ASSERT_EQUAL_UINT8(0xFE, data[1]);
     
     float decoded;
     TEST_ASSERT_TRUE(Dpt9::decode(data, decoded).isOk());

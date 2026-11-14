@@ -5,14 +5,14 @@
  * @file network_layer.hpp
  * @brief KNX network layer (layer 3)
  * 
- * Handles hop count management and address filtering.
+ * Handles hop count management and local delivery. Group filtering is a
+ * coupler function (TwoPortCoupler and its Filter Table), not an end device's.
  */
 
 #pragma once
 
 #include "knx/types.hpp"
 #include "knx/datalink/tp1_data_link_layer.hpp"
-#include "knx/network/filter_table.hpp"
 #include "knx/util/inplace_function.hpp"
 #include "knx/util/operation_progress.hpp"
 #include <atomic>
@@ -48,11 +48,12 @@ using NDataCallback = util::InplaceFunction<void(const NDataFrame&), 64>;
 /**
  * @brief Network layer
  * 
- * Handles hop count management and address filtering.
+ * Handles hop count management and local delivery. Group filtering is a
+ * coupler function (TwoPortCoupler and its Filter Table), not an end device's.
  * 
  * @thread_safety Most methods are NOT thread-safe. sendFrame() should be called from 
  * the same thread that processes the data link layer. Configuration methods
- * (setFilteringEnabled, etc.) should be called during initialization or with external 
+ * should be called during initialization or with external 
  * synchronization. Read-only methods (isOnSameArea) are safe to call 
  * concurrently.
  */
@@ -110,7 +111,6 @@ public:
      */
     void deliverLocalFrame(const datalink::LDataFrame& frame) { handleDlRx(frame); }
 
-
     /**
      * @brief Check if this device is on the same area
      */
@@ -121,21 +121,6 @@ public:
      */
     bool isOnSameLine(const IndividualAddress& addr) const;
     
-    /**
-     * @brief Get filter table (for configuration)
-     */
-    FilterTable& getFilterTable() { return _filterTable; }
-    
-    /**
-     * @brief Enable/disable filtering
-     */
-    void setFilteringEnabled(Toggle enabled) { _filteringEnabled = isEnabled(enabled); }
-    
-    /**
-     * @brief Check if filtering is enabled
-     */
-    bool isFilteringEnabled() const { return _filteringEnabled; }
-    
 private:
     datalink::Tp1DataLinkLayer& _datalink;
     IndividualAddress _ownAddress;
@@ -143,10 +128,6 @@ private:
     NDataCallback _rxCallbackStorage;
     bool _initialized;
     
-    // Filtering
-    FilterTable _filterTable;
-    bool _filteringEnabled;
-
     struct TxOperationState {
         bool active{false};
         bool started{false};
@@ -159,8 +140,6 @@ private:
     // Data link callback handler
     void handleDlRx(const datalink::LDataFrame& frame);
     
-    // Filtering decision logic
-    bool shouldFilterFrame(const datalink::LDataFrame& frame);
 };
 
 } // namespace network

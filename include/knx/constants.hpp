@@ -175,7 +175,11 @@ namespace dpt {
     constexpr uint16_t DPT9_EXPONENT_MASK = 0x7800;
     constexpr uint16_t DPT9_SIGN_MASK = 0x8000;
     constexpr float DPT9_MIN_VALUE = -671088.64f;           // -2048 * 2^15 * 0.01
-    constexpr float DPT9_MAX_VALUE = 670760.96f;            // +2047 * 2^15 * 0.01
+    // 03_07_02 §3.10: range [-671 088,64 … 670 433,28]; the encoding 7FFFh
+    // (+2047 * 2^15 * 0.01 = 670 760,96) "shall always be used to denote
+    // invalid data", so the largest value is +2046 * 2^15 * 0.01.
+    constexpr float DPT9_MAX_VALUE = 670433.28f;
+    constexpr uint16_t DPT9_INVALID = 0x7FFF;
     
     // DPT 10 (Time - 3 bytes: day, hour, minute, second)
     constexpr uint8_t DPT10_SIZE = 24;                      // 3 bytes

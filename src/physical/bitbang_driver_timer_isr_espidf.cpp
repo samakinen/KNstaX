@@ -245,6 +245,12 @@ void BitBangDriverTimerIsrEspIdf::setAckGroupAddresses(std::span<const uint16_t>
     _core.setAckGroupAddresses(addresses.data(), addresses.size());
 }
 
+#if KNX_FEATURE_COUPLER
+void BitBangDriverTimerIsrEspIdf::setGroupAckFilter(const GroupAckFilter* filter) {
+    _core.setGroupAckFilter(filter);
+}
+#endif
+
 void BitBangDriverTimerIsrEspIdf::setLocalBusy(bool busy) {
     _core.setLocalBusy(busy);
 }

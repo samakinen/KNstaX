@@ -32,11 +32,13 @@ SecureTunnelingSecurity::SecureTunnelingSecurity(
     const Key& sessionKey,
     SessionId sessionId,
     const std::array<uint8_t, SecureWrapper::kSerialLen>& localSerial,
-    uint64_t initialSeq)
+    uint64_t initialSeq,
+    std::optional<uint64_t> lastReceivedSeq)
     : sessionKey_(sessionKey)
     , sessionId_(sessionId)
     , serial_(localSerial)
     , seq48_(initialSeq & 0xFFFFFFFFFFFFULL)
+    , lastRxSeq48_(lastReceivedSeq)
 {
 }
 
@@ -58,9 +60,19 @@ util::Result<size_t> SecureTunnelingSecurity::unprotect(std::span<const uint8_t>
 {
     if (!sessionId_.isValid()) return util::ErrorCode::NotInitialized;
 
+    // 03/08/09 §2.2.3.3: "An incoming frame shall be discarded if the sequence
+    // number is less than or equal to the stored number." Checking before the
+    // MAC is allowed (§2.2.1.3.3); the stored number moves only once the frame
+    // has verified, so a forged frame cannot push it forward.
+    const uint64_t sequence = SecureWrapper::sequenceOf(in);
+    if (lastRxSeq48_.has_value() && sequence <= *lastRxSeq48_) {
+        return util::ErrorCode::AccessDenied;
+    }
+
     auto unwrapRes = SecureWrapper::unwrapAndVerify(sessionKey_, sessionId_, in, out);
     if (unwrapRes.isError()) return unwrapRes.error();
 
+    lastRxSeq48_ = sequence;
     return unwrapRes;
 }
 
@@ -186,19 +198,26 @@ util::Result<util::OperationProgressState> SecureTunnelingClient::pollConnectTun
         return recvRes.error();
     }
 
-    auto channelResult = ControlPacketCodec::decodeChannelStatusResponse(
-        std::span<const uint8_t>(frameBuffer_.span()).first(recvRes.value()),
-        control_packet::kServiceConnectionResponse);
-    if (channelResult.isError()) {
+    // 03/08/02 §7.8.2: on success the response carries the data endpoint and
+    // the CRD with the tunnel's Individual Address (03/08/04 §5.4.4).
+    auto responseResult = ControlPacketCodec::decodeConnectResponse(
+        std::span<const uint8_t>(frameBuffer_.span()).first(recvRes.value()));
+    if (responseResult.isError()) {
         connectOperation_.reset();
-        return channelResult.error();
+        return responseResult.error();
     }
-    if (channelResult.value().status != 0x00 || channelResult.value().channelId == 0x00) {
+    const auto& response = responseResult.value();
+    if (response.status != control_packet::kStatusNoError) {
         connectOperation_.reset();
         return util::ErrorCode::OperationFailed;
     }
+    if (response.channelId == 0x00 || response.connectionType != ControlPacketCodec::kConnectionTypeTunnel) {
+        connectOperation_.reset();
+        return util::ErrorCode::DecodeFailed;
+    }
+    tunnelAddress_ = response.tunnelAddress;
 
-    TunnelingOrchestration::markConnected(channelId_, seq_, lastActivityTimeMs_, ChannelId(channelResult.value().channelId), [this]() {
+    TunnelingOrchestration::markConnected(channelId_, seq_, lastActivityTimeMs_, ChannelId(response.channelId), [this]() {
         return getCurrentTimeMs_();
     });
     connectOperation_.reset();
@@ -422,23 +441,16 @@ util::Result<bool> SecureTunnelingClient::receiveOnce_(int timeoutMs)
         TunnelingOrchestration::markActivity(lastActivityTimeMs_, [this]() { return getCurrentTimeMs_(); });
     }
 
+    // Tunnelling inside a TCP connection (03/08/04 §2.6.2): the sequence
+    // counter is not evaluated, no TUNNELLING_ACK is sent and received ones
+    // are ignored. Hence no expected sequence and an ACK sender never called.
     return TunnelingOrchestration::handleInboundFrame(
         frameBuffer_.span().first(inSize),
         header.serviceType,
         channelId_,
         ackTracker_,
-        [&](uint8_t sequence) -> util::Result<void> {
-            PacketWriter ackPacket(scratchBuffer_.span());
-            auto ackHeaderResult = ControlPacketCodec::encodeTunnelingAck(
-                ackPacket,
-                channelId_.value(),
-                sequence,
-                0x00);
-            if (ackHeaderResult.isOk()) {
-                (void)sendFrameUnlocked_(ackPacket.span());
-            }
-            return util::Result<void>::ok();
-        },
+        nullptr,
+        [](uint8_t) -> util::Result<void> { return util::Result<void>::ok(); },
         [&](std::span<const uint8_t> cemi) {
             auto cb = rxCb_;
             ioLock.unlock();
@@ -463,18 +475,13 @@ util::Result<bool> SecureTunnelingClient::poll(int timeoutMs)
 
 util::Result<void> SecureTunnelingClient::sendCemi(std::span<const uint8_t> cemi, bool waitAck, int timeoutMs)
 {
+    // Over TCP there is no TUNNELLING_ACK to wait for (03/08/04 §2.6.2): TCP
+    // delivers the request or fails the connection, and the confirmation of
+    // the frame on the bus is the L_Data.con the server sends back.
+    (void)waitAck;
+    (void)timeoutMs;
     if (!isTunnelingConnected()) return util::ErrorCode::NotInitialized;
-    const uint8_t expectedAckSeq = seq_.value();
-    auto sendRes = sendTunnelingRequest_(cemi);
-    if (sendRes.isError()) return sendRes.error();
-    if (!waitAck) return util::Result<void>::ok();
-
-    return TunnelingOrchestration::waitForAck(
-        ackTracker_,
-        expectedAckSeq,
-        timeoutMs,
-        [this](int remainingMs) { return receiveOnce_(remainingMs); },
-        [this]() { return getCurrentTimeMs_(); });
+    return sendTunnelingRequest_(cemi);
 }
 
 util::Result<void> SecureTunnelingClient::beginOpen(platform::NetworkInterface& network,
@@ -566,7 +573,10 @@ util::Result<void> SecureTunnelingClient::beginOpen(platform::NetworkInterface& 
                 openOperation_.options.initialSeq,
                 openOperation_.clientPublicKey,
                 frameBuffer_.span().first(respSize),
-                secureBuffer_.span());
+                secureBuffer_.span(),
+                openOperation_.options.deviceAuthenticationCode.has_value()
+                    ? &*openOperation_.options.deviceAuthenticationCode
+                    : nullptr);
             if (authRequestResult.isError()) {
                 close();
                 return authRequestResult.error();
@@ -592,11 +602,13 @@ util::Result<void> SecureTunnelingClient::beginOpen(platform::NetworkInterface& 
         }
         const size_t statusSize = readStatus.value();
 
+        uint64_t statusSequence = 0;
         auto statusResult = SecureSessionBootstrap::decodeSessionStatus(
             openOperation_.negotiatedSession.wrapperKey,
             openOperation_.negotiatedSession.sessionId,
             frameBuffer_.span().first(statusSize),
-            scratchBuffer_.span());
+            scratchBuffer_.span(),
+            &statusSequence);
         if (statusResult.isError()) {
             close();
             return statusResult.error();
@@ -609,7 +621,8 @@ util::Result<void> SecureTunnelingClient::beginOpen(platform::NetworkInterface& 
         security_ = std::make_unique<SecureTunnelingSecurity>(openOperation_.negotiatedSession.wrapperKey,
                                                               openOperation_.negotiatedSession.sessionId,
                                                               openOperation_.options.clientSerial,
-                                                              openOperation_.negotiatedSession.nextSequence);
+                                                              openOperation_.negotiatedSession.nextSequence,
+                                                              statusSequence);
         secureChannel_ = std::make_unique<SecureTcpFrameChannel>(*sock_,
                                                                  *security_,
                                                                  secureBuffer_.span(),

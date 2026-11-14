@@ -167,10 +167,10 @@ constexpr application::DptValue::Type valueTypeForDpt(application::DptId dpt) no
             return application::DptValue::Type::RgbColor;
         case application::DptMainType::XyYColor:
             return application::DptValue::Type::XyYColor;
-        case application::DptMainType::HsvColor:
-            return application::DptValue::Type::HsvColor;
-        case application::DptMainType::ColorTransition:
-            return application::DptValue::Type::ColorTransition;
+        case application::DptMainType::ColourTransitionXyY:
+            return application::DptValue::Type::ColourTransitionXyY;
+        case application::DptMainType::ConverterStatus:
+            return application::DptValue::Type::ConverterStatus;
         case application::DptMainType::Unsupported:
             break;
     }

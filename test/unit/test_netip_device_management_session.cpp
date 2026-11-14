@@ -94,9 +94,14 @@ int runPlainWorkflowTest()
             const uint16_t serviceType = static_cast<uint16_t>((static_cast<uint16_t>(buf[2]) << 8) | buf[3]);
             if (serviceType == 0x0205) {
                 std::vector<uint8_t> resp;
-                writeHeader(resp, 0x0206, 8);
+                writeHeader(resp, 0x0206, 20);
                 resp.push_back(0x01);
                 resp.push_back(0x00);
+                // Route Back data endpoint HPAI and the tunnelling CRD, IA 1.1.10
+                // (03/08/02 Figure 49).
+                for (uint8_t octet : std::initializer_list<uint8_t>{0x08, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x04, 0x11, 0x0A}) {
+                    resp.push_back(octet);
+                }
                 ::sendto(srv, resp.data(), resp.size(), 0, reinterpret_cast<sockaddr*>(&src), slen);
             } else if (serviceType == 0x0209) {
                 disconnectReceived.store(true);
@@ -750,14 +755,15 @@ int runSecureWorkflowTest()
     statusWrapped.resize(statusWrap.value());
 
     std::vector<uint8_t> connectRespPlain = {
-        0x06, 0x10, 0x02, 0x06, 0x00, 0x10, 0x11, 0x00,
-        0x08, 0x02, 127, 0, 0, 1, 0x1F, 0x90,
+        0x06, 0x10, 0x02, 0x06, 0x00, 0x14, 0x11, 0x00,
+        0x08, 0x02, 0, 0, 0, 0, 0x00, 0x00,  // TCP: Route Back only (03/08/02 §8.6.2)
+        0x04, 0x04, 0x11, 0x0A,              // CRD: tunnelling, IA 1.1.10
     };
 
     std::vector<uint8_t> connectRespWrapped(SecureWrapper::kOverhead + connectRespPlain.size());
     auto connectWrap = SecureWrapper::wrap(wrapperKey,
                                            sid,
-                                           std::array<uint8_t, 6>{0x00, 0x00, 0x00, 0x00, 0x00, 0x02},
+                                           std::array<uint8_t, 6>{0x00, 0x00, 0x00, 0x00, 0x00, 0x03}  /* after the status frame: sequence numbers only increase */,
                                            std::array<uint8_t, 6>{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff},
                                            tag,
                                            counterSuffix,
@@ -857,7 +863,7 @@ int runSecureWorkflowTest()
     std::vector<uint8_t> writeWrapped(SecureWrapper::kOverhead + writeFrame.size());
     auto wrappedWriteResult = SecureWrapper::wrap(wrapperKey,
                                                   sid,
-                                                  std::array<uint8_t, 6>{0x00, 0x00, 0x00, 0x00, 0x00, 0x03},
+                                                  std::array<uint8_t, 6>{0x00, 0x00, 0x00, 0x00, 0x00, 0x04},
                                                   std::array<uint8_t, 6>{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01},
                                                   tag,
                                                   counterSuffix,
@@ -869,7 +875,7 @@ int runSecureWorkflowTest()
     std::vector<uint8_t> readWrapped(SecureWrapper::kOverhead + readFrame.size());
     auto wrappedReadResult = SecureWrapper::wrap(wrapperKey,
                                                  sid,
-                                                 std::array<uint8_t, 6>{0x00, 0x00, 0x00, 0x00, 0x00, 0x04},
+                                                 std::array<uint8_t, 6>{0x00, 0x00, 0x00, 0x00, 0x00, 0x05},
                                                  std::array<uint8_t, 6>{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x02},
                                                  tag,
                                                  counterSuffix,

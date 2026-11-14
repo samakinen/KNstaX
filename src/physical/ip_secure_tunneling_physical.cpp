@@ -28,7 +28,7 @@ IpSecureTunnelingPhysical::IpSecureTunnelingPhysical()
     options_.host = host_;
     options_.port = port_;
     options_.userId = UserId(1);
-    options_.initialSeq = 1;
+    options_.initialSeq = 0;
 }
 
 IpSecureTunnelingPhysical::~IpSecureTunnelingPhysical() { close(); }
@@ -76,6 +76,12 @@ void IpSecureTunnelingPhysical::setCredentials(UserId userId,
     options_.clientPrivateKey = clientPrivateKey;
     options_.clientSerial = clientSerial;
     options_.initialSeq = initialSeq;
+}
+
+void IpSecureTunnelingPhysical::setDeviceAuthenticationCode(const std::array<uint8_t, 16>& code)
+{
+    if (initialized_) return;
+    options_.deviceAuthenticationCode = code;
 }
 
 util::Result<void> IpSecureTunnelingPhysical::init()

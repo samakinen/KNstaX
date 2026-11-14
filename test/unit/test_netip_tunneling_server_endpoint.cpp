@@ -212,6 +212,7 @@ void test_tunneling_server_endpoint_connect_state_disconnect_lifecycle(void)
     TunnelingServerEndpoint::Options options{};
     options.port = NetIpPort(3671);
     options.maxChannels = 2;
+    options.tunnelAddresses = {IndividualAddress(0x110A), IndividualAddress(0x110B)};
 
     auto openResult = endpoint.open(network, options);
     TEST_ASSERT_TRUE(openResult.isOk());
@@ -276,6 +277,7 @@ void test_tunneling_server_endpoint_tunneling_ack_and_callback_sequence_rules(vo
     TunnelingServerEndpoint::Options options{};
     options.port = NetIpPort(3671);
     options.maxChannels = 1;
+    options.tunnelAddresses = {IndividualAddress(0x110A), IndividualAddress(0x110B)};
 
     auto openResult = endpoint.open(network, options);
     TEST_ASSERT_TRUE(openResult.isOk());
@@ -335,13 +337,200 @@ void test_tunneling_server_endpoint_tunneling_ack_and_callback_sequence_rules(vo
     TEST_ASSERT_TRUE(pollWrongSequence.isOk());
     TEST_ASSERT_TRUE(pollWrongSequence.value());
 
+    // 03/08/04 §2.6.1: neither the expected counter nor one less -> "shall
+    // not reply and shall discard the received frame".
+    TEST_ASSERT_TRUE(deliveredCemi.empty());
+    TEST_ASSERT_EQUAL_UINT32(0u, static_cast<uint32_t>(network.udp->tx().size()));
+
+    // One less than expected (a repetition of 0): acknowledged, not delivered.
+    const auto repeated = buildTunnelingRequest(channelId, 0, cemi);
+    network.udp->pushRx(clientAddress, kClientPort, repeated);
+    TEST_ASSERT_TRUE(endpoint.poll(0).isOk());
     TEST_ASSERT_TRUE(deliveredCemi.empty());
     TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(network.udp->tx().size()));
-    auto wrongSeqAck = control_packet::Codec::decodeTunnelingAck(network.udp->tx()[0].payload);
-    TEST_ASSERT_TRUE(wrongSeqAck.isOk());
-    TEST_ASSERT_EQUAL_UINT8(channelId, wrongSeqAck.value().channelId);
-    TEST_ASSERT_EQUAL_UINT8(9u, wrongSeqAck.value().sequence);
-    TEST_ASSERT_EQUAL_UINT8(0x04u, wrongSeqAck.value().status);
+    auto repeatAck = control_packet::Codec::decodeTunnelingAck(network.udp->tx()[0].payload);
+    TEST_ASSERT_TRUE(repeatAck.isOk());
+    TEST_ASSERT_EQUAL_UINT8(0u, repeatAck.value().sequence);
+    TEST_ASSERT_EQUAL_UINT8(0x00u, repeatAck.value().status);
+
+    // The next expected one (1) is delivered again.
+    network.udp->clearTx();
+    network.udp->pushRx(clientAddress, kClientPort, buildTunnelingRequest(channelId, 1, cemi));
+    TEST_ASSERT_TRUE(endpoint.poll(0).isOk());
+    TEST_ASSERT_EQUAL_UINT32(cemi.size(), static_cast<uint32_t>(deliveredCemi.size()));
+    TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(network.udp->tx().size()));
+}
+
+void test_tunneling_server_endpoint_connect_response_carries_hpai_and_crd(void)
+{
+    // 03/08/02 §7.8.2, Figure 49: channel, status, data endpoint HPAI, CRD
+    // with the tunnel's Individual Address — sent to the control endpoint
+    // named in the request.
+    TestNetwork network;
+    TunnelingServerEndpoint endpoint;
+    TunnelingServerEndpoint::Options options{};
+    options.port = NetIpPort(3671);
+    options.tunnelAddresses = {IndividualAddress(0x110A)};
+    options.dataEndpointAddress = IpAddress::fromOctets(192, 168, 200, 20);
+    TEST_ASSERT_TRUE(endpoint.open(network, options).isOk());
+
+    const IpAddress clientAddress = IpAddress::fromOctets(192, 168, 200, 7);
+    std::array<uint8_t, 64> bytes{};
+    PacketWriter writer{std::span<uint8_t>(bytes)};
+    const control_packet::HpaiEndpoint control{control_packet::HpaiProtocol::Udp, clientAddress, 50000};
+    const control_packet::HpaiEndpoint data{control_packet::HpaiProtocol::Udp, clientAddress, 50001};
+    TEST_ASSERT_TRUE(control_packet::Codec::encodeConnectionRequest(writer, control, data).isOk());
+    network.udp->pushRx(clientAddress, 40000, writer.span());
+    TEST_ASSERT_TRUE(endpoint.poll(0).isOk());
+
+    TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(network.udp->tx().size()));
+    const auto& tx = network.udp->tx()[0];
+    TEST_ASSERT_TRUE(tx.destinationAddress == clientAddress);
+    TEST_ASSERT_EQUAL_UINT16(50000, tx.destinationPort);  // control endpoint, not the UDP source
+    const std::array<uint8_t, 20> expected{0x06, 0x10, 0x02, 0x06, 0x00, 0x14, 0x01, 0x00, 0x08, 0x01,
+                                           192,  168,  200,  20,   0x0E, 0x57, 0x04, 0x04, 0x11, 0x0A};
+    TEST_ASSERT_EQUAL_UINT32(expected.size(), static_cast<uint32_t>(tx.payload.size()));
+    TEST_ASSERT_EQUAL_MEMORY(expected.data(), tx.payload.data(), expected.size());
+
+    const auto decoded = control_packet::Codec::decodeConnectResponse(tx.payload);
+    TEST_ASSERT_TRUE(decoded.isOk());
+    TEST_ASSERT_EQUAL_HEX16(0x110A, decoded.value().tunnelAddress);
+
+    // Tunnelling requests from the client go to its data endpoint.
+    network.udp->clearTx();
+    const std::array<uint8_t, 2> cemi{0x11, 0x00};
+    std::array<uint8_t, 64> reqBytes{};
+    PacketWriter req{std::span<uint8_t>(reqBytes)};
+    TEST_ASSERT_TRUE(control_packet::Codec::encodeTunnelingRequest(req, 1, 0, cemi).isOk());
+    network.udp->pushRx(clientAddress, 50001, req.span());
+    TEST_ASSERT_TRUE(endpoint.poll(0).isOk());
+    TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(network.udp->tx().size()));
+    TEST_ASSERT_EQUAL_UINT16(50001, network.udp->tx()[0].destinationPort);
+}
+
+void test_tunneling_server_endpoint_refuses_what_it_cannot_serve(void)
+{
+    TestNetwork network;
+    TunnelingServerEndpoint endpoint;
+    TunnelingServerEndpoint::Options options{};
+    options.tunnelAddresses = {IndividualAddress(0x110A)};
+    TEST_ASSERT_TRUE(endpoint.open(network, options).isOk());
+    const IpAddress clientAddress = IpAddress::fromOctets(127, 0, 0, 1);
+
+    const auto statusOf = [&](std::span<const uint8_t> request) {
+        network.udp->clearTx();
+        network.udp->pushRx(clientAddress, 45000, request);
+        TEST_ASSERT_TRUE(endpoint.poll(0).isOk());
+        TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(network.udp->tx().size()));
+        auto response = control_packet::Codec::decodeConnectResponse(network.udp->tx()[0].payload);
+        TEST_ASSERT_TRUE(response.isOk());
+        return response.value().status;
+    };
+
+    // Layer 80h (busmonitor) is not served: E_TUNNELLING_LAYER.
+    std::array<uint8_t, 64> bytes{};
+    PacketWriter writer{std::span<uint8_t>(bytes)};
+    TEST_ASSERT_TRUE(control_packet::Codec::encodeConnectionRequest(writer, loopbackHpai(45000), loopbackHpai(45000), 0x80).isOk());
+    TEST_ASSERT_EQUAL_HEX8(0x29, statusOf(writer.span()));
+
+    // Connection type 03h (device management): E_CONNECTION_TYPE.
+    auto request = buildConnectRequest(45000);
+    request[request.size() - 3] = 0x03;
+    TEST_ASSERT_EQUAL_HEX8(0x22, statusOf(request));
+
+    // One address, two clients: E_NO_MORE_CONNECTIONS for the second.
+    TEST_ASSERT_EQUAL_HEX8(0x00, statusOf(buildConnectRequest(45000)));
+    TEST_ASSERT_EQUAL_HEX8(0x24, statusOf(buildConnectRequest(45001)));
+}
+
+void test_tunneling_server_endpoint_repeats_once_then_disconnects(void)
+{
+    // 03/08/04 §2.6.1: no TUNNELLING_ACK within 1 s -> repeat once with the
+    // same sequence counter, then DISCONNECT_REQUEST.
+    TestNetwork network;
+    TunnelingServerEndpoint endpoint;
+    ManualTimingPlatform timing;
+    TunnelingServerEndpoint::Options options{};
+    options.tunnelAddresses = {IndividualAddress(0x110A)};
+    TEST_ASSERT_TRUE(endpoint.open(network, options).isOk());
+    endpoint.setTimingPlatform(&timing);
+
+    const IpAddress clientAddress = IpAddress::fromOctets(127, 0, 0, 1);
+    network.udp->pushRx(clientAddress, 45000, buildConnectRequest(45000));
+    TEST_ASSERT_TRUE(endpoint.poll(0).isOk());
+    network.udp->clearTx();
+
+    const std::array<uint8_t, 2> cemi1{0x29, 0x01};
+    const std::array<uint8_t, 2> cemi2{0x29, 0x02};
+    TEST_ASSERT_TRUE(endpoint.sendCemi(ChannelId(1), cemi1).isOk());
+    TEST_ASSERT_TRUE(endpoint.sendCemi(ChannelId(1), cemi2).isOk());  // queued behind the first
+    TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(network.udp->tx().size()));
+
+    // ACK for sequence 0 releases the second frame with sequence 1.
+    std::array<uint8_t, 16> ackBytes{};
+    PacketWriter ack{std::span<uint8_t>(ackBytes)};
+    TEST_ASSERT_TRUE(control_packet::Codec::encodeTunnelingAck(ack, 1, 0, 0x00).isOk());
+    network.udp->pushRx(clientAddress, 45000, ack.span());
+    TEST_ASSERT_TRUE(endpoint.poll(0).isOk());
+    TEST_ASSERT_EQUAL_UINT32(2u, static_cast<uint32_t>(network.udp->tx().size()));
+    auto second = control_packet::Codec::decodeTunnelingRequest(network.udp->tx()[1].payload);
+    TEST_ASSERT_TRUE(second.isOk());
+    TEST_ASSERT_EQUAL_UINT8(1u, second.value().sequence);
+
+    // No ACK: after 1 s the same frame again, same sequence counter.
+    timing.advanceMs(1000);
+    (void)endpoint.poll(0);
+    TEST_ASSERT_EQUAL_UINT32(3u, static_cast<uint32_t>(network.udp->tx().size()));
+    auto repeat = control_packet::Codec::decodeTunnelingRequest(network.udp->tx()[2].payload);
+    TEST_ASSERT_TRUE(repeat.isOk());
+    TEST_ASSERT_EQUAL_UINT8(1u, repeat.value().sequence);
+
+    // Still no ACK: DISCONNECT_REQUEST to the control endpoint, channel gone.
+    timing.advanceMs(1000);
+    (void)endpoint.poll(0);
+    TEST_ASSERT_EQUAL_UINT32(4u, static_cast<uint32_t>(network.udp->tx().size()));
+    KnxNetIpHeader header{};
+    TEST_ASSERT_TRUE(KnxNetIpCodec::decodeHeader(network.udp->tx()[3].payload, header).isOk());
+    TEST_ASSERT_EQUAL_HEX16(0x0209, header.serviceType.value());
+    TEST_ASSERT_EQUAL_UINT32(0u, static_cast<uint32_t>(endpoint.activeChannelCount()));
+}
+
+void test_tunneling_server_endpoint_heartbeat_supervision(void)
+{
+    // 03/08/02 §5.4: 120 s without a correctly received frame -> the server
+    // sends DISCONNECT_REQUEST; frames with an unexpected sequence counter do
+    // not retrigger the timeout.
+    TestNetwork network;
+    TunnelingServerEndpoint endpoint;
+    ManualTimingPlatform timing;
+    TunnelingServerEndpoint::Options options{};
+    options.tunnelAddresses = {IndividualAddress(0x110A)};
+    TEST_ASSERT_EQUAL_UINT32(120000u, options.channelIdleTimeoutMs);
+    TEST_ASSERT_TRUE(endpoint.open(network, options).isOk());
+    endpoint.setTimingPlatform(&timing);
+
+    const IpAddress clientAddress = IpAddress::fromOctets(127, 0, 0, 1);
+    network.udp->pushRx(clientAddress, 45000, buildConnectRequest(45000));
+    TEST_ASSERT_TRUE(endpoint.poll(0).isOk());
+
+    timing.advanceMs(100000);
+    network.udp->pushRx(clientAddress, 45000, buildConnectionStateRequest(1, 45000));
+    TEST_ASSERT_TRUE(endpoint.poll(0).isOk());  // heartbeat: restarts the 120 s
+
+    timing.advanceMs(100000);
+    const std::array<uint8_t, 2> cemi{0x11, 0x00};
+    network.udp->pushRx(clientAddress, 45000, buildTunnelingRequest(1, 7, cemi));  // unexpected sequence
+    TEST_ASSERT_TRUE(endpoint.poll(0).isOk());
+    TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(endpoint.activeChannelCount()));
+
+    network.udp->clearTx();
+    timing.advanceMs(20000);  // 120 s since the heartbeat
+    (void)endpoint.poll(0);
+    TEST_ASSERT_EQUAL_UINT32(0u, static_cast<uint32_t>(endpoint.activeChannelCount()));
+    TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(network.udp->tx().size()));
+    KnxNetIpHeader header{};
+    TEST_ASSERT_TRUE(KnxNetIpCodec::decodeHeader(network.udp->tx()[0].payload, header).isOk());
+    TEST_ASSERT_EQUAL_HEX16(0x0209, header.serviceType.value());
 }
 
 void test_tunneling_server_endpoint_send_cemi_to_all_fans_out_to_active_channels(void)
@@ -352,6 +541,7 @@ void test_tunneling_server_endpoint_send_cemi_to_all_fans_out_to_active_channels
     TunnelingServerEndpoint::Options options{};
     options.port = NetIpPort(3671);
     options.maxChannels = 2;
+    options.tunnelAddresses = {IndividualAddress(0x110A), IndividualAddress(0x110B)};
 
     auto openResult = endpoint.open(network, options);
     TEST_ASSERT_TRUE(openResult.isOk());
@@ -401,6 +591,7 @@ void test_tunneling_server_endpoint_prunes_idle_channels_on_poll(void)
     TunnelingServerEndpoint::Options options{};
     options.port = NetIpPort(3671);
     options.maxChannels = 1;
+    options.tunnelAddresses = {IndividualAddress(0x110A), IndividualAddress(0x110B)};
     options.channelIdleTimeoutMs = 10;
 
     auto openResult = endpoint.open(network, options);
@@ -432,5 +623,9 @@ int main(void)
     RUN_TEST(test_tunneling_server_endpoint_tunneling_ack_and_callback_sequence_rules);
     RUN_TEST(test_tunneling_server_endpoint_send_cemi_to_all_fans_out_to_active_channels);
     RUN_TEST(test_tunneling_server_endpoint_prunes_idle_channels_on_poll);
+    RUN_TEST(test_tunneling_server_endpoint_connect_response_carries_hpai_and_crd);
+    RUN_TEST(test_tunneling_server_endpoint_refuses_what_it_cannot_serve);
+    RUN_TEST(test_tunneling_server_endpoint_repeats_once_then_disconnects);
+    RUN_TEST(test_tunneling_server_endpoint_heartbeat_supervision);
     return UNITY_END();
 }

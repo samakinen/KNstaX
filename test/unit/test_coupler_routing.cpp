@@ -83,11 +83,25 @@ void assertAction(RoutingAction expected, RoutingAction actual, const char* what
     }
 }
 
+/// A Filter Table in which every group address passes. The specification
+/// default is a cleared table (03/05/01 §4.5.3), under which GROUP_ROUT6FFF
+/// routes nothing; the hop-count and addressing tests need traffic to flow.
+FilterTable& passAllTable()
+{
+    static FilterTable table = [] {
+        FilterTable t;
+        t.setAll(true);
+        return t;
+    }();
+    return table;
+}
+
 /// A line coupler for line 1.1, i.e. individual address 1.1.0.
 CouplerRoutingPolicy lineCoupler()
 {
     CouplerRoutingPolicy policy;
     policy.setOwnAddress(IndividualAddress(ia(1, 1, 0)));
+    policy.setFilterTable(&passAllTable());
     return policy;
 }
 
@@ -96,6 +110,7 @@ CouplerRoutingPolicy backboneCoupler()
 {
     CouplerRoutingPolicy policy;
     policy.setOwnAddress(IndividualAddress(ia(1, 0, 0)));
+    policy.setFilterTable(&passAllTable());
     return policy;
 }
 
@@ -371,10 +386,7 @@ void test_phys_frame_config_is_per_direction(void)
 void test_group_routing_consults_the_filter_table(void)
 {
     FilterTable table;
-    table.setDefaultAction(FilterAction::Block);
-    TEST_ASSERT_TRUE(table.addEntry(GroupAddress(0x0801), GroupAddress(0xFFFF),
-                                    FilterAction::Allow, EntryState::Enabled)
-                         .isOk());
+    table.set(GroupAddress(0x0801), true);
 
     auto policy = lineCoupler();
     policy.setFilterTable(&table);
@@ -390,11 +402,9 @@ void test_group_routing_consults_the_filter_table(void)
 
 void test_a_filtered_group_frame_is_ignored_totally_even_at_hop_count_seven(void)
 {
-    // The reading that matters: the routing condition gates the hop-count rule
-    // rather than sitting beside it. Otherwise every hop-count-7 telegram would
-    // bypass the filter table and the filter table would be decorative.
+    // The routing condition gates the hop-count rule (03/03/03
+    // §2.4.2.4.5.2.2: "ELSE IGNORE_TOTALLY").
     FilterTable table;
-    table.setDefaultAction(FilterAction::Block);
 
     auto policy = lineCoupler();
     policy.setFilterTable(&table);
@@ -406,11 +416,7 @@ void test_a_filtered_group_frame_is_ignored_totally_even_at_hop_count_seven(void
 
 void test_group_lock_blocks_everything_in_its_range(void)
 {
-    FilterTable table;
-    table.setDefaultAction(FilterAction::Allow);
-
-    auto policy = lineCoupler();
-    policy.setFilterTable(&table);
+    auto policy = lineCoupler();  // pass-all table
     policy.groupConfig(CouplerPort::Primary).group6FFF = GroupHandling::Lock;
 
     auto frame = groupFrame(0x0801);
@@ -420,8 +426,7 @@ void test_group_lock_blocks_everything_in_its_range(void)
 
 void test_group_unlock_bypasses_the_filter_table(void)
 {
-    FilterTable table;
-    table.setDefaultAction(FilterAction::Block);
+    FilterTable table;  // cleared
 
     auto policy = lineCoupler();
     policy.setFilterTable(&table);
@@ -434,11 +439,8 @@ void test_group_unlock_bypasses_the_filter_table(void)
 
 void test_the_two_group_ranges_are_configured_separately(void)
 {
-    // §4.4.5 splits at 0x6FFF because ETS only downloads filter entries for the
-    // lower range. Applying one setting to both either filters addresses that
-    // were never in the table, or stops filtering ones that were.
-    FilterTable table;
-    table.setDefaultAction(FilterAction::Block);
+    // §4.5.6: GROUP_6FFF for addresses <= 6FFFh, GROUP_7000 for >= 7000h.
+    FilterTable table;  // cleared
 
     auto policy = lineCoupler();
     policy.setFilterTable(&table);
@@ -454,34 +456,151 @@ void test_the_two_group_ranges_are_configured_separately(void)
                  policy.decide(CouplerPort::Primary, high), "0x7000 uses GROUP_7000");
 }
 
-void test_group_routing_passes_everything_without_a_filter_table(void)
+void test_group_rout_7000_consults_the_same_filter_table(void)
 {
-    // A coupler whose filter table has not been downloaded yet must not sever
-    // the line. Failing open here is the difference between an installation
-    // that works before commissioning and one that appears dead.
-    auto policy = lineCoupler();
-    TEST_ASSERT_NULL(policy.filterTable());
-
-    auto frame = groupFrame(0x0801);
-    assertAction(RoutingAction::RouteDecremented,
-                 policy.decide(CouplerPort::Primary, frame), "no filter table");
-}
-
-void test_filter_table_use_disabled_bypasses_filtering(void)
-{
-    // PID_FILTER_TABLE_USE = 0 degrades GROUP_ROUT to GROUP_UNLOCK rather than
-    // blocking everything.
+    // GROUP_ROUT7000: "Routing shall depend on the Routing Table" (§4.5.6),
+    // which covers the full 16-bit space (§5.3.1.1.1).
     FilterTable table;
-    table.setDefaultAction(FilterAction::Block);
+    table.set(GroupAddress(0x7801), true);
 
     auto policy = lineCoupler();
     policy.setFilterTable(&table);
-    policy.setFilterTableInUse(false);
+    policy.groupConfig(CouplerPort::Primary).group7000 = GroupHandling::Route;
+
+    assertAction(RoutingAction::RouteDecremented,
+                 policy.decide(CouplerPort::Primary, groupFrame(0x7801)), "0x7801 in table");
+    assertAction(RoutingAction::IgnoreTotally,
+                 policy.decide(CouplerPort::Primary, groupFrame(0x7802)), "0x7802 not in table");
+}
+
+void test_group_routing_without_a_filter_table_routes_nothing(void)
+{
+    // With GROUP_ROUT and nothing to evaluate, the evaluation is negative.
+    CouplerRoutingPolicy policy;
+    policy.setOwnAddress(IndividualAddress(ia(1, 1, 0)));
+    TEST_ASSERT_NULL(policy.filterTable());
 
     auto frame = groupFrame(0x0801);
-    assertAction(RoutingAction::RouteDecremented,
-                 policy.decide(CouplerPort::Primary, frame), "PID_FILTER_TABLE_USE = 0");
+    assertAction(RoutingAction::IgnoreTotally,
+                 policy.decide(CouplerPort::Primary, frame), "no filter table");
 }
+
+void test_filter_table_use_disabled_routes_nothing_under_group_rout(void)
+{
+    // §4.5.13.3, value 0: "this evaluation shall return negative for all Group
+    // Addresses" — Figure 5 of 03/03/03: Filter Table Use = False -> FALSE.
+    auto policy = lineCoupler();  // pass-all table
+    policy.setFilterTableInUse(false);
+
+    assertAction(RoutingAction::IgnoreTotally,
+                 policy.decide(CouplerPort::Primary, groupFrame(0x0801)),
+                 "PID_FILTER_TABLE_USE = 0");
+    // UNLOCK does not evaluate the table, so it is unaffected.
+    policy.groupConfig(CouplerPort::Primary).group6FFF = GroupHandling::Unlock;
+    assertAction(RoutingAction::RouteDecremented,
+                 policy.decide(CouplerPort::Primary, groupFrame(0x0801)),
+                 "UNLOCK ignores Filter Table Use");
+}
+
+void test_load_states_gate_the_filter_table_evaluation(void)
+{
+    // Figure 5: Device Object LSM != Loaded -> FALSE; Filter Table LSM !=
+    // Loaded -> FALSE.
+    auto policy = lineCoupler();
+    policy.setFilterTableLoaded(false);
+    assertAction(RoutingAction::IgnoreTotally,
+                 policy.decide(CouplerPort::Primary, groupFrame(0x0801)), "table not loaded");
+    policy.setFilterTableLoaded(true);
+    policy.setDeviceLoaded(false);
+    assertAction(RoutingAction::IgnoreTotally,
+                 policy.decide(CouplerPort::Primary, groupFrame(0x0801)), "device not loaded");
+    policy.setDeviceLoaded(true);
+    assertAction(RoutingAction::RouteDecremented,
+                 policy.decide(CouplerPort::Primary, groupFrame(0x0801)), "both loaded");
+}
+
+void test_group_forwarding_decision_table(void)
+{
+    // Every combination of GROUP_6FFF handling, Filter Table Use, Filter Table
+    // bit and hop count against 03/03/03 §2.4.2.4.5.2.2:
+    //   condition TRUE and 0 < C <= 7 -> ROUTE_DECREMENTED (C = 7: unmodified)
+    //   condition TRUE and C = 0      -> IGNORE_ACKED
+    //   otherwise                     -> IGNORE_TOTALLY
+    // and the layer-2 acknowledge of 03/05/01 §4.5.5 GROUP_IACK_ROUT:
+    //   1 -> acknowledge iff the condition is TRUE; 0 -> acknowledge all.
+    FilterTable table;
+    table.set(GroupAddress(0x0801), true);  // 0x0802 stays cleared
+
+    const GroupHandling handlings[] = {GroupHandling::Unlock, GroupHandling::Lock, GroupHandling::Route};
+    for (const GroupHandling handling : handlings) {
+        for (const bool inUse : {true, false}) {
+            for (const uint16_t ga : {uint16_t{0x0801}, uint16_t{0x0802}}) {
+                for (const uint8_t hop : {uint8_t{0}, uint8_t{3}, uint8_t{7}}) {
+                    for (const bool ackRoutedOnly : {true, false}) {
+                        auto policy = lineCoupler();
+                        policy.setFilterTable(&table);
+                        policy.setFilterTableInUse(inUse);
+                        policy.groupConfig(CouplerPort::Primary).group6FFF = handling;
+                        policy.lineConfig(CouplerPort::Primary).groupAckRoutedOnly = ackRoutedOnly;
+
+                        const bool condition = handling == GroupHandling::Unlock
+                            || (handling == GroupHandling::Route && inUse && ga == 0x0801);
+                        RoutingAction expected = RoutingAction::IgnoreTotally;
+                        if (condition) {
+                            expected = hop == 0   ? RoutingAction::IgnoreAcked
+                                       : hop == 7 ? RoutingAction::RouteUnmodified
+                                                  : RoutingAction::RouteDecremented;
+                        }
+                        const auto frame = groupFrame(ga, hop);
+                        const RoutingAction action = policy.decide(CouplerPort::Primary, frame);
+                        assertAction(expected, action, "decision table");
+
+                        const bool expectAck = !ackRoutedOnly || condition;
+                        TEST_ASSERT_EQUAL(static_cast<int>(expectAck ? AckPolicy::Acknowledge
+                                                                     : AckPolicy::NoAcknowledge),
+                                          static_cast<int>(policy.ackPolicy(CouplerPort::Primary,
+                                                                            frame, action)));
+                        // The ISR form of the same rule must agree.
+                        TEST_ASSERT_EQUAL(expectAck,
+                                          policy.groupAckFilter(CouplerPort::Primary).acknowledges(ga));
+                    }
+                }
+            }
+        }
+    }
+}
+
+void test_group_ack_filter_follows_each_ports_configuration(void)
+{
+    using Mode = knx::physical::GroupAckFilter::Mode;
+    FilterTable table;
+    auto policy = lineCoupler();
+    policy.setFilterTable(&table);
+    policy.groupConfig(CouplerPort::Primary).group6FFF = GroupHandling::Route;
+    policy.groupConfig(CouplerPort::Primary).group7000 = GroupHandling::Unlock;
+    policy.groupConfig(CouplerPort::Secondary).group6FFF = GroupHandling::Lock;
+    policy.groupConfig(CouplerPort::Secondary).group7000 = GroupHandling::Route;
+
+    const auto primary = policy.groupAckFilter(CouplerPort::Primary);
+    TEST_ASSERT_EQUAL(static_cast<int>(Mode::FilterTable), static_cast<int>(primary.low));
+    TEST_ASSERT_EQUAL(static_cast<int>(Mode::Always), static_cast<int>(primary.high));
+    TEST_ASSERT_TRUE(primary.filterTable == table.octets().data());
+
+    const auto secondary = policy.groupAckFilter(CouplerPort::Secondary);
+    TEST_ASSERT_EQUAL(static_cast<int>(Mode::Never), static_cast<int>(secondary.low));
+    TEST_ASSERT_EQUAL(static_cast<int>(Mode::FilterTable), static_cast<int>(secondary.high));
+
+    // The ISR reads the table live: no refresh needed for a table edit.
+    TEST_ASSERT_FALSE(primary.acknowledges(0x0801));
+    table.set(GroupAddress(0x0801), true);
+    TEST_ASSERT_TRUE(primary.acknowledges(0x0801));
+
+    // Filter Table Use = 0 turns FilterTable modes into Never.
+    policy.setFilterTableInUse(false);
+    TEST_ASSERT_EQUAL(static_cast<int>(Mode::Never),
+                      static_cast<int>(policy.groupAckFilter(CouplerPort::Primary).low));
+}
+
 
 // -----------------------------------------------------------------------------
 // Broadcast (03/03/03 §2.4.2.4.4)
@@ -515,7 +634,6 @@ void test_broadcast_is_not_subject_to_the_filter_table(void)
     // through the filter table would block it in every real installation, since
     // no filter table contains 0/0/0.
     FilterTable table;
-    table.setDefaultAction(FilterAction::Block);
 
     auto policy = lineCoupler();
     policy.setFilterTable(&table);
@@ -739,8 +857,12 @@ int main(void)
     RUN_TEST(test_group_lock_blocks_everything_in_its_range);
     RUN_TEST(test_group_unlock_bypasses_the_filter_table);
     RUN_TEST(test_the_two_group_ranges_are_configured_separately);
-    RUN_TEST(test_group_routing_passes_everything_without_a_filter_table);
-    RUN_TEST(test_filter_table_use_disabled_bypasses_filtering);
+    RUN_TEST(test_group_rout_7000_consults_the_same_filter_table);
+    RUN_TEST(test_group_routing_without_a_filter_table_routes_nothing);
+    RUN_TEST(test_filter_table_use_disabled_routes_nothing_under_group_rout);
+    RUN_TEST(test_load_states_gate_the_filter_table_evaluation);
+    RUN_TEST(test_group_forwarding_decision_table);
+    RUN_TEST(test_group_ack_filter_follows_each_ports_configuration);
 
     RUN_TEST(test_broadcast_is_routed_by_default);
     RUN_TEST(test_broadcast_lock_blocks_broadcast);

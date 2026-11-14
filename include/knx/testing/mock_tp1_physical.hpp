@@ -282,6 +282,13 @@ public:
         _asyncSendEnabled = enabled;
     }
 
+#if KNX_FEATURE_COUPLER
+    /// Records the coupler group-acknowledge rule a real TP1 backend would
+    /// evaluate in its receive ISR, so tests can check what it acknowledges.
+    void setGroupAckFilter(const physical::GroupAckFilter* filter) { _groupAckFilter = filter; }
+    const physical::GroupAckFilter* groupAckFilter() const { return _groupAckFilter; }
+#endif
+
     void queueAsyncOutcome(physical::TxOutcomeState outcome)
     {
         std::lock_guard<std::mutex> lock(_mutex);
@@ -289,6 +296,9 @@ public:
     }
 
 private:
+#if KNX_FEATURE_COUPLER
+    const physical::GroupAckFilter* _groupAckFilter{nullptr};
+#endif
     bool _open{false};
     size_t _txCount{0};
     physical::PhysicalLayerState _state{physical::PhysicalLayerState::Idle};

@@ -266,7 +266,7 @@ void test_ip_secure_tunneling_physical_send_receive(void)
     connectRespPlain.push_back(0x02);
     connectRespPlain.push_back(0x06);
     connectRespPlain.push_back(0x00);
-    connectRespPlain.push_back(0x10);
+    connectRespPlain.push_back(0x14);
     connectRespPlain.push_back(0x11);
     connectRespPlain.push_back(0x00);
     connectRespPlain.push_back(0x08);
@@ -277,6 +277,10 @@ void test_ip_secure_tunneling_physical_send_receive(void)
     connectRespPlain.push_back(1);
     connectRespPlain.push_back(0x1F);
     connectRespPlain.push_back(0x90);
+    // CRD: tunnelling connection, IA 1.1.10 (03/08/04 §5.4.4).
+    for (uint8_t octet : std::initializer_list<uint8_t>{0x04, 0x04, 0x11, 0x0A}) {
+        connectRespPlain.push_back(octet);
+    }
 
     std::vector<uint8_t> connectRespWrapped(SecureWrapper::kOverhead + connectRespPlain.size());
     auto connectWrapRes = SecureWrapper::wrap(swKey,

@@ -39,6 +39,9 @@ public:
 
     void setAckGroupAddresses(std::span<const uint16_t> addresses) override;
     void setLocalBusy(bool busy) override;
+#if KNX_FEATURE_COUPLER
+    void setGroupAckFilter(const GroupAckFilter* filter) override;
+#endif
 
     Tp1MediumDiagnostics* diagnostics() override { return this; }
     const Tp1MediumDiagnostics* diagnostics() const override { return this; }

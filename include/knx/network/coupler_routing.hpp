@@ -15,7 +15,7 @@
  * ## Which configuration governs which direction
  *
  * The `MAIN`/`SUB` property pairs are named after the subnetwork a frame
- * arrives *from*, not the one it leaves towards (03/05/01 §4.4.4, and the
+ * arrives *from*, not the one it leaves towards (03/05/01 §4.5.5, and the
  * conformance rows in §"PID_MAIN_LCGRPCONFIG = XXXXXX11 → Primary to Secondary
  * shall be routed in function of the Filter Table"). So:
  *
@@ -29,6 +29,7 @@
 
 #include "knx/datalink/tp1_data_link_layer.hpp"
 #include "knx/network/filter_table.hpp"
+#include "knx/physical/group_ack_filter.hpp"
 #include "knx/types.hpp"
 
 #include <cstdint>
@@ -138,7 +139,7 @@ enum class FrameClass : uint8_t {
     SystemBroadcast,
 };
 
-/// PHYS_FRAME field of PID_MAIN_LCCONFIG / PID_SUB_LCCONFIG (03/05/01 §4.4.4).
+/// PHYS_FRAME field of PID_MAIN_LCCONFIG / PID_SUB_LCCONFIG (03/05/01 §4.5.5).
 enum class PhysFrameHandling : uint8_t {
     /// Route every point-to-point frame regardless of address (bridge mode).
     Unlock = 1,
@@ -148,7 +149,7 @@ enum class PhysFrameHandling : uint8_t {
     Route = 3,
 };
 
-/// PHYS_IACK field of PID_MAIN_LCCONFIG / PID_SUB_LCCONFIG (03/05/01 §4.4.4).
+/// PHYS_IACK field of PID_MAIN_LCCONFIG / PID_SUB_LCCONFIG (03/05/01 §4.5.5).
 enum class PhysAckHandling : uint8_t {
     /// Acknowledge frames that are routed or addressed to the coupler. Default.
     Normal = 1,
@@ -159,7 +160,7 @@ enum class PhysAckHandling : uint8_t {
     Nack = 3,
 };
 
-/// GROUP_6FFF / GROUP_7000 fields of PID_*_LCGRPCONFIG (03/05/01 §4.4.5).
+/// GROUP_6FFF / GROUP_7000 fields of PID_*_LCGRPCONFIG (03/05/01 §4.5.6).
 enum class GroupHandling : uint8_t {
     /// Route every group frame in the range without consulting the filter table.
     Unlock = 1,
@@ -170,7 +171,7 @@ enum class GroupHandling : uint8_t {
 };
 
 /**
- * @brief PID_MAIN_LCCONFIG / PID_SUB_LCCONFIG (03/05/01 §4.4.4).
+ * @brief PID_MAIN_LCCONFIG / PID_SUB_LCCONFIG (03/05/01 §4.5.5).
  *
  * Governs point-to-point and broadcast frames arriving on one side.
  */
@@ -193,7 +194,7 @@ struct LineCouplerConfig {
 inline constexpr uint8_t kDefaultLineCouplerConfig = 0x77;
 
 /**
- * @brief PID_MAIN_LCGRPCONFIG / PID_SUB_LCGRPCONFIG (03/05/01 §4.4.5).
+ * @brief PID_MAIN_LCGRPCONFIG / PID_SUB_LCGRPCONFIG (03/05/01 §4.5.6).
  *
  * Governs group-addressed frames arriving on one side.
  */
@@ -203,8 +204,8 @@ struct GroupCouplerConfig {
     /**
      * bits 2-3. Group addresses ≥ 0x7000, i.e. main groups 14..31.
      *
-     * The default is Unlock, not Route: ETS does not put these into a filter
-     * table, so filtering them would silently black-hole them.
+     * The default is GROUP_UNLOCK7000, as §4.5.6 marks it (d); GROUP_ROUT7000
+     * consults the same full-range Filter Table as GROUP_ROUT6FFF.
      */
     GroupHandling group7000{GroupHandling::Unlock};
     bool groupRepeat{true};  ///< bit 4
@@ -266,14 +267,38 @@ public:
     FilterTable* filterTable() const { return _filterTable; }
 
     /**
-     * @brief PID_FILTER_TABLE_USE.
+     * @brief PID_FILTER_TABLE_USE (03/05/01 §4.5.13).
      *
-     * When false, GROUP_ROUT degrades to GROUP_UNLOCK rather than blocking
-     * everything: a coupler whose filter table has not been downloaded yet must
-     * pass traffic, not sever the line.
+     * 0: "The Filter Table shall not be evaluated. If the ... Coupler Parameter
+     * values conclude on the evaluation of Filter Table, then, this evaluation
+     * shall return negative for all Group Addresses." So with GROUP_ROUT in
+     * effect and this false, no group frame in that range is routed
+     * (03/03/03 §2.4.2.4.5.2.2, Figure 5).
      */
     void setFilterTableInUse(bool inUse) { _filterTableInUse = inUse; }
     bool isFilterTableInUse() const { return _filterTableInUse; }
+
+    /**
+     * @brief Load State of the Filter Table and of the Device Object.
+     *
+     * Figure 5 of 03/03/03 §2.4.2.4.5.2.2: when the routing condition depends
+     * on the Filter Table, it is FALSE unless both are Loaded. Default Loaded,
+     * the Router Object's default Load State (03/05/01 §4.5.3).
+     */
+    void setFilterTableLoaded(bool loaded) { _filterTableLoaded = loaded; }
+    bool isFilterTableLoaded() const { return _filterTableLoaded; }
+    void setDeviceLoaded(bool loaded) { _deviceLoaded = loaded; }
+    bool isDeviceLoaded() const { return _deviceLoaded; }
+
+    /**
+     * @brief The layer-2 acknowledge rule for group frames arriving on
+     *        @p origin, reduced for evaluation in the receive ISR.
+     *
+     * Matches @ref ackPolicy for multicast frames: everything with
+     * GROUP_IACK_ROUT = 0, otherwise exactly the addresses whose routing
+     * condition is TRUE (routed, or IGNORE_ACKED when the hop count is spent).
+     */
+    physical::GroupAckFilter groupAckFilter(CouplerPort origin) const;
 
     /// Configuration governing frames arriving on @p origin. See the file header.
     LineCouplerConfig& lineConfig(CouplerPort origin) { return _lineConfig[index(origin)]; }
@@ -300,7 +325,7 @@ public:
      * @brief The layer-2 acknowledge to give for a frame that yielded @p action.
      *
      * Separate from the routing decision because the acknowledge fields are
-     * explicitly "independent of the Coupler Mode" (03/05/01 §4.4.4): a frame
+     * explicitly "independent of the Coupler Mode" (03/05/01 §4.5.5): a frame
      * can be dropped and still acknowledged, or routed and not acknowledged.
      */
     AckPolicy ackPolicy(CouplerPort origin, const datalink::LDataFrame& frame,
@@ -335,11 +360,15 @@ private:
                                                      uint8_t hopCount) const;
 
     bool groupRoutingCondition(CouplerPort origin, const GroupAddress& destination) const;
+    bool filterTableUsable() const;
+    bool filterTableEvaluation(uint16_t address) const;
 
     IndividualAddress _ownAddress{};
     CouplerRole _role{CouplerRole::Repeater};
     FilterTable* _filterTable{nullptr};
     bool _filterTableInUse{true};
+    bool _filterTableLoaded{true};
+    bool _deviceLoaded{true};
 
     LineCouplerConfig _lineConfig[2]{};
     GroupCouplerConfig _groupConfig[2]{};

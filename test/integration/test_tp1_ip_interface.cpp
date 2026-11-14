@@ -195,7 +195,7 @@ void test_tp1_ip_interface_smoke_bidirectional_forwarding(void)
     TestNetwork network;
     TunnelingServerEndpoint server;
 
-    auto openResult = server.open(network, TunnelingServerEndpoint::Options{});
+    auto openResult = server.open(network, TunnelingServerEndpoint::Options{.tunnelAddresses = {knx::IndividualAddress(0x110A), knx::IndividualAddress(0x110B)}});
     TEST_ASSERT_TRUE(openResult.isOk());
 
     network::Tp1IpInterfaceBridge bridge(tp1, server);

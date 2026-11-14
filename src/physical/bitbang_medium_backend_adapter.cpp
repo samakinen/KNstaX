@@ -142,6 +142,12 @@ void BitBangMediumBackendAdapter::setAckGroupAddresses(std::span<const uint16_t>
     _tp1Driver.setAckGroupAddresses(addresses);
 }
 
+#if KNX_FEATURE_COUPLER
+void BitBangMediumBackendAdapter::setGroupAckFilter(const GroupAckFilter* filter) {
+    _tp1Driver.setGroupAckFilter(filter);
+}
+#endif
+
 void BitBangMediumBackendAdapter::setLocalBusy(bool busy) {
     _tp1Driver.setLocalBusy(busy);
 }

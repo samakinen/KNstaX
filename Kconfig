@@ -247,6 +247,17 @@ menu "KNX Stack Configuration"
                 in the statistics themselves.
 
                 Do NOT leave this enabled in production builds.
+
+        config KNX_ENABLE_COUPLER
+            bool "Coupler group acknowledge"
+            default n
+            help
+                Build the hook that lets a TP1 line or backbone coupler
+                acknowledge the group frames it routes (PID_*_LCCONFIG
+                GROUP_IACK_ROUT, 03/05/01 4.5.5) from the receive interrupt,
+                using its Filter Table. An end device acknowledges only its
+                own group addresses and does not need this; leave it off
+                unless the image is a coupler.
     endmenu
 
     menu "IP Configuration"

@@ -38,11 +38,21 @@ util::Result<SecureSessionBootstrap::AuthenticateRequest> SecureSessionBootstrap
     uint64_t initialSequence,
     const SecureSession::PublicKey& clientPublicKey,
     std::span<const uint8_t> sessionResponseFrame,
-    std::span<uint8_t> outWrappedFrame)
+    std::span<uint8_t> outWrappedFrame,
+    const SecureSession::DeviceAuthenticationCode* deviceAuthenticationCode)
 {
     SecureSession::SessionResponse parsed{};
     if (SecureSession::decodeSessionResponse(sessionResponseFrame, parsed).isError()) {
         return util::ErrorCode::DecodeFailed;
+    }
+
+    // 03/08/09 §2.2.3.7.3/§2.2.3.7.5: the MAC over the server's and the
+    // client's public values, keyed with the Device Authentication Code, is
+    // what proves the response came from the device and not a man in the
+    // middle. Checked before any key material is derived from it.
+    if (deviceAuthenticationCode != nullptr
+        && !SecureSession::verifySessionResponseMac(*deviceAuthenticationCode, parsed, clientPublicKey)) {
+        return util::ErrorCode::AccessDenied;
     }
 
     SecureSession::SessionKey sessionKey{};
@@ -94,23 +104,29 @@ util::Result<SecureSessionBootstrap::AuthenticateRequest> SecureSessionBootstrap
 util::Result<uint8_t> SecureSessionBootstrap::decodeSessionStatus(const SecureWrapper::Key& wrapperKey,
                                                                   SessionId sessionId,
                                                                   std::span<const uint8_t> frame,
-                                                                  std::span<uint8_t> scratchPlaintext)
+                                                                  std::span<uint8_t> scratchPlaintext,
+                                                                  uint64_t* outSequence)
 {
     KnxNetIpHeader header;
     auto headerResult = KnxNetIpCodec::decodeHeader(frame, header);
     if (headerResult.isError()) return util::ErrorCode::DecodeFailed;
 
-    uint8_t status = 0xFF;
-    if (header.serviceType == SecureWrapper::kServiceTypeSecureWrapper) {
-        auto unwrapResult = SecureWrapper::unwrapAndVerify(wrapperKey, sessionId, frame, scratchPlaintext);
-        if (unwrapResult.isError()) return util::ErrorCode::DecodeFailed;
-        if (SecureSession::decodeSessionStatus(scratchPlaintext.first(unwrapResult.value()), status).isError()) {
-            return util::ErrorCode::DecodeFailed;
-        }
-        return status;
+    // A plain SESSION_STATUS is not authenticated: a success code in one
+    // would let anyone on the path declare the session open.
+    if (header.serviceType != SecureWrapper::kServiceTypeSecureWrapper) {
+        return util::ErrorCode::AccessDenied;
     }
 
-    if (SecureSession::decodeSessionStatus(frame, status).isError()) return util::ErrorCode::DecodeFailed;
+    auto unwrapResult = SecureWrapper::unwrapAndVerify(wrapperKey, sessionId, frame, scratchPlaintext);
+    if (unwrapResult.isError()) return util::ErrorCode::DecodeFailed;
+
+    uint8_t status = 0xFF;
+    if (SecureSession::decodeSessionStatus(scratchPlaintext.first(unwrapResult.value()), status).isError()) {
+        return util::ErrorCode::DecodeFailed;
+    }
+    if (outSequence != nullptr) {
+        *outSequence = SecureWrapper::sequenceOf(frame);
+    }
     return status;
 }
 

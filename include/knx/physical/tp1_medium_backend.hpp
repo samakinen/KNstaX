@@ -8,6 +8,8 @@
 
 #pragma once
 
+#include "knx/config.hpp"
+#include "knx/physical/group_ack_filter.hpp"
 #include "knx/physical/link_state.hpp"
 #include "knx/util/inplace_function.hpp"
 #include "knx/util/result.hpp"
@@ -135,6 +137,10 @@ public:
         (void)addresses;
     }
     virtual void setLocalBusy(bool busy) { (void)busy; }
+#if KNX_FEATURE_COUPLER
+    /// A coupler's group acknowledge rule (see GroupAckFilter); null clears it.
+    virtual void setGroupAckFilter(const GroupAckFilter* filter) { (void)filter; }
+#endif
 
     virtual Tp1MediumDiagnostics* diagnostics() { return nullptr; }
     virtual const Tp1MediumDiagnostics* diagnostics() const { return nullptr; }

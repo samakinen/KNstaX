@@ -3,9 +3,11 @@
 
 #pragma once
 
+#include "knx/config.hpp"
 #include "knx/datalink/tp1_dl_common.hpp"
 #include "knx/physical/bitbang_driver_interface.hpp"
 #include "knx/physical/bitbang_timing_stats.hpp"
+#include "knx/physical/group_ack_filter.hpp"
 #include "knx/physical/timer_gpio_hal.h"
 
 #include <algorithm>
@@ -173,6 +175,15 @@ public:
     /// Busy state reflected in the ISR's ACK decision (BUSY instead of ACK).
     void setLocalBusy(bool busy) { _localBusy = busy; }
 
+#if KNX_FEATURE_COUPLER
+    /// A coupler's group acknowledge rule (see GroupAckFilter), or null for
+    /// an end device. Consulted only for group frames the address table above
+    /// does not already acknowledge: the two conditions are OR-ed
+    /// (03/03/03 §2.4.2.4.4). The filter is owned by the coupler and must
+    /// outlive its publication here; a pointer store is a single write.
+    void setGroupAckFilter(const GroupAckFilter* filter) { _groupAckFilter = filter; }
+#endif
+
     /// Bus-monitor mode: the device only listens. It must not acknowledge
     /// anything, or a monitoring tool would change the traffic it observes —
     /// a frame meant for a device that is absent would look delivered.
@@ -322,6 +333,9 @@ private:
     // Sorted ascending by setAckGroupAddresses(); armEarlyAckIfAddressed()
     // binary-searches it.
     std::array<uint16_t, MAX_ACK_GROUP_ADDRESSES> _ackGroupAddresses{};
+#if KNX_FEATURE_COUPLER
+    const GroupAckFilter* volatile _groupAckFilter{nullptr};
+#endif
     // ACK receive transaction: one-bit state feeding the timeout classification
     // in txHandleWaitingAck(). Cleared by prepareAckReception().
     bool     _ackStartEdgeSeen{false};
@@ -660,6 +674,12 @@ private:
             // TP1 wire: certified senders keep CTRL bits 1..0 at zero, so
             // gating on them would suppress every acknowledgment.
             addressed = destRaw == 0x0000u || ackGroupTableContains(destRaw);
+#if KNX_FEATURE_COUPLER
+            if (!addressed) {
+                const GroupAckFilter* coupler = _groupAckFilter;
+                addressed = coupler != nullptr && coupler->acknowledges(destRaw);
+            }
+#endif
         } else {
             // Individually-addressed frames: always ACK when they match our
             // address; the individual broadcast 0xFFFF is never acknowledged.

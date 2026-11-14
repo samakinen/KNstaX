@@ -142,12 +142,9 @@ void test_the_router_object_binds_to_the_couplers_own_filter_table(void)
 
     // Writing through the coupler's table must be visible to the routing
     // policy, which is the same object.
-    TEST_ASSERT_EQUAL(0u, coupler->filterTable().entryCount());
-    TEST_ASSERT_TRUE(coupler->filterTable()
-                         .addEntry(GroupAddress(0x0801), GroupAddress(0xFFFF),
-                                   network::FilterAction::Allow, EntryState::Enabled)
-                         .isOk());
-    TEST_ASSERT_EQUAL(1u, coupler->filterTable().entryCount());
+    TEST_ASSERT_EQUAL_UINT32(0u, coupler->filterTable().passCount());
+    coupler->filterTable().set(GroupAddress(0x0801), true);
+    TEST_ASSERT_TRUE(coupler->policy().filterTable()->passes(GroupAddress(0x0801)));
     TEST_ASSERT_TRUE(&coupler->filterTable() == coupler->policy().filterTable());
 }
 

@@ -9,7 +9,9 @@
 #include "knx/application/dpt.hpp"
 #include "knx/constants.hpp"
 #include "knx/util/bit_ops.hpp"
+#include <bit>
 #include <cmath>
+#include <limits>
 #include <span>
 
 using namespace knx::constants::dpt;
@@ -128,8 +130,8 @@ const DptInfo kKnownDpts[] = {
     X(HvacMode,        HvacMode)                        \
     X(RgbColor,        RgbColor)                        \
     X(XyYColor,        XyYColor)                        \
-    X(HsvColor,        HsvColor)                        \
-    X(ColorTransition, ColorTransition)
+    X(ColourTransitionXyY, ColourTransitionXyY)          \
+    X(ConverterStatus, ConverterStatus)
 
 util::Result<size_t> encodeForValueType(DptValue::Type type,
                                         const DptValue& value,
@@ -312,36 +314,36 @@ util::Result<void> Dpt5::decode(std::span<const uint8_t> data, uint8_t& value) {
 // S = sign bit (bit 15), E = exponent (bits 14-11), M = signed 11-bit mantissa (bits 10-0)
 // Value = (0.01 * M) * 2^E
 util::Result<size_t> Dpt9::encode(float value, std::span<uint8_t> data) {
-    if (std::isnan(value) || std::isinf(value)) {
+    // 03_07_02 §3.10: 7FFFh "shall always be used to denote invalid data";
+    // NaN is this codec's in-memory form of that code.
+    if (std::isnan(value)) {
+        return writeWord(DPT9_INVALID, data);
+    }
+    if (std::isinf(value)) {
         return util::ErrorCode::InvalidParameter;
     }
 
-    // Reject values outside representable DPT9 range.
-    if (value < DPT9_MIN_VALUE || value > DPT9_MAX_VALUE) {
-        return util::ErrorCode::InvalidParameter;
+    // Each exponent's mantissa is rounded once, from the value itself: rounding
+    // the previous exponent's already-rounded mantissa again (halving it) can
+    // land one step off the nearest code.
+    const double hundredths = static_cast<double>(value) * 100.0;
+    for (int exponent = 0; exponent <= DPT9_MAX_EXPONENT; ++exponent) {
+        // Division by a power of two is exact; it also keeps ldexp out of the image.
+        const long mantissa = std::lround(hundredths / static_cast<double>(1u << exponent));
+        if (mantissa < DPT9_MIN_MANTISSA || mantissa > DPT9_MAX_MANTISSA) {
+            continue;
+        }
+        const uint16_t raw = static_cast<uint16_t>(
+            (mantissa < 0 ? DPT9_SIGN_MASK : 0u) |
+            (static_cast<unsigned>(exponent) << 11) |
+            (static_cast<uint16_t>(mantissa) & DPT9_MANTISSA_MASK));
+        // The only finite value that rounds onto 7FFFh lies above the range.
+        if (raw == DPT9_INVALID) {
+            return util::ErrorCode::InvalidParameter;
+        }
+        return writeWord(raw, data);
     }
-
-    // Scale to the signed 11-bit mantissa resolution.
-    int32_t mantissa = static_cast<int32_t>(std::lround(static_cast<double>(value) / DPT9_SCALE_FACTOR));
-    uint8_t exponent = 0;
-
-    // Normalize mantissa to the signed 11-bit range using round-to-nearest.
-    while ((mantissa < DPT9_MIN_MANTISSA || mantissa > DPT9_MAX_MANTISSA) && exponent < DPT9_MAX_EXPONENT) {
-        mantissa = static_cast<int32_t>(std::lround(static_cast<double>(mantissa) / 2.0));
-        ++exponent;
-    }
-
-    // Still not representable.
-    if (mantissa < DPT9_MIN_MANTISSA || mantissa > DPT9_MAX_MANTISSA) {
-        return util::ErrorCode::InvalidParameter;
-    }
-
-    const uint16_t encodedMantissa = static_cast<uint16_t>(mantissa) & DPT9_MANTISSA_MASK;
-    const uint16_t raw = static_cast<uint16_t>(
-        ((mantissa < 0) ? DPT9_SIGN_MASK : 0u) |
-        (static_cast<uint16_t>(exponent & 0x0F) << 11) |
-        encodedMantissa);
-    return writeWord(raw, data);
+    return util::ErrorCode::InvalidParameter;
 }
 
 util::Result<void> Dpt9::decode(std::span<const uint8_t> data, float& value) {
@@ -350,6 +352,10 @@ util::Result<void> Dpt9::decode(std::span<const uint8_t> data, float& value) {
     }
 
     const uint16_t raw = bits::makeWord(data[0], data[1]);
+    if (raw == DPT9_INVALID) {
+        value = std::numeric_limits<float>::quiet_NaN();
+        return util::Result<void>::ok();
+    }
     const int exponent = (raw >> 11) & 0x0F;
     int mantissa = raw & DPT9_MANTISSA_MASK;
     if ((raw & DPT9_SIGN_MASK) != 0u) {
@@ -465,30 +471,24 @@ util::Result<size_t> Dpt10::encode(uint8_t dayOfWeek, uint8_t hour, uint8_t minu
         return util::ErrorCode::InvalidParameter;
     }
     
-    // Byte 0: [D D D H H H H H] - Day (3 bits) + Hour (5 bits)
-    uint8_t byte0 = static_cast<uint8_t>(((dayOfWeek & 0x07) << 5) | (hour & DPT10_HOUR_MASK));
-    
-    // Byte 1: [M M M M M M S S] - Minutes (6 bits) + Seconds high (2 bits)
-    uint8_t byte1 = static_cast<uint8_t>(((minute & DPT10_MINUTE_MASK) << 2) | ((second >> 4) & 0x03));
-    
-    // Byte 2: [S S S S 0 0 0 0] - Seconds low (4 bits)
-    uint8_t byte2 = static_cast<uint8_t>((second & DPT10_SECOND_MASK) << 4);
-
-    return writeArray(std::array<uint8_t, 3>{byte0, byte1, byte2}, data);
+    // 03_07_02 §3.11, N3U5r2U6r2U6: [N N N H H H H H] [0 0 M M M M M M] [0 0 S S S S S S]
+    return writeArray(std::array<uint8_t, 3>{
+                          static_cast<uint8_t>((dayOfWeek << 5) | hour),
+                          minute,
+                          second},
+                      data);
 }
 
 util::Result<void> Dpt10::decode(std::span<const uint8_t> data, Value& time) {
     if (data.size() < 3) {
         return util::Result<void>::err(util::ErrorCode::DecodeFailed);
     }
-    
-    // Extract day of week and hour
+
+    // Reserved bits (the top two of the minute and second octets) are masked.
     time.dayOfWeek = (data[0] >> 5) & 0x07;
     time.hour = data[0] & DPT10_HOUR_MASK;
-    
-    // Extract minutes and seconds
-    time.minute = (data[1] >> 2) & DPT10_MINUTE_MASK;
-    time.second = static_cast<uint8_t>(((data[1] & 0x03) << 4) | ((data[2] >> 4) & DPT10_SECOND_MASK));
+    time.minute = data[1] & DPT10_MINUTE_MASK;
+    time.second = data[2] & DPT10_SECOND_MASK;
     
     // Validate ranges
     if (time.dayOfWeek > DPT10_MAX_DAY || time.hour > DPT10_MAX_HOUR || time.minute > DPT10_MAX_MINUTE || time.second > DPT10_MAX_SECOND) {
@@ -533,42 +533,86 @@ util::Result<void> Dpt11::decode(std::span<const uint8_t> data, Value& date) {
     return util::Result<void>::ok();
 }
 
-// DPT 19 - Date Time
+// DPT 19.001 - DPT_DateTime (03_07_02 §3.20)
+//
+// Octets MSB first: [year - 1900] [r4 month] [r3 day] [DoW(3) hour(5)]
+// [r2 minutes] [r2 seconds] [F WD NWD NY ND NDoW NT SUTI] [CLQ SRC r6]
+namespace {
+
+constexpr uint8_t kDpt19Fault = 0x80;
+constexpr uint8_t kDpt19WorkingDay = 0x40;
+constexpr uint8_t kDpt19NoWorkingDay = 0x20;
+constexpr uint8_t kDpt19NoYear = 0x10;
+constexpr uint8_t kDpt19NoDate = 0x08;
+constexpr uint8_t kDpt19NoDayOfWeek = 0x04;
+constexpr uint8_t kDpt19NoTime = 0x02;
+constexpr uint8_t kDpt19SummerTime = 0x01;
+constexpr uint8_t kDpt19ExternalSync = 0x80;   // CLQ
+constexpr uint8_t kDpt19ReliableSource = 0x40; // SRC
+constexpr uint8_t kDpt19Reserved = 0x3F;
+
+constexpr uint16_t kDpt19YearBase = 1900;
+constexpr uint16_t kDpt19YearMax = 2155;
+
+// Hour 0…24, where 24 is valid only as 24:00:00 (Note 11).
+constexpr bool dpt19TimeValid(uint8_t hour, uint8_t minute, uint8_t second)
+{
+    if (hour == 24) {
+        return minute == 0 && second == 0;
+    }
+    return hour <= 23 && minute <= 59 && second <= 59;
+}
+
+} // namespace
+
 util::Result<size_t> Dpt19::encode(const Value& datetime, std::span<uint8_t> data) {
-    // Validate ranges
-    if (datetime.year < 1900 || datetime.year > 2155 ||
-        datetime.month < 1 || datetime.month > 12 ||
-        datetime.day < 1 || datetime.day > 31 ||
-        datetime.dayOfWeek > 7 ||
-        datetime.hour > 23 || datetime.minute > 59 || datetime.second > 59) {
+    // Only fields the flags declare valid are range-checked; the others are
+    // transmitted as zero.
+    if (!datetime.noYear && (datetime.year < kDpt19YearBase || datetime.year > kDpt19YearMax)) {
         return util::ErrorCode::InvalidParameter;
     }
-    
-    uint8_t year_offset = static_cast<uint8_t>(datetime.year - 1900);
+    if (!datetime.noDate && (datetime.month < 1 || datetime.month > 12 ||
+                             datetime.day < 1 || datetime.day > 31)) {
+        return util::ErrorCode::InvalidParameter;
+    }
+    if (!datetime.noDayOfWeek && datetime.dayOfWeek > 7) {
+        return util::ErrorCode::InvalidParameter;
+    }
+    if (!datetime.noTime && !dpt19TimeValid(datetime.hour, datetime.minute, datetime.second)) {
+        return util::ErrorCode::InvalidParameter;
+    }
 
-    uint8_t byte3 = ((datetime.dayOfWeek & 0x07) << 5) | ((datetime.hour >> 2) & 0x07);
+    const uint8_t year = datetime.noYear ? 0u : static_cast<uint8_t>(datetime.year - kDpt19YearBase);
+    const uint8_t month = datetime.noDate ? 0u : datetime.month;
+    const uint8_t day = datetime.noDate ? 0u : datetime.day;
+    const uint8_t dayOfWeek = datetime.noDayOfWeek ? 0u : datetime.dayOfWeek;
+    const uint8_t hour = datetime.noTime ? 0u : datetime.hour;
+    const uint8_t minute = datetime.noTime ? 0u : datetime.minute;
+    const uint8_t second = datetime.noTime ? 0u : datetime.second;
 
-    uint8_t byte4 = ((datetime.hour & 0x03) << 6) | (datetime.minute & 0x3F);
+    uint8_t flags = 0;
+    if (datetime.fault) flags |= kDpt19Fault;
+    if (datetime.workingDay && !datetime.noWD) flags |= kDpt19WorkingDay;
+    if (datetime.noWD) flags |= kDpt19NoWorkingDay;
+    if (datetime.noYear) flags |= kDpt19NoYear;
+    if (datetime.noDate) flags |= kDpt19NoDate;
+    if (datetime.noDayOfWeek) flags |= kDpt19NoDayOfWeek;
+    if (datetime.noTime) flags |= kDpt19NoTime;
+    if (datetime.suti) flags |= kDpt19SummerTime;
 
-    uint8_t flags1 = 0;
-    if (datetime.fault) flags1 |= 0x80;
-    if (datetime.workingDay) flags1 |= 0x40;
-    if (datetime.noWD) flags1 |= 0x20;
-    if (datetime.noYear) flags1 |= 0x10;
-    if (datetime.noDate) flags1 |= 0x08;
-    if (datetime.noDayOfWeek) flags1 |= 0x04;
-    if (datetime.noTime) flags1 |= 0x02;
-    if (datetime.suti) flags1 |= 0x01;
+    uint8_t quality = 0;
+    if (datetime.externalSync) quality |= kDpt19ExternalSync;
+    if (datetime.reliableSource) quality |= kDpt19ReliableSource;
 
     return writeArray(std::array<uint8_t, 8>{
-                          year_offset,
-                          static_cast<uint8_t>(datetime.month & 0x0F),
-                          static_cast<uint8_t>(datetime.day & 0x1F),
-                          byte3,
-                          byte4,
-                          static_cast<uint8_t>(datetime.second & 0x3F),
-                          flags1,
-                          0x00},
+                          year,
+                          month,
+                          day,
+                          static_cast<uint8_t>((dayOfWeek << 5) | hour),
+                          minute,
+                          second,
+                          flags,
+                          quality},
                       data);
 }
 
@@ -576,46 +620,46 @@ util::Result<void> Dpt19::decode(std::span<const uint8_t> data, Value& datetime)
     if (data.size() < 8) {
         return util::Result<void>::err(util::ErrorCode::DecodeFailed);
     }
-    
-    // Extract year
-    datetime.year = 1900 + data[0];
-    
-    // Extract month, day
-    datetime.month = data[1] & 0x0F;
-    datetime.day = data[2] & 0x1F;
-    
-    // Extract day of week and hour
-    datetime.dayOfWeek = (data[3] >> 5) & 0x07;
-    datetime.hour = static_cast<uint8_t>(((data[3] & 0x07) << 2) | ((data[4] >> 6) & 0x03));
-    
-    // Extract minute and second
-    datetime.minute = data[4] & 0x3F;
-    datetime.second = data[5] & 0x3F;
-    
-    // Extract flags
-    datetime.fault = (data[6] & 0x80) != 0;
-    datetime.workingDay = (data[6] & 0x40) != 0;
-    datetime.noWD = (data[6] & 0x20) != 0;
-    datetime.noYear = (data[6] & 0x10) != 0;
-    datetime.noDate = (data[6] & 0x08) != 0;
-    datetime.noDayOfWeek = (data[6] & 0x04) != 0;
-    datetime.noTime = (data[6] & 0x02) != 0;
-    datetime.suti = (data[6] & 0x01) != 0;
-    
-    // Validate ranges (unless marked as invalid)
-    if (!datetime.noYear && (datetime.year < 1900 || datetime.year > 2155)) {
+
+    // Note 15: the reserved bits of the last octet "shall be 0 ... Receivers
+    // shall check these bits to be 0."
+    if ((data[7] & kDpt19Reserved) != 0u) {
         return util::Result<void>::err(util::ErrorCode::InvalidParameter);
     }
-    if (!datetime.noDate && (datetime.month < 1 || datetime.month > 12 || datetime.day < 1 || datetime.day > 31)) {
+
+    Value decoded{};
+    decoded.year = static_cast<uint16_t>(kDpt19YearBase + data[0]);
+    decoded.month = data[1] & 0x0F;
+    decoded.day = data[2] & 0x1F;
+    decoded.dayOfWeek = (data[3] >> 5) & 0x07;
+    decoded.hour = data[3] & 0x1F;
+    decoded.minute = data[4] & 0x3F;
+    decoded.second = data[5] & 0x3F;
+
+    decoded.fault = (data[6] & kDpt19Fault) != 0;
+    decoded.workingDay = (data[6] & kDpt19WorkingDay) != 0;
+    decoded.noWD = (data[6] & kDpt19NoWorkingDay) != 0;
+    decoded.noYear = (data[6] & kDpt19NoYear) != 0;
+    decoded.noDate = (data[6] & kDpt19NoDate) != 0;
+    decoded.noDayOfWeek = (data[6] & kDpt19NoDayOfWeek) != 0;
+    decoded.noTime = (data[6] & kDpt19NoTime) != 0;
+    decoded.suti = (data[6] & kDpt19SummerTime) != 0;
+    decoded.externalSync = (data[7] & kDpt19ExternalSync) != 0;
+    decoded.reliableSource = (data[7] & kDpt19ReliableSource) != 0;
+
+    // The year octet covers exactly 1900…2155, so it needs no check. Fields
+    // flagged "not valid" are not checked either.
+    if (!decoded.noDate && (decoded.month < 1 || decoded.month > 12 ||
+                            decoded.day < 1 || decoded.day > 31)) {
         return util::Result<void>::err(util::ErrorCode::InvalidParameter);
     }
-    if (!datetime.noDayOfWeek && datetime.dayOfWeek > 7) {
+    // Note 11: "Messages with invalid values ("Hour = 24", Minutes and Seconds
+    // not zero) have to be ignored by the receiver."
+    if (!decoded.noTime && !dpt19TimeValid(decoded.hour, decoded.minute, decoded.second)) {
         return util::Result<void>::err(util::ErrorCode::InvalidParameter);
     }
-    if (!datetime.noTime && (datetime.hour > 23 || datetime.minute > 59 || datetime.second > 59)) {
-        return util::Result<void>::err(util::ErrorCode::InvalidParameter);
-    }
-    
+
+    datetime = decoded;
     return util::Result<void>::ok();
 }
 
@@ -646,47 +690,37 @@ util::Result<void> Dpt13::decode(std::span<const uint8_t> data, int32_t& value) 
     return util::Result<void>::ok();
 }
 
-// DPT 14 - 32-bit Float (IEEE 754)
+// DPT 14 - 32-bit Float (IEEE 754 single precision, 03_07_02 §3.15)
 util::Result<size_t> Dpt14::encode(float value, std::span<uint8_t> data) {
     if (std::isnan(value) || std::isinf(value)) {
         return util::ErrorCode::InvalidParameter;
     }
-    
-    // Use union to access raw bytes
-    union {
-        float f;
-        uint32_t u;
-    } converter;
-    
-    converter.f = value;
-    
-    return writeDword(converter.u, data);
+    static_assert(std::numeric_limits<float>::is_iec559, "DPT 14 requires IEEE 754 float");
+    return writeDword(std::bit_cast<uint32_t>(value), data);
 }
 
 util::Result<void> Dpt14::decode(std::span<const uint8_t> data, float& value) {
     if (data.size() < 4) {
         return util::Result<void>::err(util::ErrorCode::DecodeFailed);
     }
-    
-    union {
-        float f;
-        uint32_t u;
-    } converter;
-    
-    converter.u = bits::makeDword(data[0], data[1], data[2], data[3]);
-    
-    value = converter.f;
+    value = std::bit_cast<float>(bits::makeDword(data[0], data[1], data[2], data[3]));
     return util::Result<void>::ok();
 }
 
-// DPT 16 - String (ASCII, 14 bytes max)
+// DPT 16 - String, 14 octets (03_07_02 §3.17): "The length is fixed to 14
+// octets ... If the string to be transmitted is smaller then 14 octets, unused
+// trailing octets in the character string shall be set to NULL (00h)."
+// A 14-character string therefore fills every octet and has no terminator.
+namespace {
+constexpr size_t kDpt16Octets = 14u;
+} // namespace
+
 util::Result<size_t> Dpt16::encode(const std::string& value, std::span<uint8_t> data) {
-    // Maximum 13 characters + NULL terminator
-    if (value.length() > 13) {
+    if (value.length() > kDpt16Octets) {
         return util::ErrorCode::InvalidParameter;
     }
 
-    auto capacityResult = ensureCapacity(data, 14u);
+    auto capacityResult = ensureCapacity(data, kDpt16Octets);
     if (capacityResult.isError()) {
         return capacityResult.error();
     }
@@ -695,116 +729,106 @@ util::Result<size_t> Dpt16::encode(const std::string& value, std::span<uint8_t> 
     for (char c : value) {
         data[index++] = static_cast<uint8_t>(c);
     }
-    while (index < 14u) {
+    while (index < kDpt16Octets) {
         data[index++] = 0x00u;
     }
 
-    return 14u;
+    return kDpt16Octets;
 }
 
 util::Result<void> Dpt16::decode(std::span<const uint8_t> data, std::string& value) {
-    if (data.size() < 14) {
+    if (data.size() < kDpt16Octets) {
         return util::Result<void>::err(util::ErrorCode::DecodeFailed);
     }
-    
+
     value.clear();
-    
-    // Extract string until NULL or end of 14 bytes
-    for (size_t i = 0; i < 14; ++i) {
+    for (size_t i = 0; i < kDpt16Octets; ++i) {
         if (data[i] == 0x00) break;
         value += static_cast<char>(data[i]);
     }
-    
+
     return util::Result<void>::ok();
 }
 
-// DPT 17 - Scene Number
+// DPT 17.001 - Scene Number, r2U6 (03_07_02 §3.18)
 util::Result<size_t> Dpt17::encode(uint8_t sceneNumber, std::span<uint8_t> data) {
     if (sceneNumber > 63) {
         return util::ErrorCode::InvalidParameter;
     }
-
-    return writeArray(std::array<uint8_t, 1>{static_cast<uint8_t>(sceneNumber & 0x3F)}, data);
+    return writeArray(std::array<uint8_t, 1>{sceneNumber}, data);
 }
 
 util::Result<size_t> Dpt17::encode(const Value& scene, std::span<uint8_t> data) {
-    if (scene.sceneNumber > 63) {
-        return util::ErrorCode::InvalidParameter;
-    }
-    
-    // Bit 7 = validity (0=valid, 1=invalid), bits 0-5 = scene number
-    uint8_t byte = scene.sceneNumber & 0x3F;
-    if (!scene.valid) {
-        byte |= 0x80;  // Set invalid bit
-    }
-    
-    return writeArray(std::array<uint8_t, 1>{byte}, data);
+    return encode(scene.sceneNumber, data);
 }
 
 util::Result<void> Dpt17::decode(std::span<const uint8_t> data, Value& scene) {
     if (data.empty()) {
         return util::Result<void>::err(util::ErrorCode::DecodeFailed);
     }
-    
+    // The two reserved high bits are ignored.
     scene.sceneNumber = data[0] & 0x3F;
-    scene.valid = (data[0] & 0x80) == 0;  // Bit 7 = 0 means valid
-    
     return util::Result<void>::ok();
 }
 
-// DPT 15 - Access Control (4 bytes)
+// DPT 15.000 - DPT_Access_Data, U4U4U4U4U4U4B4N4 (03_07_02 §3.16)
+// [D6 D5] [D4 D3] [D2 D1] [E P D C | Index]
+namespace {
+constexpr uint32_t kDpt15MaxCode = 999999u;
+constexpr uint8_t kDpt15Error = 0x80;
+constexpr uint8_t kDpt15Permission = 0x40;
+constexpr uint8_t kDpt15ReadDirection = 0x20;
+constexpr uint8_t kDpt15Encrypted = 0x10;
+} // namespace
+
 util::Result<size_t> Dpt15::encode(const Value& access, std::span<uint8_t> data) {
-    // Validate digit ranges
-    if (access.digit0 > 9 || access.digit1 > 9 || 
-        access.digit2 > 9 || access.digit3 > 9) {
+    if (access.accessCode > kDpt15MaxCode || access.index > 0x0F) {
         return util::ErrorCode::InvalidParameter;
     }
-    
-    auto capacityResult = ensureCapacity(data, 4u);
-    if (capacityResult.isError()) {
-        return capacityResult.error();
+
+    // Six decimal digits, D1 (least significant) first.
+    uint8_t digits[6]{};
+    uint32_t code = access.accessCode;
+    for (auto& digit : digits) {
+        digit = static_cast<uint8_t>(code % 10u);
+        code /= 10u;
     }
-    
-    // Each byte: [digit(4bits) E P R C]
-    // digit in upper nibble, control bits in lower nibble
-    uint8_t controlBits = 0;
-    if (access.encrypted) controlBits |= 0x01;
-    if (access.readDirection) controlBits |= 0x02;
-    if (access.permission) controlBits |= 0x04;
-    if (access.error) controlBits |= 0x08;
-    
-    data[0] = (access.digit3 << 4) | controlBits;
-    data[1] = (access.digit2 << 4) | controlBits;
-    data[2] = (access.digit1 << 4) | controlBits;
-    data[3] = (access.digit0 << 4) | controlBits;
-    
-    return 4u;
+
+    uint8_t last = access.index;
+    if (access.error) last |= kDpt15Error;
+    if (access.permission) last |= kDpt15Permission;
+    if (access.readDirection) last |= kDpt15ReadDirection;
+    if (access.encrypted) last |= kDpt15Encrypted;
+
+    // One 32-bit word, D6 in the most significant nibble.
+    uint32_t word = last;
+    for (size_t i = 0; i < 6; ++i) {
+        word |= static_cast<uint32_t>(digits[i]) << (8u + 4u * i);
+    }
+    return writeDword(word, data);
 }
 
 util::Result<void> Dpt15::decode(std::span<const uint8_t> data, Value& access) {
     if (data.size() < 4) {
         return util::Result<void>::err(util::ErrorCode::DecodeFailed);
     }
-    
-    // Extract digits from upper nibbles
-    access.digit3 = (data[0] >> 4) & 0x0F;
-    access.digit2 = (data[1] >> 4) & 0x0F;
-    access.digit1 = (data[2] >> 4) & 0x0F;
-    access.digit0 = (data[3] >> 4) & 0x0F;
-    
-    // Validate digits
-    if (access.digit0 > 9 || access.digit1 > 9 || 
-        access.digit2 > 9 || access.digit3 > 9) {
-        return util::Result<void>::err(util::ErrorCode::InvalidParameter);
+
+    uint32_t code = 0;
+    for (size_t i = 0; i < 3; ++i) {
+        const uint8_t high = (data[i] >> 4) & 0x0F;
+        const uint8_t low = data[i] & 0x0F;
+        if (high > 9 || low > 9) {
+            return util::Result<void>::err(util::ErrorCode::InvalidParameter);
+        }
+        code = code * 100u + high * 10u + low;
     }
-    
-    // Extract control bits from last byte (all bytes should have same control bits)
-    uint8_t controlBits = data[3] & 0x0F;
-    access.encrypted = (controlBits & 0x01) != 0;
-    access.readDirection = (controlBits & 0x02) != 0;
-    access.permission = (controlBits & 0x04) != 0;
-    access.error = (controlBits & 0x08) != 0;
-    
+
+    access.accessCode = code;
+    access.error = (data[3] & kDpt15Error) != 0;
+    access.permission = (data[3] & kDpt15Permission) != 0;
+    access.readDirection = (data[3] & kDpt15ReadDirection) != 0;
+    access.encrypted = (data[3] & kDpt15Encrypted) != 0;
+    access.index = data[3] & 0x0F;
     return util::Result<void>::ok();
 }
 
@@ -886,15 +910,26 @@ util::Result<void> Dpt232::decode(std::span<const uint8_t> data, uint8_t& red, u
     return util::Result<void>::ok();
 }
 
-// DPT 242 - xyY Color (6 bytes)
+// DPT 242.600 - DPT_Colour_xyY, U16U16U8r6B2 (03_07_02 §6.9)
+namespace {
+constexpr uint8_t kColourValid = 0x02;      // C
+constexpr uint8_t kBrightnessValid = 0x01;  // B
+
+constexpr uint8_t colourValidity(bool colourValid, bool brightnessValid)
+{
+    return static_cast<uint8_t>((colourValid ? kColourValid : 0u) |
+                                (brightnessValid ? kBrightnessValid : 0u));
+}
+} // namespace
+
 util::Result<size_t> Dpt242::encode(const Value& color, std::span<uint8_t> data) {
     return writeArray(std::array<uint8_t, 6>{
-                          static_cast<uint8_t>((color.x >> 8) & 0xFFu),
+                          static_cast<uint8_t>(color.x >> 8),
                           static_cast<uint8_t>(color.x & 0xFFu),
-                          static_cast<uint8_t>((color.y >> 8) & 0xFFu),
+                          static_cast<uint8_t>(color.y >> 8),
                           static_cast<uint8_t>(color.y & 0xFFu),
                           color.brightness,
-                          static_cast<uint8_t>(color.valid ? 0x01u : 0x00u)},
+                          colourValidity(color.colourValid, color.brightnessValid)},
                       data);
 }
 
@@ -902,92 +937,92 @@ util::Result<void> Dpt242::decode(std::span<const uint8_t> data, Value& color) {
     if (data.size() < 6) {
         return util::Result<void>::err(util::ErrorCode::DecodeFailed);
     }
-    
-    // x coordinate (big-endian)
-    color.x = static_cast<uint16_t>((data[0] << 8) | data[1]);
-    
-    // y coordinate (big-endian)
-    color.y = static_cast<uint16_t>((data[2] << 8) | data[3]);
-    
-    // Brightness
+    // The six reserved bits of the last octet are ignored.
+    color.x = bits::makeWord(data[0], data[1]);
+    color.y = bits::makeWord(data[2], data[3]);
     color.brightness = data[4];
-    
-    // Valid flag
-    color.valid = (data[5] & 0x01) != 0;
-    
+    color.colourValid = (data[5] & kColourValid) != 0;
+    color.brightnessValid = (data[5] & kBrightnessValid) != 0;
     return util::Result<void>::ok();
 }
 
-// DPT 243 - HSV Color (3 bytes)
-util::Result<size_t> Dpt243::encode(const Value& color, std::span<uint8_t> data) {
-    return encode(color.hue, color.saturation, color.value, data);
-}
-
-util::Result<size_t> Dpt243::encode(uint16_t hue, uint8_t saturation, uint8_t value, std::span<uint8_t> data) {
-    // Validate ranges
-    if (hue > 360 || saturation > 100 || value > 100) {
-        return util::ErrorCode::InvalidParameter;
-    }
-
-    // Hue: 0-360° mapped to 0-255 (360° / 255 ≈ 1.41° per step)
-    uint8_t hueScaled = static_cast<uint8_t>((hue * 255u) / 360u);
-
-    // Saturation: 0-100% mapped to 0-255
-    uint8_t satScaled = static_cast<uint8_t>((static_cast<uint16_t>(saturation) * 255u) / 100u);
-
-    // Value: 0-100% mapped to 0-255
-    uint8_t valScaled = static_cast<uint8_t>((static_cast<uint16_t>(value) * 255u) / 100u);
-
-    return writeArray(std::array<uint8_t, 3>{hueScaled, satScaled, valScaled}, data);
-}
-
-util::Result<void> Dpt243::decode(std::span<const uint8_t> data, Value& color) {
-    return decode(data, color.hue, color.saturation, color.value);
-}
-
-util::Result<void> Dpt243::decode(std::span<const uint8_t> data, uint16_t& hue, uint8_t& saturation, uint8_t& value) {
-    if (data.size() < 3) {
-        return util::Result<void>::err(util::ErrorCode::DecodeFailed);
-    }
-    
-    // Hue: 0-255 mapped to 0-360°
-    hue = static_cast<uint16_t>((static_cast<uint16_t>(data[0]) * 360u) / 255u);
-    
-    // Saturation: 0-255 mapped to 0-100%
-    saturation = static_cast<uint8_t>((static_cast<uint16_t>(data[1]) * 100u) / 255u);
-    
-    // Value: 0-255 mapped to 0-100%
-    value = static_cast<uint8_t>((static_cast<uint16_t>(data[2]) * 100u) / 255u);
-    
-    return util::Result<void>::ok();
-}
-
-// DPT 244 - Color Transition (6 bytes)
-util::Result<size_t> Dpt244::encode(const Value& transition, std::span<uint8_t> data) {
-    return writeArray(std::array<uint8_t, 6>{
-                          transition.red,
-                          transition.green,
-                          transition.blue,
-                          static_cast<uint8_t>((transition.fadeTime >> 8) & 0xFFu),
-                          static_cast<uint8_t>(transition.fadeTime & 0xFFu),
-                          transition.reserved},
+// DPT 243.600 - DPT_Colour_Transition_xyY, U16U16U16U8r6B2 (03_07_02 §6.10)
+util::Result<size_t> Dpt243::encode(const Value& transition, std::span<uint8_t> data) {
+    return writeArray(std::array<uint8_t, 8>{
+                          static_cast<uint8_t>(transition.timePeriod >> 8),
+                          static_cast<uint8_t>(transition.timePeriod & 0xFFu),
+                          static_cast<uint8_t>(transition.x >> 8),
+                          static_cast<uint8_t>(transition.x & 0xFFu),
+                          static_cast<uint8_t>(transition.y >> 8),
+                          static_cast<uint8_t>(transition.y & 0xFFu),
+                          transition.brightness,
+                          colourValidity(transition.colourValid, transition.brightnessValid)},
                       data);
 }
 
-util::Result<void> Dpt244::decode(std::span<const uint8_t> data, Value& transition) {
-    if (data.size() < 6) {
+util::Result<void> Dpt243::decode(std::span<const uint8_t> data, Value& transition) {
+    if (data.size() < 8) {
         return util::Result<void>::err(util::ErrorCode::DecodeFailed);
     }
-    
-    transition.red = data[0];
-    transition.green = data[1];
-    transition.blue = data[2];
-    
-    // Fade time (big-endian)
-    transition.fadeTime = static_cast<uint16_t>((data[3] << 8) | data[4]);
-    
-    transition.reserved = data[5];
-    
+    transition.timePeriod = bits::makeWord(data[0], data[1]);
+    transition.x = bits::makeWord(data[2], data[3]);
+    transition.y = bits::makeWord(data[4], data[5]);
+    transition.brightness = data[6];
+    transition.colourValid = (data[7] & kColourValid) != 0;
+    transition.brightnessValid = (data[7] & kBrightnessValid) != 0;
+    return util::Result<void>::ok();
+}
+
+// DPT 244.600 - DPT_Converter_Status, N4B4N2N2N2N2 (03_07_02 §6.11)
+// [CM(4) | HS: 0 0 switchOn inhibitActive] [FP(2) DP(2) PP(2) CF(2)]
+namespace {
+constexpr uint8_t kConverterModeMax = 9;    // 10…15 reserved
+constexpr uint8_t kConverterPendingMax = 2; // 3 reserved
+constexpr uint8_t kHsInhibitActive = 0x01;
+constexpr uint8_t kHsSwitchOn = 0x02;
+constexpr uint8_t kHsReserved = 0x0C;
+
+constexpr bool converterStatusValid(const Dpt244Value& s)
+{
+    return s.mode <= kConverterModeMax && s.functionTestPending <= kConverterPendingMax &&
+           s.durationTestPending <= kConverterPendingMax &&
+           s.partialDurationTestPending <= kConverterPendingMax && s.failure <= kConverterPendingMax;
+}
+} // namespace
+
+util::Result<size_t> Dpt244::encode(const Value& status, std::span<uint8_t> data) {
+    if (!converterStatusValid(status)) {
+        return util::ErrorCode::InvalidParameter;
+    }
+    const uint8_t high = static_cast<uint8_t>((status.mode << 4) |
+                                              (status.hardwiredSwitchOn ? kHsSwitchOn : 0u) |
+                                              (status.hardwiredInhibitActive ? kHsInhibitActive : 0u));
+    const uint8_t low = static_cast<uint8_t>((status.functionTestPending << 6) |
+                                             (status.durationTestPending << 4) |
+                                             (status.partialDurationTestPending << 2) |
+                                             status.failure);
+    return writeWord(static_cast<uint16_t>((high << 8) | low), data);
+}
+
+util::Result<void> Dpt244::decode(std::span<const uint8_t> data, Value& status) {
+    if (data.size() < 2) {
+        return util::Result<void>::err(util::ErrorCode::DecodeFailed);
+    }
+    if ((data[0] & kHsReserved) != 0u) {
+        return util::Result<void>::err(util::ErrorCode::InvalidParameter);
+    }
+    Value decoded{};
+    decoded.mode = static_cast<uint8_t>(data[0] >> 4);
+    decoded.hardwiredInhibitActive = (data[0] & kHsInhibitActive) != 0;
+    decoded.hardwiredSwitchOn = (data[0] & kHsSwitchOn) != 0;
+    decoded.functionTestPending = static_cast<uint8_t>(data[1] >> 6);
+    decoded.durationTestPending = static_cast<uint8_t>((data[1] >> 4) & 0x03);
+    decoded.partialDurationTestPending = static_cast<uint8_t>((data[1] >> 2) & 0x03);
+    decoded.failure = static_cast<uint8_t>(data[1] & 0x03);
+    if (!converterStatusValid(decoded)) {
+        return util::Result<void>::err(util::ErrorCode::InvalidParameter);
+    }
+    status = decoded;
     return util::Result<void>::ok();
 }
 

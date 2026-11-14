@@ -44,7 +44,11 @@ public:
                         std::span<const uint8_t> passwordLatin1,
                         const std::array<uint8_t, 32>& clientPrivateKey,
                         const std::array<uint8_t, 6>& clientSerial,
-                        uint64_t initialSeq = 1);
+                        uint64_t initialSeq = 0);
+
+    // The server's Device Authentication Code (the key); with it the
+    // SESSION_RESPONSE MAC is verified (03/08/09 §2.2.3.7.3). Call before init().
+    void setDeviceAuthenticationCode(const std::array<uint8_t, 16>& code);
 
     util::Result<void> init();
     void close();

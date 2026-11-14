@@ -77,6 +77,9 @@ std::unique_ptr<IpSecureTunnelingPhysical> createConfiguredIpSecureTunnelingPhys
                          config.clientPrivateKey,
                          config.clientSerial,
                          config.initialSeq);
+    if (config.deviceAuthenticationCode.has_value()) {
+        phys->setDeviceAuthenticationCode(*config.deviceAuthenticationCode);
+    }
     return phys;
 }
 #endif

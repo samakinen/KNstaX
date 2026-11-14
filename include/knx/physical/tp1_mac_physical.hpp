@@ -73,6 +73,9 @@ public:
     /// Forwarded to the backend's timing domain (ISR/hardware), where the
     /// per-telegram ACK decision is made.
     void setAckGroupAddresses(std::span<const uint16_t> addresses);
+#if KNX_FEATURE_COUPLER
+    void setGroupAckFilter(const GroupAckFilter* filter);
+#endif
     util::Result<std::vector<uint8_t>> receiveFrame(uint32_t timeoutMs);
     util::Result<void> beginReceive(uint32_t timeoutMs);
     util::Result<ProgressState> pollReceive();

@@ -62,8 +62,8 @@ enum class DptMainType : uint16_t {
     Bitfield16 = 22,
     RgbColor = 232,
     XyYColor = 242,
-    HsvColor = 243,
-    ColorTransition = 244,
+    ColourTransitionXyY = 243,
+    ConverterStatus = 244,
 };
 
 struct DptId {
@@ -106,33 +106,43 @@ struct Dpt3Value {
     uint8_t stepCode{0};
 };
 
+/// DPT 10.001 DPT_TimeOfDay (03_07_02 §3.11).
 struct Dpt10Value {
-    uint8_t dayOfWeek{0};
-    uint8_t hour{0};
-    uint8_t minute{0};
-    uint8_t second{0};
+    uint8_t dayOfWeek{0};  ///< 0 = no day, 1 = Monday … 7 = Sunday
+    uint8_t hour{0};       ///< 0…23
+    uint8_t minute{0};     ///< 0…59
+    uint8_t second{0};     ///< 0…59
 };
 
+/// DPT 11.001 DPT_Date (03_07_02 §3.12).
 struct Dpt11Value {
-    uint8_t day{1};
-    uint8_t month{1};
+    uint8_t day{1};    ///< 1…31
+    uint8_t month{1};  ///< 1…12
+    /// Two-digit year as carried on the wire, 0…99. Century rule (§3.12):
+    /// ≥ 90 is the 20th century, < 90 the 21st, i.e. 1990…2089; see fullYear().
     uint8_t year{0};
+
+    constexpr uint16_t fullYear() const
+    {
+        return static_cast<uint16_t>(year >= 90u ? 1900u + year : 2000u + year);
+    }
 };
 
+/// DPT 15.000 DPT_Access_Data (03_07_02 §3.16), U4U4U4U4U4U4B4N4.
 struct Dpt15Value {
-    uint8_t digit0{0};
-    uint8_t digit1{0};
-    uint8_t digit2{0};
-    uint8_t digit3{0};
-    bool error{false};
-    bool permission{false};
-    bool readDirection{false};
-    bool encrypted{false};
+    /// Access identification code as a decimal number, 0…999 999: its six
+    /// digits are D6 (most significant) … D1 on the wire.
+    uint32_t accessCode{0};
+    bool error{false};          ///< E: reading of the access code failed
+    bool permission{false};     ///< P: access accepted
+    bool readDirection{false};  ///< D: 0 = left to right, 1 = right to left
+    bool encrypted{false};      ///< C: access information is ciphered
+    uint8_t index{0};           ///< Index of the access code, 0…15
 };
 
+/// DPT 17.001 DPT_SceneNumber (03_07_02 §3.18), r2U6.
 struct Dpt17Value {
-    uint8_t sceneNumber{0};
-    bool valid{true};
+    uint8_t sceneNumber{0};  ///< 0…63
 };
 
 struct Dpt18Value {
@@ -140,22 +150,28 @@ struct Dpt18Value {
     bool learn{false};
 };
 
+/// DPT 19.001 DPT_DateTime (03_07_02 §3.20).
+///
+/// A field whose "not valid" flag is set (NY, ND, NDoW, NT, NWD) is
+/// transmitted as zero and not range-checked on reception.
 struct Dpt19Value {
-    uint16_t year{1900};
-    uint8_t month{1};
-    uint8_t day{1};
-    uint8_t dayOfWeek{0};
-    uint8_t hour{0};
-    uint8_t minute{0};
-    uint8_t second{0};
-    bool fault{false};
-    bool workingDay{false};
-    bool noWD{false};
-    bool noYear{false};
-    bool noDate{false};
-    bool noDayOfWeek{false};
-    bool noTime{false};
-    bool suti{false};
+    uint16_t year{1900};       ///< 1900…2155 (octet: year − 1900)
+    uint8_t month{1};          ///< 1…12
+    uint8_t day{1};            ///< 1…31
+    uint8_t dayOfWeek{0};      ///< 0 = any day, 1 = Monday … 7 = Sunday
+    uint8_t hour{0};           ///< 0…24; 24 only as 24:00:00 (Note 11)
+    uint8_t minute{0};         ///< 0…59
+    uint8_t second{0};         ///< 0…59
+    bool fault{false};         ///< F
+    bool workingDay{false};    ///< WD
+    bool noWD{false};          ///< NWD: WD not valid
+    bool noYear{false};        ///< NY
+    bool noDate{false};        ///< ND: month and day not valid
+    bool noDayOfWeek{false};   ///< NDoW
+    bool noTime{false};        ///< NT: hour, minutes, seconds not valid
+    bool suti{false};          ///< SUTI: summer time (hour already corrected)
+    bool externalSync{false};  ///< CLQ: clock with external sync signal
+    bool reliableSource{false};///< SRC: reliable synchronisation source
 };
 
 enum class Dpt20Mode : uint8_t {
@@ -172,25 +188,34 @@ struct Dpt232Value {
     uint8_t blue{0};
 };
 
+/// DPT 242.600 DPT_Colour_xyY (03_07_02 §6.9), U16U16U8r6B2.
 struct Dpt242Value {
+    uint16_t x{0};               ///< x × 65 535
+    uint16_t y{0};               ///< y × 65 535
+    uint8_t brightness{0};       ///< as DPT 5.001 (0…255 = 0…100 %)
+    bool colourValid{false};     ///< C: x and y valid
+    bool brightnessValid{false}; ///< B: brightness valid
+};
+
+/// DPT 243.600 DPT_Colour_Transition_xyY (03_07_02 §6.10), U16U16U16U8r6B2.
+struct Dpt243Value {
+    uint16_t timePeriod{0};      ///< fading time, 100 ms units (as DPT 7.004)
     uint16_t x{0};
     uint16_t y{0};
     uint8_t brightness{0};
-    bool valid{false};
+    bool colourValid{false};
+    bool brightnessValid{false};
 };
 
-struct Dpt243Value {
-    uint16_t hue{0};
-    uint8_t saturation{0};
-    uint8_t value{0};
-};
-
+/// DPT 244.600 DPT_Converter_Status (03_07_02 §6.11), N4B4N2N2N2N2.
 struct Dpt244Value {
-    uint8_t red{0};
-    uint8_t green{0};
-    uint8_t blue{0};
-    uint16_t fadeTime{0};
-    uint8_t reserved{0};
+    uint8_t mode{0};                     ///< CM, 0…9 (10…15 reserved)
+    bool hardwiredInhibitActive{false};  ///< HS bit 0
+    bool hardwiredSwitchOn{false};       ///< HS bit 1
+    uint8_t functionTestPending{0};      ///< FP, 0…2 (3 reserved)
+    uint8_t durationTestPending{0};      ///< DP, 0…2
+    uint8_t partialDurationTestPending{0}; ///< PP, 0…2
+    uint8_t failure{0};                  ///< CF, 0…2
 };
 
 namespace dptids {
@@ -240,8 +265,8 @@ public:
         HvacMode,
         RgbColor,
         XyYColor,
-        HsvColor,
-        ColorTransition,
+        ColourTransitionXyY,
+        ConverterStatus,
     };
 
     DptValue()
@@ -377,13 +402,13 @@ public:
     }
 
     explicit DptValue(Dpt243Value value)
-        : _type(Type::HsvColor)
+        : _type(Type::ColourTransitionXyY)
         , _value(value)
     {
     }
 
     explicit DptValue(Dpt244Value value)
-        : _type(Type::ColorTransition)
+        : _type(Type::ConverterStatus)
         , _value(value)
     {
     }
@@ -412,8 +437,8 @@ public:
     Dpt20Mode asHvacMode() const { return std::get<Dpt20Mode>(_value); }
     const Dpt232Value& asRgbColor() const { return std::get<Dpt232Value>(_value); }
     const Dpt242Value& asXyYColor() const { return std::get<Dpt242Value>(_value); }
-    const Dpt243Value& asHsvColor() const { return std::get<Dpt243Value>(_value); }
-    const Dpt244Value& asColorTransition() const { return std::get<Dpt244Value>(_value); }
+    const Dpt243Value& asColourTransitionXyY() const { return std::get<Dpt243Value>(_value); }
+    const Dpt244Value& asConverterStatus() const { return std::get<Dpt244Value>(_value); }
 
     template <typename T>
     const T* tryGet() const
@@ -524,8 +549,8 @@ constexpr uint16_t dptPayloadBits(DptId id) noexcept {
         case DptMainType::String:          return 112;  // 14 octets
         case DptMainType::DateTime:        return 64;   // 8 octets
         case DptMainType::XyYColor:        return 48;   // 6 octets
-        case DptMainType::HsvColor:        return 24;   // 3 octets
-        case DptMainType::ColorTransition: return 48;   // 6 octets
+        case DptMainType::ColourTransitionXyY: return 64; // 8 octets
+        case DptMainType::ConverterStatus: return 16;   // 2 octets
         case DptMainType::Unsupported:     break;
     }
     return 0;
@@ -693,7 +718,12 @@ public:
 };
 
 /**
- * @brief DPT 9 - Float (2 bytes)
+ * @brief DPT 9 - Float (2 bytes), 03_07_02 §3.10
+ *
+ * FloatValue = 0.01 * M * 2^E, M 12-bit two's complement, E 0…15, encoded with
+ * the smallest exponent that fits. 7FFFh denotes invalid data: it decodes to a
+ * quiet NaN and a NaN encodes to it. ±Inf and values outside
+ * [-671 088.64 … 670 433.28] are rejected.
  */
 class Dpt9 {
 public:
@@ -776,12 +806,11 @@ public:
 };
 
 /**
- * @brief DPT 10 - Time of Day
- * 
- * 3 bytes: Day of week (3 bits), Hour (5 bits), Minutes (6 bits), Seconds (6 bits)
- * Format: [0 0 0 D D D H H] [H H H M M M M M] [M S S S S S S S]
- * Day: 0=no day, 1=Monday, 2=Tuesday, ..., 7=Sunday
- * Hour: 0-23, Minutes: 0-59, Seconds: 0-59
+ * @brief DPT 10.001 DPT_TimeOfDay (03_07_02 §3.11)
+ *
+ * 3 octets N3U5r2U6r2U6: [N N N H H H H H] [0 0 M M M M M M] [0 0 S S S S S S]
+ * Day: 0 = no day, 1 = Monday … 7 = Sunday; hour 0…23, minutes 0…59,
+ * seconds 0…59. Reserved bits are sent as 0 and ignored on reception.
  */
 class Dpt10 {
 public:
@@ -797,7 +826,8 @@ public:
  * 
  * 3 bytes: Day (5 bits), Month (4 bits), Year (7 bits)
  * Format: [0 0 0 D D D D D] [0 0 0 0 M M M M] [0 Y Y Y Y Y Y Y]
- * Day: 1-31, Month: 1-12, Year: 0-99 (offset from 2000, so 0=2000, 99=2099)
+ * Day: 1-31, Month: 1-12, Year: 0-99 (century rule of 03_07_02 §3.12:
+ * 90…99 = 1990…1999, 0…89 = 2000…2089; see Dpt11Value::fullYear()).
  */
 class Dpt11 {
 public:
@@ -809,12 +839,14 @@ public:
 };
 
 /**
- * @brief DPT 19 - Date Time
- * 
- * 8 bytes: Date + Time combined with additional flags
- * Format: Year (8 bits, 1900-2155), Month (4 bits), Day (5 bits),
- *         Day of week (3 bits), Hour (5 bits), Minutes (6 bits), Seconds (6 bits),
- *         Flags (8 bits): fault, working day, no WD, no year, no date, no DoW, no time, SUTI
+ * @brief DPT 19.001 DPT_DateTime (03_07_02 §3.20)
+ *
+ * 8 octets U8[r4U4][r3U5][U3U5][r2U6][r2U6]B16, MSB first:
+ *   [year − 1900] [0000 month] [000 day] [DoW(3) hour(5)] [00 minutes]
+ *   [00 seconds] [F WD NWD NY ND NDoW NT SUTI] [CLQ SRC 000000]
+ * Hour 24 is allowed only as 24:00:00 (Note 11); a frame with hour 24 and
+ * non-zero minutes or seconds is rejected. The six reserved bits of the last
+ * octet must be 0 (Note 15: "Receivers shall check these bits to be 0").
  */
 class Dpt19 {
 public:
@@ -863,8 +895,8 @@ public:
 /**
  * @brief DPT 16 - String (ASCII)
  * 
- * 14 bytes: NULL-terminated ASCII string
- * Maximum 13 characters + NULL terminator
+ * 14 octets A112 (03_07_02 §3.17): up to 14 characters, unused trailing
+ * octets set to NUL. A 14-character string has no terminator on the wire.
  */
 class Dpt16 {
 public:
@@ -873,11 +905,10 @@ public:
 };
 
 /**
- * @brief DPT 17 - Scene Number
- * 
- * 1 byte: Scene number (0-63) with optional validity flag
- * Bit 7: 0=scene valid, 1=scene invalid
- * Bits 0-5: Scene number (0-63)
+ * @brief DPT 17.001 DPT_SceneNumber (03_07_02 §3.18)
+ *
+ * 1 octet r2U6: [0 0 S S S S S S], scene number 0…63. The two reserved bits
+ * are sent as 0 and ignored on reception.
  */
 class Dpt17 {
 public:
@@ -889,11 +920,11 @@ public:
 };
 
 /**
- * @brief DPT 15 - Access Control
- * 
- * 4 bytes: Access code (4 digits) + control bits
- * Format: [D3 D2 D1 D0] where each Di = [digit(4bits) E P R C]
- * E=Error, P=Permission, R=Read direction, C=Encryption
+ * @brief DPT 15.000 DPT_Access_Data (03_07_02 §3.16)
+ *
+ * 4 octets U4U4U4U4U4U4B4N4: [D6 D5] [D4 D3] [D2 D1] [E P D C Index]
+ * Each digit 0…9; E = detection error, P = permission, D = read direction,
+ * C = encryption, Index 0…15.
  */
 class Dpt15 {
 public:
@@ -950,9 +981,10 @@ public:
 };
 
 /**
- * @brief DPT 242 - xyY Color (CIE 1931)
- * 
- * 6 bytes: x coordinate (uint16), y coordinate (uint16), brightness (uint8), valid flag (uint8)
+ * @brief DPT 242.600 DPT_Colour_xyY (03_07_02 §6.9)
+ *
+ * 6 octets U16U16U8r6B2: x, y, brightness, then [0 0 0 0 0 0 C B] with
+ * C = colour (x/y) valid and B = brightness valid.
  */
 class Dpt242 {
 public:
@@ -963,31 +995,33 @@ public:
 };
 
 /**
- * @brief DPT 243 - HSV Color
- * 
- * 3 bytes: Hue (0-360°), Saturation (0-100%), Value/Brightness (0-100%)
+ * @brief DPT 243.600 DPT_Colour_Transition_xyY (03_07_02 §6.10)
+ *
+ * 8 octets U16U16U16U8r6B2: time period (100 ms), x, y, brightness, then
+ * [0 0 0 0 0 0 C B]. The field order follows the clause's field table
+ * (Time Period, x-axis, y-axis, Brightness) and xknx; the octet diagram in
+ * the same clause is typeset ambiguously.
  */
 class Dpt243 {
 public:
     using Value = Dpt243Value;
 
-    static util::Result<size_t> encode(const Value& color, std::span<uint8_t> data);
-    static util::Result<size_t> encode(uint16_t hue, uint8_t saturation, uint8_t value, std::span<uint8_t> data);
-    static util::Result<void> decode(std::span<const uint8_t> data, Value& color);
-    static util::Result<void> decode(std::span<const uint8_t> data, uint16_t& hue, uint8_t& saturation, uint8_t& value);
+    static util::Result<size_t> encode(const Value& transition, std::span<uint8_t> data);
+    static util::Result<void> decode(std::span<const uint8_t> data, Value& transition);
 };
 
 /**
- * @brief DPT 244 - Color Transition
- * 
- * 6 bytes: Color transition timing information
+ * @brief DPT 244.600 DPT_Converter_Status (03_07_02 §6.11)
+ *
+ * 2 octets N4B4N2N2N2N2: [CM(4) 0 0 HS1 HS0] [FP(2) DP(2) PP(2) CF(2)].
+ * Reserved values (CM 10…15, FP/DP/PP/CF 3, HS bits 2/3) are rejected.
  */
 class Dpt244 {
 public:
     using Value = Dpt244Value;
-    
-    static util::Result<size_t> encode(const Value& transition, std::span<uint8_t> data);
-    static util::Result<void> decode(std::span<const uint8_t> data, Value& transition);
+
+    static util::Result<size_t> encode(const Value& status, std::span<uint8_t> data);
+    static util::Result<void> decode(std::span<const uint8_t> data, Value& status);
 };
 
 } // namespace application

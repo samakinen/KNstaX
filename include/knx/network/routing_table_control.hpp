@@ -33,10 +33,10 @@
 namespace knx {
 namespace network {
 
-/// ServiceIDs of PID_ROUTETABLE_CONTROL (§4.4.6.2 … §4.4.6.5).
+/// ServiceIDs of PID_ROUTETABLE_CONTROL (§4.5.7.2 … §4.5.7.5).
 enum class RouteTableServiceId : uint8_t {
-    ClearRoutingTable = 0x01,   ///< SRVID_CLEAR_ROUTINGTABLE
-    SetRoutingTable = 0x02,     ///< SRVID_SET_ROUTINGTABLE (pass every address)
+    ClearRoutingTable = 0x01,   ///< SRVID_CLEAR_FILTERTABLE (no address passes)
+    SetRoutingTable = 0x02,     ///< SRVID_SET_FILTERTABLE (every address passes)
     ClearGroupAddress = 0x03,   ///< SRVID_CLEAR_GROUPADDRESS (range)
     SetGroupAddress = 0x04,     ///< SRVID_SET_GROUPADDRESS (range)
 };
@@ -44,7 +44,7 @@ enum class RouteTableServiceId : uint8_t {
 /**
  * @brief Return codes used by PID_ROUTETABLE_CONTROL.
  *
- * §4.4.6 defines only success and a generic failure; the error value is 0xFF
+ * §4.5.7 defines only success and a generic failure; the error value is 0xFF
  * for every service.
  */
 enum class RouteTableReturnCode : uint8_t {
@@ -80,9 +80,6 @@ public:
     size_t lastAffectedAddressCount() const { return _lastAffectedAddressCount; }
 
 private:
-    util::Result<void> clearRoutingTable();
-    util::Result<void> setRoutingTable();
-    util::Result<void> applyRange(RouteTableServiceId service, std::span<const uint8_t> serviceInfo);
 
     FilterTable& _filterTable;
     size_t _lastAffectedAddressCount{0};

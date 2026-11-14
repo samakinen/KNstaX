@@ -143,6 +143,9 @@ if(DEFINED IDF_PATH OR COMMAND idf_component_register)
         # rather than a compile one.
         KNX_IP_TUNNELING=${KNX_FEATURE_IP_TUNNELING}
         KNX_SECURE_IP_TUNNELING=${KNX_FEATURE_SECURE_IP_TUNNELING}
+        # The coupler group-acknowledge hook changes the layout of
+        # Tp1DataLinkLayer::PhysicalPort, so the application must agree.
+        KNX_FEATURE_COUPLER=$<IF:$<BOOL:${CONFIG_KNX_ENABLE_COUPLER}>,1,0>
     )
     target_compile_definitions(${COMPONENT_LIB} PRIVATE
         KNX_STACK_VERSION="${KNX_VERSION_STRING}"
@@ -258,6 +261,7 @@ else()
     #   -DKNX_FEATURE_VIRTUAL_BUS=OFF -DKNX_ENABLE_TEST_HOOKS=OFF -DBUILD_TESTS=OFF
     # ------------------------------------------------------------------
     option(KNX_FEATURE_TP1 "Build the TP1 medium" ON)
+    option(KNX_FEATURE_COUPLER "Build the coupler group-acknowledge hook in the TP1 receive path; CONFIG_KNX_ENABLE_COUPLER on ESP-IDF" ON)
     option(KNX_FEATURE_NETIP "Build the KNXnet/IP medium" ON)
     option(KNX_FEATURE_TUNNELING "Build the KNXnet/IP client role (tunnelling, secure sessions); CONFIG_KNX_ENABLE_TUNNELING on ESP-IDF" ON)
     option(KNX_FEATURE_VIRTUAL_BUS "Build the virtual TP1 bus simulator" ON)
@@ -373,6 +377,7 @@ else()
         KNX_HAS_ZLIB=$<IF:$<BOOL:${KNX_HAS_ZLIB}>,1,0>
         KNX_FEATURE_NETIP=$<IF:$<BOOL:${KNX_FEATURE_NETIP}>,1,0>
         KNX_FEATURE_TP1=$<IF:$<BOOL:${KNX_FEATURE_TP1}>,1,0>
+        KNX_FEATURE_COUPLER=$<IF:$<AND:$<BOOL:${KNX_FEATURE_TP1}>,$<BOOL:${KNX_FEATURE_COUPLER}>>,1,0>
         KNX_ENABLE_TEST_HOOKS=$<IF:$<BOOL:${KNX_ENABLE_TEST_HOOKS}>,1,0>
     )
 
@@ -668,6 +673,7 @@ else()
         if(KNX_FEATURE_TUNNELING)
             knx_add_test(test_netip_tunneling SOURCES test/unit/test_netip_tunneling.cpp LABELS unit)
             knx_add_test(test_netip_tunneling_session_client SOURCES test/unit/test_netip_tunneling_session_client.cpp LABELS unit)
+            knx_add_test(test_netip_tunneling_client_rules SOURCES test/unit/test_netip_tunneling_client_rules.cpp LABELS unit)
             knx_add_test(test_netip_secure_session_bootstrap SOURCES test/unit/test_netip_secure_session_bootstrap.cpp
                 LABELS unit WORKING_DIRECTORY ${SRC_DIR})
             knx_add_test(test_netip_device_management_client SOURCES test/unit/test_netip_device_management_client.cpp)

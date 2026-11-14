@@ -323,12 +323,190 @@ void test_Dpt19_EncodeInvalidYear(void) {
 void test_Dpt19_DecodeBasicDateTime(void) {
     Dpt19::Value dt;
     // 2025-12-31 Wednesday 15:30:45, working day
-    std::vector<uint8_t> data = {125, 12, 31, 0x63, 0xDE, 0x2D, 0x40, 0x00};
-    
+    std::vector<uint8_t> data = {125, 12, 31, 0x6F, 0x1E, 0x2D, 0x40, 0x00};
+
     TEST_ASSERT_TRUE(Dpt19::decode(data, dt).isOk());
     TEST_ASSERT_EQUAL_UINT16(2025, dt.year);
     TEST_ASSERT_EQUAL_UINT8(12, dt.month);
     TEST_ASSERT_EQUAL_UINT8(31, dt.day);
+    TEST_ASSERT_EQUAL_UINT8(3, dt.dayOfWeek);
+    TEST_ASSERT_EQUAL_UINT8(15, dt.hour);
+    TEST_ASSERT_EQUAL_UINT8(30, dt.minute);
+    TEST_ASSERT_EQUAL_UINT8(45, dt.second);
+    TEST_ASSERT_TRUE(dt.workingDay);
+}
+
+// ---------------------------------------------------------------------------
+// Golden bytes built from the octet layouts of 03_07_02 (§3.11 N3U5r2U6r2U6,
+// §3.12 r3U5r4U4r1U7 with the §1.4 Figure 2 frame, §3.20 DPT_DateTime).
+// ---------------------------------------------------------------------------
+
+void test_Dpt10_GoldenBytes(void) {
+    // Wednesday 15:30:45 -> [011 01111] [00 011110] [00 101101]
+    auto data = encodePayload([](std::span<uint8_t> out) { return Dpt10::encode(3, 15, 30, 45, out); });
+    TEST_ASSERT_EQUAL_UINT(3, data.size());
+    TEST_ASSERT_EQUAL_HEX8(0x6F, data[0]);
+    TEST_ASSERT_EQUAL_HEX8(0x1E, data[1]);
+    TEST_ASSERT_EQUAL_HEX8(0x2D, data[2]);
+
+    // Sunday 23:59:59 -> [111 10111] [00 111011] [00 111011]
+    data = encodePayload([](std::span<uint8_t> out) { return Dpt10::encode(7, 23, 59, 59, out); });
+    TEST_ASSERT_EQUAL_HEX8(0xF7, data[0]);
+    TEST_ASSERT_EQUAL_HEX8(0x3B, data[1]);
+    TEST_ASSERT_EQUAL_HEX8(0x3B, data[2]);
+
+    Dpt10::Value time;
+    TEST_ASSERT_TRUE(Dpt10::decode(std::to_array<uint8_t>({0xF7, 0x3B, 0x3B}), time).isOk());
+    TEST_ASSERT_EQUAL_UINT8(7, time.dayOfWeek);
+    TEST_ASSERT_EQUAL_UINT8(23, time.hour);
+    TEST_ASSERT_EQUAL_UINT8(59, time.minute);
+    TEST_ASSERT_EQUAL_UINT8(59, time.second);
+}
+
+void test_Dpt10_DecodeIgnoresReservedBits(void) {
+    // The r2 bits above minutes and seconds are not part of the value.
+    Dpt10::Value time;
+    TEST_ASSERT_TRUE(Dpt10::decode(std::to_array<uint8_t>({0x2C, 0xDE, 0xED}), time).isOk());
+    TEST_ASSERT_EQUAL_UINT8(1, time.dayOfWeek);
+    TEST_ASSERT_EQUAL_UINT8(12, time.hour);
+    TEST_ASSERT_EQUAL_UINT8(30, time.minute);
+    TEST_ASSERT_EQUAL_UINT8(45, time.second);
+}
+
+void test_Dpt10_DecodeRejectsOutOfRange(void) {
+    Dpt10::Value time;
+    TEST_ASSERT_TRUE(Dpt10::decode(std::to_array<uint8_t>({0x18, 0x00, 0x00}), time).isError());  // hour 24
+    TEST_ASSERT_TRUE(Dpt10::decode(std::to_array<uint8_t>({0x00, 0x3C, 0x00}), time).isError());  // minute 60
+    TEST_ASSERT_TRUE(Dpt10::decode(std::to_array<uint8_t>({0x00, 0x00, 0x3C}), time).isError());  // second 60
+}
+
+void test_Dpt11_GoldenBytesFigure2(void) {
+    // §1.4 Figure 2: octets 8..10 = 00010010 00001100 00000110 (18, 12, 2006).
+    auto data = encodePayload([](std::span<uint8_t> out) { return Dpt11::encode(18, 12, 6, out); });
+    TEST_ASSERT_EQUAL_HEX8(0x12, data[0]);
+    TEST_ASSERT_EQUAL_HEX8(0x0C, data[1]);
+    TEST_ASSERT_EQUAL_HEX8(0x06, data[2]);
+
+    Dpt11::Value date;
+    TEST_ASSERT_TRUE(Dpt11::decode(data, date).isOk());
+    TEST_ASSERT_EQUAL_UINT16(2006, date.fullYear());
+}
+
+void test_Dpt11_CenturyRule(void) {
+    // §3.12 EXAMPLE 5: 99 = 1999, 0 = 2000, 4 = 2004; >= 90 is the 20th century.
+    TEST_ASSERT_EQUAL_UINT16(1999, (Dpt11Value{1, 1, 99}.fullYear()));
+    TEST_ASSERT_EQUAL_UINT16(1990, (Dpt11Value{1, 1, 90}.fullYear()));
+    TEST_ASSERT_EQUAL_UINT16(2089, (Dpt11Value{1, 1, 89}.fullYear()));
+    TEST_ASSERT_EQUAL_UINT16(2000, (Dpt11Value{1, 1, 0}.fullYear()));
+    TEST_ASSERT_EQUAL_UINT16(2004, (Dpt11Value{1, 1, 4}.fullYear()));
+}
+
+void test_Dpt19_GoldenBytes(void) {
+    Dpt19::Value dt;
+    dt.year = 2025;
+    dt.month = 12;
+    dt.day = 31;
+    dt.dayOfWeek = 3;
+    dt.hour = 15;
+    dt.minute = 30;
+    dt.second = 45;
+    dt.workingDay = true;
+    dt.suti = true;
+    dt.externalSync = true;
+    dt.reliableSource = true;
+
+    auto data = encodePayload([&](std::span<uint8_t> out) { return Dpt19::encode(dt, out); });
+    const std::array<uint8_t, 8> expected{125, 12, 31, 0x6F, 0x1E, 0x2D, 0x41, 0xC0};
+    TEST_ASSERT_EQUAL_UINT(8, data.size());
+    TEST_ASSERT_EQUAL_MEMORY(expected.data(), data.data(), 8);
+
+    Dpt19::Value decoded;
+    TEST_ASSERT_TRUE(Dpt19::decode(expected, decoded).isOk());
+    TEST_ASSERT_EQUAL_UINT8(15, decoded.hour);
+    TEST_ASSERT_EQUAL_UINT8(30, decoded.minute);
+    TEST_ASSERT_TRUE(decoded.suti);
+    TEST_ASSERT_TRUE(decoded.externalSync);
+    TEST_ASSERT_TRUE(decoded.reliableSource);
+}
+
+void test_Dpt19_EveryFlagHasItsOwnBit(void) {
+    struct FlagCase {
+        bool Dpt19Value::*flag;
+        uint8_t octet;
+        uint8_t mask;
+    };
+    const FlagCase cases[] = {
+        {&Dpt19Value::fault, 6, 0x80},       {&Dpt19Value::workingDay, 6, 0x40},
+        {&Dpt19Value::noWD, 6, 0x20},        {&Dpt19Value::noYear, 6, 0x10},
+        {&Dpt19Value::noDate, 6, 0x08},      {&Dpt19Value::noDayOfWeek, 6, 0x04},
+        {&Dpt19Value::noTime, 6, 0x02},      {&Dpt19Value::suti, 6, 0x01},
+        {&Dpt19Value::externalSync, 7, 0x80}, {&Dpt19Value::reliableSource, 7, 0x40},
+    };
+    for (const auto& c : cases) {
+        Dpt19::Value dt;
+        dt.year = 2000;
+        dt.*(c.flag) = true;
+        auto data = encodePayload([&](std::span<uint8_t> out) { return Dpt19::encode(dt, out); });
+        TEST_ASSERT_EQUAL_HEX8(c.octet == 6 ? c.mask : 0x00, data[6]);
+        TEST_ASSERT_EQUAL_HEX8(c.octet == 7 ? c.mask : 0x00, data[7]);
+        Dpt19::Value decoded;
+        TEST_ASSERT_TRUE(Dpt19::decode(data, decoded).isOk());
+        TEST_ASSERT_TRUE(decoded.*(c.flag));
+    }
+}
+
+void test_Dpt19_Hour24OnlyAsEndOfDay(void) {
+    // Note 11: 24:00:00 is valid; hour 24 with non-zero minutes or seconds is
+    // invalid and has to be ignored by the receiver.
+    Dpt19::Value dt;
+    dt.year = 2026;
+    dt.hour = 24;
+    auto data = encodePayload([&](std::span<uint8_t> out) { return Dpt19::encode(dt, out); });
+    TEST_ASSERT_EQUAL_HEX8(0x18, data[3]);
+    Dpt19::Value decoded;
+    TEST_ASSERT_TRUE(Dpt19::decode(data, decoded).isOk());
+    TEST_ASSERT_EQUAL_UINT8(24, decoded.hour);
+
+    dt.minute = 1;
+    TEST_ASSERT_TRUE(encodeResult([&](std::span<uint8_t> out) { return Dpt19::encode(dt, out); }).isError());
+    TEST_ASSERT_TRUE(Dpt19::decode(std::to_array<uint8_t>({126, 1, 1, 0x18, 0x01, 0x00, 0x00, 0x00}), decoded).isError());
+    TEST_ASSERT_TRUE(Dpt19::decode(std::to_array<uint8_t>({126, 1, 1, 0x18, 0x00, 0x01, 0x00, 0x00}), decoded).isError());
+    TEST_ASSERT_TRUE(Dpt19::decode(std::to_array<uint8_t>({126, 1, 1, 0x19, 0x00, 0x00, 0x00, 0x00}), decoded).isError());
+}
+
+void test_Dpt19_ReservedBitsOfLastOctetRejected(void) {
+    // Note 15: "Receivers shall check these bits to be 0."
+    Dpt19::Value dt;
+    for (uint8_t bit = 0; bit < 6; ++bit) {
+        const auto raw = std::to_array<uint8_t>({126, 1, 1, 0x00, 0x00, 0x00, 0x00, static_cast<uint8_t>(1u << bit)});
+        TEST_ASSERT_TRUE(Dpt19::decode(raw, dt).isError());
+    }
+}
+
+void test_Dpt19_InvalidFieldsAreZeroAndUnchecked(void) {
+    Dpt19::Value dt;
+    dt.noYear = true;
+    dt.year = 0;           // out of range, but flagged not valid
+    dt.noDate = true;
+    dt.month = 0;
+    dt.day = 0;
+    dt.noTime = true;
+    dt.hour = 99;
+    dt.noDayOfWeek = true;
+    dt.dayOfWeek = 5;
+    dt.noWD = true;
+    dt.workingDay = true;
+    auto data = encodePayload([&](std::span<uint8_t> out) { return Dpt19::encode(dt, out); });
+    const std::array<uint8_t, 8> expected{0, 0, 0, 0x00, 0x00, 0x00, 0x3E, 0x00};
+    TEST_ASSERT_EQUAL_MEMORY(expected.data(), data.data(), 8);
+
+    // A receiver does not range-check a field flagged not valid.
+    Dpt19::Value decoded;
+    TEST_ASSERT_TRUE(Dpt19::decode(std::to_array<uint8_t>({126, 0, 0, 0x1F, 0x3F, 0x3F, 0x0A, 0x00}), decoded).isOk());
+    TEST_ASSERT_TRUE(decoded.noDate);
+    TEST_ASSERT_TRUE(decoded.noTime);
+    // ...but does check one that is flagged valid.
+    TEST_ASSERT_TRUE(Dpt19::decode(std::to_array<uint8_t>({126, 0, 1, 0x00, 0x00, 0x00, 0x00, 0x00}), decoded).isError());
 }
 
 void test_Dpt19_DecodeFlagsCorrectly(void) {
@@ -422,6 +600,18 @@ int main(void) {
     RUN_TEST(test_Dpt19_DecodeFlagsCorrectly);
     RUN_TEST(test_Dpt19_DecodeInsufficientData);
     RUN_TEST(test_Dpt19_RoundTrip);
-    
+
+    // Spec layouts
+    RUN_TEST(test_Dpt10_GoldenBytes);
+    RUN_TEST(test_Dpt10_DecodeIgnoresReservedBits);
+    RUN_TEST(test_Dpt10_DecodeRejectsOutOfRange);
+    RUN_TEST(test_Dpt11_GoldenBytesFigure2);
+    RUN_TEST(test_Dpt11_CenturyRule);
+    RUN_TEST(test_Dpt19_GoldenBytes);
+    RUN_TEST(test_Dpt19_EveryFlagHasItsOwnBit);
+    RUN_TEST(test_Dpt19_Hour24OnlyAsEndOfDay);
+    RUN_TEST(test_Dpt19_ReservedBitsOfLastOctetRejected);
+    RUN_TEST(test_Dpt19_InvalidFieldsAreZeroAndUnchecked);
+
     return UNITY_END();
 }

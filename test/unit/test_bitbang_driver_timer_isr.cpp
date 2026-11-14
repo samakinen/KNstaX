@@ -655,6 +655,46 @@ void test_group_address_beyond_the_64th_is_acknowledged()
     TEST_ASSERT_EQUAL_INT(-1, sentAckByte(drainMessages()));
 }
 
+#if KNX_FEATURE_COUPLER
+// A coupler acknowledges the group frames it routes (03/05/01 §4.5.5
+// GROUP_IACK_ROUT) on top of its own group addresses; the conditions are
+// OR-ed (03/03/03 §2.4.2.4.4). The Filter Table bit is read in the ISR.
+void test_coupler_group_ack_filter_acknowledges_routed_group_frames()
+{
+    std::vector<uint8_t> filterTable(8192u, 0u);
+    filterTable[0x0801u >> 3] = static_cast<uint8_t>(1u << (0x0801u & 7u));
+    GroupAckFilter filter{};
+    filter.filterTable = filterTable.data();
+    filter.low = GroupAckFilter::Mode::FilterTable;
+    filter.high = GroupAckFilter::Mode::Never;
+    driver.setGroupAckFilter(&filter);
+    const uint16_t own = 0x0A01u;
+    driver.setAckGroupAddresses(&own, 1u);
+
+    receiveTelegram(makeStandardFrame(kRemoteAddressRaw, 0x0801u, true));
+    TEST_ASSERT_EQUAL_INT(BitBangDriverTimerIsr::ACK_BYTE_ACK, sentAckByte(drainMessages()));
+    receiveTelegram(makeStandardFrame(kRemoteAddressRaw, 0x0802u, true));
+    TEST_ASSERT_EQUAL_INT(-1, sentAckByte(drainMessages()));
+    // Its own group address is still acknowledged, filter or not.
+    receiveTelegram(makeStandardFrame(kRemoteAddressRaw, own, true));
+    TEST_ASSERT_EQUAL_INT(BitBangDriverTimerIsr::ACK_BYTE_ACK, sentAckByte(drainMessages()));
+    // GROUP_7000 = LOCK: nothing above 6FFFh.
+    receiveTelegram(makeStandardFrame(kRemoteAddressRaw, 0x7801u, true));
+    TEST_ASSERT_EQUAL_INT(-1, sentAckByte(drainMessages()));
+    // GROUP_IACK_ROUT = 0 is Always on both ranges.
+    filter.low = GroupAckFilter::Mode::Always;
+    filter.high = GroupAckFilter::Mode::Always;
+    receiveTelegram(makeStandardFrame(kRemoteAddressRaw, 0x7801u, true));
+    TEST_ASSERT_EQUAL_INT(BitBangDriverTimerIsr::ACK_BYTE_ACK, sentAckByte(drainMessages()));
+    // An individual frame for someone else is outside this rule.
+    driver.setOwnAddress(kOwnAddressRaw);
+    receiveTelegram(makeStandardFrame(kRemoteAddressRaw, 0x1234u, false));
+    TEST_ASSERT_EQUAL_INT(-1, sentAckByte(drainMessages()));
+    driver.setGroupAckFilter(nullptr);
+    driver.setAckGroupAddresses(nullptr, 0u);
+}
+#endif
+
 // While the receive queue is full the device answers BUSY, and End tells the
 // consumer not to deliver this copy: the sender repeats it.
 void test_busy_device_answers_busy_and_marks_the_frame_refused()
@@ -843,6 +883,9 @@ int main()
     RUN_TEST(test_addressed_frame_with_bad_check_octet_is_nakked);
     RUN_TEST(test_addressed_frame_shorter_than_eight_octets_is_nakked);
     RUN_TEST(test_group_address_beyond_the_64th_is_acknowledged);
+#if KNX_FEATURE_COUPLER
+    RUN_TEST(test_coupler_group_ack_filter_acknowledges_routed_group_frames);
+#endif
     RUN_TEST(test_busy_device_answers_busy_and_marks_the_frame_refused);
     RUN_TEST(test_bus_monitor_mode_sends_no_acknowledge);
     RUN_TEST(test_own_group_frame_without_a_bit_opens_the_ack_window);

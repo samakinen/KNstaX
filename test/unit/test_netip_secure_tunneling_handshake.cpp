@@ -298,7 +298,7 @@ int main()
     connectRespPlain.push_back(0x02);
     connectRespPlain.push_back(0x06);
     connectRespPlain.push_back(0x00);
-    connectRespPlain.push_back(0x10);
+    connectRespPlain.push_back(0x14);
     connectRespPlain.push_back(0x11); // channel id
     connectRespPlain.push_back(0x00); // status ok
     connectRespPlain.push_back(0x08);
@@ -309,11 +309,15 @@ int main()
     connectRespPlain.push_back(1);
     connectRespPlain.push_back(0x1F);
     connectRespPlain.push_back(0x90);
+    // CRD: tunnelling connection, IA 1.1.10 (03/08/04 §5.4.4).
+    for (uint8_t octet : std::initializer_list<uint8_t>{0x04, 0x04, 0x11, 0x0A}) {
+        connectRespPlain.push_back(octet);
+    }
 
     std::vector<uint8_t> connectRespWrapped(SecureWrapper::kOverhead + connectRespPlain.size());
     auto connectRespWrapRes = SecureWrapper::wrap(swKey,
                              sid,
-                             /*seq=*/{0x00, 0x00, 0x00, 0x00, 0x00, 0x02},
+                             /*seq=*/{0x00, 0x00, 0x00, 0x00, 0x00, 0x03}  /* after the status frame: sequence numbers only increase */,
                              /*serial=*/{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff},
                              tag,
                              counterSuffix,
@@ -363,7 +367,7 @@ int main()
     std::vector<uint8_t> stateRespWrapped(SecureWrapper::kOverhead + stateRespPlain.size());
     auto stateRespWrapRes = SecureWrapper::wrap(swKey,
                            sid,
-                           /*seq=*/{0x00, 0x00, 0x00, 0x00, 0x00, 0x03},
+                           /*seq=*/{0x00, 0x00, 0x00, 0x00, 0x00, 0x04},
                            /*serial=*/{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff},
                            tag,
                            counterSuffix,
@@ -396,7 +400,7 @@ int main()
     if (readU16BE(std::span<const uint8_t, 2>(statePlain.data() + 2, 2)) != 0x0207) return 153;
 
     // ===== One secured tunnelling request + ack =====
-    // Prepare an ACK for the first tunnelling request (seq 0).
+    // An ACK as a UDP gateway would send it; unused over TCP (see below).
     std::vector<uint8_t> ackPlain;
     ackPlain.reserve(10);
     ackPlain.push_back(0x06);
@@ -413,7 +417,7 @@ int main()
     std::vector<uint8_t> ackWrapped(SecureWrapper::kOverhead + ackPlain.size());
     auto ackWrapRes = SecureWrapper::wrap(swKey,
                              sid,
-                             /*seq=*/{0x00, 0x00, 0x00, 0x00, 0x00, 0x04},
+                             /*seq=*/{0x00, 0x00, 0x00, 0x00, 0x00, 0x05},
                              /*serial=*/{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff},
                              tag,
                              counterSuffix,
@@ -421,7 +425,9 @@ int main()
                              ackWrapped);
     if (ackWrapRes.isError()) return 70;
     ackWrapped.resize(ackWrapRes.value());
-    shared->inbound.insert(shared->inbound.end(), ackWrapped.begin(), ackWrapped.end());
+    // Inside TCP no TUNNELLING_ACK is exchanged (03/08/04 §2.6.2): the client
+    // neither waits for one nor sends one, so the gateway sends none.
+    (void)ackWrapped;
 
     std::vector<uint8_t> cemi = {0x11, 0x00, 0xBC, 0xE0, 0x00, 0x00};
     auto sendRes = client.sendCemi(cemi, true, 200);
@@ -452,7 +458,7 @@ int main()
     std::vector<uint8_t> disconnectRespWrapped(SecureWrapper::kOverhead + disconnectRespPlain.size());
     auto disconnectRespWrapRes = SecureWrapper::wrap(swKey,
                                 sid,
-                                /*seq=*/{0x00, 0x00, 0x00, 0x00, 0x00, 0x05},
+                                /*seq=*/{0x00, 0x00, 0x00, 0x00, 0x00, 0x06},
                                 /*serial=*/{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff},
                                 tag,
                                 counterSuffix,

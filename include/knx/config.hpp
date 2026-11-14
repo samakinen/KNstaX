@@ -142,6 +142,22 @@ constexpr uint16_t RESTART_PROCESS_TIME_S = 0;
 #  endif
 #endif
 
+// KNX_FEATURE_COUPLER gates the coupler's layer-2 group acknowledge in the TP1
+// receive path (physical::GroupAckFilter): the hook in the receive ISR and the
+// plumbing to it. An end device never needs it, and the ISR is IRAM. Set by
+// the build system (CONFIG_KNX_ENABLE_COUPLER on ESP-IDF, the
+// KNX_FEATURE_COUPLER CMake option on a host build); the fallback follows the
+// same rule as the media flags.
+#ifndef KNX_FEATURE_COUPLER
+#  if defined(CONFIG_KNX_ENABLE_COUPLER)
+#    define KNX_FEATURE_COUPLER 1
+#  elif defined(ESP_PLATFORM)
+#    define KNX_FEATURE_COUPLER 0
+#  else
+#    define KNX_FEATURE_COUPLER 1
+#  endif
+#endif
+
 // KNX_SECURE_ENABLED gates the whole KNX Secure surface (Data Secure, IP
 // Secure) and is used in `#if` guards, so an undefined macro silently disables
 // security rather than failing the build.  Same fallback contract as the media

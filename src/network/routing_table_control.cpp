@@ -3,7 +3,7 @@
 
 /**
  * @file routing_table_control.cpp
- * @brief PID_ROUTETABLE_CONTROL implementation (KNX 03/05/01 §4.4.6).
+ * @brief PID_ROUTETABLE_CONTROL implementation (KNX 03/05/01 §4.5.7).
  */
 
 #include "knx/network/routing_table_control.hpp"
@@ -22,20 +22,41 @@ constexpr size_t kServiceHeaderBytes = 2u;
 /// SRVID 3 and 4 carry a start and an end address, big-endian.
 constexpr size_t kRangeServiceInfoBytes = 4u;
 
-/// Standard group addresses are the range the routing table covers; addresses
-/// above 0x6FFF are "extended" and handled by PID_MAIN_LCGRPCONFIG's
-/// GROUP_7000 field rather than by the routing table (§4.4.5).
-constexpr uint16_t kMaxStandardGroupAddress = 0x6FFF;
+/// "All standard Group Addresses": the whole 16-bit space the Filter Table
+/// covers (03/05/01 §5.3.1.1.1), GA 0000h excepted.
+constexpr uint16_t kFirstGroupAddress = 0x0001u;
+constexpr uint16_t kLastGroupAddress = 0xFFFFu;
 
-/// A single-address filter entry: mask of all ones matches exactly one address.
-constexpr GroupAddress exactMask() { return GroupAddress(0xFFFFu); }
+struct Range {
+    uint16_t start;
+    uint16_t end;
+};
 
-application::FunctionPropertyResult makeResponse(RouteTableReturnCode code, uint8_t serviceId)
+Range decodeRange(std::span<const uint8_t> serviceInfo)
+{
+    return Range{
+        static_cast<uint16_t>((static_cast<uint16_t>(serviceInfo[0]) << 8) | serviceInfo[1]),
+        static_cast<uint16_t>((static_cast<uint16_t>(serviceInfo[2]) << 8) | serviceInfo[3]),
+    };
+}
+
+/// return_code + ServiceID, followed for SRVID 3/4 by the START/END ADDRESS
+/// the request carried (§4.5.7.4, §4.5.7.5: the response repeats them).
+application::FunctionPropertyResult makeResponse(RouteTableReturnCode code, uint8_t serviceId,
+                                                 std::span<const uint8_t> echo = {})
 {
     application::FunctionPropertyResult result{};
     result.returnCode = static_cast<application::FunctionPropertyReturnCode>(code);
     (void)result.data.push_back(serviceId);
+    for (uint8_t octet : echo) {
+        (void)result.data.push_back(octet);
+    }
     return result;
+}
+
+RouteTableReturnCode codeFor(bool ok)
+{
+    return ok ? RouteTableReturnCode::Success : RouteTableReturnCode::Error;
 }
 
 }  // namespace
@@ -52,125 +73,61 @@ util::Result<application::FunctionPropertyResult> RoutingTableControl::invoke(
 
     const uint8_t rawServiceId = payload[1];
     const auto serviceInfo = payload.subspan(kServiceHeaderBytes);
+    const bool stateRead = invocation == application::FunctionPropertyInvocation::StateRead;
 
-    // §4.4.6: a State_Read reports whether the service *would* work without
-    // performing it.  Treating a read as a write would let a management client
-    // wipe a coupler's filter table with what it believes is a query.
-    if (invocation == application::FunctionPropertyInvocation::StateRead) {
-        switch (static_cast<RouteTableServiceId>(rawServiceId)) {
-            case RouteTableServiceId::ClearRoutingTable:
-            case RouteTableServiceId::SetRoutingTable:
-            case RouteTableServiceId::ClearGroupAddress:
-            case RouteTableServiceId::SetGroupAddress:
-                return makeResponse(RouteTableReturnCode::Success, rawServiceId);
-        }
-        // §4.4.6.6: an unknown ServiceID is echoed back with an error code.
-        return makeResponse(RouteTableReturnCode::Error, rawServiceId);
-    }
-
-    util::Result<void> outcome = util::ErrorCode::OperationNotSupported;
     switch (static_cast<RouteTableServiceId>(rawServiceId)) {
         case RouteTableServiceId::ClearRoutingTable:
-            outcome = clearRoutingTable();
-            break;
-        case RouteTableServiceId::SetRoutingTable:
-            outcome = setRoutingTable();
-            break;
+        case RouteTableServiceId::SetRoutingTable: {
+            const bool pass = static_cast<RouteTableServiceId>(rawServiceId)
+                              == RouteTableServiceId::SetRoutingTable;
+            if (stateRead) {
+                // §4.5.7.2 b) / §4.5.7.3 b): "check if all standard Group
+                // Addresses are cleared / set". A State_Read never modifies:
+                // treating it as a write would let a query wipe the table.
+                return makeResponse(codeFor(_filterTable.rangeIs(kFirstGroupAddress,
+                                                                 kLastGroupAddress, pass)),
+                                    rawServiceId);
+            }
+            _filterTable.setAll(pass);
+            _lastAffectedAddressCount = kLastGroupAddress;
+            KNX_LOGI(TAG, "Routing table %s", pass ? "set (all pass)" : "cleared (none pass)");
+            return makeResponse(RouteTableReturnCode::Success, rawServiceId);
+        }
+
         case RouteTableServiceId::ClearGroupAddress:
-        case RouteTableServiceId::SetGroupAddress:
-            outcome = applyRange(static_cast<RouteTableServiceId>(rawServiceId), serviceInfo);
-            break;
-        default:
-            KNX_LOGW(TAG, "Unknown PID_ROUTETABLE_CONTROL ServiceID 0x%02X",
-                     static_cast<unsigned>(rawServiceId));
-            return makeResponse(RouteTableReturnCode::Error, rawServiceId);
-    }
-
-    return makeResponse(outcome.isOk() ? RouteTableReturnCode::Success : RouteTableReturnCode::Error,
-                        rawServiceId);
-}
-
-util::Result<void> RoutingTableControl::clearRoutingTable()
-{
-    // "Clear" means no standard group address is routed.  The table is emptied
-    // and the default action set to Block, so the absence of an entry denies
-    // rather than permits — an empty table that defaulted to Forward would
-    // route everything, the opposite of what the client asked for.
-    _filterTable.clear();
-    _filterTable.setDefaultAction(FilterAction::Block);
-    _lastAffectedAddressCount = 0;
-    KNX_LOGI(TAG, "Routing table cleared (default action: block)");
-    return util::Result<void>::ok();
-}
-
-util::Result<void> RoutingTableControl::setRoutingTable()
-{
-    // The inverse: every standard group address is routed.  Expressed as a
-    // default action rather than 28k individual entries.
-    _filterTable.clear();
-    _filterTable.setDefaultAction(FilterAction::Allow);
-    _lastAffectedAddressCount = 0;
-    KNX_LOGI(TAG, "Routing table set to pass all standard group addresses");
-    return util::Result<void>::ok();
-}
-
-util::Result<void> RoutingTableControl::applyRange(RouteTableServiceId service,
-                                                   std::span<const uint8_t> serviceInfo)
-{
-    if (serviceInfo.size() < kRangeServiceInfoBytes) {
-        return util::ErrorCode::DecodeFailed;
-    }
-
-    const uint16_t start = static_cast<uint16_t>((static_cast<uint16_t>(serviceInfo[0]) << 8)
-                                                 | serviceInfo[1]);
-    const uint16_t end = static_cast<uint16_t>((static_cast<uint16_t>(serviceInfo[2]) << 8)
-                                               | serviceInfo[3]);
-
-    // §4.4.6.4: "If START ADDRESS is greater than END ADDRESS no address will
-    // be modified (error response!)".  An inverted range is a client bug, and
-    // silently treating it as empty would hide it.
-    if (start > end) {
-        KNX_LOGW(TAG, "Range 0x%04X..0x%04X is inverted; rejecting",
-                 static_cast<unsigned>(start), static_cast<unsigned>(end));
-        return util::ErrorCode::InvalidParameter;
-    }
-
-    if (start > kMaxStandardGroupAddress) {
-        KNX_LOGW(TAG, "Range starts above the standard group address space (0x%04X)",
-                 static_cast<unsigned>(start));
-        return util::ErrorCode::OutOfRange;
-    }
-
-    const uint16_t clampedEnd = end > kMaxStandardGroupAddress ? kMaxStandardGroupAddress : end;
-    const auto action = (service == RouteTableServiceId::SetGroupAddress) ? FilterAction::Allow
-                                                                         : FilterAction::Block;
-
-    // The filter table is a bounded resource (MAX_ENTRIES).  Refuse a range
-    // that cannot be represented rather than applying a partial one: a
-    // half-applied routing table silently drops traffic the integrator
-    // believes is configured to pass.
-    const size_t requested = static_cast<size_t>(clampedEnd - start) + 1u;
-    const size_t free = FilterTable::MAX_ENTRIES - _filterTable.entryCount();
-    if (requested > free) {
-        KNX_LOGW(TAG,
-                 "Range 0x%04X..0x%04X needs %zu entries, %zu free; rejecting",
-                 static_cast<unsigned>(start), static_cast<unsigned>(clampedEnd), requested, free);
-        return util::ErrorCode::QueueFull;
-    }
-
-    for (uint32_t address = start; address <= clampedEnd; ++address) {
-        const GroupAddress groupAddress(static_cast<uint16_t>(address));
-        const auto res = _filterTable.addEntry(groupAddress, exactMask(), action, EntryState::Enabled);
-        if (res.isError()) {
-            return res;
+        case RouteTableServiceId::SetGroupAddress: {
+            const bool pass = static_cast<RouteTableServiceId>(rawServiceId)
+                              == RouteTableServiceId::SetGroupAddress;
+            if (serviceInfo.size() < kRangeServiceInfoBytes) {
+                return makeResponse(RouteTableReturnCode::Error, rawServiceId, serviceInfo);
+            }
+            const auto echo = serviceInfo.first(kRangeServiceInfoBytes);
+            const Range range = decodeRange(serviceInfo);
+            if (stateRead) {
+                // "If START ADDRESS is greater than END ADDRESS then no
+                // standard Group Address shall be checked": nothing fails.
+                return makeResponse(codeFor(_filterTable.rangeIs(range.start, range.end, pass)),
+                                    rawServiceId, echo);
+            }
+            // "If START ADDRESS is greater than END ADDRESS no address will be
+            // modified (error response!)".
+            if (range.start > range.end) {
+                KNX_LOGW(TAG, "Range 0x%04X..0x%04X is inverted; rejecting",
+                         static_cast<unsigned>(range.start), static_cast<unsigned>(range.end));
+                return makeResponse(RouteTableReturnCode::Error, rawServiceId, echo);
+            }
+            _filterTable.setRange(range.start, range.end, pass);
+            _lastAffectedAddressCount = static_cast<size_t>(range.end - range.start) + 1u;
+            KNX_LOGI(TAG, "%s group addresses 0x%04X..0x%04X",
+                     pass ? "Routing" : "Blocking",
+                     static_cast<unsigned>(range.start), static_cast<unsigned>(range.end));
+            return makeResponse(RouteTableReturnCode::Success, rawServiceId, echo);
         }
     }
 
-    _lastAffectedAddressCount = requested;
-    KNX_LOGI(TAG, "%s group addresses 0x%04X..0x%04X (%zu entries)",
-             action == FilterAction::Allow ? "Routing" : "Blocking",
-             static_cast<unsigned>(start), static_cast<unsigned>(clampedEnd), requested);
-    return util::Result<void>::ok();
+    KNX_LOGW(TAG, "Unknown PID_ROUTETABLE_CONTROL ServiceID 0x%02X",
+             static_cast<unsigned>(rawServiceId));
+    return makeResponse(RouteTableReturnCode::Error, rawServiceId);
 }
 
 } // namespace network

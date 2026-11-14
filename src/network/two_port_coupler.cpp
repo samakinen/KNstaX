@@ -45,12 +45,18 @@ util::Result<void> TwoPortCoupler::init() {
         [this](const datalink::LDataFrame& frame) { handleRx(Port::Secondary, frame); });
 
     initialized_.store(true);
+    refreshAckFilters();
     return util::Result<void>::ok();
 }
 
 void TwoPortCoupler::close() {
     if (!initialized_.load()) return;
     initialized_.store(false);
+#if KNX_FEATURE_COUPLER
+    // The filters live in this object; the ISRs must stop reading them.
+    primary_.setGroupAckFilter(nullptr);
+    secondary_.setGroupAckFilter(nullptr);
+#endif
     // Leave DL callbacks as-is; the DL lifetime is managed externally.
 }
 
@@ -61,8 +67,29 @@ util::Result<void> TwoPortCoupler::setOwnAddress(const IndividualAddress& addres
     // from either subnetwork.
     primary_.setOwnAddress(address);
     secondary_.setOwnAddress(address);
+    refreshAckFilters();
     return util::Result<void>::ok();
 }
+
+#if KNX_FEATURE_COUPLER
+void TwoPortCoupler::refreshAckFilters() {
+    // Each filter is updated field by field while an ISR may be reading it.
+    // Every field is one octet or a pointer, so a reader sees either the
+    // old or the new value of each; a frame decided across the update gets
+    // the acknowledge of one of the two configurations, never a third.
+    for (const Port port : {Port::Primary, Port::Secondary}) {
+        const physical::GroupAckFilter derived = policy_.groupAckFilter(port);
+        physical::GroupAckFilter& installed = ackFilters_[static_cast<size_t>(port)];
+        installed.filterTable = derived.filterTable;
+        installed.low = derived.low;
+        installed.high = derived.high;
+    }
+    if (initialized_.load()) {
+        primary_.setGroupAckFilter(&ackFilters_[static_cast<size_t>(Port::Primary)]);
+        secondary_.setGroupAckFilter(&ackFilters_[static_cast<size_t>(Port::Secondary)]);
+    }
+}
+#endif
 
 datalink::Tp1DataLinkLayer& TwoPortCoupler::linkFor(Port port) {
     return port == Port::Primary ? primary_ : secondary_;

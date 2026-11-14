@@ -22,7 +22,7 @@ using ControlPacketCodec = control_packet::Codec;
 TunnelingSessionClient::TunnelingSessionClient()
     : keepalive_([this]() {
         if (isOpen()) {
-            (void)sendConnectionStateRequest(1000);
+            (void)heartbeat();
         }
     })
 {
@@ -125,11 +125,20 @@ void TunnelingSessionClient::close()
         sock_->close();
         sock_.reset();
     }
-    TunnelingOrchestration::resetSession(channelId_, seq_);
+    resetConnectionState();
     TunnelingOrchestration::clearActivity(lastActivityTimeMs_);
     openOperation_.reset();
     remote_ = RemoteInfo{};
     localAddr_ = IpAddress(0);
+}
+
+void TunnelingSessionClient::resetConnectionState() noexcept
+{
+    TunnelingOrchestration::resetSession(channelId_, seq_);
+    rxSeq_ = TunnelingSequence(0);
+    dataEndpoint_ = RemoteInfo{};
+    tunnelAddress_ = 0;
+    ackTracker_.clear();
 }
 
 bool TunnelingSessionClient::isOpen() const noexcept
@@ -235,17 +244,39 @@ util::Result<bool> TunnelingSessionClient::receiveConnectionResponseOnce()
         return false;
     }
 
-    auto channelResult = ControlPacketCodec::decodeChannelStatusResponse(frame, control_packet::kServiceConnectionResponse);
-    if (channelResult.isError()) return channelResult.error();
+    // 03/08/02 §7.8.2: channel ID, status and, on success, the server's data
+    // endpoint HPAI and the CRD with the Individual Address of the tunnel
+    // (03/08/04 §5.4.4).
+    auto responseResult = ControlPacketCodec::decodeConnectResponse(frame);
+    if (responseResult.isError()) return responseResult.error();
+    const auto& response = responseResult.value();
 
-    if (channelResult.value().status != 0x00 || channelResult.value().channelId == 0x00) {
+    if (response.status != control_packet::kStatusNoError) {
+        KNX_LOGW(TAG_TUN, "CONNECT_RESPONSE refused the connection: status 0x%02X",
+                 static_cast<unsigned>(response.status));
         return util::ErrorCode::OperationFailed;
     }
+    if (response.channelId == 0x00 || response.connectionType != control_packet::Codec::kConnectionTypeTunnel) {
+        return util::ErrorCode::DecodeFailed;
+    }
 
-    TunnelingOrchestration::markConnected(channelId_, seq_, lastActivityTimeMs_, ChannelId(channelResult.value().channelId), [this]() {
+    // A "Route Back" data endpoint means: the address the response came from.
+    if (ControlPacketCodec::isRouteBack(response.dataEndpoint)) {
+        dataEndpoint_.addr = srcAddr;
+        dataEndpoint_.port = NetIpPort(srcPort);
+    } else {
+        dataEndpoint_.addr = response.dataEndpoint.address;
+        dataEndpoint_.port = NetIpPort(response.dataEndpoint.port);
+    }
+    tunnelAddress_ = response.tunnelAddress;
+    rxSeq_ = TunnelingSequence(0);
+    ackTracker_.clear();
+
+    TunnelingOrchestration::markConnected(channelId_, seq_, lastActivityTimeMs_, ChannelId(response.channelId), [this]() {
         return getCurrentTimeMs();
     });
-    KNX_LOGI(TAG_TUN, "Tunneling connected: channel=%u seq=%u", static_cast<unsigned>(channelId_.value()), static_cast<unsigned>(seq_.value()));
+    KNX_LOGI(TAG_TUN, "Tunneling connected: channel=%u tunnel IA=0x%04X",
+             static_cast<unsigned>(channelId_.value()), static_cast<unsigned>(tunnelAddress_));
     return true;
 }
 
@@ -288,40 +319,67 @@ util::Result<void> TunnelingSessionClient::sendDisconnect()
     return util::Result<void>::ok();
 }
 
-util::Result<void> TunnelingSessionClient::sendTunnelingRequest(std::span<const uint8_t> cemi)
+util::Result<void> TunnelingSessionClient::sendTunnelingRequest(uint8_t sequence, std::span<const uint8_t> cemi)
 {
     if (!sock_ || !sock_->isOpen() || !channelId_.isValid()) return util::ErrorCode::NotInitialized;
 
     PacketWriter packet(frameBuffer_.span());
-    auto encodeResult = ControlPacketCodec::encodeTunnelingRequest(packet, channelId_.value(), seq_.value(), cemi);
+    auto encodeResult = ControlPacketCodec::encodeTunnelingRequest(packet, channelId_.value(), sequence, cemi);
     if (encodeResult.isError()) return encodeResult.error();
 
+    // To the data endpoint the CONNECT_RESPONSE named, not the control
+    // endpoint the connection was requested on.
+    const UdpDatagramEndpoint destination{dataEndpoint_.addr, dataEndpoint_.port};
     if (security_) {
         SecureUdpDatagramChannel secureChannel(*sock_, *security_, secureBuffer_.span(), scratchBuffer_.span());
-        auto sendResult = secureChannel.send(UdpDatagramEndpoint{remote_.addr, remote_.port}, packet.span());
+        auto sendResult = secureChannel.send(destination, packet.span());
         if (sendResult.isError()) return sendResult.error();
     } else {
-        const int sent = sock_->send(remote_.addr, remote_.port.value(), packet.span());
+        const int sent = sock_->send(destination.addr, destination.port.value(), packet.span());
         if (sent != static_cast<int>(packet.size())) return util::ErrorCode::TransmissionFailed;
     }
-
-    seq_ = TunnelingSequence(static_cast<uint8_t>((seq_.value() + 1) & 0xFF));
     return util::Result<void>::ok();
 }
 
 util::Result<void> TunnelingSessionClient::sendCemi(std::span<const uint8_t> cemi, bool waitAck, int timeoutMs)
 {
     if (!isOpen()) return util::ErrorCode::NotInitialized;
-    auto sendResult = sendTunnelingRequest(cemi);
-    if (sendResult.isError()) return sendResult.error();
-    if (!waitAck) return util::Result<void>::ok();
-    const uint8_t expectedSeq = static_cast<uint8_t>((seq_.value() - 1) & 0xFF);
-    return TunnelingOrchestration::waitForAck(
-        ackTracker_,
-        expectedSeq,
-        timeoutMs,
-        [this](int remainingMs) { return receiveOnce(remainingMs); },
-        [this]() { return getCurrentTimeMs(); });
+    const uint8_t sequence = seq_.value();
+    const auto advance = [this, sequence]() {
+        seq_ = TunnelingSequence(static_cast<uint8_t>(sequence + 1u));
+    };
+
+    if (!waitAck) {
+        auto sendResult = sendTunnelingRequest(sequence, cemi);
+        if (sendResult.isError()) return sendResult.error();
+        advance();
+        return util::Result<void>::ok();
+    }
+
+    // 03/08/04 §2.6.1: not confirmed within TUNNELLING_REQUEST_TIMEOUT, or
+    // confirmed with an error status -> repeat once with the same sequence
+    // counter, then terminate the connection with a DISCONNECT_REQUEST.
+    util::Result<void> outcome = util::ErrorCode::Timeout;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        auto sendResult = sendTunnelingRequest(sequence, cemi);
+        if (sendResult.isError()) return sendResult.error();
+        outcome = TunnelingOrchestration::waitForAck(
+            ackTracker_,
+            sequence,
+            timeoutMs,
+            [this](int remainingMs) { return receiveOnce(remainingMs); },
+            [this]() { return getCurrentTimeMs(); });
+        if (outcome.isOk()) {
+            advance();
+            return outcome;
+        }
+        if (!isOpen()) return outcome;  // the server disconnected meanwhile
+    }
+
+    KNX_LOGW(TAG_TUN, "TUNNELLING_REQUEST seq=%u not confirmed twice; disconnecting",
+             static_cast<unsigned>(sequence));
+    close();
+    return outcome;
 }
 
 util::Result<bool> TunnelingSessionClient::receiveOnce(int timeoutMs)
@@ -387,26 +445,51 @@ util::Result<bool> TunnelingSessionClient::receiveOnce(int timeoutMs)
         TunnelingOrchestration::markActivity(lastActivityTimeMs_, [this]() { return getCurrentTimeMs(); });
     }
 
+    // The server may terminate the connection (03/08/02 §5.5): answer with a
+    // DISCONNECT_RESPONSE to its control endpoint and drop the channel.
+    if (header.serviceType == control_packet::kServiceDisconnectRequest) {
+        auto request = ControlPacketCodec::decodeChannelEndpointRequest(
+            std::span<const uint8_t>(inData, inLen), control_packet::kServiceDisconnectRequest);
+        if (request.isError() || !channelId_.isValid() || request.value().channelId != channelId_.value()) {
+            return true;
+        }
+        const auto& endpoint = request.value().controlEndpoint;
+        const bool routeBack = ControlPacketCodec::isRouteBack(endpoint);
+        const IpAddress replyAddr = routeBack ? srcAddr : endpoint.address;
+        const uint16_t replyPort = routeBack ? srcPort : endpoint.port;
+        PacketWriter response(scratchBuffer_.span());
+        if (ControlPacketCodec::encodeChannelStatusResponse(response, control_packet::kServiceDisconnectResponse,
+                                                            channelId_.value(), control_packet::kStatusNoError)
+                .isOk()) {
+            (void)sock_->send(replyAddr, replyPort, response.span());
+        }
+        KNX_LOGI(TAG_TUN, "Server closed tunnelling channel %u", static_cast<unsigned>(channelId_.value()));
+        resetConnectionState();
+        return true;
+    }
+
     return TunnelingOrchestration::handleInboundFrame(
         std::span<const uint8_t>(inData, inLen),
         header.serviceType,
         channelId_,
         ackTracker_,
+        &rxSeq_,
         [&](uint8_t sequence) -> util::Result<void> {
             PacketWriter ackPacket(scratchBuffer_.span());
             auto ackHeaderResult = ControlPacketCodec::encodeTunnelingAck(
                 ackPacket,
                 channelId_.value(),
                 sequence,
-                0x00);
+                control_packet::kStatusNoError);
             if (ackHeaderResult.isError()) return ackHeaderResult.error();
 
+            const UdpDatagramEndpoint destination{dataEndpoint_.addr, dataEndpoint_.port};
             if (security_) {
                 SecureUdpDatagramChannel secureChannel(*sock_, *security_, secureBuffer_.span(), frameBuffer_.span());
-                auto sendResult = secureChannel.send(UdpDatagramEndpoint{srcAddr, NetIpPort(srcPort)}, ackPacket.span());
+                auto sendResult = secureChannel.send(destination, ackPacket.span());
                 if (sendResult.isError()) return sendResult.error();
             } else {
-                (void)sock_->send(srcAddr, srcPort, ackPacket.span());
+                (void)sock_->send(destination.addr, destination.port.value(), ackPacket.span());
             }
             return util::Result<void>::ok();
         },
@@ -453,6 +536,23 @@ util::Result<void> TunnelingSessionClient::sendConnectionStateRequest(int timeou
     }
 
     return verifyResult.error();
+}
+
+util::Result<void> TunnelingSessionClient::heartbeat(int attemptTimeoutMs)
+{
+    if (!isOpen()) return util::ErrorCode::NotInitialized;
+
+    // 03/08/02 §5.4: no response within CONNECTIONSTATE_REQUEST_TIMEOUT, or an
+    // error status -> repeat the request three times, then DISCONNECT_REQUEST.
+    util::Result<void> outcome = util::ErrorCode::Timeout;
+    for (int attempt = 0; attempt <= kHeartbeatRepetitions; ++attempt) {
+        outcome = sendConnectionStateRequest(attemptTimeoutMs);
+        if (outcome.isOk()) return outcome;
+        if (!isOpen()) return outcome;
+    }
+    KNX_LOGW(TAG_TUN, "Heartbeat failed %d times; disconnecting", kHeartbeatRepetitions + 1);
+    close();
+    return outcome;
 }
 
 void TunnelingSessionClient::startKeepalive(uint32_t intervalMs)

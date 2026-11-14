@@ -27,6 +27,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -42,7 +43,8 @@ public:
     SecureTunnelingSecurity(const Key& sessionKey,
                             SessionId sessionId,
                             const std::array<uint8_t, SecureWrapper::kSerialLen>& localSerial,
-                            uint64_t initialSeq = 1);
+                            uint64_t initialSeq = 1,
+                            std::optional<uint64_t> lastReceivedSeq = std::nullopt);
 
     util::Result<size_t> protect(std::span<const uint8_t> in, std::span<uint8_t> out) override;
     util::Result<size_t> unprotect(std::span<const uint8_t> in, std::span<uint8_t> out) override;
@@ -54,6 +56,9 @@ private:
     SessionId sessionId_{SessionId::invalid()};
     std::array<uint8_t, SecureWrapper::kSerialLen> serial_{};
     uint64_t seq48_{1};
+    /// Sequence number of the last frame accepted from the server: a frame
+    /// at or below it is a replay and is discarded (03/08/09 §2.2.3.3).
+    std::optional<uint64_t> lastRxSeq48_{};
 };
 
 class SecureTunnelingClient {
@@ -82,8 +87,15 @@ public:
         // 6-byte KNX device serial number used in SecureWrapper.
         std::array<uint8_t, SecureWrapper::kSerialLen> clientSerial{};
 
-        // Initial 48-bit sequence counter for SecureWrapper.
-        uint64_t initialSeq{1};
+        // Initial 48-bit sequence counter for SecureWrapper. "The sequence number
+        // shall be initialized to zero on connection setup" (03/08/09 §2.2.3.3).
+        uint64_t initialSeq{0};
+
+        // Device Authentication Code of the server, if known (the key, not the
+        // password; see SecureSession::deriveDeviceAuthenticationCodeLatin1).
+        // When set, the SESSION_RESPONSE MAC is verified and a server that
+        // fails it is refused (03/08/09 §2.2.3.7.3).
+        std::optional<SecureSession::DeviceAuthenticationCode> deviceAuthenticationCode{};
     };
 
     SecureTunnelingClient();
@@ -123,6 +135,8 @@ public:
     }
 
     bool isTunnelingConnected() const noexcept { return isOpen() && channelId_.isValid(); }
+    /// The Individual Address in the CONNECT_RESPONSE CRD (03/08/04 §5.4.4).
+    uint16_t tunnelAddress() const noexcept { return tunnelAddress_; }
     SessionOperationType activeSessionOperation() const noexcept;
     ChannelId channelId() const noexcept { return channelId_; }
     TunnelingSequence sequence() const noexcept { return seq_; }
@@ -219,6 +233,7 @@ private:
     mutable std::mutex ioMutex_;
 
     TunnelingAckTracker ackTracker_{};
+    uint16_t tunnelAddress_{0};
     OpenOperation openOperation_{};
     ConnectOperation connectOperation_{};
     ConnectionStateOperation connectionStateOperation_{};

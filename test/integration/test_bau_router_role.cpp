@@ -172,7 +172,7 @@ void test_routing_table_control_reaches_the_couplers_own_table(void) {
     TEST_ASSERT_TRUE(gBau->management().configureRouterRole(config).isOk());
     TEST_ASSERT_TRUE(gBau->init(IndividualAddress(1, 1, 0)).isOk());
 
-    gFilterTable.setDefaultAction(network::FilterAction::Allow);
+    gFilterTable.setAll(true);
 
     // SRVID_CLEAR_ROUTINGTABLE through the same service object the BAU's
     // Function Property handler uses.
@@ -183,8 +183,7 @@ void test_routing_table_control_reaches_the_couplers_own_table(void) {
         control.invoke(application::FunctionPropertyInvocation::Command, clearRequest);
     TEST_ASSERT_TRUE(res.isOk());
 
-    TEST_ASSERT_EQUAL(static_cast<int>(network::FilterAction::Block),
-                      static_cast<int>(gFilterTable.defaultAction()));
+    TEST_ASSERT_EQUAL_UINT32(0u, gFilterTable.passCount());
 }
 
 int main(void) {

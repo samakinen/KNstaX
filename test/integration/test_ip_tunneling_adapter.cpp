@@ -73,9 +73,14 @@ void test_adapter_send_receive(void) {
 
             if (st == 0x0205) { // Connection Request
                 std::vector<uint8_t> resp;
-                writeHeader(resp, 0x0206, 8);
+                writeHeader(resp, 0x0206, 20);
                 resp.push_back(0x01); // channel id
                 resp.push_back(0x00); // status ok
+                // Route Back data endpoint HPAI and the tunnelling CRD, IA 1.1.10
+                // (03/08/02 Figure 49).
+                for (uint8_t octet : std::initializer_list<uint8_t>{0x08, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x04, 0x11, 0x0A}) {
+                    resp.push_back(octet);
+                }
                 ::sendto(srv, resp.data(), resp.size(), 0, (sockaddr*)&src, slen);
             } else if (st == 0x0420) { // Tunneling Request
                 // ACK back
@@ -178,9 +183,14 @@ void test_adapter_send_receive_with_explicit_progression(void) {
 
             if (st == 0x0205) {
                 std::vector<uint8_t> resp;
-                writeHeader(resp, 0x0206, 8);
+                writeHeader(resp, 0x0206, 20);
                 resp.push_back(0x01);
                 resp.push_back(0x00);
+                // Route Back data endpoint HPAI and the tunnelling CRD, IA 1.1.10
+                // (03/08/02 Figure 49).
+                for (uint8_t octet : std::initializer_list<uint8_t>{0x08, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x04, 0x11, 0x0A}) {
+                    resp.push_back(octet);
+                }
                 ::sendto(srv, resp.data(), resp.size(), 0, (sockaddr*)&src, slen);
             } else if (st == 0x0420 && n >= 10) {
                 uint8_t seq = buf[8];

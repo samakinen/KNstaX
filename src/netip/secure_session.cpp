@@ -223,6 +223,66 @@ util::Result<void> SecureSession::decodeSessionStatus(std::span<const uint8_t> f
     return util::Result<void>::ok();
 }
 
+util::Result<void> SecureSession::deriveDeviceAuthenticationCodeLatin1(std::span<const uint8_t> secretLatin1,
+                                                                      DeviceAuthenticationCode& outCode)
+{
+    constexpr std::string_view kDeviceAuthenticationSalt = "device-authentication-code.1.secure.ip.knx.org";
+    const auto saltBytes = std::span(reinterpret_cast<const uint8_t*>(kDeviceAuthenticationSalt.data()),
+                                     kDeviceAuthenticationSalt.size());
+    return knx::security::KeyDerivation::pbkdf2(secretLatin1, saltBytes, 65536, outCode);
+}
+
+util::Result<void> SecureSession::computeSessionResponseMac(const DeviceAuthenticationCode& deviceAuthenticationCode,
+                                                            SessionId sessionId,
+                                                            const PublicKey& clientPublicKey,
+                                                            const PublicKey& serverPublicKey,
+                                                            MessageAuthenticationCode& outMac)
+{
+    // A = KNXnet/IP Secure Header | Secure Session Identifier | (X ^ Y),
+    // a = 40 octets (§2.2.3.7.4).
+    std::array<uint8_t, kHeaderLen + 2 + kPublicKeyLen> additionalData{};
+    util::ByteWriter writer(additionalData);
+    if (writer.u8(kHeaderLen).isError() || writer.u8(kVersion).isError()
+        || writer.u16be(kServiceTypeSessionResponse.value()).isError()
+        || writer.u16be(static_cast<uint16_t>(kSessionResponseFrameLen)).isError()
+        || writer.u16be(sessionId.value()).isError()) {
+        return util::ErrorCode::EncodeFailed;
+    }
+    for (size_t i = 0; i < kPublicKeyLen; ++i) {
+        additionalData[kHeaderLen + 2 + i] = static_cast<uint8_t>(clientPublicKey[i] ^ serverPublicKey[i]);
+    }
+
+    // B0 is all zero with Q = 0 (Figure 16); the payload is empty.
+    const knx::security::Aes128CbcMac::Block block0{};
+    knx::security::Aes128CbcMac::Block macCbc{};
+    auto macResult = knx::security::Aes128CbcMac::compute(deviceAuthenticationCode, block0,
+                                                          std::span<const uint8_t>(additionalData),
+                                                          std::span<const uint8_t>(), macCbc);
+    if (macResult.isError()) return macResult.error();
+
+    // Ctr0 = 0…0 FFh 00h (Figure 17).
+    knx::security::Aes128Ctr::Counter ctr0{};
+    std::copy(kAuthCtrIvBytes.begin(), kAuthCtrIvBytes.end(), ctr0.begin());
+    return knx::security::Aes128Ctr::crypt(deviceAuthenticationCode, ctr0, macCbc, outMac);
+}
+
+bool SecureSession::verifySessionResponseMac(const DeviceAuthenticationCode& deviceAuthenticationCode,
+                                             const SessionResponse& response,
+                                             const PublicKey& clientPublicKey)
+{
+    MessageAuthenticationCode expected{};
+    if (computeSessionResponseMac(deviceAuthenticationCode, response.sessionId, clientPublicKey,
+                                  response.serverPublicKey, expected)
+            .isError()) {
+        return false;
+    }
+    uint8_t difference = 0;
+    for (size_t i = 0; i < expected.size(); ++i) {
+        difference = static_cast<uint8_t>(difference | (expected[i] ^ response.messageAuthenticationCode[i]));
+    }
+    return difference == 0;
+}
+
 util::Result<void> SecureSession::deriveSessionKey(const knx::security::X25519::Scalar& clientPrivateKey,
                                     const PublicKey& serverPublicKey,
                                     SessionKey& out)

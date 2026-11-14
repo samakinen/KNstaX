@@ -41,6 +41,8 @@ public:
     using PublicKey = std::array<uint8_t, kPublicKeyLen>;
     using SessionKey = std::array<uint8_t, 16>;
     using UserPasswordKey = std::array<uint8_t, 16>;
+    using DeviceAuthenticationCode = std::array<uint8_t, 16>;
+    using MessageAuthenticationCode = std::array<uint8_t, 16>;
 
     struct SessionResponse {
         SessionId sessionId{SessionId::invalid()};
@@ -81,6 +83,31 @@ public:
     static util::Result<void> decodeSessionStatus(std::span<const uint8_t> frame, uint8_t& statusOut);
 
     // Derive session key = SHA-256(X25519(priv, peerPub))[0..15].
+    /// Device Authentication Code from its shared secret (03/08/09 §2.3.1.3.1):
+    /// PBKDF2(HMAC-SHA256, secret, "device-authentication-code.1.secure.ip.knx.org",
+    /// 65 536, 128).
+    static util::Result<void> deriveDeviceAuthenticationCodeLatin1(std::span<const uint8_t> secretLatin1,
+                                                                    DeviceAuthenticationCode& outCode);
+
+    /**
+     * @brief The SESSION_RESPONSE MAC (03/08/09 §2.2.3.7.4): AES128-CCM with
+     * the Device Authentication Code as key, A = Secure Header | Secure
+     * Session Identifier | (X ^ Y), empty payload, B0 = 0 with Q = 0 and
+     * Ctr0 = 0…0 FFh 00h. The returned MAC is the encrypted one, as it
+     * appears in the frame.
+     */
+    static util::Result<void> computeSessionResponseMac(const DeviceAuthenticationCode& deviceAuthenticationCode,
+                                                       SessionId sessionId,
+                                                       const PublicKey& clientPublicKey,
+                                                       const PublicKey& serverPublicKey,
+                                                       MessageAuthenticationCode& outMac);
+
+    /// Check the MAC of a decoded SESSION_RESPONSE against the Device
+    /// Authentication Code (03/08/09 §2.2.3.7.5). Constant-time compare.
+    static bool verifySessionResponseMac(const DeviceAuthenticationCode& deviceAuthenticationCode,
+                                         const SessionResponse& response,
+                                         const PublicKey& clientPublicKey);
+
     static util::Result<void> deriveSessionKey(const knx::security::X25519::Scalar& clientPrivateKey,
                                  const PublicKey& serverPublicKey,
                                  SessionKey& out);

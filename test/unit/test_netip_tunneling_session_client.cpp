@@ -82,9 +82,14 @@ int main()
                 lastTunnelingClient = src;
                 lastTunnelingLen = slen;
                 std::vector<uint8_t> resp;
-                writeHeader(resp, 0x0206, 8);
+                writeHeader(resp, 0x0206, 20);
                 resp.push_back(0x01);
                 resp.push_back(0x00);
+                // Route Back data endpoint HPAI and the tunnelling CRD, IA 1.1.10
+                // (03/08/02 Figure 49).
+                for (uint8_t octet : std::initializer_list<uint8_t>{0x08, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x04, 0x11, 0x0A}) {
+                    resp.push_back(octet);
+                }
                 ::sendto(srv, resp.data(), resp.size(), 0, reinterpret_cast<sockaddr*>(&src), slen);
             } else if (serviceType == 0x0209) {
                 disconnectReceived.store(true);

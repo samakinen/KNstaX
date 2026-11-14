@@ -96,6 +96,19 @@ public:
                                      std::span<const uint8_t> inner,
                                      std::span<uint8_t> outWrapper);
 
+    /// The 48-bit sequence information of a SECURE_WRAPPER frame (octets 8…13:
+    /// after the 6-octet header and the 2-octet Secure Session Identifier).
+    /// 0 for a frame too short to hold it.
+    static constexpr uint64_t sequenceOf(std::span<const uint8_t> wrapper) noexcept
+    {
+        if (wrapper.size() < kHeaderLen + 2 + kSeqLen) return 0;
+        uint64_t sequence = 0;
+        for (size_t i = 0; i < kSeqLen; ++i) {
+            sequence = (sequence << 8) | wrapper[kHeaderLen + 2 + i];
+        }
+        return sequence;
+    }
+
     // Unwrap and authenticate a SecureWrapper. Returns false on parse, decrypt, or MAC failure.
     //
     // For routing, set expectedSessionId=0.

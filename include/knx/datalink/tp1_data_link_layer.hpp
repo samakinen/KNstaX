@@ -12,6 +12,7 @@
 #pragma once
 
 #include "knx/config.hpp"
+#include "knx/physical/group_ack_filter.hpp"
 #include "knx/types.hpp"
 #include "knx/util/result.hpp"
 #include "knx/physical/tp1_physical_layer.hpp"
@@ -393,6 +394,21 @@ public:
      * @brief Enable/disable promiscuous mode (receive all frames)
      */
     void setPromiscuousMode(PromiscuousMode mode);
+
+#if KNX_FEATURE_COUPLER
+    /**
+     * @brief Install a coupler's group acknowledge rule in the physical
+     *        layer's receive path (no-op for media without one).
+     *
+     * The filter must outlive its installation; pass null to remove it.
+     */
+    void setGroupAckFilter(const physical::GroupAckFilter* filter)
+    {
+        if (_physicalPort.setGroupAckFilter != nullptr) {
+            _physicalPort.setGroupAckFilter(_physicalPort.context, filter);
+        }
+    }
+#endif
     void setOwnAddress(const IndividualAddress& ownAddress);
     
     /**
@@ -449,6 +465,9 @@ private:
         util::Result<void> (*setBusMonitorMode)(void*, Toggle){nullptr};
         util::Result<void> (*setOwnAddress)(void*, uint16_t){nullptr};
         void (*setAckGroupAddresses)(void*, std::span<const uint16_t>){nullptr};
+#if KNX_FEATURE_COUPLER
+        void (*setGroupAckFilter)(void*, const physical::GroupAckFilter*){nullptr};
+#endif
         // True when the physical can notify the RX task about queued frames.
         // Physicals without it (e.g. the IP adapters, which only surface
         // frames when polled) are polled on a short interval instead of the
@@ -525,6 +544,16 @@ private:
                     (void)addresses;
                 }
             },
+#if KNX_FEATURE_COUPLER
+            .setGroupAckFilter = [] (void* context, const physical::GroupAckFilter* filter) {
+                if constexpr (requires(ConcretePhysical* p) { p->setGroupAckFilter(filter); }) {
+                    static_cast<ConcretePhysical*>(context)->setGroupAckFilter(filter);
+                } else {
+                    (void)context;
+                    (void)filter;
+                }
+            },
+#endif
             .hasQueueNotify = requires(ConcretePhysical* p,
                                        physical::Tp1MediumBackend::QueueNotifyCallback cb,
                                        void* ctx) { p->setQueueNotifyCallback(cb, ctx); },

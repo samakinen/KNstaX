@@ -215,7 +215,7 @@ void test_tp1_ip_interface_bridge_forwards_tp1_to_ip_clients(void)
     TestNetwork network;
     TunnelingServerEndpoint server;
 
-    auto openResult = server.open(network, TunnelingServerEndpoint::Options{});
+    auto openResult = server.open(network, TunnelingServerEndpoint::Options{.tunnelAddresses = {knx::IndividualAddress(0x110A), knx::IndividualAddress(0x110B)}});
     TEST_ASSERT_TRUE(openResult.isOk());
 
     network::Tp1IpInterfaceBridge bridge(tp1, server);
@@ -252,7 +252,7 @@ void test_tp1_ip_interface_bridge_forwards_ip_cemi_to_tp1(void)
     TestNetwork network;
     TunnelingServerEndpoint server;
 
-    auto openResult = server.open(network, TunnelingServerEndpoint::Options{});
+    auto openResult = server.open(network, TunnelingServerEndpoint::Options{.tunnelAddresses = {knx::IndividualAddress(0x110A), knx::IndividualAddress(0x110B)}});
     TEST_ASSERT_TRUE(openResult.isOk());
 
     network::Tp1IpInterfaceBridge bridge(tp1, server);
@@ -289,7 +289,7 @@ void test_tp1_ip_interface_bridge_drops_invalid_ip_cemi(void)
     TestNetwork network;
     TunnelingServerEndpoint server;
 
-    auto openResult = server.open(network, TunnelingServerEndpoint::Options{});
+    auto openResult = server.open(network, TunnelingServerEndpoint::Options{.tunnelAddresses = {knx::IndividualAddress(0x110A), knx::IndividualAddress(0x110B)}});
     TEST_ASSERT_TRUE(openResult.isOk());
 
     network::Tp1IpInterfaceBridge bridge(tp1, server);

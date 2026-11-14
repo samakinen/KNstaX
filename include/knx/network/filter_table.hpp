@@ -3,209 +3,103 @@
 
 /**
  * @file filter_table.hpp
- * @brief KNX filter table for group address filtering
- * 
- * Manages which group addresses are allowed/blocked at network layer.
+ * @brief A coupler's group-address Filter Table (03/05/01 §5.3.1).
+ *
+ * The table is the bit field of Filter Table Realisation Type 3 (03/05/01
+ * §5.3.1.1): 65 536 bits, one per Group Address, in 8 192 octets. Group
+ * Address `ga` lives in octet `ga / 8`, bit `ga % 8` counted from the least
+ * significant bit. A set bit means the Filter Table evaluation for that
+ * address is positive (the message may pass), a cleared bit that it is
+ * negative. Bit 0 (GA 0000h, the broadcast address) is "don't care" and is
+ * never evaluated.
+ *
+ * The same layout is used by Realisation Type 2 (mask 0912h, §5.2.1, "the
+ * Filter Table supports filtering of full 16 bit Group Addressing"); the older
+ * 3.5 KB table of masks 0910h/0911h covered only 0000h…6FFFh. A full-range
+ * table is needed because PID_*_LCGRPCONFIG GROUP_ROUT7000 (§4.5.6) routes
+ * addresses ≥ 7000h "depending on the Routing Table" too.
+ *
+ * Every range ETS can download fits: a range operation is a loop over bits, so
+ * there is no entry limit, and a later Set always overrides an earlier Clear
+ * of the same address (and vice versa).
+ *
+ * 8 KB is a coupler's cost, so only a coupler instantiates one: it is a
+ * member of @ref TwoPortCoupler, which is itself only created for a coupler
+ * stack port. End devices have no Filter Table.
  */
 
 #pragma once
 
 #include "knx/types.hpp"
-#include "knx/util/result.hpp"
+
+#include <array>
+#include <cstddef>
 #include <cstdint>
-#include <optional>
 #include <span>
-#include <vector>
 
 namespace knx {
 namespace network {
 
-/**
- * @brief Filter action
- */
-enum class FilterAction {
-    Allow,  ///< Allow frame to pass
-    Block   ///< Block frame
-};
-
-/**
- * @brief Filter table entry
- * 
- * Defines filtering rules for group addresses.
- */
-struct FilterEntry {
-    GroupAddress address;   ///< Group address or range
-    GroupAddress mask;      ///< Address mask (0=wildcard)
-    FilterAction action;    ///< Allow or block
-    EntryState enabled;     ///< Entry is active
-    
-    FilterEntry()
-        : address(0)
-        , mask(0xFFFF)
-        , action(FilterAction::Allow)
-        , enabled(EntryState::Enabled)
-    {
-    }
-    
-    /**
-     * @brief Check if address matches this filter
-     * @param addr Address to check
-     * @return true if address matches mask
-     */
-    bool matches(const GroupAddress& addr) const {
-        return (addr.raw & mask.raw) == (address.raw & mask.raw);
-    }
-};
-
-/**
- * @brief Filter table for network layer
- * 
- * Manages group address filtering at network boundaries.
- * Used by line couplers to control which group telegrams cross lines.
- */
 class FilterTable {
 public:
-    /// Maximum filter table entries
-    static constexpr size_t MAX_ENTRIES = 64;
-    
-    FilterTable();
-    ~FilterTable() = default;
-    
-    /**
-     * @brief Set default filter action
-     * @param action Default action when no rule matches
-     */
-    void setDefaultAction(FilterAction action) { _defaultAction = action; }
-    
-    /**
-     * @brief Get default filter action
-     * @return Default action
-     */
-    FilterAction defaultAction() const { return _defaultAction; }
-    
-    /**
-     * @brief Add filter entry
-     * @param entry Filter entry to add
-     * @return Index of entry, or -1 if table full
-     */
-    int addEntry(const FilterEntry& entry);
-    
-    /**
-     * @brief Add filter entry (convenience method)
-     * @param address Group address
-     * @param addressMask Address mask
-     * @param action Filter action
-     * @param enabled Entry enabled
-     * @return Result<void> indicating success or error
-     */
-    util::Result<void> addEntry(const GroupAddress& address, const GroupAddress& addressMask, FilterAction action, EntryState enabled) {
-        FilterEntry entry;
-        entry.address = address;
-        entry.mask = addressMask;
-        entry.action = action;
-        entry.enabled = enabled;
-        return addEntry(entry) >= 0
-            ? util::Result<void>::ok()
-            : util::Result<void>::err(util::ErrorCode::QueueFull);
-    }
-    
-    /**
-     * @brief Remove filter entry
-     * @param index Entry index to remove
-    * @return Result<void> indicating success or error
-     */
-    util::Result<void> removeEntry(size_t index);
-    
-    /**
-     * @brief Get filter entry
-     * @param index Entry index
-     * @return Pointer to entry, or nullptr if invalid index
-     */
-    const FilterEntry* getEntry(size_t index) const;
-    
-    /**
-     * @brief Update filter entry
-     * @param index Entry index
-     * @param entry New entry data
-    * @return Result<void> indicating success or error
-     */
-    util::Result<void> updateEntry(size_t index, const FilterEntry& entry);
-    
-    /**
-     * @brief Update filter entry (convenience method)
-     * @param index Entry index
-     * @param address Group address
-     * @param addressMask Address mask
-     * @param action Filter action
-     * @param enabled Entry enabled
-     * @return true if updated
-     */
-    util::Result<void> updateEntry(size_t index, const GroupAddress& address, const GroupAddress& addressMask, FilterAction action, EntryState enabled) {
-        FilterEntry entry;
-        entry.address = address;
-        entry.mask = addressMask;
-        entry.action = action;
-        entry.enabled = enabled;
-        return updateEntry(index, entry);
-    }
-    
-    /**
-     * @brief Get filter entry (optional-based, for tests)
-     * @param index Entry index
-     * @return Optional containing entry if found
-     */
-    std::optional<FilterEntry> getEntryOpt(size_t index) const {
-        const FilterEntry* entry = getEntry(index);
-        if (entry) {
-            return *entry;
+    /// 65 536 bits, one per 16-bit Group Address (§5.3.1.1.1).
+    static constexpr size_t kOctets = 8192u;
+
+    /// A new table is cleared: "The default Load State shall be Loaded and the
+    /// Routing Table cleared" (03/05/01 §4.5.3).
+    FilterTable() = default;
+
+    /// Filter Table evaluation for @p address (§5.3.1.1.2): true = positive.
+    /// GA 0000h is never evaluated and always reads negative.
+    bool passes(GroupAddress address) const noexcept
+    {
+        if (address.raw == 0u) {
+            return false;
         }
-        return std::nullopt;
+        return (_bits[address.raw >> 3] & bitMask(address.raw)) != 0u;
     }
-    
-    /**
-     * @brief Clear all filter entries
-     */
-    void clear();
-    
-    /**
-     * @brief Get number of entries
-     * @return Entry count
-     */
-    size_t entryCount() const { return _entries.size(); }
-    
-    /**
-     * @brief Check if group address should be filtered
-     * 
-     * @param addr Group address to check
-     * @return FilterAction (Allow or Block)
-     */
-    FilterAction checkFilter(const GroupAddress& addr) const;
-    
-    
-    /**
-     * @brief Load filter table from binary data
-     * @param data Binary filter table data
-    * @return Result<void> indicating success or error
-     */
-    util::Result<void> loadTable(std::span<const uint8_t> data);
-    
-    /**
-     * @brief Save filter table to binary data
-     * @param out Output buffer for filter table
-    * @return Result<size_t> number of bytes written or error
-     */
-    util::Result<size_t> saveTable(std::span<uint8_t> out) const;
+
+    /// Set (pass) or clear (block) one address. GA 0000h is ignored.
+    void set(GroupAddress address, bool pass) noexcept
+    {
+        if (address.raw == 0u) {
+            return;
+        }
+        if (pass) {
+            _bits[address.raw >> 3] = static_cast<uint8_t>(_bits[address.raw >> 3] | bitMask(address.raw));
+        } else {
+            _bits[address.raw >> 3] = static_cast<uint8_t>(_bits[address.raw >> 3] & ~bitMask(address.raw));
+        }
+    }
+
+    /// Set or clear every address from @p first to @p last inclusive.
+    /// Does nothing when @p first > @p last.
+    void setRange(uint16_t first, uint16_t last, bool pass) noexcept;
+
+    /// SRVID_SET_FILTERTABLE / SRVID_CLEAR_FILTERTABLE: every address.
+    void setAll(bool pass) noexcept;
+
+    /// True when every address in [first, last] has the state @p pass
+    /// (the State_Read checks of §4.5.7.4/§4.5.7.5). GA 0000h is skipped.
+    /// An empty range (first > last) is vacuously true.
+    bool rangeIs(uint16_t first, uint16_t last, bool pass) const noexcept;
+
+    /// Number of addresses that pass (GA 0000h not counted).
+    size_t passCount() const noexcept;
+
+    /// The raw table in the §5.3.1.1.1 layout, for a memory-mapped view
+    /// (Realisation Type 3 is loaded by the MaC with A_Memory_Write) and for
+    /// persistence.
+    std::span<uint8_t, kOctets> octets() noexcept { return _bits; }
+    std::span<const uint8_t, kOctets> octets() const noexcept { return _bits; }
 
 private:
-    std::vector<FilterEntry> _entries;
-    FilterAction _defaultAction;
-    
-    /**
-     * @brief Find matching filter entry
-     * @param addr Address to match
-     * @return Pointer to matching entry, or nullptr
-     */
-    const FilterEntry* findEntry(const GroupAddress& addr) const;
+    static constexpr uint8_t bitMask(uint16_t address) noexcept
+    {
+        return static_cast<uint8_t>(1u << (address & 0x07u));
+    }
+
+    std::array<uint8_t, kOctets> _bits{};
 };
 
 } // namespace network

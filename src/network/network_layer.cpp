@@ -21,7 +21,6 @@ NetworkLayer::NetworkLayer(datalink::Tp1DataLinkLayer& datalink)
     , _rxCallback(nullptr)
     , _rxCallbackStorage()
     , _initialized(false)
-    , _filteringEnabled(false)
 {
 }
 
@@ -187,12 +186,6 @@ void NetworkLayer::handleDlRx(const datalink::LDataFrame& frame) {
     nFrame.dlFrame = frame;
     nFrame.hopCount = frame.hopCount;
     
-    // Check filtering if enabled
-    if (_filteringEnabled && shouldFilterFrame(frame)) {
-        KNX_LOGD(TAG, "Frame filtered: dest=0x%04X", frame.destination.raw);
-        return;
-    }
-    
     // Always deliver to local application if addressed to us or broadcast
     bool forLocalDelivery = false;
     if (isGroupAddress(frame.destinationType)) {
@@ -210,19 +203,6 @@ void NetworkLayer::handleDlRx(const datalink::LDataFrame& frame) {
             (*cb)(nFrame);
         }
     }
-}
-
-bool NetworkLayer::shouldFilterFrame(const datalink::LDataFrame& frame) {
-    // Only filter group addresses
-    if (!isGroupAddress(frame.destinationType)) {
-        return false;
-    }
-    
-    // Check filter table
-    FilterAction action = _filterTable.checkFilter(frame.destination);
-    
-    // Block means filter out (don't pass)
-    return (action == FilterAction::Block);
 }
 
 } // namespace network

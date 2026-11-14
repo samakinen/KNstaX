@@ -25,6 +25,7 @@
 #include "knx/util/result.hpp"
 #include <array>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -107,7 +108,11 @@ struct IpSecureTunnelingConfiguration {
 	std::vector<uint8_t> passwordLatin1;
 	std::array<uint8_t, 32> clientPrivateKey{};
 	std::array<uint8_t, 6> clientSerial{};
-	uint64_t initialSeq{1};
+	/// "initialized to zero on connection setup" (03/08/09 §2.2.3.3).
+	uint64_t initialSeq{0};
+	/// The server's Device Authentication Code (key), to verify its
+	/// SESSION_RESPONSE MAC; unset skips the check.
+	std::optional<std::array<uint8_t, 16>> deviceAuthenticationCode{};
 };
 
 /**

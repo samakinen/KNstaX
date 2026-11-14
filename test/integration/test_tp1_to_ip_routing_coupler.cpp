@@ -117,6 +117,8 @@ void test_tp1_to_ip_routing_forward_and_filter(void) {
     coupler.setRoutingEnabled(knx::Toggle::Enable);
     coupler.setFilteringEnabled(knx::Toggle::Enable);
     TEST_ASSERT_TRUE(coupler.init().isOk());
+    // A new Filter Table is cleared (03/05/01 §4.5.3); let 0/1/0 through.
+    coupler.filterTable().set(knx::GroupAddress(0x0100), true);
 
     // Forwarding case
     const GroupAddress groupAddr(0x0100);
@@ -138,8 +140,7 @@ void test_tp1_to_ip_routing_forward_and_filter(void) {
 
     // Filter-table block case
     got.store(false);
-    coupler.filterTable().clear();
-    TEST_ASSERT_TRUE(coupler.filterTable().addEntry(groupAddr, knx::GroupAddress(0xFFFF), FilterAction::Block, knx::EntryState::Enabled).isOk());
+    coupler.filterTable().set(groupAddr, false);
 
     tp1Phys.injectRxFrame(std::vector<uint8_t>(raw, raw + rawLen));
     for (int i = 0; i < 40 && !got.load(); ++i) {
@@ -181,6 +182,8 @@ void test_ip_routing_to_tp1_forward_and_filter(void) {
     coupler.setRoutingEnabled(knx::Toggle::Enable);
     coupler.setFilteringEnabled(knx::Toggle::Enable);
     TEST_ASSERT_TRUE(coupler.init().isOk());
+    // A new Filter Table is cleared (03/05/01 §4.5.3); let 0/1/0 through.
+    coupler.filterTable().set(knx::GroupAddress(0x0100), true);
 
     // Inject a routing indication into multicast (acts as "IP-side" incoming telegram)
     const GroupAddress groupAddr(0x0100);
@@ -218,8 +221,7 @@ void test_ip_routing_to_tp1_forward_and_filter(void) {
     TEST_ASSERT_EQUAL_UINT8(5, decoded.hopCount); // decremented by coupler
 
     // Filter-table block case: block group addr and re-send; should not forward again.
-    coupler.filterTable().clear();
-    TEST_ASSERT_TRUE(coupler.filterTable().addEntry(groupAddr, knx::GroupAddress(0xFFFF), FilterAction::Block, knx::EntryState::Enabled).isOk());
+    coupler.filterTable().set(groupAddr, false);
 
     const auto blockedSend = sender.sendRoutingIndication(cemi);
     TEST_ASSERT_TRUE(blockedSend.isOk());

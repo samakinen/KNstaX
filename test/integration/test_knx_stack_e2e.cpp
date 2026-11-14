@@ -1410,7 +1410,7 @@ void test_e2e_bau_deferred_auto_group_value_response_progression(void) {
 }
 
 void test_e2e_bau_group_object_runtime_bridge_supports_scene_number(void) {
-    const application::Dpt17Value original{42u, true};
+    const application::Dpt17Value original{42u};
 
     TEST_ASSERT_TRUE(bauUnit->setGroupObjectValue(knx::GroupObjectIndex(2), application::DptValue(original)).isOk());
 
@@ -1419,7 +1419,6 @@ void test_e2e_bau_group_object_runtime_bridge_supports_scene_number(void) {
 
     const auto& decoded = valueResult.value().asSceneNumber();
     TEST_ASSERT_EQUAL_UINT8(original.sceneNumber, decoded.sceneNumber);
-    TEST_ASSERT_EQUAL(original.valid, decoded.valid);
 }
 
 int run_all_knx_stack_e2e_tests(void) {

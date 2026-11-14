@@ -147,7 +147,7 @@ void tearDown(void) {}
 void test_a_group_frame_crosses_to_the_other_port_with_the_hop_count_decremented(void)
 {
     CouplerHarness h;
-    h.coupler.setFilteringEnabled(Toggle::Disable);
+    h.coupler.filterTable().setAll(true);  // every group address passes
 
     h.inject(CouplerPort::Primary, makeFrame(IndividualAddress(ia(1, 2, 5)), 0x0801,
                                              AddressType::Group, 6));
@@ -164,7 +164,7 @@ void test_a_group_frame_crosses_to_the_other_port_with_the_hop_count_decremented
 void test_forwarding_works_in_both_directions(void)
 {
     CouplerHarness h;
-    h.coupler.setFilteringEnabled(Toggle::Disable);
+    h.coupler.filterTable().setAll(true);  // every group address passes
 
     h.inject(CouplerPort::Secondary, makeFrame(IndividualAddress(ia(1, 1, 9)), 0x0801,
                                                AddressType::Group, 4));
@@ -180,7 +180,7 @@ void test_hop_count_seven_crosses_without_being_decremented(void)
     // The forwarded frame must still carry 7, otherwise "unlimited" would be
     // silently converted into "six more couplers".
     CouplerHarness h;
-    h.coupler.setFilteringEnabled(Toggle::Disable);
+    h.coupler.filterTable().setAll(true);  // every group address passes
 
     h.inject(CouplerPort::Primary, makeFrame(IndividualAddress(ia(1, 2, 5)), 0x0801,
                                              AddressType::Group, 7));
@@ -195,7 +195,7 @@ void test_hop_count_one_is_still_forwarded(void)
     // Regression: an implementation that decrements first and then drops on
     // zero loses every frame with one hop left.
     CouplerHarness h;
-    h.coupler.setFilteringEnabled(Toggle::Disable);
+    h.coupler.filterTable().setAll(true);  // every group address passes
 
     h.inject(CouplerPort::Primary, makeFrame(IndividualAddress(ia(1, 2, 5)), 0x0801,
                                              AddressType::Group, 1));
@@ -209,7 +209,7 @@ void test_hop_count_one_is_still_forwarded(void)
 void test_an_exhausted_frame_is_dropped_and_reported(void)
 {
     CouplerHarness h;
-    h.coupler.setFilteringEnabled(Toggle::Disable);
+    h.coupler.filterTable().setAll(true);  // every group address passes
 
     h.inject(CouplerPort::Primary, makeFrame(IndividualAddress(ia(1, 2, 5)), 0x0801,
                                              AddressType::Group, 0));
@@ -224,11 +224,8 @@ void test_an_exhausted_frame_is_dropped_and_reported(void)
 void test_the_filter_table_blocks_group_frames(void)
 {
     CouplerHarness h;
-    h.coupler.filterTable().setDefaultAction(FilterAction::Block);
-    TEST_ASSERT_TRUE(h.coupler.filterTable()
-                         .addEntry(GroupAddress(0x0801), GroupAddress(0xFFFF), FilterAction::Allow,
-                                   EntryState::Enabled)
-                         .isOk());
+    h.coupler.filterTable().setAll(false);
+    h.coupler.filterTable().set(GroupAddress(0x0801), true);
     h.coupler.setFilteringEnabled(Toggle::Enable);
 
     h.inject(CouplerPort::Primary, makeFrame(IndividualAddress(ia(1, 2, 5)), 0x0801,
@@ -304,7 +301,7 @@ void test_broadcast_crosses_the_coupler(void)
     // ETS discovers unaddressed devices by broadcast, so a coupler that eats
     // broadcast hides everything behind it.
     CouplerHarness h;
-    h.coupler.filterTable().setDefaultAction(FilterAction::Block);
+    h.coupler.filterTable().setAll(false);
     h.coupler.setFilteringEnabled(Toggle::Enable);
 
     h.inject(CouplerPort::Primary,
@@ -322,7 +319,7 @@ void test_a_forwarded_frame_echoed_back_does_not_loop(void)
     // transmission. Without echo suppression the two ports would volley the
     // frame until its hop count ran out.
     CouplerHarness h;
-    h.coupler.setFilteringEnabled(Toggle::Disable);
+    h.coupler.filterTable().setAll(true);  // every group address passes
 
     h.inject(CouplerPort::Primary, makeFrame(IndividualAddress(ia(1, 2, 5)), 0x0801,
                                              AddressType::Group, 6));
@@ -362,7 +359,7 @@ void test_the_coupler_configuration_reaches_the_forwarding_path(void)
     // A LOCK written into the policy must actually stop traffic; the property
     // being settable is not the same as it being obeyed.
     CouplerHarness h;
-    h.coupler.setFilteringEnabled(Toggle::Disable);
+    h.coupler.filterTable().setAll(true);  // every group address passes
     h.coupler.policy().groupConfig(CouplerPort::Primary).group6FFF = GroupHandling::Lock;
 
     h.inject(CouplerPort::Primary, makeFrame(IndividualAddress(ia(1, 2, 5)), 0x0801,
@@ -382,7 +379,7 @@ void test_group_frames_are_delivered_locally_as_well_as_routed(void)
     // own address table decides what it listens to. Making them exclusive would
     // mean a coupler could never subscribe to a group address it also forwards.
     CouplerHarness h;
-    h.coupler.setFilteringEnabled(Toggle::Disable);
+    h.coupler.filterTable().setAll(true);  // every group address passes
 
     h.inject(CouplerPort::Primary, makeFrame(IndividualAddress(ia(1, 2, 5)), 0x0801,
                                              AddressType::Group, 6));
@@ -397,7 +394,7 @@ void test_a_filtered_group_frame_is_still_offered_locally(void)
     // telegram crossing to the other line, but this device may still be one of
     // its intended recipients.
     CouplerHarness h;
-    h.coupler.filterTable().setDefaultAction(FilterAction::Block);
+    h.coupler.filterTable().setAll(false);
     h.coupler.setFilteringEnabled(Toggle::Enable);
 
     h.inject(CouplerPort::Primary, makeFrame(IndividualAddress(ia(1, 2, 5)), 0x0900,
@@ -421,6 +418,44 @@ void test_transit_individual_frames_are_not_delivered_locally(void)
     TEST_ASSERT_EQUAL(0u, h.locallyDelivered.size());            // but not ours
 }
 
+void test_the_coupler_installs_its_group_ack_rule_in_both_ports(void)
+{
+#if KNX_FEATURE_COUPLER
+    // The TP1 acknowledge is sent from the receive ISR, so the policy has to
+    // reach the physical layer as a GroupAckFilter (03/05/01 §4.5.5
+    // GROUP_IACK_ROUT: acknowledge the frames that will be routed).
+    CouplerHarness h;
+    const auto* primary = h.primaryPhysical.groupAckFilter();
+    const auto* secondary = h.secondaryPhysical.groupAckFilter();
+    TEST_ASSERT_NOT_NULL(primary);
+    TEST_ASSERT_NOT_NULL(secondary);
+
+    // Defaults: GROUP_ROUT6FFF over a cleared table, GROUP_UNLOCK7000.
+    TEST_ASSERT_FALSE(primary->acknowledges(0x0801));
+    TEST_ASSERT_TRUE(primary->acknowledges(0x7801));
+
+    // A Filter Table edit is seen at once; no refresh needed.
+    h.coupler.filterTable().set(GroupAddress(0x0801), true);
+    TEST_ASSERT_TRUE(primary->acknowledges(0x0801));
+    TEST_ASSERT_TRUE(secondary->acknowledges(0x0801));
+
+    // A configuration change takes effect on refresh, per port.
+    h.coupler.policy().groupConfig(CouplerPort::Secondary).group6FFF = GroupHandling::Lock;
+    h.coupler.refreshAckFilters();
+    TEST_ASSERT_FALSE(secondary->acknowledges(0x0801));
+    TEST_ASSERT_TRUE(primary->acknowledges(0x0801));
+
+    // Filter Table Use = 0: the evaluation is negative everywhere.
+    h.coupler.setFilteringEnabled(Toggle::Disable);
+    TEST_ASSERT_FALSE(primary->acknowledges(0x0801));
+
+    // Closing the coupler withdraws the filters it owns.
+    h.coupler.close();
+    TEST_ASSERT_NULL(h.primaryPhysical.groupAckFilter());
+    TEST_ASSERT_NULL(h.secondaryPhysical.groupAckFilter());
+#endif
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -442,6 +477,7 @@ int main(void)
     RUN_TEST(test_group_frames_are_delivered_locally_as_well_as_routed);
     RUN_TEST(test_a_filtered_group_frame_is_still_offered_locally);
     RUN_TEST(test_transit_individual_frames_are_not_delivered_locally);
+    RUN_TEST(test_the_coupler_installs_its_group_ack_rule_in_both_ports);
 
     return UNITY_END();
 }

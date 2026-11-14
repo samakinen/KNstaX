@@ -166,7 +166,8 @@ util::Result<uint32_t> IpTunnelingPhysical::beginTransmit(std::span<const uint8_
     }
 
     pendingTxCemi_.assign(cemi.begin(), cemi.begin() + cemiResult.value());
-    auto sendRes = client_.sendCemi(std::span<const uint8_t>(pendingTxCemi_.data(), pendingTxCemi_.size()), true, 500);
+    auto sendRes = client_.sendCemi(std::span<const uint8_t>(pendingTxCemi_.data(), pendingTxCemi_.size()), true,
+                                    netip::TunnelingSessionClient::kTunnelingRequestTimeoutMs);
     txState_ = sendRes.isOk() ? ProgressState::Success : util::progressStateFromError(sendRes.error());
     state_ = sendRes.isOk() ? PhysicalLayerState::Idle : PhysicalLayerState::Error;
     if (sendRes.isError()) {

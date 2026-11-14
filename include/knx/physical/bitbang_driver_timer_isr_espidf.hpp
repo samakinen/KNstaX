@@ -42,6 +42,9 @@ public:
     util::Result<void> setBusMonitorMode(bool enabled) override;
     void setAckGroupAddresses(std::span<const uint16_t> addresses) override;
     void setLocalBusy(bool busy) override;
+#if KNX_FEATURE_COUPLER
+    void setGroupAckFilter(const GroupAckFilter* filter) override;
+#endif
     void pollTp1() override;
     bool popTp1Event(Tp1RxEvent& outEvent) override;
     Tp1AckDiagnosticsSnapshot getTp1AckDiagnostics() const override;

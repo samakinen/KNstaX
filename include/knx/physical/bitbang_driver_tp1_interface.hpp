@@ -29,6 +29,9 @@ public:
     // API: a task-scheduled decision can never reliably beat that deadline.
     virtual void setAckGroupAddresses(std::span<const uint16_t> addresses) = 0;
     virtual void setLocalBusy(bool busy) = 0;
+#if KNX_FEATURE_COUPLER
+    virtual void setGroupAckFilter(const GroupAckFilter* filter) { (void)filter; }
+#endif
 
     virtual void pollTp1() = 0;
     virtual bool popTp1Event(Tp1RxEvent& outEvent) = 0;
