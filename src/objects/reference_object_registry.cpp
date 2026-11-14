@@ -33,6 +33,7 @@ enum class ReferencePropertyId : uint8_t {
     RouterLoadStateControl = 5,     // PID_LOAD_STATE_CONTROL  §4.5.3, §4.23.2
     RouterTableReference = 7,       // PID_TABLE_REFERENCE     §4.2.7
     RouterMcbTable = 27,            // PID_MCB_TABLE           §4.2.27
+    RouterErrorCode = 28,           // PID_ERROR_CODE          §4.2.28
     RouterLineStatus = 51,          // PID_LINE_STATUS         §4.4.3
     RouterMainLcConfig = 52,        // PID_MAIN_LCCONFIG       §4.4.4
     RouterSubLcConfig = 53,         // PID_SUB_LCCONFIG        §4.4.4
@@ -237,6 +238,7 @@ std::span<const PropertyDeclaration> referenceObjectProperties(InterfaceObjectTy
             entry(toPid(ReferencePropertyId::RouterLoadStateControl), PDT::Control, PA::ReadWrite, 1),
             entry(toPid(ReferencePropertyId::RouterTableReference), PDT::UnsignedLong, PA::ReadOnly, 1),
             entry(toPid(ReferencePropertyId::RouterMcbTable), PDT::Generic08, PA::ReadWrite, 1),
+            entry(toPid(ReferencePropertyId::RouterErrorCode), PDT::Enum8, PA::ReadOnly, 1),
             // PID_LINE_STATUS is device-reported, not configured.
             entry(toPid(ReferencePropertyId::RouterLineStatus), PDT::Bitset8, PA::ReadOnly, 1),
             entry(toPid(ReferencePropertyId::RouterMainLcConfig), PDT::UnsignedChar, PA::ReadWrite, 1),

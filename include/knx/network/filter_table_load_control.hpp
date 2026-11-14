@@ -32,6 +32,7 @@
 #include <array>
 #include <cstdint>
 #include <span>
+#include <vector>
 
 namespace knx {
 namespace network {
@@ -65,8 +66,23 @@ public:
     static constexpr size_t kMcbSize = 8;
     using Mcb = std::array<uint8_t, kMcbSize>;
 
+    /// PID_ERROR_CODE values (03_05_01 §4.2.28): DPT_ErrorClass_System
+    /// (20.011, 03_07_02), the subset this load state machine reports.
+    static constexpr uint8_t kErrorNone = 0;
+    static constexpr uint8_t kErrorGeneralDevice = 1;
+    static constexpr uint8_t kErrorConfiguration = 3;
+    static constexpr uint8_t kErrorAllocationSizeZero = 8;
+    static constexpr uint8_t kErrorCrc = 9;
+    static constexpr uint8_t kErrorMaxTableLength = 13;
+    static constexpr uint8_t kErrorUndefinedLoadCommand = 14;
+
     /// Called after every state change with whether the table is now Loaded.
     using StateListener = util::InplaceFunction<void(bool loaded), 32>;
+
+    /// Persisted record: header, then the table run-length encoded or raw,
+    /// whichever is shorter (see serialize()). Worst case is the raw table.
+    static constexpr size_t kRecordHeaderSize = 15;
+    static constexpr size_t kMaxRecordSize = kRecordHeaderSize + FilterTable::kOctets;
 
     explicit FilterTableLoadControl(FilterTable& table, uint16_t memoryAddress = kDefaultMemoryAddress);
 
@@ -79,6 +95,38 @@ public:
 
     /// Table 94 "Device Restart": an interrupted Loading becomes Unloaded.
     void deviceRestart();
+
+    /// PID_ERROR_CODE (§4.2.28): why the state is Error; 0 in any other state.
+    uint8_t errorCode() const noexcept { return _errorCode; }
+
+    /// Master Reset with a factory-reset Erase Code: the new-device state of
+    /// §4.5.3 ("Loaded and the Routing Table cleared"), MCB and error cleared.
+    void factoryReset();
+
+    /// The load state, allocation, error code, MCB and table as one record
+    /// for the persisted state. Format (all multi-octet fields big-endian):
+    ///   0     version (1)
+    ///   1     load state (Table 92)
+    ///   2     flags: bit 0 = memory allocated
+    ///   3     PID_ERROR_CODE
+    ///   4-11  PID_MCB_TABLE
+    ///   12-13 CRC16-CCITT of the 8192-octet table
+    ///   14    encoding: 0 = raw 8192 octets, 1 = runs of {count: 2, value: 1}
+    ///   15-   the table
+    /// Runs are used when shorter than the raw table, so the record is never
+    /// larger than kMaxRecordSize.
+    void serialize(std::vector<uint8_t>& out) const;
+
+    /// Take the state from serialize()'s record and apply the Device Restart
+    /// transition of Table 94 to it. An empty record (nothing ever stored)
+    /// leaves the §4.5.3 default. A record that does not decode, or whose
+    /// table does not match its CRC, is the "error detection at start-up"
+    /// of Table 94: the table is cleared and the state is Error.
+    void restore(std::span<const uint8_t> record);
+
+    /// A record is stored but storage could not read it: start-up error
+    /// detection as for a corrupt record, with error code 1.
+    void restoreUnreadable();
 
     /// PID_TABLE_REFERENCE (§4.2.7): the table's address while memory is
     /// allocated, zero once Unloaded or when allocation failed.
@@ -102,6 +150,8 @@ public:
 
 private:
     void setState(State state);
+    void fail(uint8_t errorCode);
+    void rejectStoredState(uint8_t errorCode);
     void additionalLoadControl(std::span<const uint8_t> control);
     void complete();
     void allocate(uint32_t size, bool fill, uint8_t fillValue);
@@ -113,6 +163,7 @@ private:
     State _state{State::Loaded};
     bool _allocated{true};
     bool _mcbWritten{false};
+    uint8_t _errorCode{kErrorNone};
     Mcb _mcb{};
     StateListener _listener{};
 };

@@ -660,6 +660,21 @@ void DeviceModel::flushPersistenceIfDirty()
     checkpointSecuritySequenceState();
 }
 
+void DeviceModel::setBankedRecordSource(uint16_t keyId, objects::InterfaceObjectManager::BankedRecordSource source)
+{
+    if (_interfaceObjectManager) {
+        _interfaceObjectManager->setBankedRecordSource(keyId, std::move(source));
+    }
+}
+
+std::optional<std::vector<uint8_t>> DeviceModel::loadBankedRecord(uint16_t keyId)
+{
+    if (!_interfaceObjectManager) {
+        return std::vector<uint8_t>{};
+    }
+    return _interfaceObjectManager->loadBankedRecord(keyId);
+}
+
 // ─── Data Secure state ───────────────────────────────────────────────────────
 
 bool DeviceModel::loadSecuritySequenceState()

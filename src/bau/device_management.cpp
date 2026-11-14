@@ -217,6 +217,7 @@ enum : uint8_t {
     kPidRouterLoadStateControl = 5,
     kPidRouterTableReference = 7,
     kPidRouterMcbTable = 27,
+    kPidRouterErrorCode = 28,
     kPidRouterLineStatus = 51,
     kPidRouterMainLcConfig = 52,
     kPidRouterSubLcConfig = 53,
@@ -436,6 +437,15 @@ util::Result<void> DeviceManagement::applyMasterReset(application::EraseCode era
             setDomainAddress(octets);
         }
 #endif
+    }
+
+    // A coupler's Filter Table is not "link information for Group Objects"
+    // (ResetLinks, 06h, names the Group Address and Association Tables only),
+    // so only the ex-factory resets touch it: back to the new-device state
+    // of 03/05/01 §4.5.3, Loaded with the Routing Table cleared.
+    if (factoryReset && _filterTableLoad != nullptr) {
+        _filterTableLoad->factoryReset();
+        applyFilterTableLoadState(_filterTableLoad->loaded());
     }
 
     if (resetAddress) {
@@ -702,15 +712,33 @@ void DeviceManagement::bindFilterTableLoadControl()
     if (router == nullptr || _routerRole.filterTable == nullptr) {
         return;
     }
-    if (_filterTableRegionRegistered) {
-        // The memory window is registered once; a role re-declared with a
-        // different table cannot move it.
+    if (_filterTableLoad != nullptr) {
+        // Bound and the memory window registered once; a role re-declared
+        // with a different table cannot move it.
         return;
     }
 
     _filterTableLoad = std::make_unique<network::FilterTableLoadControl>(*_routerRole.filterTable);
-    _filterTableLoad->setStateListener([this](bool loaded) { applyFilterTableLoadState(loaded); });
     auto* load = _filterTableLoad.get();
+
+    // The table, its load state, allocation, MCB and error code come back as
+    // the last completed save left them, with Table 94's Device Restart
+    // applied; nothing stored is a new device (§4.5.3: Loaded, cleared).
+    constexpr uint16_t kRecordKey = objects::InterfaceObjectManager::kRouterFilterTableKeyId;
+    if (const auto record = _model.loadBankedRecord(kRecordKey)) {
+        load->restore(*record);
+    } else {
+        load->restoreUnreadable();
+    }
+    _model.setBankedRecordSource(kRecordKey, [load](std::vector<uint8_t>& out) { load->serialize(out); });
+    // Every state change can change what is stored (Load Completed makes the
+    // downloaded table current, Unload clears it); a save during Loading
+    // stores Loading, which the restart turns into Unloaded.
+    _filterTableLoad->setStateListener([this](bool loaded) {
+        applyFilterTableLoadState(loaded);
+        _model.markPersistenceDirty();
+    });
+    applyFilterTableLoadState(load->loaded());
 
     using Binding = objects::GenericInterfaceObject::PropertyBinding;
     const auto bind = [&](uint8_t pid, Binding binding) {
@@ -741,6 +769,10 @@ void DeviceManagement::bindFilterTableLoadControl()
             return std::vector<uint8_t>(mcb.begin(), mcb.end());
         },
         .write = [load](std::span<const uint8_t> value) { return load->writeMcb(value); }});
+    // PID_ERROR_CODE: why the load state is Error (§4.2.28).
+    bind(kPidRouterErrorCode, Binding{
+        .read = [load]() { return std::vector<uint8_t>{load->errorCode()}; },
+        .write = {}});
 
     if (_stackPort != nullptr) {
         const auto region = application::MemoryRegion{MemoryAddress(load->memoryAddress()),
@@ -750,8 +782,6 @@ void DeviceManagement::bindFilterTableLoadControl()
         if (result.isError()) {
             KNX_LOGE(TAG, "Filter Table memory window not registered: %s",
                      util::errorCodeToString(result.error()));
-        } else {
-            _filterTableRegionRegistered = true;
         }
     }
 }
@@ -956,6 +986,11 @@ util::Result<application::FunctionPropertyResult> DeviceManagement::handleRouter
     }
 
     network::RoutingTableControl control(*_routerRole.filterTable);
+    // A Command may change the table, which is persisted with its load
+    // state; a State_Read never does.
+    if (request.invocation != application::FunctionPropertyInvocation::StateRead) {
+        _model.markPersistenceDirty();
+    }
     return control.invoke(request.invocation, request.data.span());
 }
 

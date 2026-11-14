@@ -47,7 +47,15 @@ constexpr uint8_t kPidTableReference = 7;
 constexpr uint8_t kPidMcbTable = 27;
 
 MockPhysicalLayer* gPhysical = nullptr;
-std::unique_ptr<platform::LinuxPlatform> gPlatform;
+/// A Master Reset ends in a restart, which the plain host platform carries out
+/// by ending the process.
+class RecordingPlatform final : public platform::LinuxPlatform {
+public:
+    void restart() override { restartRequested = true; }
+    bool restartRequested{false};
+};
+
+std::unique_ptr<RecordingPlatform> gPlatform;
 std::unique_ptr<bau::BusAccessUnit> gBau;
 FilterTable gTable;
 uint8_t gSeq = 0;
@@ -203,7 +211,7 @@ void setUp(void)
     clearPersistenceStore();
     gTable = FilterTable{};
     gSeq = 0;
-    gPlatform = std::make_unique<platform::LinuxPlatform>();
+    gPlatform = std::make_unique<RecordingPlatform>();
     auto physical = std::make_unique<MockPhysicalLayer>();
     gPhysical = physical.get();
     gBau = std::make_unique<bau::BusAccessUnit>(*gPlatform, createTp1TestStackPort(*gPlatform, std::move(physical)));
@@ -276,11 +284,120 @@ void test_unload_clears_the_table(void)
     TEST_ASSERT_EQUAL_HEX32(0u, be32(propertyRead(gRouterIndex, kPidTableReference)));
 }
 
+namespace {
+
+constexpr uint8_t kPidErrorCode = 28;
+
+/// A_Restart Master Reset, connectionless, as DM_Restart_RCl sends it.
+void masterReset(uint8_t eraseCode)
+{
+    const std::array<uint8_t, 2> data{eraseCode, 0x00};
+    const auto tpdu = protocol::buildTpdu(protocol::TPCIField::create(protocol::TPCI::UnnumberedData, 0),
+                                          application::APCIField::create(application::APCIService::Restart, 0x01),
+                                          std::span<const uint8_t>(data));
+    inject(std::vector<uint8_t>(tpdu.begin(), tpdu.end()));
+    (void)pump(60);
+    TEST_ASSERT_TRUE(gPlatform->restartRequested);
+    gPlatform->restartRequested = false;
+}
+
+/// What the coupler boots into: a fresh BAU on the same persisted state and
+/// a table object that starts out empty.
+void restartDevice()
+{
+    gBau->close();
+    gBau.reset();
+    gTable = FilterTable{};
+    gPlatform = std::make_unique<RecordingPlatform>();
+    auto physical = std::make_unique<MockPhysicalLayer>();
+    gPhysical = physical.get();
+    gBau = std::make_unique<bau::BusAccessUnit>(*gPlatform, createTp1TestStackPort(*gPlatform, std::move(physical)));
+    bau::BusAccessUnit::RouterRoleConfig config{};
+    config.filterTable = &gTable;
+    TEST_ASSERT_TRUE(gBau->management().configureRouterRole(config).isOk());
+    TEST_ASSERT_TRUE(gBau->init(kCoupler).isOk());
+    gBau->link().setPromiscuousMode(datalink::PromiscuousMode::Enable);
+    (void)pump(20);
+    gSeq = 0;
+    inject(std::vector<uint8_t>{0x80}); // T_Connect
+    (void)pump(20);
+}
+
+void downloadWithMatchingMcb(const FilterTable& expected)
+{
+    const uint16_t crc = FilterTableLoadControl::crc16Ccitt(expected.octets());
+    (void)propertyWrite(kPidMcbTable, mcb(crc));
+    TEST_ASSERT_EQUAL_UINT8(1u, loadEvent({0x02}));
+}
+
+} // namespace
+
+// PID_ERROR_CODE (03/05/01 §4.2.28): readable over the bus after a CRC
+// mismatch (DPT_ErrorClass_System 9, "CRC-error"), back to 0 once Unload
+// leaves Error.
+void test_error_code_reads_crc_error_after_a_mismatch(void)
+{
+    TEST_ASSERT_EQUAL_UINT8(0u, propertyRead(gRouterIndex, kPidErrorCode).at(0));
+    const FilterTable expected = loadTableBody();
+    const uint16_t crc = FilterTableLoadControl::crc16Ccitt(expected.octets());
+    (void)propertyWrite(kPidMcbTable, mcb(static_cast<uint16_t>(crc ^ 0x8000u)));
+    TEST_ASSERT_EQUAL_UINT8(3u, loadEvent({0x02}));
+    TEST_ASSERT_EQUAL_UINT8(FilterTableLoadControl::kErrorCrc, propertyRead(gRouterIndex, kPidErrorCode).at(0));
+    TEST_ASSERT_EQUAL_UINT8(0u, loadEvent({0x04}));
+    TEST_ASSERT_EQUAL_UINT8(0u, propertyRead(gRouterIndex, kPidErrorCode).at(0));
+}
+
+// The downloaded table and Loaded come back after the restart that ends an
+// ETS download, and the Router Object reports them.
+void test_downloaded_table_survives_restart(void)
+{
+    const FilterTable expected = loadTableBody();
+    downloadWithMatchingMcb(expected);
+    const auto mcbBefore = propertyRead(gRouterIndex, kPidMcbTable);
+    gBau->flushPendingPersistence(); // what the A_Restart handler does
+
+    restartDevice();
+    TEST_ASSERT_EQUAL_MEMORY(expected.octets().data(), gTable.octets().data(), FilterTable::kOctets);
+    TEST_ASSERT_EQUAL_UINT8(1u, propertyRead(gRouterIndex, kPidLoadStateControl).at(0));
+    TEST_ASSERT_EQUAL_HEX32(FilterTableLoadControl::kDefaultMemoryAddress,
+                            be32(propertyRead(gRouterIndex, kPidTableReference)));
+    TEST_ASSERT_TRUE(propertyRead(gRouterIndex, kPidMcbTable) == mcbBefore);
+}
+
+// 03/05/02 Table 4: Factory Reset (02h) and Factory Reset without IA (07h)
+// reset the device to its ex-factory state, which for the Router Object is
+// 03/05/01 §4.5.3 "Loaded and the Routing Table cleared". ResetLinks (06h)
+// covers the Group Address and Association Tables only and leaves it.
+void test_master_reset_factory_reset_clears_the_filter_table(void)
+{
+    const FilterTable expected = loadTableBody();
+    downloadWithMatchingMcb(expected);
+    gBau->flushPendingPersistence();
+
+    masterReset(0x06);
+    TEST_ASSERT_EQUAL_UINT32(expected.passCount(), gTable.passCount());
+
+    masterReset(0x02);
+    auto* load = gBau->management().filterTableLoadControl();
+    TEST_ASSERT_NOT_NULL(load);
+    TEST_ASSERT_TRUE(load->loaded());
+    TEST_ASSERT_EQUAL_UINT32(0u, gTable.passCount());
+    TEST_ASSERT_TRUE(load->mcb() == FilterTableLoadControl::Mcb{});
+
+    // Persisted by the reset itself: the device boots into it.
+    restartDevice();
+    TEST_ASSERT_EQUAL_UINT32(0u, gTable.passCount());
+    TEST_ASSERT_EQUAL_UINT8(1u, propertyRead(gRouterIndex, kPidLoadStateControl).at(0));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_type3_download_with_matching_mcb_loads_the_table);
     RUN_TEST(test_type3_download_with_wrong_crc_ends_in_error);
     RUN_TEST(test_unload_clears_the_table);
+    RUN_TEST(test_error_code_reads_crc_error_after_a_mismatch);
+    RUN_TEST(test_downloaded_table_survives_restart);
+    RUN_TEST(test_master_reset_factory_reset_clears_the_filter_table);
     return UNITY_END();
 }

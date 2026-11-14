@@ -63,11 +63,24 @@ void FilterTableLoadControl::setState(State state)
     if (state == _state) {
         return;
     }
+    // "When the load state changes from 'Error' to a different state then
+    // the Error Code shall be set to '0'" (§4.2.28).
+    if (_state == State::Error) {
+        _errorCode = kErrorNone;
+    }
     _state = state;
     KNX_LOGI(TAG, "Filter Table load state %u", static_cast<unsigned>(state));
     if (_listener) {
         _listener(loaded());
     }
+}
+
+void FilterTableLoadControl::fail(uint8_t errorCode)
+{
+    // "the last error that occurred before the load state 'Error' is set"
+    // (§4.2.28).
+    _errorCode = errorCode;
+    setState(State::Error);
 }
 
 void FilterTableLoadControl::applyEvent(std::span<const uint8_t> control)
@@ -104,7 +117,7 @@ void FilterTableLoadControl::applyEvent(std::span<const uint8_t> control)
             if (_state == State::Loading) {
                 additionalLoadControl(control);
             } else if (_state == State::Loaded) {
-                setState(State::Error);
+                fail(kErrorUndefinedLoadCommand);
             }
             break;
 
@@ -150,7 +163,7 @@ void FilterTableLoadControl::additionalLoadControl(std::span<const uint8_t> cont
             if (control.size() >= 6u) {
                 if (be16(control.subspan(2, 2)) != _memoryAddress) {
                     _allocated = false;
-                    setState(State::Error);
+                    fail(kErrorConfiguration);
                     break;
                 }
                 allocate(be16(control.subspan(4, 2)), false, 0u);
@@ -170,7 +183,7 @@ void FilterTableLoadControl::allocate(uint32_t size, bool fill, uint8_t fillValu
     if (size == 0u || size > FilterTable::kOctets) {
         KNX_LOGW(TAG, "Filter Table allocation of %u octets refused", static_cast<unsigned>(size));
         _allocated = false;
-        setState(State::Error);
+        fail(size == 0u ? kErrorAllocationSizeZero : kErrorMaxTableLength);
         return;
     }
     _allocated = true;
@@ -199,7 +212,7 @@ void FilterTableLoadControl::complete()
 {
     if (!_allocated) {
         KNX_LOGW(TAG, "LoadCompleted without allocated Filter Table memory");
-        setState(State::Error);
+        fail(kErrorConfiguration);
         return;
     }
 
@@ -207,7 +220,7 @@ void FilterTableLoadControl::complete()
                                              : static_cast<uint32_t>(FilterTable::kOctets);
     if (segmentSize == 0u || segmentSize > FilterTable::kOctets) {
         KNX_LOGW(TAG, "MCB segment size %u does not fit the Filter Table", static_cast<unsigned>(segmentSize));
-        setState(State::Error);
+        fail(segmentSize == 0u ? kErrorConfiguration : kErrorMaxTableLength);
         return;
     }
 
@@ -222,7 +235,7 @@ void FilterTableLoadControl::complete()
         if (expected != crc) {
             KNX_LOGW(TAG, "Filter Table CRC %04X, MCB says %04X", static_cast<unsigned>(crc),
                      static_cast<unsigned>(expected));
-            setState(State::Error);
+            fail(kErrorCrc);
             return;
         }
     } else {
@@ -243,8 +256,158 @@ void FilterTableLoadControl::deviceRestart()
 {
     if (_state == State::Loading) {
         _allocated = false;
+        _mcbWritten = false;
         setState(State::Unloaded);
     }
+}
+
+void FilterTableLoadControl::factoryReset()
+{
+    _table.setAll(false);
+    _allocated = true;
+    _mcbWritten = false;
+    _mcb = Mcb{};
+    setState(State::Loaded);
+    _errorCode = kErrorNone;
+}
+
+namespace {
+
+constexpr uint8_t kRecordVersion = 1;
+constexpr size_t kRecordState = 1;
+constexpr size_t kRecordFlags = 2;
+constexpr size_t kRecordErrorCode = 3;
+constexpr size_t kRecordMcb = 4;
+constexpr size_t kRecordCrc = 12;
+constexpr size_t kRecordEncoding = 14;
+constexpr uint8_t kFlagAllocated = 0x01;
+constexpr uint8_t kEncodingRaw = 0;
+constexpr uint8_t kEncodingRuns = 1;
+constexpr size_t kRunSize = 3;
+
+/// Octets the run encoding of @p octets takes.
+size_t runEncodedSize(std::span<const uint8_t> octets)
+{
+    size_t runs = 0;
+    for (size_t i = 0; i < octets.size();) {
+        size_t j = i + 1u;
+        while (j < octets.size() && octets[j] == octets[i]) {
+            ++j;
+        }
+        ++runs;
+        i = j;
+    }
+    return runs * kRunSize;
+}
+
+} // namespace
+
+void FilterTableLoadControl::serialize(std::vector<uint8_t>& out) const
+{
+    const auto octets = std::span<const uint8_t>(_table.octets());
+    const uint16_t crc = crc16Ccitt(octets);
+    const size_t runBytes = runEncodedSize(octets);
+    const bool useRuns = runBytes < octets.size();
+
+    out.clear();
+    out.reserve(kRecordHeaderSize + (useRuns ? runBytes : octets.size()));
+    out.push_back(kRecordVersion);
+    out.push_back(static_cast<uint8_t>(_state));
+    out.push_back(_allocated ? kFlagAllocated : 0u);
+    out.push_back(_errorCode);
+    out.insert(out.end(), _mcb.begin(), _mcb.end());
+    out.push_back(static_cast<uint8_t>(crc >> 8));
+    out.push_back(static_cast<uint8_t>(crc));
+    out.push_back(useRuns ? kEncodingRuns : kEncodingRaw);
+    if (!useRuns) {
+        out.insert(out.end(), octets.begin(), octets.end());
+        return;
+    }
+    for (size_t i = 0; i < octets.size();) {
+        size_t j = i + 1u;
+        while (j < octets.size() && octets[j] == octets[i]) {
+            ++j;
+        }
+        const size_t count = j - i; // 1..8192: fits two octets
+        out.push_back(static_cast<uint8_t>(count >> 8));
+        out.push_back(static_cast<uint8_t>(count));
+        out.push_back(octets[i]);
+        i = j;
+    }
+}
+
+void FilterTableLoadControl::restoreUnreadable()
+{
+    KNX_LOGE(TAG, "Stored Filter Table record unreadable; load state Error");
+    rejectStoredState(kErrorGeneralDevice);
+}
+
+void FilterTableLoadControl::rejectStoredState(uint8_t errorCode)
+{
+    // Table 94, Device Restart from Loaded: "Error in case of error detection
+    // at start-up". The data is not to be trusted, so none of it is kept.
+    _table.setAll(false);
+    _allocated = false;
+    _mcbWritten = false;
+    _mcb = Mcb{};
+    fail(errorCode);
+}
+
+void FilterTableLoadControl::restore(std::span<const uint8_t> record)
+{
+    if (record.empty()) {
+        // Never stored: a new device, §4.5.3 "The default Load State shall be
+        // Loaded and the Routing Table cleared" (the constructor's state).
+        return;
+    }
+
+    auto octets = _table.octets();
+    bool valid = record.size() >= kRecordHeaderSize && record[0] == kRecordVersion
+              && record[kRecordState] <= static_cast<uint8_t>(State::Error);
+    if (valid) {
+        const auto body = record.subspan(kRecordHeaderSize);
+        if (record[kRecordEncoding] == kEncodingRaw) {
+            valid = body.size() == octets.size();
+            if (valid) {
+                std::copy(body.begin(), body.end(), octets.begin());
+            }
+        } else if (record[kRecordEncoding] == kEncodingRuns && body.size() % kRunSize == 0u) {
+            size_t filled = 0;
+            for (size_t i = 0; valid && i < body.size(); i += kRunSize) {
+                const size_t count = be16(body.subspan(i, 2));
+                if (count == 0u || count > octets.size() - filled) {
+                    valid = false;
+                    break;
+                }
+                std::fill_n(octets.begin() + static_cast<std::ptrdiff_t>(filled), count, body[i + 2u]);
+                filled += count;
+            }
+            valid = valid && filled == octets.size();
+        } else {
+            valid = false;
+        }
+    }
+    const bool crcMatches = valid && crc16Ccitt(octets) == be16(record.subspan(kRecordCrc, 2));
+
+    if (!crcMatches) {
+        KNX_LOGE(TAG, "Stored Filter Table record is %s; load state Error",
+                 valid ? "corrupt (CRC)" : "malformed");
+        rejectStoredState(valid ? kErrorCrc : kErrorConfiguration);
+        return;
+    }
+
+    _allocated = (record[kRecordFlags] & kFlagAllocated) != 0u;
+    _mcbWritten = false;
+    std::copy_n(record.begin() + static_cast<std::ptrdiff_t>(kRecordMcb), kMcbSize, _mcb.begin());
+    const auto state = static_cast<State>(record[kRecordState]);
+    if (state == State::Error) {
+        fail(record[kRecordErrorCode]);
+    } else {
+        setState(state);
+    }
+    // Table 94, Device Restart: Unloaded, Loaded and Error stay; an
+    // interrupted Loading becomes Unloaded.
+    deviceRestart();
 }
 
 } // namespace network

@@ -11,6 +11,7 @@
 #include "knx/objects/property_kernel.hpp"
 #include "knx/util/hex.hpp"
 #include "knx/util/log.hpp"
+#include <iterator>
 #include <optional>
 #include <utility>
 
@@ -375,6 +376,39 @@ size_t InterfaceObjectManager::loadFromPersistence() {
     return loaded;
 }
 
+std::span<const uint16_t> InterfaceObjectManager::bankedRecordKeys() {
+    static constexpr uint16_t kKeys[] = {kRouterFilterTableKeyId};
+    static_assert(std::size(kKeys) == std::tuple_size_v<decltype(_bankedRecordSources)>);
+    return kKeys;
+}
+
+void InterfaceObjectManager::setBankedRecordSource(uint16_t keyId, BankedRecordSource source) {
+    const auto keys = bankedRecordKeys();
+    for (size_t i = 0; i < keys.size(); ++i) {
+        if (keys[i] == keyId) {
+            _bankedRecordSources[i] = std::move(source);
+            return;
+        }
+    }
+    KNX_LOGE(TAG, "No banked record 0x%04X", static_cast<unsigned>(keyId));
+}
+
+std::optional<std::vector<uint8_t>> InterfaceObjectManager::loadBankedRecord(uint16_t keyId) {
+    std::vector<uint8_t> data;
+    if (!_persistenceEnabled || !_persistence) {
+        return data;
+    }
+    const auto res = _persistence->loadById(bankedKeyId(keyId, _activeBank), data);
+    if (res.isError()) {
+        if (res.error() != util::ErrorCode::NotFound) {
+            KNX_LOGW(TAG, "Failed to load keyId=0x%04x: %s", keyId, util::errorCodeToString(res.error()));
+            return std::nullopt;
+        }
+        data.clear();
+    }
+    return data;
+}
+
 uint8_t InterfaceObjectManager::readActivePersistenceBank() {
     std::vector<uint8_t> stored;
     if (_persistence->loadById(kPersistenceBankMarkerKeyId, stored).isOk() &&
@@ -393,6 +427,12 @@ void InterfaceObjectManager::erasePersistenceBank(uint8_t bank) {
             ++failed;
         }
     });
+    for (const uint16_t keyId : bankedRecordKeys()) {
+        const auto erased = _persistence->eraseById(bankedKeyId(keyId, bank));
+        if (erased.isError() && erased.error() != util::ErrorCode::NotFound) {
+            ++failed;
+        }
+    }
     if (failed != 0u) {
         KNX_LOGW(TAG, "Could not erase %zu key(s) of persistence bank %u", failed, static_cast<unsigned>(bank));
     }
@@ -442,11 +482,11 @@ util::Result<size_t> InterfaceObjectManager::saveToPersistence() {
     const uint8_t nextBank = static_cast<uint8_t>(_activeBank ^ 1u);
     bool bankComplete = true;
 
-    auto saveProp = [&](InterfaceObjectType objectType, application::PropertyID propertyId, auto getter) {
-        const uint16_t baseKeyId = makePersistenceKeyId(objectType, propertyId);
+    // One copy of the write path for every getter: @p readable is what the
+    // getter returned, @p data what it produced.
+    auto saveRecord = [&](uint16_t baseKeyId, bool readable, std::vector<uint8_t>& data) {
         const uint16_t keyId = bankedKeyId(baseKeyId, nextBank);
-        std::vector<uint8_t> data;
-        if (!getter(data)) {
+        if (!readable) {
             // Nothing readable now (an object this device does not have, say).
             // The old bank is about to be dropped, so carry its copy across
             // rather than lose it.
@@ -475,6 +515,12 @@ util::Result<size_t> InterfaceObjectManager::saveToPersistence() {
             return;
         }
         ++saved;
+    };
+
+    auto saveProp = [&](InterfaceObjectType objectType, application::PropertyID propertyId, auto getter) {
+        std::vector<uint8_t> data;
+        const bool readable = getter(data);
+        saveRecord(makePersistenceKeyId(objectType, propertyId), readable, data);
     };
 
     auto savePropViaManager = [&](InterfaceObjectType objectType, application::PropertyID propertyId) {
@@ -577,6 +623,17 @@ util::Result<size_t> InterfaceObjectManager::saveToPersistence() {
             savePropViaManager(objectType, propertyId);
         }
     });
+
+    const auto recordKeys = bankedRecordKeys();
+    for (size_t i = 0; i < recordKeys.size(); ++i) {
+        // Without an owner yet the stored record is carried over.
+        std::vector<uint8_t> data;
+        const bool readable = static_cast<bool>(_bankedRecordSources[i]);
+        if (readable) {
+            _bankedRecordSources[i](data);
+        }
+        saveRecord(recordKeys[i], readable, data);
+    }
 
     if (!bankComplete) {
         // The marker still names the old bank, so the device keeps booting

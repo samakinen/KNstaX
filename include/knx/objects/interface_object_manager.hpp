@@ -23,10 +23,13 @@
 #include "knx/application/property.hpp"
 #include "knx/types.hpp"
 #include "knx/util/fixed_vector.hpp"
+#include "knx/util/inplace_function.hpp"
 #include "knx/util/result.hpp"
+#include <array>
 #include <cstddef>
 #include <initializer_list>
 #include <memory>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -138,6 +141,34 @@ public:
 
     /// Bit that selects bank 1 in a property key.
     static constexpr uint16_t kPersistenceBank1KeyBit = 0x8000u;
+
+    /// Banked record holding a coupler's Filter Table with its load state,
+    /// allocation, PID_ERROR_CODE and PID_MCB_TABLE
+    /// (network::FilterTableLoadControl::serialize()).
+    ///
+    /// A Resource of the Router Object (type 6) that is memory-mapped rather
+    /// than a property, so it has no PID to be keyed by. 0xF0 is outside the
+    /// PID range of the Router Object. Unlike the two keys above it is part
+    /// of the banked state: it is written into the inactive bank with every
+    /// other persisted property and becomes current with the same marker
+    /// switch, so a reset during a save keeps the previous table, load state
+    /// and download together.
+    static constexpr uint16_t kRouterFilterTableKeyId = 0x06F0u;
+
+    /// Fills the bytes of a banked record for a save; empty stores nothing.
+    using BankedRecordSource = util::InplaceFunction<void(std::vector<uint8_t>&), 16>;
+
+    /// Give the save a source for the banked record @p keyId (one of
+    /// bankedRecordKeys()). Without a source a save carries the stored record
+    /// over unchanged, so state whose owner is not set up yet is not lost.
+    void setBankedRecordSource(uint16_t keyId, BankedRecordSource source);
+
+    /// The banked record @p keyId as the active bank holds it: empty when
+    /// none is stored, nullopt when one is stored but cannot be read.
+    std::optional<std::vector<uint8_t>> loadBankedRecord(uint16_t keyId);
+
+    /// The keys of the banked records that are not properties.
+    static std::span<const uint16_t> bankedRecordKeys();
 
     /// The bank the next load reads and saveSecuritySequenceState() writes.
     /// Exposed for tests.
@@ -375,6 +406,8 @@ private:
     bool _persistenceEnabled;
     bool _initialized;
     uint8_t _activeBank{0};  ///< See kPersistenceBankMarkerKeyId.
+    /// Indexed like bankedRecordKeys().
+    std::array<BankedRecordSource, 1> _bankedRecordSources{};
 
     InterfaceObject* findKernelObject(InterfaceObjectType objectType);
     const InterfaceObject* findKernelObject(InterfaceObjectType objectType) const;

@@ -103,7 +103,9 @@ private:
     /// publishMediumInterfaceObjects() when a coupler role is declared.
     void publishRouterObject();
 
-    /// Bind the Router Object's PID_LOAD_STATE_CONTROL, PID_TABLE_REFERENCE
+    /// Restore the Filter Table and its load state from the persisted state,
+    /// make them part of every save, bind the Router Object's
+    /// PID_LOAD_STATE_CONTROL, PID_TABLE_REFERENCE, PID_ERROR_CODE
     /// and PID_MCB_TABLE to the Filter Table load state machine and register
     /// the table's memory window (03/05/01 §5.3.1).
     void bindFilterTableLoadControl();
@@ -153,7 +155,6 @@ private:
     RouterRoleConfig _routerRole{};
     /// Realisation Type 3 loading of _routerRole.filterTable; couplers only.
     std::unique_ptr<network::FilterTableLoadControl> _filterTableLoad{};
-    bool _filterTableRegionRegistered{false};
 
 #if KNX_FEATURE_NETIP
     ManagementControl::BackboneKeyCallback _backboneKeyCallback{};

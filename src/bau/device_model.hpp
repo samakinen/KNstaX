@@ -148,6 +148,12 @@ public:
     /// of every secure download and immediately talks to it again.
     void flushPersistenceIfDirty();
 
+    /// Banked state that is not a property (InterfaceObjectManager::
+    /// bankedRecordKeys()): saved with every other persisted property.
+    void setBankedRecordSource(uint16_t keyId, objects::InterfaceObjectManager::BankedRecordSource source);
+    /// Empty when none is stored (or before init()), nullopt when unreadable.
+    std::optional<std::vector<uint8_t>> loadBankedRecord(uint16_t keyId);
+
     // --- Data Secure state ----------------------------------------------------
     //
     // Last Valid SeqNr values (03/05/01 §6.3.8.4) and the Sequence Number for

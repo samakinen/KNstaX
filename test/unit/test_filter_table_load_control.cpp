@@ -252,6 +252,215 @@ void test_remaining_transitions(void)
     TEST_ASSERT_EQUAL(static_cast<int>(State::Unloaded), static_cast<int>(control.state()));
 }
 
+// §4.2.28: PID_ERROR_CODE carries the reason for Error and goes back to 0
+// when the state leaves Error.
+void test_error_code_follows_the_error_state(void)
+{
+    FilterTable table;
+    FilterTableLoadControl control(table);
+    TEST_ASSERT_EQUAL_UINT8(FilterTableLoadControl::kErrorNone, control.errorCode());
+
+    control.applyEvent(event(FilterTableLoadControl::kEventStartLoading));
+    const uint16_t crc = FilterTableLoadControl::crc16Ccitt(control.memory());
+    TEST_ASSERT_TRUE(control.writeMcb(mcbFor(FilterTable::kOctets, static_cast<uint16_t>(crc ^ 1u))).isOk());
+    control.applyEvent(event(FilterTableLoadControl::kEventLoadCompleted));
+    TEST_ASSERT_EQUAL(static_cast<int>(State::Error), static_cast<int>(control.state()));
+    TEST_ASSERT_EQUAL_UINT8(FilterTableLoadControl::kErrorCrc, control.errorCode());
+
+    control.applyEvent(event(FilterTableLoadControl::kEventUnload));
+    TEST_ASSERT_EQUAL_UINT8(FilterTableLoadControl::kErrorNone, control.errorCode());
+
+    control.applyEvent(event(FilterTableLoadControl::kEventStartLoading));
+    control.applyEvent(dataRelativeAllocation(0x2001, false, 0));
+    TEST_ASSERT_EQUAL_UINT8(FilterTableLoadControl::kErrorMaxTableLength, control.errorCode());
+    control.applyEvent(event(FilterTableLoadControl::kEventUnload));
+    control.applyEvent(event(FilterTableLoadControl::kEventStartLoading));
+    control.applyEvent(dataRelativeAllocation(0, false, 0));
+    TEST_ASSERT_EQUAL_UINT8(FilterTableLoadControl::kErrorAllocationSizeZero, control.errorCode());
+}
+
+namespace {
+
+/// Store @p source's state, restore it into a fresh control, and check the
+/// table and the record size.
+void roundTrip(FilterTable& source, size_t maxRecordSize)
+{
+    FilterTableLoadControl from(source);
+    std::vector<uint8_t> record;
+    from.serialize(record);
+    TEST_ASSERT_TRUE(record.size() <= maxRecordSize);
+    TEST_ASSERT_TRUE(record.size() <= FilterTableLoadControl::kMaxRecordSize);
+
+    FilterTable restored;
+    restored.setAll(true);
+    FilterTableLoadControl to(restored);
+    to.restore(record);
+    TEST_ASSERT_TRUE(to.loaded());
+    TEST_ASSERT_EQUAL_MEMORY(source.octets().data(), restored.octets().data(), FilterTable::kOctets);
+}
+
+} // namespace
+
+// The stored record is the table run-length encoded, or raw when that is
+// shorter, so even the worst case stays one header over 8 KB.
+void test_record_round_trips_worst_case_tables(void)
+{
+    FilterTable table;
+    roundTrip(table, FilterTableLoadControl::kRecordHeaderSize + 3u); // empty
+
+    // All set: octet 0 differs (GA 0000h is never set), the rest is one run.
+    table.setAll(true);
+    roundTrip(table, FilterTableLoadControl::kRecordHeaderSize + 6u);
+
+    // Alternating bits: every octet AAh, except octet 0.
+    for (uint32_t ga = 1; ga <= 0xFFFFu; ++ga) {
+        table.set(GroupAddress(static_cast<uint16_t>(ga)), (ga & 1u) != 0u);
+    }
+    roundTrip(table, FilterTableLoadControl::kRecordHeaderSize + 6u);
+
+    // Alternating octets: the worst case for runs, so stored raw.
+    for (uint32_t ga = 1; ga <= 0xFFFFu; ++ga) {
+        table.set(GroupAddress(static_cast<uint16_t>(ga)), ((ga >> 3) & 1u) != 0u);
+    }
+    roundTrip(table, FilterTableLoadControl::kMaxRecordSize);
+
+    // Noise: no runs at all.
+    uint32_t lcg = 12345u;
+    for (auto& octet : table.octets()) {
+        lcg = lcg * 1103515245u + 12345u;
+        octet = static_cast<uint8_t>(lcg >> 16);
+    }
+    roundTrip(table, FilterTableLoadControl::kMaxRecordSize);
+
+    // What a download typically holds: a few ranges and single addresses.
+    table.setAll(false);
+    table.setRange(0x0800, 0x08FF, true);
+    table.set(GroupAddress(0x0A03), true);
+    table.set(GroupAddress(0x1F11), true);
+    roundTrip(table, 64u);
+}
+
+// Table 94 "Device Restart": Loaded, Unloaded and Error come back as stored,
+// with the allocation, MCB and error code; Loading becomes Unloaded.
+void test_restore_applies_device_restart(void)
+{
+    FilterTable table;
+    FilterTableLoadControl control(table);
+    control.applyEvent(event(FilterTableLoadControl::kEventStartLoading));
+    control.memory()[0x0101] = 0x02;
+    const uint16_t crc = FilterTableLoadControl::crc16Ccitt(control.memory());
+    TEST_ASSERT_TRUE(control.writeMcb(mcbFor(FilterTable::kOctets, crc)).isOk());
+    control.applyEvent(event(FilterTableLoadControl::kEventLoadCompleted));
+    TEST_ASSERT_TRUE(control.loaded());
+    std::vector<uint8_t> loaded;
+    control.serialize(loaded);
+
+    {
+        FilterTable restored;
+        FilterTableLoadControl after(restored);
+        after.restore(loaded);
+        TEST_ASSERT_TRUE(after.loaded());
+        TEST_ASSERT_TRUE(restored.passes(GroupAddress(0x0809)));
+        TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(restored.passCount()));
+        TEST_ASSERT_TRUE(after.mcb() == control.mcb());
+        TEST_ASSERT_EQUAL_HEX32(FilterTableLoadControl::kDefaultMemoryAddress, after.tableReference());
+    }
+
+    control.applyEvent(event(FilterTableLoadControl::kEventStartLoading));
+    std::vector<uint8_t> loading;
+    control.serialize(loading);
+    {
+        FilterTable restored;
+        FilterTableLoadControl after(restored);
+        after.restore(loading);
+        TEST_ASSERT_EQUAL(static_cast<int>(State::Unloaded), static_cast<int>(after.state()));
+        TEST_ASSERT_EQUAL_HEX32(0u, after.tableReference());
+    }
+
+    TEST_ASSERT_TRUE(control.writeMcb(mcbFor(FilterTable::kOctets, static_cast<uint16_t>(crc ^ 1u))).isOk());
+    control.applyEvent(event(FilterTableLoadControl::kEventLoadCompleted));
+    std::vector<uint8_t> error;
+    control.serialize(error);
+    {
+        FilterTable restored;
+        FilterTableLoadControl after(restored);
+        after.restore(error);
+        TEST_ASSERT_EQUAL(static_cast<int>(State::Error), static_cast<int>(after.state()));
+        TEST_ASSERT_EQUAL_UINT8(FilterTableLoadControl::kErrorCrc, after.errorCode());
+    }
+
+    control.applyEvent(event(FilterTableLoadControl::kEventUnload));
+    std::vector<uint8_t> unloaded;
+    control.serialize(unloaded);
+    {
+        FilterTable restored;
+        FilterTableLoadControl after(restored);
+        after.restore(unloaded);
+        TEST_ASSERT_EQUAL(static_cast<int>(State::Unloaded), static_cast<int>(after.state()));
+        TEST_ASSERT_EQUAL_UINT8(FilterTableLoadControl::kErrorNone, after.errorCode());
+    }
+
+    // Nothing stored: the new device of §4.5.3, Loaded and cleared.
+    FilterTable fresh;
+    FilterTableLoadControl never(fresh);
+    never.restore({});
+    TEST_ASSERT_TRUE(never.loaded());
+    TEST_ASSERT_EQUAL_UINT32(0u, static_cast<uint32_t>(fresh.passCount()));
+}
+
+// Table 94: "Error in case of error detection at start-up". A record that
+// does not decode, or whose table does not match its CRC, is not trusted.
+void test_corrupt_record_restores_as_error(void)
+{
+    FilterTable table;
+    table.setRange(0x0100, 0x01FF, true);
+    FilterTableLoadControl control(table);
+    std::vector<uint8_t> record;
+    control.serialize(record);
+
+    auto flipped = record;
+    flipped.back() ^= 0x01u; // the value of the last run
+    FilterTable restored;
+    FilterTableLoadControl after(restored);
+    after.restore(flipped);
+    TEST_ASSERT_EQUAL(static_cast<int>(State::Error), static_cast<int>(after.state()));
+    TEST_ASSERT_EQUAL_UINT8(FilterTableLoadControl::kErrorCrc, after.errorCode());
+    TEST_ASSERT_EQUAL_UINT32(0u, static_cast<uint32_t>(restored.passCount()));
+
+    auto truncated = record;
+    truncated.pop_back();
+    FilterTable restored2;
+    FilterTableLoadControl after2(restored2);
+    after2.restore(truncated);
+    TEST_ASSERT_EQUAL(static_cast<int>(State::Error), static_cast<int>(after2.state()));
+    TEST_ASSERT_EQUAL_UINT8(FilterTableLoadControl::kErrorConfiguration, after2.errorCode());
+
+    FilterTable restored3;
+    FilterTableLoadControl after3(restored3);
+    after3.restoreUnreadable();
+    TEST_ASSERT_EQUAL(static_cast<int>(State::Error), static_cast<int>(after3.state()));
+    TEST_ASSERT_EQUAL_UINT8(FilterTableLoadControl::kErrorGeneralDevice, after3.errorCode());
+}
+
+// A factory reset is the new-device state of §4.5.3, whatever came before.
+void test_factory_reset_is_loaded_and_cleared(void)
+{
+    FilterTable table;
+    FilterTableLoadControl control(table);
+    control.applyEvent(event(FilterTableLoadControl::kEventStartLoading));
+    table.setAll(true);
+    TEST_ASSERT_TRUE(control.writeMcb(mcbFor(FilterTable::kOctets, 0)).isOk());
+    control.applyEvent(event(FilterTableLoadControl::kEventLoadCompleted));
+    TEST_ASSERT_EQUAL(static_cast<int>(State::Error), static_cast<int>(control.state()));
+
+    control.factoryReset();
+    TEST_ASSERT_TRUE(control.loaded());
+    TEST_ASSERT_EQUAL_UINT8(FilterTableLoadControl::kErrorNone, control.errorCode());
+    TEST_ASSERT_EQUAL_UINT32(0u, static_cast<uint32_t>(table.passCount()));
+    TEST_ASSERT_TRUE(control.mcb() == FilterTableLoadControl::Mcb{});
+    TEST_ASSERT_EQUAL_HEX32(FilterTableLoadControl::kDefaultMemoryAddress, control.tableReference());
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -265,5 +474,10 @@ int main(void)
     RUN_TEST(test_allocation_fill);
     RUN_TEST(test_mcb_is_written_only_while_loading);
     RUN_TEST(test_remaining_transitions);
+    RUN_TEST(test_error_code_follows_the_error_state);
+    RUN_TEST(test_record_round_trips_worst_case_tables);
+    RUN_TEST(test_restore_applies_device_restart);
+    RUN_TEST(test_corrupt_record_restores_as_error);
+    RUN_TEST(test_factory_reset_is_loaded_and_cleared);
     return UNITY_END();
 }
