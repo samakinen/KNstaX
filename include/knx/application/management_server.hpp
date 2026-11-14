@@ -154,7 +154,8 @@ public:
     void setPropertyReadProvider(PropertyReadProvider provider);
     void setPropertyWriteProvider(PropertyWriteProvider provider);
     void setPropertyDescriptionProvider(PropertyDescriptionProvider provider);
-    util::Result<void> registerMemoryRegion(const MemoryRegion& region, std::span<uint8_t> storage);
+    util::Result<void> registerMemoryRegion(const MemoryRegion& region, std::span<uint8_t> storage,
+                                            MemoryWriteGuard writeGuard = {});
     bool memoryRegionWritten(MemoryAddress regionStart) const;
 
     DeviceDescriptorService& deviceDescriptorService() { return *_deviceDescriptorService; }
@@ -249,6 +250,8 @@ private:
         /// tell "ETS downloaded zeros" from "ETS never touched this segment" —
         /// the buffer reads all-zero either way.
         bool written{false};
+        /// Refuses writes while it returns false (see MemoryWriteGuard).
+        MemoryWriteGuard writeGuard{};
     };
     static constexpr size_t kMaxMemorySegments = 8;
     util::FixedVector<MemorySegmentBinding, kMaxMemorySegments> _memorySegments;

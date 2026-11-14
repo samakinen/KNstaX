@@ -298,8 +298,12 @@ device:
      `ROUTE_LAST` is reachable only through the explicit `FrameClass` overload.
    - `PID_MAIN_LCCONFIG` and friends are applied to the live policy by
      `syncRouterRoutingConfig()`, which the application must call after a
-     download; there is no automatic property-write hook. The filter table does
-     not need this — it applies live through `PID_ROUTETABLE_CONTROL`.
+     download; there is no automatic property-write hook. They are persisted
+     (with `PID_FILTER_TABLE_USE`) and applied at start-up, and Master Reset
+     02h/07h returns them to the configuration declared in
+     `configureRouterRole()`. The filter table does not need this — it applies
+     live through `PID_ROUTETABLE_CONTROL`, and its memory window accepts
+     `A_Memory_Write` only while its load state is Loading (§5.3.1.5).
 7. **HIL coverage is thin** — one hardware validation test. Virtual TP1
    simulation does not substitute for electrical/timing compliance testing on
    real transceivers.

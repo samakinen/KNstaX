@@ -855,9 +855,10 @@ void BusAccessStackPort::setPropertyDescriptionProvider(PropertyDescriptionProvi
 }
 
 util::Result<void> BusAccessStackPort::registerMemoryRegion(const application::MemoryRegion& region,
-                                                            std::span<uint8_t> storage)
+                                                            std::span<uint8_t> storage,
+                                                            application::MemoryWriteGuard writeGuard)
 {
-    return _application ? _application->registerMemoryRegion(region, storage)
+    return _application ? _application->registerMemoryRegion(region, storage, std::move(writeGuard))
                         : util::Result<void>::err(util::ErrorCode::NotInitialized);
 }
 

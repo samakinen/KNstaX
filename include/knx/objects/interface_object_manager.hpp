@@ -180,6 +180,16 @@ public:
      */
     size_t loadFromPersistence();
 
+    /**
+     * @brief Restore the persisted properties of one object type only
+     *
+     * For a reference object created after loadFromPersistence() ran (a
+     * Router Object declared once the device is running): its stored values
+     * are in the active bank like every other, but nothing restored them.
+     * @return Number of properties restored
+     */
+    size_t loadObjectFromPersistence(InterfaceObjectType objectType);
+
 private:
     /// Compare the stored layout version against this firmware's and discard
     /// the namespace when they differ.  Called from init(), before anything is
@@ -380,6 +390,10 @@ public:
     bool hasObjectType(InterfaceObjectType objectType) const;
 
 private:
+    /// Restore the persisted properties from the active bank, of @p only
+    /// when given, else of every object.
+    size_t loadPersistedProperties(std::optional<InterfaceObjectType> only);
+
     // Owned interface objects (default configuration)
     DeviceObject _deviceObject;
     AddressTableObject _addressTable;

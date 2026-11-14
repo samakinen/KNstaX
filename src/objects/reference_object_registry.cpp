@@ -241,6 +241,7 @@ std::span<const PropertyDeclaration> referenceObjectProperties(InterfaceObjectTy
             entry(toPid(ReferencePropertyId::RouterErrorCode), PDT::Enum8, PA::ReadOnly, 1),
             // PID_LINE_STATUS is device-reported, not configured.
             entry(toPid(ReferencePropertyId::RouterLineStatus), PDT::Bitset8, PA::ReadOnly, 1),
+            // 52..55 and 67 are persisted: see InterfaceObjectManager::persistedProperties().
             entry(toPid(ReferencePropertyId::RouterMainLcConfig), PDT::UnsignedChar, PA::ReadWrite, 1),
             entry(toPid(ReferencePropertyId::RouterSubLcConfig), PDT::UnsignedChar, PA::ReadWrite, 1),
             entry(toPid(ReferencePropertyId::RouterMainLcGrpConfig), PDT::UnsignedChar, PA::ReadWrite, 1),

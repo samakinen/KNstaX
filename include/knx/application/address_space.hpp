@@ -16,6 +16,7 @@
 #include <optional>
 
 #include "knx/types.hpp"
+#include "knx/util/inplace_function.hpp"
 #include "knx/util/result.hpp"
 
 namespace knx {
@@ -30,6 +31,17 @@ enum class MemoryAccessMode : uint8_t {
     ReadWrite = 2,
     NoAccess = 3
 };
+
+/**
+ * @brief Whether a memory-mapped region accepts writes right now
+ *
+ * For a Resource whose memory may only be written in some state of its Load
+ * State Machine (a coupler's Filter Table: 03/05/01 §5.3.1.5). A refused
+ * write is answered like any other failed write: A_Memory_Response with
+ * number = 0 in Verify Mode, nothing otherwise (03/03/07 §3.5.4). Empty
+ * means always.
+ */
+using MemoryWriteGuard = util::InplaceFunction<bool(), 16>;
 
 /**
  * @brief Memory region descriptor

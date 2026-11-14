@@ -132,7 +132,8 @@ public:
     /// Register a memory-mapped region backed by caller-owned storage (used by
     /// the ETS SystemB download: table segments transferred via A_Memory_Write).
     util::Result<void> registerMemoryRegion(const application::MemoryRegion& region,
-                                            std::span<uint8_t> storage);
+                                            std::span<uint8_t> storage,
+                                            application::MemoryWriteGuard writeGuard = {});
     /// Whether a management client has ever written into the region starting
     /// at @p regionStart. Distinguishes "downloaded all zeros" from "never
     /// downloaded" — the backing buffer reads zero in both cases.

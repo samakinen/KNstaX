@@ -83,6 +83,11 @@ std::span<const InterfaceObjectManager::PersistedProperty> InterfaceObjectManage
     // for Secure Routing fell back to plain routing at the next boot. On a device without that object the reads fail and
     // nothing is stored for it.
     constexpr auto knxNetIp = InterfaceObjectType::knxNetIpParameter();
+    // The Router Object (couplers only) for the coupler configuration ETS
+    // downloads and the forwarding path acts on. Without it a coupler came
+    // back from every restart on its ex-factory routing configuration. The
+    // filter table itself is a banked record (kRouterFilterTableKeyId).
+    constexpr auto router = InterfaceObjectType::router();
 
     // PID_PROG_MODE is deliberately absent: KNX devices leave programming mode
     // on power-up, and persisting it left the device stuck in the
@@ -135,6 +140,14 @@ std::span<const InterfaceObjectManager::PersistedProperty> InterfaceObjectManage
         {knxNetIp, static_cast<PID>(91)},  // PID_BACKBONE_KEY
         {knxNetIp, static_cast<PID>(95)},  // PID_MULTICAST_LATENCY_TOLERANCE
         {knxNetIp, static_cast<PID>(96)},  // PID_SYNC_LATENCY_FRACTION
+        // 03/05/01 §4.5.5, §4.5.6, §4.5.13. PID_HOP_COUNT, PID_L2_COUPLER_TYPE
+        // and PID_COUPL_SERV_CONTROL are not here: the forwarding path does
+        // not act on them, and the first two are the product's declaration.
+        {router, static_cast<PID>(52)},    // PID_MAIN_LCCONFIG
+        {router, static_cast<PID>(53)},    // PID_SUB_LCCONFIG
+        {router, static_cast<PID>(54)},    // PID_MAIN_LCGRPCONFIG
+        {router, static_cast<PID>(55)},    // PID_SUB_LCGRPCONFIG
+        {router, static_cast<PID>(67)},    // PID_FILTER_TABLE_USE
     };
     return kPersisted;
 }
@@ -335,10 +348,33 @@ size_t InterfaceObjectManager::loadFromPersistence() {
         return 0;
     }
 
+    const size_t loaded = loadPersistedProperties(std::nullopt);
+
+    // Whatever the other bank holds is a save that never reached its marker
+    // switch (or the bank a completed save could not finish erasing). It is
+    // never read, but it would be mixed into the next save's bank, so clear it.
+    erasePersistenceBank(static_cast<uint8_t>(_activeBank ^ 1u));
+
+    KNX_LOGD(TAG, "Loaded %zu properties from persistence bank %u", loaded,
+             static_cast<unsigned>(_activeBank));
+    return loaded;
+}
+
+size_t InterfaceObjectManager::loadObjectFromPersistence(InterfaceObjectType objectType) {
+    if (!_persistenceEnabled || !_persistenceManager) {
+        return 0;
+    }
+    return loadPersistedProperties(objectType);
+}
+
+size_t InterfaceObjectManager::loadPersistedProperties(std::optional<InterfaceObjectType> only) {
     size_t loaded = 0;
     const InterfaceObjectInstance instance(1);
 
     auto loadProp = [&](InterfaceObjectType objectType, application::PropertyID propertyId) {
+        if (only.has_value() && objectType != *only) {
+            return;
+        }
         const uint16_t keyId = bankedKeyId(makePersistenceKeyId(objectType, propertyId), _activeBank);
         std::vector<uint8_t> data;
         const auto res = _persistence->loadById(keyId, data);
@@ -365,14 +401,6 @@ size_t InterfaceObjectManager::loadFromPersistence() {
     };
 
     forEachPersistedProperty(loadProp);
-
-    // Whatever the other bank holds is a save that never reached its marker
-    // switch (or the bank a completed save could not finish erasing). It is
-    // never read, but it would be mixed into the next save's bank, so clear it.
-    erasePersistenceBank(static_cast<uint8_t>(_activeBank ^ 1u));
-
-    KNX_LOGD(TAG, "Loaded %zu properties from persistence bank %u", loaded,
-             static_cast<unsigned>(_activeBank));
     return loaded;
 }
 

@@ -570,9 +570,11 @@ void test_PropertyModel_UndeclaredPidIsInvalidProperty(void)
 void test_PropertyModel_PersistedPropertiesExistAndAreWriteable(void)
 {
     GenericInterfaceObject paramObj(InterfaceObjectType::knxNetIpParameter());
+    GenericInterfaceObject routerObj(InterfaceObjectType::router());
     InterfaceObjectManager mgr;
     TEST_ASSERT_TRUE(mgr.init(false).isOk());
     TEST_ASSERT_TRUE(mgr.registerReferenceObject(paramObj).isOk());
+    TEST_ASSERT_TRUE(mgr.registerReferenceObject(routerObj).isOk());
 
     for (const auto& property : InterfaceObjectManager::persistedProperties()) {
         PropertyDescription description;

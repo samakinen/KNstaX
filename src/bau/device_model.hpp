@@ -73,6 +73,8 @@ public:
     /// Restore every persisted property. restoring() is true for the duration,
     /// so observers can tell stored values coming back from remote writes.
     size_t restore();
+    /// restore() for one reference object created after it ran.
+    size_t restoreReferenceObject(InterfaceObjectType objectType);
     bool restoring() const { return _restoring; }
 
     /// Register the interface objects, property providers and memory-mapped

@@ -86,6 +86,17 @@ size_t DeviceModel::restore()
     return loaded;
 }
 
+size_t DeviceModel::restoreReferenceObject(InterfaceObjectType objectType)
+{
+    if (!_interfaceObjectManager) {
+        return 0;
+    }
+    _restoring = true;
+    const size_t loaded = _interfaceObjectManager->loadObjectFromPersistence(objectType);
+    _restoring = false;
+    return loaded;
+}
+
 void DeviceModel::bind()
 {
     if (_stackPort == nullptr) {

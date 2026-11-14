@@ -506,6 +506,31 @@ void test_error_code_is_readable_and_survives_restart(void)
     TEST_ASSERT_EQUAL_UINT8(0u, readErrorCode(*device.bau));
 }
 
+// A coupler declared once the device is running (configureRouterRole() after
+// init()) gets its Router Object after init()'s restore has run; the coupler
+// configuration stored for it is restored then, and reaches the policy.
+void test_routing_configuration_survives_restart_when_declared_at_run_time(void)
+{
+    {
+        CouplerDevice device;
+        const std::array<uint8_t, 1> physLock{0x76};
+        const std::array<uint8_t, 1> notUsed{0x00};
+        TEST_ASSERT_TRUE(device.bau->writeProperty(InterfaceObjectType::router(), InterfaceObjectInstance(1),
+                                                   static_cast<application::PropertyID>(52), 1, physLock).isOk());
+        TEST_ASSERT_TRUE(device.bau->writeProperty(InterfaceObjectType::router(), InterfaceObjectInstance(1),
+                                                   static_cast<application::PropertyID>(67), 1, notUsed).isOk());
+        device.bau->flushPendingPersistence();
+    }
+    CouplerDevice device;
+    TEST_ASSERT_EQUAL(static_cast<int>(network::PhysFrameHandling::Lock),
+                      static_cast<int>(device.coupler().policy().lineConfig(network::CouplerPort::Primary).physFrame));
+    TEST_ASSERT_FALSE(device.coupler().policy().isFilterTableInUse());
+    // PID_FILTER_TABLE_USE = 0: the evaluation is negative for every group
+    // address (§4.5.13.3), so a loaded table that passes 0801h does not route it.
+    device.download(tableWith(0x0800, 0x08FF));
+    TEST_ASSERT_FALSE(device.routes(0x0801));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -523,5 +548,6 @@ int main(void)
     RUN_TEST(test_power_loss_during_save_keeps_the_previous_table);
     RUN_TEST(test_failed_save_keeps_the_previous_table);
     RUN_TEST(test_error_code_is_readable_and_survives_restart);
+    RUN_TEST(test_routing_configuration_survives_restart_when_declared_at_run_time);
     return UNITY_END();
 }

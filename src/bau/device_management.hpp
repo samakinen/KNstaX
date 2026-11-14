@@ -103,6 +103,10 @@ private:
     /// publishMediumInterfaceObjects() when a coupler role is declared.
     void publishRouterObject();
 
+    /// Master Reset 02h/07h: put the coupler configuration back to
+    /// _routerFactoryConfig and apply it to the routing policy.
+    void restoreRouterFactoryConfig();
+
     /// Restore the Filter Table and its load state from the persisted state,
     /// make them part of every save, bind the Router Object's
     /// PID_LOAD_STATE_CONTROL, PID_TABLE_REFERENCE, PID_ERROR_CODE
@@ -153,6 +157,12 @@ private:
     MediumType _deviceMedium{MediumType::TP1};
     /// Coupler role, if declared.  A null filterTable means "end device".
     RouterRoleConfig _routerRole{};
+    /// The Router Object's coupler configuration (PID_MAIN_LCCONFIG,
+    /// PID_SUB_LCCONFIG, PID_MAIN_LCGRPCONFIG, PID_SUB_LCGRPCONFIG,
+    /// PID_FILTER_TABLE_USE, in kRouterConfigPids order) as the product
+    /// declared it in configureRouterRole(): the ex-factory state that seeds a
+    /// never-downloaded coupler and that Master Reset 02h/07h return to.
+    std::array<uint8_t, 5> _routerFactoryConfig{};
     /// Realisation Type 3 loading of _routerRole.filterTable; couplers only.
     std::unique_ptr<network::FilterTableLoadControl> _filterTableLoad{};
 

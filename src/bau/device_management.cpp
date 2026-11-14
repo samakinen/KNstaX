@@ -231,6 +231,14 @@ enum : uint8_t {
     kPidRouterFilterTableUse = 67,
 };
 
+/// The Router Object's coupler configuration: what ETS downloads into a line
+/// or backbone coupler and the forwarding path acts on (03/05/01 §4.5.5,
+/// §4.5.6, §4.5.13). Persisted (InterfaceObjectManager::persistedProperties),
+/// so the order here is only that of _routerFactoryConfig.
+constexpr std::array<uint8_t, 5> kRouterConfigPids{
+    kPidRouterMainLcConfig, kPidRouterSubLcConfig, kPidRouterMainLcGrpConfig,
+    kPidRouterSubLcGrpConfig, kPidRouterFilterTableUse};
+
 /// Big-endian helpers: KNX properties are always network byte order.
 std::array<uint8_t, 2> beU16(uint16_t value)
 {
@@ -447,6 +455,11 @@ util::Result<void> DeviceManagement::applyMasterReset(application::EraseCode era
         _filterTableLoad->factoryReset();
         applyFilterTableLoadState(_filterTableLoad->loaded());
     }
+    // Its routing configuration is ex-factory state too, and Table 6 lists
+    // nothing of the coupler's that 07h keeps: both erase codes return it.
+    if (factoryReset) {
+        restoreRouterFactoryConfig();
+    }
 
     if (resetAddress) {
         // The response has already gone out from the old address (03/05/02
@@ -619,6 +632,25 @@ util::Result<void> DeviceManagement::configureRouterRole(const RouterRoleConfig&
         return util::ErrorCode::InvalidParameter;
     }
 
+    // What the product declares here, before init(), is the coupler's
+    // ex-factory configuration: with a routing policy attached, whatever the
+    // firmware set on it; otherwise the specification defaults of 03/05/01
+    // §4.5.5 / §4.5.6 (the "(d)" values). PID_FILTER_TABLE_USE has no
+    // specification default (§4.5.13), so it is the product's declaration.
+    uint8_t mainLcConfig = network::kDefaultLineCouplerConfig;
+    uint8_t subLcConfig = network::kDefaultLineCouplerConfig;
+    uint8_t mainLcGrpConfig = network::kDefaultGroupCouplerConfig;
+    uint8_t subLcGrpConfig = network::kDefaultGroupCouplerConfig;
+    if (_routerRole.routingPolicy != nullptr) {
+        const auto& policy = *_routerRole.routingPolicy;
+        mainLcConfig = policy.lineConfig(network::CouplerPort::Primary).encode();
+        subLcConfig = policy.lineConfig(network::CouplerPort::Secondary).encode();
+        mainLcGrpConfig = policy.groupConfig(network::CouplerPort::Primary).encode();
+        subLcGrpConfig = policy.groupConfig(network::CouplerPort::Secondary).encode();
+    }
+    _routerFactoryConfig = {mainLcConfig, subLcConfig, mainLcGrpConfig, subLcGrpConfig,
+                            static_cast<uint8_t>(_routerRole.filterTableInUse ? 1u : 0u)};
+
     // When called after init(), publish immediately; otherwise init() picks it
     // up through publishMediumInterfaceObjects().
     if (_running) {
@@ -639,6 +671,11 @@ void DeviceManagement::publishRouterObject()
         == required.end()) {
         required.push_back(InterfaceObjectType::router());
         _model.setReferenceObjectTypes(std::move(required));
+        // Declared on a running device: init()'s restore ran before the object
+        // existed, so the configuration stored for it is brought back now.
+        if (_model.referenceObjectsInstantiated()) {
+            (void)_model.restoreReferenceObject(InterfaceObjectType::router());
+        }
     }
 
     // During BusAccessUnit::init() this first runs in phase 4, before the
@@ -672,33 +709,31 @@ void DeviceManagement::publishRouterObject()
     seedWord(kPidRouterMaxApduLength, _routerRole.maxRoutedApduLength);
     seedByte(kPidRouterHopCount, _routerRole.hopCount);
     seedByte(kPidRouterL2CouplerType, _routerRole.l2CouplerType);
-    seedByte(kPidRouterFilterTableUse, _routerRole.filterTableInUse ? 1u : 0u);
 
     // Sub-line power is up until the link layer says otherwise; PID_LINE_STATUS
     // bit 0 is POWER_DOWN_SUBLINE, so 0 is the healthy value.
     seedByte(kPidRouterLineStatus, 0u);
 
-    // The coupler configuration bytes. When a routing policy is attached these
-    // are seeded from it, so the Router Object reports what the forwarding path
-    // will actually do rather than a fixed guess. Otherwise the specification
-    // defaults from 03/05/01 §4.4.4 / §4.4.5 apply.
-    uint8_t mainLcConfig = network::kDefaultLineCouplerConfig;
-    uint8_t subLcConfig = network::kDefaultLineCouplerConfig;
-    uint8_t mainLcGrpConfig = network::kDefaultGroupCouplerConfig;
-    uint8_t subLcGrpConfig = network::kDefaultGroupCouplerConfig;
-    if (_routerRole.routingPolicy != nullptr) {
-        const auto& policy = *_routerRole.routingPolicy;
-        mainLcConfig = policy.lineConfig(network::CouplerPort::Primary).encode();
-        subLcConfig = policy.lineConfig(network::CouplerPort::Secondary).encode();
-        mainLcGrpConfig = policy.groupConfig(network::CouplerPort::Primary).encode();
-        subLcGrpConfig = policy.groupConfig(network::CouplerPort::Secondary).encode();
+    // The coupler configuration is what ETS downloads, and it is persisted:
+    // a value the restore in BusAccessUnit::init() brought back (or one
+    // written since) is the configuration in force and is kept. Only a
+    // coupler that has never been downloaded is seeded, with the ex-factory
+    // values configureRouterRole() recorded. Seeding over the restored bytes,
+    // as this used to, put every coupler back on its defaults at each
+    // restart.
+    for (size_t i = 0; i < kRouterConfigPids.size(); ++i) {
+        const auto pid = static_cast<application::PropertyID>(kRouterConfigPids[i]);
+        if (_model.referenceObjectPropertyValue(InterfaceObjectType::router(), pid).empty()) {
+            seedByte(kRouterConfigPids[i], _routerFactoryConfig[i]);
+        }
     }
-    seedByte(kPidRouterMainLcConfig, mainLcConfig);
-    seedByte(kPidRouterSubLcConfig, subLcConfig);
-    seedByte(kPidRouterMainLcGrpConfig, mainLcGrpConfig);
-    seedByte(kPidRouterSubLcGrpConfig, subLcGrpConfig);
 
     bindFilterTableLoadControl();
+
+    // Whatever the Router Object now holds is what the forwarding path must
+    // do from the first frame on (§4.5.13.3: the MaS "shall actively
+    // interpret" PID_FILTER_TABLE_USE).
+    (void)syncRouterRoutingConfig();
 
     KNX_LOGI(TAG, "Router Object published (medium=%u, hop count=%u, filter table %s)",
              static_cast<unsigned>(_routerRole.subMedium),
@@ -778,7 +813,17 @@ void DeviceManagement::bindFilterTableLoadControl()
         const auto region = application::MemoryRegion{MemoryAddress(load->memoryAddress()),
                                                       static_cast<uint32_t>(network::FilterTable::kOctets),
                                                       application::MemoryAccessMode::ReadWrite, "FilterTable"};
-        const auto result = _stackPort->registerMemoryRegion(region, load->memory());
+        // Written only while Loading. §5.3.1.5 has the MaC "respect the Load
+        // State Machine if modifying the Filter Table", i.e. write it between
+        // Start Loading and Load Completed (§4.23.2.4.1, Figure 64). In
+        // Loaded the window is the live table that PID_MCB_TABLE's CRC was
+        // computed over and the persisted record holds, so a stray write
+        // there changed routing behind both; in Unloaded and Error the memory
+        // is not allocated (PID_TABLE_REFERENCE reads 0, §4.2.7). Refused
+        // like any failed write (03/03/07 §3.5.4): number = 0 in Verify Mode.
+        const auto result = _stackPort->registerMemoryRegion(
+            region, load->memory(),
+            [load]() { return load->state() == network::FilterTableLoadControl::State::Loading; });
         if (result.isError()) {
             KNX_LOGE(TAG, "Filter Table memory window not registered: %s",
                      util::errorCodeToString(result.error()));
@@ -800,6 +845,23 @@ void DeviceManagement::applyFilterTableLoadState(bool loaded)
     if (coupler != nullptr && &coupler->policy() == policy) {
         coupler->refreshAckFilters();
     }
+}
+
+void DeviceManagement::restoreRouterFactoryConfig()
+{
+    if (!hasRouterRole() || _model.referenceObject(InterfaceObjectType::router()) == nullptr) {
+        return;
+    }
+    for (size_t i = 0; i < kRouterConfigPids.size(); ++i) {
+        const std::array<uint8_t, 1> value{_routerFactoryConfig[i]};
+        const auto result = _model.setReferenceObjectProperty(
+            InterfaceObjectType::router(), static_cast<application::PropertyID>(kRouterConfigPids[i]), value);
+        if (result.isError()) {
+            KNX_LOGE(TAG, "Router Object PID %u not reset: %s",
+                     static_cast<unsigned>(kRouterConfigPids[i]), util::errorCodeToString(result.error()));
+        }
+    }
+    (void)syncRouterRoutingConfig();
 }
 
 util::Result<void> DeviceManagement::syncRouterRoutingConfig()

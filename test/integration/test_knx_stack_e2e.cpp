@@ -4,6 +4,22 @@
 /**
  * @file test_knx_stack_e2e.cpp
  * @brief End-to-end KNX stack tests with BAU and object-layer integration
+ *
+ * The device runs on a VirtualPlatform: its data link RX task is a fibre, and
+ * the test body is the only thing that makes it run (an injected frame, a
+ * clock advance). A request the test injects has been handled, and its answer
+ * transmitted to completion, by the time injectFrame() returns.
+ *
+ * On LinuxPlatform the RX task was a real thread that answered management
+ * requests on its own. The test took "the answer is in the mock's sent queue"
+ * for "the device has finished sending it", and the RX thread could still be
+ * between handing the frame to the physical layer and closing its data link
+ * TX operation; the test's next link().sendFrame() then met that operation and
+ * failed with Busy ("TX operation already active"). With the CPUs loaded
+ * about 1 run in 70 failed that way, in the ASan and the plain build alike:
+ * mostly in test_e2e_property_value_write_individual_address_via_properties,
+ * where the address change also has the RX thread save to persistence first,
+ * and in test_e2e_classic_and_extended_descriptions_agree.
  */
 
 #include "unity.h"
@@ -11,16 +27,14 @@
 #include "knx/application/apci_services.hpp"
 #include "knx/datalink/frame_codec.hpp"
 #include "knx/bau/bau.hpp"
-#include "knx/platform/linux_platform.hpp"
+#include "knx/platform/virtual_platform.hpp"
+#include "knx/platform/virtual_test_clock.hpp"
 #include "knx/objects/device_object.hpp"
 #include "knx/protocol/tpdu_codec.hpp"
 #include "../mocks/mock_physical_layer.hpp"
-#include <chrono>
 #include <filesystem>
 #include <memory>
-#include <mutex>
 #include <span>
-#include <thread>
 #include <vector>
 #include "knx/objects/object_persistence.hpp"
 
@@ -28,22 +42,15 @@ using namespace knx;
 using namespace knx::test;
 
 static MockPhysicalLayer* physicalLayer;
-static std::unique_ptr<knx::platform::LinuxPlatform> platformInstance;
+static knx::platform::VirtualTestClock testClock;
+static std::unique_ptr<knx::platform::VirtualPlatform> platformInstance;
 static std::unique_ptr<bau::BusAccessUnit> bauUnit;
 static std::vector<std::pair<knx::GroupObjectIndex, std::vector<uint8_t>>> receivedWrites;
 static std::vector<knx::GroupObjectIndex> receivedReads;
-static std::mutex receivedWritesMutex;
-static std::mutex receivedReadsMutex;
 
 static void clearReceivedCallbacks() {
-    {
-        std::lock_guard<std::mutex> lock(receivedWritesMutex);
-        receivedWrites.clear();
-    }
-    {
-        std::lock_guard<std::mutex> lock(receivedReadsMutex);
-        receivedReads.clear();
-    }
+    receivedWrites.clear();
+    receivedReads.clear();
 }
 
 static void pumpBau(int iterations = 1) {
@@ -52,53 +59,33 @@ static void pumpBau(int iterations = 1) {
     }
 }
 
-static bool waitForReceivedWrites(size_t expected, uint32_t timeoutMs = 250) {
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
-    while (std::chrono::steady_clock::now() < deadline) {
-        {
-            std::lock_guard<std::mutex> lock(receivedWritesMutex);
-            if (receivedWrites.size() >= expected) {
-                return true;
-            }
-        }
-
+/// Run the device for up to @p timeoutMs of virtual time, one millisecond at
+/// a time, until @p done. The time is the device's, not the host's: a loaded
+/// or instrumented host makes the test slower, never different.
+template <typename Done>
+static bool runUntil(Done done, uint32_t timeoutMs) {
+    for (uint32_t elapsedMs = 0;; ++elapsedMs) {
         pumpBau();
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (done()) {
+            return true;
+        }
+        if (elapsedMs >= timeoutMs) {
+            return false;
+        }
+        platformInstance->advanceTimeMs(1u);
     }
+}
 
-    std::lock_guard<std::mutex> lock(receivedWritesMutex);
-    return receivedWrites.size() >= expected;
+static bool waitForReceivedWrites(size_t expected, uint32_t timeoutMs = 250) {
+    return runUntil([&]() { return receivedWrites.size() >= expected; }, timeoutMs);
 }
 
 static bool waitForReceivedReads(size_t expected, uint32_t timeoutMs = 250) {
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
-    while (std::chrono::steady_clock::now() < deadline) {
-        {
-            std::lock_guard<std::mutex> lock(receivedReadsMutex);
-            if (receivedReads.size() >= expected) {
-                return true;
-            }
-        }
-
-        pumpBau();
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-
-    std::lock_guard<std::mutex> lock(receivedReadsMutex);
-    return receivedReads.size() >= expected;
+    return runUntil([&]() { return receivedReads.size() >= expected; }, timeoutMs);
 }
 
 static bool waitForSentFrame(std::vector<uint8_t>& frame, uint32_t timeoutMs = 250) {
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
-    while (std::chrono::steady_clock::now() < deadline) {
-        pumpBau();
-        if (physicalLayer->tryGetSentFrame(frame)) {
-            return true;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-
-    return physicalLayer->getSentFrame(frame, 1);
+    return runUntil([&]() { return physicalLayer->tryGetSentFrame(frame); }, timeoutMs);
 }
 
 static void drainSentFrames() {
@@ -136,7 +123,8 @@ static void clearPersistenceStore() {
 void setUp(void) {
     clearPersistenceStore();
 
-    platformInstance = std::make_unique<knx::platform::LinuxPlatform>();
+    testClock.reset();
+    platformInstance = std::make_unique<knx::platform::VirtualPlatform>(testClock);
     auto ownedPhysical = std::make_unique<MockPhysicalLayer>();
     physicalLayer = ownedPhysical.get();
     auto stackPort = knx::test::createTp1TestStackPort(*platformInstance, std::move(ownedPhysical));
@@ -148,12 +136,10 @@ void setUp(void) {
 
     // Register callbacks by group-object index
     bauUnit->setGroupObjectWriteCallback([](knx::GroupObjectIndex idx, std::span<const uint8_t> data) {
-        std::lock_guard<std::mutex> lock(receivedWritesMutex);
         receivedWrites.push_back({idx, std::vector<uint8_t>(data.begin(), data.end())});
     });
 
     bauUnit->setGroupObjectReadCallback([](knx::GroupObjectIndex idx) {
-        std::lock_guard<std::mutex> lock(receivedReadsMutex);
         receivedReads.push_back(idx);
     });
 
@@ -254,12 +240,11 @@ void test_e2e_group_write_ack(void) {
 
     // Group-addressed telegrams must not emit TP1 ACKs.
     std::vector<uint8_t> ack;
-    TEST_ASSERT_FALSE(physicalLayer->getSentFrame(ack));
+    TEST_ASSERT_FALSE(physicalLayer->tryGetSentFrame(ack));
 
     // Application callback fired (object index 0 = GA(5,3,7))
     TEST_ASSERT_TRUE(waitForReceivedWrites(1));
     {
-        std::lock_guard<std::mutex> lock(receivedWritesMutex);
         TEST_ASSERT_EQUAL(1, static_cast<int>(receivedWrites.size()));
         TEST_ASSERT_EQUAL(0, static_cast<int>(receivedWrites[0].first.value()));
         TEST_ASSERT_EQUAL(0x01, receivedWrites[0].second[0]);
@@ -300,7 +285,6 @@ void test_e2e_group_read_ack(void) {
     // Read callback fired (object index 1 = GA(1,2,3))
     TEST_ASSERT_TRUE(waitForReceivedReads(1));
     {
-        std::lock_guard<std::mutex> lock(receivedReadsMutex);
         TEST_ASSERT_EQUAL(1, static_cast<int>(receivedReads.size()));
         TEST_ASSERT_EQUAL(1, static_cast<int>(receivedReads[0].value()));
     }
@@ -335,11 +319,10 @@ void test_e2e_other_group_no_ack(void) {
 
     // No ACK expected
     std::vector<uint8_t> maybeAck;
-    TEST_ASSERT_FALSE(physicalLayer->getSentFrame(maybeAck));
+    TEST_ASSERT_FALSE(physicalLayer->tryGetSentFrame(maybeAck));
 
     // No callbacks fired
     {
-        std::lock_guard<std::mutex> lock(receivedWritesMutex);
         TEST_ASSERT_TRUE(receivedWrites.empty());
     }
 }
@@ -378,7 +361,6 @@ void test_e2e_invalid_crc_no_dl_nack_frame(void) {
 
     // No callbacks on bad checksum
     {
-        std::lock_guard<std::mutex> lock(receivedWritesMutex);
         TEST_ASSERT_TRUE(receivedWrites.empty());
     }
 }

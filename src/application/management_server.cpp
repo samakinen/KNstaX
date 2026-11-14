@@ -151,7 +151,8 @@ void ManagementServer::registerPropertyObject(InterfaceObjectType objectType,
 }
 
 util::Result<void> ManagementServer::registerMemoryRegion(const MemoryRegion& region,
-                                                          std::span<uint8_t> storage)
+                                                          std::span<uint8_t> storage,
+                                                          MemoryWriteGuard writeGuard)
 {
     if (!_addressSpace || !_memoryService) {
         return util::Result<void>::err(util::ErrorCode::NotInitialized);
@@ -164,7 +165,7 @@ util::Result<void> ManagementServer::registerMemoryRegion(const MemoryRegion& re
     if (addRes.isError()) {
         return addRes;
     }
-    if (!_memorySegments.push_back(MemorySegmentBinding{region, storage})) {
+    if (!_memorySegments.push_back(MemorySegmentBinding{region, storage, false, std::move(writeGuard)})) {
         return util::Result<void>::err(util::ErrorCode::ResourceUnavailable);
     }
 
@@ -186,6 +187,12 @@ util::Result<void> ManagementServer::registerMemoryRegion(const MemoryRegion& re
         [this](MemoryAddress address, std::span<const uint8_t> data) -> util::Result<void> {
             for (auto& segment : _memorySegments) {
                 if (segment.region.containsRange(address, static_cast<uint8_t>(data.size()))) {
+                    if (segment.writeGuard && !segment.writeGuard()) {
+                        KNX_LOGW(TAG, "Write into %s at 0x%04X refused in its current load state",
+                                 segment.region.name != nullptr ? segment.region.name : "region",
+                                 static_cast<unsigned>(address.raw));
+                        return util::Result<void>::err(util::ErrorCode::AccessDenied);
+                    }
                     const uint32_t offset = static_cast<uint32_t>(address.raw)
                                           - static_cast<uint32_t>(segment.region.startAddress.raw);
                     std::copy(data.begin(), data.end(), segment.storage.data() + offset);

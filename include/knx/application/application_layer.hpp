@@ -224,10 +224,12 @@ public:
      * Used by the ETS SystemB download procedure: loadable table segments are
      * exposed via PID_TABLE_REFERENCE and transferred with A_Memory_Write /
      * A_Memory_Read within the registered address range. The storage must
-     * outlive the application layer.
+     * outlive the application layer. @p writeGuard, when set, is asked
+     * before every write into the region.
      */
-    util::Result<void> registerMemoryRegion(const MemoryRegion& region, std::span<uint8_t> storage) {
-        return _management.registerMemoryRegion(region, storage);
+    util::Result<void> registerMemoryRegion(const MemoryRegion& region, std::span<uint8_t> storage,
+                                            MemoryWriteGuard writeGuard = {}) {
+        return _management.registerMemoryRegion(region, storage, std::move(writeGuard));
     }
 
     void setManagementServerHooks(ManagementServerHooks hooks) { _management.setHooks(std::move(hooks)); }
