@@ -31,6 +31,7 @@ HPAI_PROTO_TCP = 0x02
 CRI_LENGTH = 0x04
 CRI_CONN_TUNNEL = 0x04
 CRI_LAYER_TP1 = 0x02
+CRD_LENGTH = 0x04
 
 TUNNELING_HEADER_LENGTH = 0x04
 
@@ -102,7 +103,14 @@ def parse_connect_request(pkt: bytes) -> Tuple[Optional[Hpai], Optional[Hpai]]:
     return ctrl, data
 
 
-def build_connect_response(channel_id: int, status: int, data_endpoint: Hpai, *, hpai_proto: int = HPAI_PROTO_UDP) -> bytes:
+def build_connect_response(
+    channel_id: int,
+    status: int,
+    data_endpoint: Hpai,
+    *,
+    tunnel_address: int,
+    hpai_proto: int = HPAI_PROTO_UDP,
+) -> bytes:
     # We include: [channel(1)][status(1)][HPAI data endpoint (8)][CRD (4)]
     body = bytearray()
     body.append(channel_id & 0xFF)
@@ -121,8 +129,13 @@ def build_connect_response(channel_id: int, status: int, data_endpoint: Hpai, *,
         )
     )
 
-    # CRD: same format as CRI in our client code.
-    body.extend(bytes([CRI_LENGTH, CRI_CONN_TUNNEL, CRI_LAYER_TP1, 0x00]))
+    # CRD of a tunnelling connection (03/08/04 §5.4.4): length, connection
+    # type, then the Individual Address the server assigned to the tunnel.
+    # It is NOT the CRI echoed back: the CRI's "layer 02h, reserved 00h" read
+    # as a CRD is the address 0.2.0, and a client that adopts the tunnel
+    # address -- xknx does, as current_address -- then sends every telegram
+    # from 0.2.0 instead of the address its keyring expects.
+    body.extend(bytes([CRD_LENGTH, CRI_CONN_TUNNEL, (tunnel_address >> 8) & 0xFF, tunnel_address & 0xFF]))
 
     pkt = build_header(ST_CONNECTION_RESPONSE, len(body))
     pkt.extend(body)

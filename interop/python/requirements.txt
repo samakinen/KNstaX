@@ -4,4 +4,8 @@ pytest-timeout>=2.3
 
 # Used by optional KNX Data Secure interop tests.
 # Tests will still be skipped unless XKNX_KNXKEYS_FILE and XKNX_KNXKEYS_PASSWORD are set.
-xknx
+# Pinned: the Data Secure tests build signed .knxkeys with xknx.secure.keyring
+# internals (KeyringSAXContentHandler, hash_keyring_password), and xknx takes
+# its source address from the CONNECT_RESPONSE CRD. Verified with 4.1.1
+# (November 2026); move the pin deliberately, with a full interop run.
+xknx==4.1.1

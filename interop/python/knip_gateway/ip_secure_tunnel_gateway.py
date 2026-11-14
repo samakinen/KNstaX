@@ -494,6 +494,8 @@ class KnxIpSecureTunnelingGateway:
             channel_id=client.channel_id,
             status=knxip_codec.E_NO_ERROR,
             data_endpoint=knxip_codec.Hpai(ip=gw_ip, port=gw_port),
+            # Same numbering as the UDP gateway: channel n is tunnel 1.1.n.
+            tunnel_address=0x1100 + (client.channel_id & 0xFF),
             hpai_proto=knxip_codec.HPAI_PROTO_TCP,
         )
         await self._send_secure(client, resp)

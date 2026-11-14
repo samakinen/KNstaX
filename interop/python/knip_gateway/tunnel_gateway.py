@@ -187,6 +187,9 @@ class KnxIpTunnelingGateway:
             channel_id=ch,
             status=knxip_codec.E_NO_ERROR,
             data_endpoint=knxip_codec.Hpai(ip=gw_ip, port=gw_port),
+            # Channel n is tunnel 1.1.n, so the tests' first connection (the
+            # KNstaX peer) is 1.1.1 and the second (the client) 1.1.2.
+            tunnel_address=self._clients_by_channel[ch].assigned_ia_raw,
         )
         # Prefer replying to the observed source address (addr) to ensure
         # loopback tests receive responses from 127.0.0.1. Use the control

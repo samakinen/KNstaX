@@ -57,23 +57,13 @@ def _knstax_peer_path() -> Path:
 
 
 
-def _generate_knxkeys_file(*, out_path: Path, password: str, group_address: str, receiver_ia: str, senders_ia: list[str], group_key: bytes) -> None:
-    # Minimal ETS-style XML with one GA key and allowed senders
-    xml = f"""
-<Keyring xmlns="http://knx.org/xml/keyring/1" Project="KNstaX-Interop" ToolVersion="1.0">
-  <KeyringItems>
-    <GroupAddressKey GroupAddress="{group_address}" Key="{group_key.hex()}"/>
-    <IndividualAddressKey IndividualAddress="{receiver_ia}" ToolKey="{secrets.token_hex(16)}"/>
-  </KeyringItems>
-  <Authorizations>
-    <GroupAddressAuthorization GroupAddress="{group_address}">
-      {''.join(f'<AuthorizedSource IndividualAddress="{ia}"/>' for ia in senders_ia)}
-    </GroupAddressAuthorization>
-  </Authorizations>
-  <Password>{password}</Password>
-</Keyring>
-""".strip()
-    out_path.write_text(xml, encoding="utf-8")
+# The keyring has to be a real, signed ETS keyring: xknx verifies the
+# signature against the password before it reads a single key. This file used
+# to write an ad-hoc XML of its own (unsigned, and not the ETS schema), which
+# xknx refused to load -- so the Data Secure case below was skipped on every
+# run while looking like part of the suite. The generator the dedicated Data
+# Secure tests use is the one ETS-compatible implementation; use it here too.
+from tests.test_knstax_data_secure_xknx import _generate_knxkeys_file  # noqa: E402
 
 
 # -------------------- Parametrized scenarios --------------------
@@ -127,13 +117,11 @@ async def test_interop_bidir_write_and_read_response(transport_secure: bool, dat
             senders_ia=[knstax_own, xknx_ia],
             group_key=group_key,
         )
-        try:
-            keyring = sync_load_keyring(str(knxkeys_file_path), knxkeys_password)
-            ga_keys = keyring.get_data_secure_group_keys()
-            if ga_obj not in ga_keys:
-                pytest.skip(f"Secured GA {group_address} not present in keyring")
-        except Exception as exc:  # pragma: no cover
-            pytest.skip(f"Failed to load keyring: {exc}")
+        # The keyring is generated right here, so a load failure is a bug in
+        # the test, not a missing optional input: fail rather than skip.
+        keyring = sync_load_keyring(str(knxkeys_file_path), knxkeys_password)
+        ga_keys = keyring.get_data_secure_group_keys()
+        assert ga_obj in ga_keys, f"Secured GA {group_address} not present in the generated keyring"
         secure_config = SecureConfig(knxkeys_file_path=str(knxkeys_file_path), knxkeys_password=knxkeys_password)
 
     # IP Secure tunneling requires user credentials even without Data Secure

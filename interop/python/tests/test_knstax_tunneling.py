@@ -90,6 +90,13 @@ def _make_l_data_req(
     return cemi_codec.encode_l_data(frame, message_code=cemi_codec.CEMI_MC_L_DATA_REQ)
 
 
+def _make_individual_l_data_req(*, src_ia: str, dst_ia: str, apci_service: int, data6: int = 0) -> bytes:
+    """Connectionless point-to-point (T_Data_Individual) L_Data.req."""
+    tpdu = cemi_codec.pack_tpdu(0x00, cemi_codec.apci(apci_service, data6), b"")
+    frame = cemi_codec.LDataFrame(src=_ia(src_ia), dst=_ia(dst_ia), is_group=False, tpdu=tpdu)
+    return cemi_codec.encode_l_data(frame, message_code=cemi_codec.CEMI_MC_L_DATA_REQ)
+
+
 @pytest.mark.asyncio
 async def test_client_to_knstax_groupwrite_udp_tunneling():
     peer = _knstax_peer_path()
@@ -540,9 +547,13 @@ async def test_client_device_descriptor_read_response_udp_tunneling():
         client = KnxIpTunnelingClient()
         await client.start((host, port), local_ip="127.0.0.1")
         try:
-            req = _make_l_data_req(
+            # A_DeviceDescriptor_Read is point-to-point only (03/03/07 Table 1:
+            # connectionless or connection-oriented), so it goes to the peer's
+            # individual address. Sent to a group address -- as this test once
+            # did -- the device correctly ignores it.
+            req = _make_individual_l_data_req(
                 src_ia="1.1.2",
-                dst_ga="1/0/0",
+                dst_ia="1.1.1",
                 apci_service=cemi_codec.APCI_DEVICE_DESCRIPTOR_READ,
                 data6=0,
             )
