@@ -64,8 +64,8 @@ RawRxHeader parseRawRxHeader(std::span<const uint8_t> buffer) {
     }
 
     header.valid = true;
-    const uint16_t destRaw = (static_cast<uint16_t>(buffer[DEST_ADDR_HI_POS]) << 8)
-                           | buffer[DEST_ADDR_LO_POS];
+    const uint16_t destRaw = static_cast<uint16_t>((buffer[DEST_ADDR_HI_POS] << 8)
+                                                   | buffer[DEST_ADDR_LO_POS]);
     header.destination = GroupAddress(destRaw);
     header.destinationType = (buffer[LENGTH_POS] & DEST_ADDR_TYPE) != 0
         ? AddressType::Group

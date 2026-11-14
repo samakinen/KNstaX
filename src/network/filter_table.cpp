@@ -92,7 +92,7 @@ util::Result<void> FilterTable::loadTable(std::span<const uint8_t> data) {
     
     _defaultAction = (data[0] != 0) ? FilterAction::Block : FilterAction::Allow;
     
-    uint16_t count = (static_cast<uint16_t>(data[1]) << 8) | data[2];
+    uint16_t count = static_cast<uint16_t>((data[1] << 8) | data[2]);
     const size_t expectedSize = 3u + (static_cast<size_t>(count) * 5u);
     if (data.size() != expectedSize) {
         KNX_LOGE(TAG, "Invalid filter table size");
@@ -104,8 +104,8 @@ util::Result<void> FilterTable::loadTable(std::span<const uint8_t> data) {
     size_t offset = 3;
     for (uint16_t i = 0; i < count; i++) {
         FilterEntry entry;
-        entry.address.raw = (static_cast<uint16_t>(data[offset]) << 8) | data[offset + 1];
-        entry.mask.raw = (static_cast<uint16_t>(data[offset + 2]) << 8) | data[offset + 3];
+        entry.address.raw = static_cast<uint16_t>((data[offset] << 8) | data[offset + 1]);
+        entry.mask.raw = static_cast<uint16_t>((data[offset + 2] << 8) | data[offset + 3]);
         entry.action = (data[offset + 4] != 0) ? FilterAction::Block : FilterAction::Allow;
         entry.enabled = EntryState::Enabled;
         

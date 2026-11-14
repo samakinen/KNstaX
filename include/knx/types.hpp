@@ -276,13 +276,11 @@ struct IndividualAddress : Address16Base<IndividualAddress> {
     uint8_t line() const { return part1(); }
     uint8_t device() const { return part2(); }
     static constexpr uint16_t encode2Parts(uint8_t part0, uint8_t part2) {
-        return (static_cast<uint16_t>(part0) << 8) | part2;
+        return static_cast<uint16_t>((part0 << 8) | part2);
     }
 
     static constexpr uint16_t encode3Parts(uint8_t part0, uint8_t part1, uint8_t part2) {
-        return (static_cast<uint16_t>(part0 & 0x0F) << 12) |
-               (static_cast<uint16_t>(part1 & 0x0F) << 8) |
-               part2;
+        return static_cast<uint16_t>(((part0 & 0x0F) << 12) | ((part1 & 0x0F) << 8) | part2);
     }
 };
 
@@ -364,13 +362,11 @@ struct GroupAddress : Address16Base<GroupAddress> {
     uint8_t middle() const { return part1(); }
     uint8_t sub() const { return part2(); }
     static constexpr uint16_t encode2Parts(uint8_t part0, uint16_t part2) {
-        return (static_cast<uint16_t>(part0 & 0x1F) << 11) | (part2 & 0x07FF);
+        return static_cast<uint16_t>(((part0 & 0x1F) << 11) | (part2 & 0x07FF));
     }
 
     static constexpr uint16_t encode3Parts(uint8_t part0, uint8_t part1, uint8_t part2) {
-        return (static_cast<uint16_t>(part0 & 0x1F) << 11) |
-               (static_cast<uint16_t>(part1 & 0x07) << 8) |
-               part2;
+        return static_cast<uint16_t>(((part0 & 0x1F) << 11) | ((part1 & 0x07) << 8) | part2);
     }
 };
 

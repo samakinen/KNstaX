@@ -650,7 +650,7 @@ private:
             return;
         }
 
-        const uint16_t destRaw = (static_cast<uint16_t>(_rxDstHi) << 8) | _rxDstLo;
+        const uint16_t destRaw = static_cast<uint16_t>((_rxDstHi << 8) | _rxDstLo);
         bool addressed;
         if (isGroupAddressed) {
             // Group frames: the device is addressed when the destination is in

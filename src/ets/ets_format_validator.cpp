@@ -95,7 +95,7 @@ uint16_t FormatValidator::crc16_ccitt(std::span<const uint8_t> data) {
 
     for (uint8_t byte : data) {
         uint8_t index = static_cast<uint8_t>((crc >> 8) ^ byte);
-        crc = (crc << 8) ^ crc16_table[index];
+        crc = static_cast<uint16_t>((crc << 8) ^ crc16_table[index]);
     }
 
     return crc;
@@ -120,7 +120,7 @@ util::Result<void> FormatValidator::isValidFormat(std::span<const uint8_t> buffe
         return util::ErrorCode::InvalidFrameSize;
     }
 
-    uint16_t magic = (static_cast<uint16_t>(buffer[0]) << 8) | buffer[1];
+    uint16_t magic = static_cast<uint16_t>((buffer[0] << 8) | buffer[1]);
     if (magic != FORMAT_MAGIC) {
         return util::ErrorCode::DecodeFailed;
     }
@@ -132,7 +132,7 @@ uint8_t FormatValidator::detectFormatVersion(std::span<const uint8_t> buffer) {
         return 0;  // Unknown/invalid
     }
 
-    uint16_t magic = (static_cast<uint16_t>(buffer[0]) << 8) | buffer[1];
+    uint16_t magic = static_cast<uint16_t>((buffer[0] << 8) | buffer[1]);
     if (magic != FORMAT_MAGIC) {
         return 0;
     }
@@ -175,7 +175,7 @@ FormatValidator::ValidationResult FormatValidator::validateFull(
     }
     
     // Extract header checksum (at offset 6-7)
-    uint16_t storedHeaderCrc = (static_cast<uint16_t>(buffer[6]) << 8) | buffer[7];
+    uint16_t storedHeaderCrc = static_cast<uint16_t>((buffer[6] << 8) | buffer[7]);
     
     // Calculate header checksum (first 6 bytes)
     uint16_t calculatedHeaderCrc = crc16_ccitt(buffer.subspan(0, 6));

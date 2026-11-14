@@ -41,8 +41,8 @@ public:
         if (remaining() < 2) {
             return ErrorCode::BufferTooSmall;
         }
-        const uint16_t value = (static_cast<uint16_t>(std::to_integer<uint8_t>(_data[_offset])) << 8)
-                     | static_cast<uint16_t>(std::to_integer<uint8_t>(_data[_offset + 1]));
+        const uint16_t value = static_cast<uint16_t>((std::to_integer<uint8_t>(_data[_offset]) << 8)
+                                                     | std::to_integer<uint8_t>(_data[_offset + 1]));
         _offset += 2;
         return value;
     }

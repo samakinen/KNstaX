@@ -56,7 +56,7 @@ util::Result<T> decodeCommon(std::span<const uint8_t> payload, uint8_t expectedM
     T result{};
     result.connection.channelId = ChannelId(payload[1]);
     result.connection.sequenceCounter = payload[2];
-    result.target.objectType = InterfaceObjectType((static_cast<uint16_t>(payload[5]) << 8) | payload[6]);
+    result.target.objectType = InterfaceObjectType(static_cast<uint16_t>((payload[5] << 8) | payload[6]));
     result.target.objectInstance = InterfaceObjectInstance(payload[7]);
     result.target.propertyId = static_cast<application::PropertyID>(payload[8]);
     result.target.elementCount = static_cast<uint8_t>((payload[9] >> 4) & 0x0F);

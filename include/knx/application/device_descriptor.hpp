@@ -158,8 +158,8 @@ struct DeviceDescriptorType2 {
         desc.mediumType = static_cast<knx::MediumType>(data[0]);
         desc.firmwareVersion = data[1];
         desc.deviceType = DeviceType(static_cast<uint16_t>((data[2] << 8) | data[3]));
-        desc.applicationVersion = (static_cast<uint16_t>(data[4]) << 8) | data[5];
-        desc.linkMgmtProcedures = (static_cast<uint16_t>(data[6]) << 8) | data[7];
+        desc.applicationVersion = static_cast<uint16_t>((data[4] << 8) | data[5]);
+        desc.linkMgmtProcedures = static_cast<uint16_t>((data[6] << 8) | data[7]);
         std::copy(data.begin() + 8, data.end(), desc.reserved.begin());
         return desc;
     }

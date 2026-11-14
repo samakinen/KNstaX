@@ -171,7 +171,7 @@ constexpr T setBitsShifted(T value, T bits, T mask) {
  * @return Composed 16-bit value
  */
 constexpr uint16_t makeWord(uint8_t highByte, uint8_t lowByte) {
-    return (static_cast<uint16_t>(highByte) << 8) | lowByte;
+    return static_cast<uint16_t>((highByte << 8) | lowByte);
 }
 
 /**
@@ -299,7 +299,7 @@ constexpr uint8_t getLowNibble(uint8_t value) {
  * @return Composed byte
  */
 constexpr uint8_t makeNibbles(uint8_t high, uint8_t low) {
-    return ((high & 0x0F) << 4) | (low & 0x0F);
+    return static_cast<uint8_t>(((high & 0x0F) << 4) | (low & 0x0F));
 }
 
 /**
@@ -309,7 +309,7 @@ constexpr uint8_t makeNibbles(uint8_t high, uint8_t low) {
  * @return Byte with swapped nibbles
  */
 constexpr uint8_t swapNibbles(uint8_t value) {
-    return ((value & 0x0F) << 4) | ((value >> 4) & 0x0F);
+    return static_cast<uint8_t>(((value & 0x0F) << 4) | ((value >> 4) & 0x0F));
 }
 
 // ============================================================================
@@ -320,7 +320,7 @@ constexpr uint8_t swapNibbles(uint8_t value) {
  * @brief Swap byte order of 16-bit value
  */
 constexpr uint16_t swapBytes16(uint16_t value) {
-    return ((value & 0xFF) << 8) | ((value >> 8) & 0xFF);
+    return static_cast<uint16_t>(((value & 0xFF) << 8) | ((value >> 8) & 0xFF));
 }
 
 /**

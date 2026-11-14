@@ -362,7 +362,7 @@ util::Result<void> Dpt9::decode(std::span<const uint8_t> data, float& value) {
 
 // DPT 2 - 1-bit controlled (2 bits: control + value)
 util::Result<size_t> Dpt2::encode(bool control, bool value, std::span<uint8_t> data) {
-    uint8_t byte = ((control ? 1 : 0) << 1) | (value ? 1 : 0);
+    uint8_t byte = static_cast<uint8_t>(((control ? 1 : 0) << 1) | (value ? 1 : 0));
     return writeArray(std::array<uint8_t, 1>{byte}, data);
 }
 
@@ -384,7 +384,7 @@ util::Result<size_t> Dpt3::encode(bool control, uint8_t stepCode, std::span<uint
     if (stepCode > DPT3_STEPCODE_MASK) {
         return util::ErrorCode::InvalidParameter;
     }
-    uint8_t byte = ((control ? 1 : 0) << 3) | (stepCode & DPT3_STEPCODE_MASK);
+    uint8_t byte = static_cast<uint8_t>(((control ? 1 : 0) << 3) | (stepCode & DPT3_STEPCODE_MASK));
     return writeArray(std::array<uint8_t, 1>{byte}, data);
 }
 
@@ -466,13 +466,13 @@ util::Result<size_t> Dpt10::encode(uint8_t dayOfWeek, uint8_t hour, uint8_t minu
     }
     
     // Byte 0: [D D D H H H H H] - Day (3 bits) + Hour (5 bits)
-    uint8_t byte0 = ((dayOfWeek & 0x07) << 5) | (hour & DPT10_HOUR_MASK);
+    uint8_t byte0 = static_cast<uint8_t>(((dayOfWeek & 0x07) << 5) | (hour & DPT10_HOUR_MASK));
     
     // Byte 1: [M M M M M M S S] - Minutes (6 bits) + Seconds high (2 bits)
-    uint8_t byte1 = ((minute & DPT10_MINUTE_MASK) << 2) | ((second >> 4) & 0x03);
+    uint8_t byte1 = static_cast<uint8_t>(((minute & DPT10_MINUTE_MASK) << 2) | ((second >> 4) & 0x03));
     
     // Byte 2: [S S S S 0 0 0 0] - Seconds low (4 bits)
-    uint8_t byte2 = (second & DPT10_SECOND_MASK) << 4;
+    uint8_t byte2 = static_cast<uint8_t>((second & DPT10_SECOND_MASK) << 4);
 
     return writeArray(std::array<uint8_t, 3>{byte0, byte1, byte2}, data);
 }
@@ -488,7 +488,7 @@ util::Result<void> Dpt10::decode(std::span<const uint8_t> data, Value& time) {
     
     // Extract minutes and seconds
     time.minute = (data[1] >> 2) & DPT10_MINUTE_MASK;
-    time.second = ((data[1] & 0x03) << 4) | ((data[2] >> 4) & DPT10_SECOND_MASK);
+    time.second = static_cast<uint8_t>(((data[1] & 0x03) << 4) | ((data[2] >> 4) & DPT10_SECOND_MASK));
     
     // Validate ranges
     if (time.dayOfWeek > DPT10_MAX_DAY || time.hour > DPT10_MAX_HOUR || time.minute > DPT10_MAX_MINUTE || time.second > DPT10_MAX_SECOND) {
@@ -586,7 +586,7 @@ util::Result<void> Dpt19::decode(std::span<const uint8_t> data, Value& datetime)
     
     // Extract day of week and hour
     datetime.dayOfWeek = (data[3] >> 5) & 0x07;
-    datetime.hour = ((data[3] & 0x07) << 2) | ((data[4] >> 6) & 0x03);
+    datetime.hour = static_cast<uint8_t>(((data[3] & 0x07) << 2) | ((data[4] >> 6) & 0x03));
     
     // Extract minute and second
     datetime.minute = data[4] & 0x3F;
@@ -904,10 +904,10 @@ util::Result<void> Dpt242::decode(std::span<const uint8_t> data, Value& color) {
     }
     
     // x coordinate (big-endian)
-    color.x = (static_cast<uint16_t>(data[0]) << 8) | data[1];
+    color.x = static_cast<uint16_t>((data[0] << 8) | data[1]);
     
     // y coordinate (big-endian)
-    color.y = (static_cast<uint16_t>(data[2]) << 8) | data[3];
+    color.y = static_cast<uint16_t>((data[2] << 8) | data[3]);
     
     // Brightness
     color.brightness = data[4];
@@ -984,7 +984,7 @@ util::Result<void> Dpt244::decode(std::span<const uint8_t> data, Value& transiti
     transition.blue = data[2];
     
     // Fade time (big-endian)
-    transition.fadeTime = (static_cast<uint16_t>(data[3]) << 8) | data[4];
+    transition.fadeTime = static_cast<uint16_t>((data[3] << 8) | data[4]);
     
     transition.reserved = data[5];
     

@@ -80,7 +80,7 @@ struct TPCIField {
      * @brief Build a TPCI field from a base type and optional sequence number.
      */
     static constexpr TPCIField create(TPCI tpci, uint8_t seq = 0) {
-        return TPCIField(static_cast<uint8_t>(tpci) | ((seq & 0x0F) << 2));
+        return TPCIField(static_cast<uint8_t>(static_cast<uint8_t>(tpci) | ((seq & 0x0F) << 2)));
     }
 
     /**
@@ -94,14 +94,14 @@ struct TPCIField {
      * @brief Build a T_ACK TPCI field for a given sequence number.
      */
     static constexpr TPCIField ack(uint8_t seq) {
-        return TPCIField(static_cast<uint8_t>(TPCI::NumberedControl) | ((seq & 0x0F) << 2) | 0x02);
+        return TPCIField(static_cast<uint8_t>(static_cast<uint8_t>(TPCI::NumberedControl) | ((seq & 0x0F) << 2) | 0x02));
     }
 
     /**
      * @brief Build a T_NAK TPCI field for a given sequence number.
      */
     static constexpr TPCIField nak(uint8_t seq) {
-        return TPCIField(static_cast<uint8_t>(TPCI::NumberedControl) | ((seq & 0x0F) << 2) | 0x03);
+        return TPCIField(static_cast<uint8_t>(static_cast<uint8_t>(TPCI::NumberedControl) | ((seq & 0x0F) << 2) | 0x03));
     }
 };
 

@@ -170,12 +170,12 @@ util::Result<void> decodeCemiLData(std::span<const uint8_t> buffer,
     if (buffer.size() < idx + 6) { // src(2)+dst(2)+len(1)+tpci(1) minimal
         return util::ErrorCode::InvalidFrameSize;
     }
-    uint16_t src = (static_cast<uint16_t>(buffer[idx]) << 8) | buffer[idx + 1];
+    uint16_t src = static_cast<uint16_t>((buffer[idx] << 8) | buffer[idx + 1]);
     frame.source = IndividualAddress(src);
     idx += 2;
 
     // Destination address
-    uint16_t dst = (static_cast<uint16_t>(buffer[idx]) << 8) | buffer[idx + 1];
+    uint16_t dst = static_cast<uint16_t>((buffer[idx] << 8) | buffer[idx + 1]);
     frame.destination = GroupAddress(dst);
     idx += 2;
 
