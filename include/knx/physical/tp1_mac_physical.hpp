@@ -16,7 +16,7 @@
 #include <atomic>
 #include <cstddef>
 #include <memory>
-#include <mutex>
+#include "knx/platform/mutex.hpp"
 #include <span>
 
 namespace knx {
@@ -164,7 +164,7 @@ private:
     bool _gateTxOnLinkDown{true};
     LinkStateCallback _linkStateCallback{nullptr};
     void* _linkStateCallbackContext{nullptr};
-    std::mutex _rxMutex;
+    platform::LocalMutex _rxMutex;
     std::array<BufferedFrame, RX_QUEUE_CAPACITY> _rxFrames;
     size_t _rxHead;
     size_t _rxCount;

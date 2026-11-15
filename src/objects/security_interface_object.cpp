@@ -164,17 +164,17 @@ void SecurityInterfaceObject::applyDownloadedDeviceKeys(KeyMap resolved, bool ta
 // === Sequence Number Management ===
 
 uint64_t SecurityInterfaceObject::incrementSendingSequence() {
-    std::lock_guard<std::mutex> lock(_sequenceMutex);
+    platform::LocalLock<platform::LocalMutex> lock(_sequenceMutex);
     return ++_sendingSequence;
 }
 
 uint64_t SecurityInterfaceObject::getSendingSequenceThreadSafe() const {
-    std::lock_guard<std::mutex> lock(_sequenceMutex);
+    platform::LocalLock<platform::LocalMutex> lock(_sequenceMutex);
     return _sendingSequence;
 }
 
 util::Result<void> SecurityInterfaceObject::updateReceivingSequence(uint64_t seq) {
-    std::lock_guard<std::mutex> lock(_sequenceMutex);
+    platform::LocalLock<platform::LocalMutex> lock(_sequenceMutex);
     
     // Sequence number must be strictly increasing
     if (seq <= _receivingSequence) {
@@ -189,29 +189,29 @@ util::Result<void> SecurityInterfaceObject::updateReceivingSequence(uint64_t seq
 }
 
 void SecurityInterfaceObject::setSendingSequence(uint64_t seq) {
-    std::lock_guard<std::mutex> lock(_sequenceMutex);
+    platform::LocalLock<platform::LocalMutex> lock(_sequenceMutex);
     _sendingSequence = seq;
     KNX_LOGD("KNX.Security", "Sending sequence set to %llu", (unsigned long long)seq);
 }
 
 void SecurityInterfaceObject::setSendingSequenceSilent(uint64_t seq) {
-    std::lock_guard<std::mutex> lock(_sequenceMutex);
+    platform::LocalLock<platform::LocalMutex> lock(_sequenceMutex);
     _sendingSequence = seq;
 }
 
 void SecurityInterfaceObject::setReceivingSequence(uint64_t seq) {
-    std::lock_guard<std::mutex> lock(_sequenceMutex);
+    platform::LocalLock<platform::LocalMutex> lock(_sequenceMutex);
     _receivingSequence = seq;
     KNX_LOGD("KNX.Security", "Receiving sequence set to %llu", (unsigned long long)seq);
 }
 
 uint64_t SecurityInterfaceObject::getToolAccessSequence() const {
-    std::lock_guard<std::mutex> lock(_sequenceMutex);
+    platform::LocalLock<platform::LocalMutex> lock(_sequenceMutex);
     return _toolAccessSequence;
 }
 
 void SecurityInterfaceObject::setToolAccessSequence(uint64_t seq) {
-    std::lock_guard<std::mutex> lock(_sequenceMutex);
+    platform::LocalLock<platform::LocalMutex> lock(_sequenceMutex);
     if (seq == _toolAccessSequence) {
         return;
     }
@@ -220,13 +220,13 @@ void SecurityInterfaceObject::setToolAccessSequence(uint64_t seq) {
 }
 
 uint64_t SecurityInterfaceObject::getPeerSequence(const IndividualAddress& address) const {
-    std::lock_guard<std::mutex> lock(_sequenceMutex);
+    platform::LocalLock<platform::LocalMutex> lock(_sequenceMutex);
     auto it = _peerSequences.find(address.raw);
     return it == _peerSequences.end() ? 0u : it->second;
 }
 
 void SecurityInterfaceObject::setPeerSequence(const IndividualAddress& address, uint64_t seq) {
-    std::lock_guard<std::mutex> lock(_sequenceMutex);
+    platform::LocalLock<platform::LocalMutex> lock(_sequenceMutex);
     auto& stored = _peerSequences[address.raw];
     if (stored == seq) {
         return;
@@ -246,7 +246,7 @@ void SecurityInterfaceObject::setPeerSequence(const IndividualAddress& address, 
 }
 
 void SecurityInterfaceObject::syncSequencesFromAddressTable() {
-    std::lock_guard<std::mutex> lock(_sequenceMutex);
+    platform::LocalLock<platform::LocalMutex> lock(_sequenceMutex);
 
     const auto it = _extraProperties.find(SecurityProperty::SecurityIndividualAddressTable);
     if (it == _extraProperties.end()) {
@@ -271,12 +271,12 @@ void SecurityInterfaceObject::syncSequencesFromAddressTable() {
 }
 
 bool SecurityInterfaceObject::sequenceStateDirty() const {
-    std::lock_guard<std::mutex> lock(_sequenceMutex);
+    platform::LocalLock<platform::LocalMutex> lock(_sequenceMutex);
     return _sequenceStateDirty;
 }
 
 void SecurityInterfaceObject::clearSequenceStateDirty() {
-    std::lock_guard<std::mutex> lock(_sequenceMutex);
+    platform::LocalLock<platform::LocalMutex> lock(_sequenceMutex);
     _sequenceStateDirty = false;
 }
 

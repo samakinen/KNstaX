@@ -181,6 +181,22 @@ else()
     
     cmake_minimum_required(VERSION 3.21)
     project(KNstaX VERSION ${KNX_VERSION_NUMERIC} LANGUAGES C CXX)
+
+    # KNX_PLATFORM=baremetal: a single-threaded target without an RTOS (see
+    # include/knx/platform/cooperative_platform.hpp). Host-only groups and
+    # media a small end device never links default to OFF; the product can
+    # still override any of them on the command line. KNX_PLATFORM must be
+    # given explicitly, with a toolchain file for the target.
+    if(DEFINED KNX_PLATFORM AND KNX_PLATFORM STREQUAL "baremetal")
+        foreach(_knx_off IN ITEMS KNX_SECURE_ENABLED KNX_ZLIB_ENABLED KNX_FEATURE_COUPLER
+                KNX_FEATURE_NETIP KNX_FEATURE_TUNNELING KNX_FEATURE_VIRTUAL_BUS
+                KNX_FEATURE_ETS_TOOLING KNX_ENABLE_TEST_HOOKS BUILD_TESTS)
+            if(NOT DEFINED ${_knx_off})
+                set(${_knx_off} OFF CACHE BOOL "Default for KNX_PLATFORM=baremetal")
+            endif()
+        endforeach()
+    endif()
+
     option(KNX_SECURE_ENABLED "Enable KNX Secure features (mbedTLS AES + PBKDF2 required)" ON)
     option(KNX_BUILD_EXAMPLES "Build standalone examples" OFF)
     option(KNX_ZLIB_ENABLED "Enable optional zlib/DEFLATE support for the KNXprog importer" ON)
@@ -229,7 +245,7 @@ else()
         elseif(UNIX AND NOT APPLE)
             set(KNX_PLATFORM "linux")
         else()
-            message(FATAL_ERROR "Unknown platform. Please specify -DKNX_PLATFORM=linux|macos|windows")
+            message(FATAL_ERROR "Unknown platform. Please specify -DKNX_PLATFORM=linux|macos|windows|baremetal")
         endif()
     endif()
 
@@ -271,7 +287,13 @@ else()
     set(COMMON_SOURCES ${KNX_SOURCES_CORE})
 
     if(KNX_FEATURE_TP1)
-        list(APPEND COMMON_SOURCES ${KNX_SOURCES_TP1})
+        if(KNX_PLATFORM STREQUAL "baremetal")
+            # The bit-bang backend is ESP-IDF only. The product adds its own
+            # backend (for example a TP-UART one) to its target.
+            list(APPEND COMMON_SOURCES ${KNX_SOURCES_TP1_COMMON})
+        else()
+            list(APPEND COMMON_SOURCES ${KNX_SOURCES_TP1})
+        endif()
     endif()
     if(KNX_FEATURE_NETIP)
         list(APPEND COMMON_SOURCES ${KNX_SOURCES_NETIP})
@@ -315,9 +337,15 @@ else()
     elseif(KNX_PLATFORM STREQUAL "windows")
         # Platform stubs for host builds do not require additional sources
         set(PLATFORM_LIBS)
+    elseif(KNX_PLATFORM STREQUAL "baremetal")
+        set(PLATFORM_LIBS)
     else()
         message(FATAL_ERROR "Unknown platform: ${KNX_PLATFORM}")
     endif()
+
+    # CooperativePlatform is the platform on baremetal and is portable, so host
+    # builds compile it too and test it (test_cooperative_platform).
+    list(APPEND PLATFORM_SOURCES ${KNX_SOURCES_PLATFORM_COOPERATIVE})
 
     if(KNX_ZLIB_ENABLED)
         find_package(ZLIB QUIET)
@@ -364,6 +392,11 @@ else()
             ${MBEDCRYPTO_LIBRARY}
             ${MBEDTLS_LIBRARY}
         )
+    endif()
+
+    if(KNX_PLATFORM STREQUAL "baremetal")
+        # PUBLIC: selects platform::LocalMutex in headers the product includes.
+        target_compile_definitions(knx_core PUBLIC KNX_PLATFORM_BAREMETAL=1)
     endif()
 
     target_compile_definitions(knx_core PUBLIC
@@ -474,6 +507,8 @@ else()
         knx_add_test(test_routing_table_control SOURCES test/unit/test_routing_table_control.cpp LABELS unit)
         knx_add_test(test_coupler_routing SOURCES test/unit/test_coupler_routing.cpp LABELS unit)
         knx_add_test(test_bau_router_role SOURCES test/integration/test_bau_router_role.cpp LABELS integration)
+        knx_add_test(test_cooperative_platform SOURCES test/unit/test_cooperative_platform.cpp LABELS unit)
+        knx_add_test(test_persistence_factory SOURCES test/unit/test_persistence_factory.cpp LABELS unit)
         knx_add_test(test_persistence_schema_version SOURCES test/integration/test_persistence_schema_version.cpp
             LABELS integration RUN_SERIAL)
         knx_add_test(test_link_monitor SOURCES test/unit/test_link_monitor.cpp LABELS physical unit)

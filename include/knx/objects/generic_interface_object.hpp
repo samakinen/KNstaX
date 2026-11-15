@@ -15,7 +15,7 @@
 #include "knx/objects/reference_object_registry.hpp"
 #include "knx/util/result.hpp"
 #include <map>
-#include <mutex>
+#include "knx/platform/mutex.hpp"
 #include <vector>
 
 namespace knx {
@@ -136,7 +136,7 @@ private:
     static constexpr size_t kMaxHandlerCount = kMaxRegistrationCount + 1u;
 
     InterfaceObjectType _type;
-    mutable std::mutex _valuesMutex;
+    mutable platform::LocalMutex _valuesMutex;
     std::map<application::PropertyID, std::vector<uint8_t>> _values;
     util::FixedVector<GenericPropertyInfo, kMaxRegistrationCount> _handlerInfo;
     util::FixedVector<PropertyHandler, kMaxHandlerCount> _handlers;

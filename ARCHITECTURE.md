@@ -187,6 +187,18 @@ Current state:
 
 Protocol and data-link code should depend only on the smallest required subset of platform behavior.
 
+### Cooperative (single-threaded) mode
+
+A target without an RTOS builds with `-DKNX_PLATFORM=baremetal` (standalone CMake, with a toolchain file such as `cmake/toolchains/arm-none-eabi.cmake`). `KNX_PLATFORM_BAREMETAL` then selects:
+
+- `platform::LocalMutex` and `platform::LocalLock` (`knx/platform/mutex.hpp`) as no-ops where hosts use `std::mutex`. The arm-none-eabi libstdc++ has no `std::mutex`. Data shared with an interrupt must not rely on them; it uses critical sections.
+- `platform::CooperativePlatform` (`knx/platform/cooperative_platform.hpp`): tasks are refused, locks never block, queues are fixed rings that fail instead of waiting, and a notification from an interrupt sets a flag the main loop reads.
+- `Tp1DataLinkLayer` without an RX task (`config::RX_TASK_ENABLED_DEFAULT` is false). The main loop drives it through `processRxAvailable()`, which `BusAccessStackPort::processBackgroundWork()` already calls.
+- No default `ObjectPersistence`. The product registers one with `objects::setPersistenceFactory()`.
+- No system-clock fallback in `util::nowMs()` / `util::delayMs()`: time comes from the platform, which `BusAccessStackPort` now also hands to `Tp1MacPhysical`.
+
+The bit-bang backend is not built in this mode; the product adds its own `Tp1MediumBackend`. `test/baremetal/size_gate` links a reference device in this configuration and checks it against flash and RAM budgets (`test/baremetal/size_gate/run_gate.sh`). Status of the bare-metal work and the measured sizes: `docs/design/cortex-m-tpuart2-support.md`.
+
 ## Execution model
 
 TP1 receive processing uses a common async service model:

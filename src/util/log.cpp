@@ -11,7 +11,7 @@
 #include <cstring>
 #include <string>
 #include <map>
-#include <mutex>
+#include "knx/platform/mutex.hpp"
 #include <string_view>
 
 #if __has_include("esp_log.h")
@@ -89,7 +89,7 @@ Level minLevel = Level::Info;  // Default runtime level
 // Per-module log levels. std::less<> lets a lookup take the tag as a
 // string_view, so resolving a level never builds a std::string.
 std::map<std::string, Level, std::less<>> g_moduleLevels;
-std::mutex g_moduleLevelsMutex;
+platform::LocalMutex g_moduleLevelsMutex;
 std::atomic<bool> g_hasModuleLevels{false};
 
 // Every log call resolves its tag, twice with KNX_LOGx (isLevelEnabled, then
@@ -121,7 +121,7 @@ Level resolveEffectiveLevel(const char* tag) {
         return minLevel;
     }
 
-    std::lock_guard<std::mutex> lock(g_moduleLevelsMutex);
+    platform::LocalLock<platform::LocalMutex> lock(g_moduleLevelsMutex);
     for (const TagCacheEntry& entry : g_tagCache) {
         if (entry.tag == tag) {
             return entry.hasOverride ? entry.level : minLevel;
@@ -153,7 +153,7 @@ Level getLevel() {
 
 void setModuleLevel(const char* tag, Level level) {
     if (!tag || tag[0] == '\0') return;  // Ignore null or empty tags
-    std::lock_guard<std::mutex> lock(g_moduleLevelsMutex);
+    platform::LocalLock<platform::LocalMutex> lock(g_moduleLevelsMutex);
     g_moduleLevels[tag] = level;
     clearTagCacheLocked();
     g_hasModuleLevels.store(true, std::memory_order_release);
@@ -165,7 +165,7 @@ Level getModuleLevel(const char* tag) {
 
 void clearModuleLevel(const char* tag) {
     if (!tag || tag[0] == '\0') return;  // Ignore null or empty tags
-    std::lock_guard<std::mutex> lock(g_moduleLevelsMutex);
+    platform::LocalLock<platform::LocalMutex> lock(g_moduleLevelsMutex);
     auto it = g_moduleLevels.find(std::string_view(tag));
     if (it != g_moduleLevels.end()) g_moduleLevels.erase(it);
     clearTagCacheLocked();
@@ -173,7 +173,7 @@ void clearModuleLevel(const char* tag) {
 }
 
 void clearAllModuleLevels() {
-    std::lock_guard<std::mutex> lock(g_moduleLevelsMutex);
+    platform::LocalLock<platform::LocalMutex> lock(g_moduleLevelsMutex);
     g_moduleLevels.clear();
     clearTagCacheLocked();
     g_hasModuleLevels.store(false, std::memory_order_release);

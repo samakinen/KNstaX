@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | **Accepted** 15 November 2026, including the compact profile (K7) as KNstaX scope even though it changes core structures such as group object storage. The first target runs bare metal with no RTOS. Nothing here is implemented yet. Per DEVELOPMENT_GUIDELINES, README.md and the conformance status must not claim any of it until it ships with tests. |
+| Status | **Accepted** 15 November 2026, including the compact profile (K7) as KNstaX scope even though it changes core structures such as group object storage. The first target runs bare metal with no RTOS. **K1 is implemented** (§6.3). **K7 is started and the size gate (M1) is missed** (§9.1). Everything else is not implemented. Per DEVELOPMENT_GUIDELINES, README.md and the conformance status must not claim more than ships with tests. |
 | Motivating product | H8i8o 8DI/8DO module: GD32F103CB (Cortex-M3, 128 KiB flash, 20 KiB RAM) + Siemens TP-UART2. Its design lives in the h8i8o repository, `docs/design/`. |
 | Principle | Everything here is generic. A different board, MCU, I/O count or TP-UART-family chip should be able to use it unchanged. Board facts (pins, clocks, flash geometry) stay in the product repository. |
 
@@ -279,6 +279,24 @@ run the full stack over the simulated chip against `xknx`, as it does for bit-ba
   `__attribute__((section(".ramfunc")))` on Cortex-M, empty on hosts. Applied to the TP-UART RX
   engine and the acknowledge lookup.
 
+### 6.3 Status of K1 (16 November 2026)
+
+Implemented and tested:
+
+- `KNX_PLATFORM=baremetal` in the standalone CMake, `cmake/toolchains/arm-none-eabi.cmake`, and the TP1 source list split into `KNX_SOURCES_TP1_COMMON` and `KNX_SOURCES_TP1_BITBANG_ESPIDF`. A bare-metal build contains no host-only groups and no bit-bang backend.
+- `platform::LocalMutex` / `LocalLock` in place of `std::mutex` in the core. All 46 core translation units compile for Cortex-M3 without a stand-in.
+- `CooperativePlatform` (`test_cooperative_platform`, on the host).
+- `Tp1DataLinkLayer` defaults to no RX task in this mode. `processRxAvailable()` was already called from the BAU's background work.
+- A product-supplied persistence through `objects::setPersistenceFactory()` (`test_persistence_factory`, on the host). The file backend (`<fstream>`, `<filesystem>`) is no longer compiled in.
+- Two defects the cross-build exposed, both fixed for every platform: `Tp1MacPhysical` was never given the platform's clock by the stack port, so on a target without a system clock its timeouts could not expire; and `util::nowMs()` / `delayMs()` fell back to `std::chrono` / `std::this_thread`, which the target lacks.
+
+The host suite (149 tests, excluding the Long, benchmark and interop labels) passes with these changes.
+
+Not done:
+
+- `KNX_ISR_RAM`, which the TP-UART RX engine (K3) needs.
+- On-target verification. The reference device has only been run under QEMU (Cortex-M3, `mps2-an385`), to measure heap use.
+
 ## 7. K5: `FlashLogPersistence`
 
 An `ObjectPersistence` implementation over:
@@ -328,6 +346,8 @@ wins.
 
 ## 9. K7: compact device profile
 
+> **Superseded by [small-target-profile.md](small-target-profile.md)** (16 November 2026). After the M1 measurement in §9.1, K7 is replaced by a build-time configuration system (Kconfig for every build, profiles, capacities as options) plus four structural changes. The table below is kept as the original plan.
+
 Goal: a TP1 end device with ≤ 60 group objects links into **≤ 88 KiB of flash and ≤ 10 KiB of
 RAM** (static plus heap high-water mark) for the KNstaX share on Cortex-M3 at `-Os` with LTO.
 The numbers are those of the H8i8o budget; the mechanisms are generic.
@@ -348,6 +368,58 @@ The numbers are those of the H8i8o budget; the mechanisms are generic.
 
 All steps keep the ESP32 and host builds behaving the same. They are a feature diet selected by
 configuration, not a fork.
+
+### 9.1 M1 result (16 November 2026): the budget is missed
+
+Reference device: `test/baremetal/size_gate`, a TP1 end device with 60 group objects (40 x DPT 1, 8 x DPT 5, 4 x DPT 3, 4 x DPT 17, 4 x DPT 18; no float type) and a null medium backend, started through `startCommissionedProduct()`. Cortex-M3, `-Os`, LTO, `--gc-sections`, newlib-nano, logging compiled out. Run `test/baremetal/size_gate/run_gate.sh`.
+
+Measured at KNstaX `ef4ed60` plus the K1 changes, **before K7 steps 1-5 and 8** (steps 6 and 7 are in the gate's configuration):
+
+| | Measured | Budget | Over by |
+|---|---:|---:|---:|
+| KNstaX flash (stack, product runtime and start-up glue) | **132.4 KiB** | 88 KiB | +44.4 KiB |
+| KNstaX RAM, static | 1.7 KiB | | |
+| KNstaX RAM, heap high-water after `startCommissionedProduct()` | **65.1 KiB** | | |
+| KNstaX RAM, static + heap | **66.9 KiB** | 10 KiB | +56.9 KiB |
+| C/C++ runtime flash | 11.6 KiB | 8 KiB | +3.6 KiB |
+
+Where the heap goes. The high-water mark is reached during start-up and does not grow over 200 further loop iterations with the null backend. Traffic buffers on a real bus are not included.
+
+| Allocation | Bytes |
+|---|---:|
+| 61 x group object (`sizeof` 248 B) | 15 128 |
+| `CommissionedProductRuntime` (60 bindings) | 12 184 |
+| `Tp1MacPhysical` (receive frame ring) | 8 488 |
+| `Tp1DataLinkLayer` | 5 752 |
+| `InterfaceObjectManager` | 5 424 |
+| `BusAccessUnit` | 5 312 |
+| Association table (maximum capacity) | 3 472 |
+| `TransportLayer` | 2 880 |
+| Group object table, application layer, other | about 8 000 |
+
+Group objects (step 4) are therefore about a quarter of the heap, not nearly all of it as the plan assumed. The stack's own structures are the larger part, and most of them are sized by the maximum capacities in `config.hpp`, which is step 5's territory.
+
+Flash, from the symbols in the LTO image: the product runtime templates (`EndpointRuntime`, the start-up inlined into `main`, bindings and port specs) come to about 32 KB, roughly 500 B per port. They are instantiated once per port, and none of K7's eight steps addresses them. `BusAccessUnit` (8 KB), `ApplicationLayer` (6 KB), `BusAccessStackPort` (5 KB), `Tp1DataLinkLayer`, `DeviceManagement` and `TransportLayer` (4 KB each) follow.
+
+Upper bounds for the K7 steps not yet applied, from the symbols the LTO image keeps (a step cannot save more than this):
+
+| Step | Flash | RAM |
+|---|---:|---:|
+| 1. DPT codecs from the product | at most 8.5 KiB (dispatch 2, catalogue 1.7, soft-float 4.8) | |
+| 2. Coupler sources gated | at most 5.5 KiB | |
+| 3. Security Interface Object and GO diagnostics gated | at most 3.2 KiB | |
+| 4. Compact group objects (248 B to 32 B or less) | | about 13 KiB |
+| 5. Table and queue capacities from the product | | several KiB (`Tp1MacPhysical`, data link layer, association table) |
+
+Together that is at most about 17 KiB of flash, which would leave about 115 KiB against a budget of 88, and a RAM figure in the tens of KiB against a budget of 10. Steps 1-5 are therefore not enough, and the first decision gate is **no-go for the plan as written**. These are estimates, not measurements. The steps were not applied, because the owner decides what happens after a missed gate (H8i8o design, section 11). The fall-backs in H8i8o design section 4.3 apply.
+
+The probe of 15 November (`tools/size-probe` in h8i8o) was optimistic for two reasons. It passed `-DKNX_LOG_LEVEL=1`, which nothing reads (the macro is `KNX_LOG_LEVEL_COMPILE`), and it measured no RAM at all.
+
+### 9.2 Size gate tooling
+
+- `test/baremetal/size_gate/`: the reference device, memory map, start-up code and `size_budget.json`. The memory map is larger than the real part on purpose, so that an over-budget image still links and the script can say by how much.
+- `scripts/ci/knstax_size_gate.py`: reads the linker map and splits the KNstaX share from the C/C++ runtime. libc and libstdc++ members stay attributable under LTO; KNstaX does not, so its share includes a few lines of glue. It checks flash and RAM against the budget. It is a new script because `knstax_size_budget.py` reads ESP-IDF maps and counts one archive; the ESP-IDF gate is unchanged.
+- `run_gate.sh`: builds the LTO image, runs a semihosting variant under QEMU for the heap high-water mark (with an allocation-size profile), and runs the script. It exits 1 when over budget. It is not wired into CI yet.
 
 ## 10. K8: `knx/blocks`
 

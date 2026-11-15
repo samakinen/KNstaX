@@ -112,6 +112,9 @@ public:
         : _platform(platform)
         , _macPhysical(std::make_unique<physical::Tp1MacPhysical>(std::move(mediumBackend)))
     {
+        // The MAC measures its own timeouts. Without the platform it falls
+        // back to the host's system clock, which a bare-metal target lacks.
+        _macPhysical->setTimingPlatform(&_platform);
     }
 #endif
 

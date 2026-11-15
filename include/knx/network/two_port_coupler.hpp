@@ -23,7 +23,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
-#include <mutex>
+#include "knx/platform/mutex.hpp"
 
 namespace knx {
 namespace network {
@@ -196,7 +196,7 @@ private:
     /// the receive path of every forwarded frame, on the medium least able to
     /// afford one.
     struct RecentHashes {
-        std::mutex mutex;
+        platform::LocalMutex mutex;
         std::array<uint64_t, kRecentHashCapacity> values{};
         size_t count{0};
         size_t next{0};

@@ -18,7 +18,7 @@
 #include <array>
 #include <vector>
 #include <map>
-#include <mutex>
+#include "knx/platform/mutex.hpp"
 
 namespace knx {
 namespace objects {
@@ -374,7 +374,7 @@ private:
     uint16_t _lastFailureSource;
     
     // Thread safety for sequence numbers
-    mutable std::mutex _sequenceMutex;
+    mutable platform::LocalMutex _sequenceMutex;
 
     // Storage for additional secure interface properties (reference use)
     std::map<SecurityProperty, std::vector<uint8_t>> _extraProperties;

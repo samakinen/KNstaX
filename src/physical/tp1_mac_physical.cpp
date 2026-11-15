@@ -99,7 +99,7 @@ void Tp1MacPhysical::close() {
     _txOutcomeSequence = 0;
 
     {
-        std::lock_guard<std::mutex> lock(_rxMutex);
+        platform::LocalLock<platform::LocalMutex> lock(_rxMutex);
         _rxHead = 0;
         _rxCount = 0;
         _rxHeld = false;
@@ -233,7 +233,7 @@ util::Result<void> Tp1MacPhysical::beginReceive(uint32_t timeoutMs) {
 
     {
         // The caller is done with the frame the previous receive handed out.
-        std::lock_guard<std::mutex> lock(_rxMutex);
+        platform::LocalLock<platform::LocalMutex> lock(_rxMutex);
         releaseHeldFrameLocked();
     }
 
@@ -255,7 +255,7 @@ util::Result<Tp1MacPhysical::ProgressState> Tp1MacPhysical::pollReceive() {
     (void)_backend->service();
 
     {
-        std::lock_guard<std::mutex> lock(_rxMutex);
+        platform::LocalLock<platform::LocalMutex> lock(_rxMutex);
         releaseHeldFrameLocked();
         if (_rxCount > 0) {
             // Hand the queue slot itself to the caller instead of copying it
@@ -480,7 +480,7 @@ void Tp1MacPhysical::handleTp1Event(const Tp1RxEvent& event) {
     }
 
     {
-        std::lock_guard<std::mutex> lock(_rxMutex);
+        platform::LocalLock<platform::LocalMutex> lock(_rxMutex);
         if (_rxCount >= RX_QUEUE_CAPACITY) {
             // Only reachable when more than RX_BUSY_RESERVE frames were
             // acknowledged before the busy state reached the ISR. The newest

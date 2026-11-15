@@ -125,9 +125,25 @@ public:
     virtual std::vector<std::string> listKeys() = 0;
 };
 
+/// Creates a persistence backend; see setPersistenceFactory().
+using PersistenceFactory = std::unique_ptr<ObjectPersistence> (*)();
+
 /**
- * @brief Create platform-specific persistence instance
- * @return Unique pointer to persistence implementation for current platform
+ * @brief Make createPersistence() return the product's own storage backend
+ *
+ * Registered before the stack starts. It replaces the platform default (NVS
+ * on ESP-IDF, files on hosts) and is the only source of storage on a
+ * bare-metal build, which has no default. Pass nullptr to restore the default.
+ *
+ * @thread_safety NOT thread-safe: call during initialisation, before
+ *                `BusAccessUnit::init()` or `startCommissionedProduct()`.
+ */
+void setPersistenceFactory(PersistenceFactory factory);
+
+/**
+ * @brief Create the persistence instance for this build
+ * @return The registered factory's backend, else the platform default.
+ *         `nullptr` on a bare-metal build with no factory registered.
  */
 std::unique_ptr<ObjectPersistence> createPersistence();
 

@@ -24,6 +24,15 @@ namespace config {
 // Task Configuration
 // ============================================================================
 
+// Whether the TP1 data link layer runs receive processing on its own task.
+// A single-threaded (KNX_PLATFORM_BAREMETAL) build has no scheduler, so the
+// main loop drives it through processRxAvailable() instead.
+#if defined(KNX_PLATFORM_BAREMETAL)
+    constexpr bool RX_TASK_ENABLED_DEFAULT = false;
+#else
+    constexpr bool RX_TASK_ENABLED_DEFAULT = true;
+#endif
+
 #ifdef CONFIG_KNX_RX_TASK_STACK_SIZE
     constexpr uint32_t RX_TASK_STACK_SIZE = CONFIG_KNX_RX_TASK_STACK_SIZE;
 #else

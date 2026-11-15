@@ -10,9 +10,11 @@
 #pragma once
 
 #include "knx/config.hpp"
-#include "knx/netip/ip_secure/mc_timer_store.hpp"
 #include "knx/objects/object_persistence.hpp"
+#if KNX_FEATURE_NETIP
+#include "knx/netip/ip_secure/mc_timer_store.hpp"
 #include "knx/physical/ip_routing_physical.hpp"
+#endif
 #if KNX_IP_TUNNELING
 #include "knx/physical/ip_tunneling_physical.hpp"
 #endif

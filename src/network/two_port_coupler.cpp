@@ -130,13 +130,13 @@ uint64_t TwoPortCoupler::hashFrame(const datalink::LDataFrame& frame) {
 
 bool TwoPortCoupler::shouldDropDueToRecent(Port port, uint64_t h) {
     RecentHashes& r = recentFor(port);
-    std::lock_guard<std::mutex> lock(r.mutex);
+    platform::LocalLock<platform::LocalMutex> lock(r.mutex);
     return r.contains(h);
 }
 
 void TwoPortCoupler::rememberSentTo(Port port, uint64_t h) {
     RecentHashes& r = recentFor(port);
-    std::lock_guard<std::mutex> lock(r.mutex);
+    platform::LocalLock<platform::LocalMutex> lock(r.mutex);
     r.remember(h);
 }
 

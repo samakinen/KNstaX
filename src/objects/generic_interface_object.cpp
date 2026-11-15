@@ -176,7 +176,7 @@ util::Result<void> GenericInterfaceObject::readGeneric(
     if (const auto* binding = domain->findBinding(info->id); binding != nullptr && binding->read) {
         data = binding->read();
     } else {
-        std::lock_guard<std::mutex> lock(domain->_valuesMutex);
+        platform::LocalLock<platform::LocalMutex> lock(domain->_valuesMutex);
         auto it = domain->_values.find(info->id);
         if (it == domain->_values.end()) {
             return util::Result<void>::err(util::ErrorCode::OperationNotSupported);
@@ -253,7 +253,7 @@ util::Result<void> GenericInterfaceObject::writeGeneric(
     std::vector<uint8_t> observed;
     bool notify = false;
     {
-        std::lock_guard<std::mutex> lock(domain->_valuesMutex);
+        platform::LocalLock<platform::LocalMutex> lock(domain->_valuesMutex);
         auto it = domain->_values.find(info->id);
         if (it == domain->_values.end()) {
             return util::Result<void>::err(util::ErrorCode::OperationNotSupported);
@@ -329,13 +329,13 @@ const GenericInterfaceObject::PropertyBinding* GenericInterfaceObject::findBindi
 
 void GenericInterfaceObject::setWriteValidator(WriteValidator validator)
 {
-    std::lock_guard<std::mutex> lock(_valuesMutex);
+    platform::LocalLock<platform::LocalMutex> lock(_valuesMutex);
     _writeValidator = std::move(validator);
 }
 
 void GenericInterfaceObject::setWriteObserver(WriteObserver observer)
 {
-    std::lock_guard<std::mutex> lock(_valuesMutex);
+    platform::LocalLock<platform::LocalMutex> lock(_valuesMutex);
     _writeObserver = std::move(observer);
 }
 
@@ -371,14 +371,14 @@ util::Result<void> GenericInterfaceObject::setPropertyValue(application::Propert
         return util::ErrorCode::BufferTooSmall;
     }
 
-    std::lock_guard<std::mutex> lock(_valuesMutex);
+    platform::LocalLock<platform::LocalMutex> lock(_valuesMutex);
     _values[propertyId].assign(value.begin(), value.end());
     return util::Result<void>::ok();
 }
 
 std::vector<uint8_t> GenericInterfaceObject::propertyValue(application::PropertyID propertyId) const
 {
-    std::lock_guard<std::mutex> lock(_valuesMutex);
+    platform::LocalLock<platform::LocalMutex> lock(_valuesMutex);
     const auto it = _values.find(propertyId);
     return it == _values.end() ? std::vector<uint8_t>{} : it->second;
 }

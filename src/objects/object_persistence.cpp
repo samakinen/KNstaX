@@ -13,11 +13,11 @@
 #include <array>
 #include <cstdio>
 
-#ifdef ESP_PLATFORM
+#if defined(ESP_PLATFORM)
 #include "esp_err.h"
 #include "nvs_flash.h"
 #include "nvs.h"
-#else
+#elif !defined(KNX_PLATFORM_BAREMETAL)
 #include <fstream>
 #include <filesystem>
 #include <map>
@@ -31,7 +31,7 @@ static const char* TAG = "KNX.Persistence";
 namespace knx {
 namespace objects {
 
-#ifndef ESP_PLATFORM
+#if !defined(ESP_PLATFORM) && !defined(KNX_PLATFORM_BAREMETAL)
 namespace {
 
 /// Default root when KNX_NVS_ROOT is unset. A pure function of the PID, so the
@@ -68,14 +68,17 @@ const std::string& resolvedRootDir()
 
 std::string persistenceRootDir()
 {
-#ifdef ESP_PLATFORM
+#if defined(ESP_PLATFORM)
     // NVS-backed; no filesystem root involved.
     return std::string();
-#else
+#elif !defined(KNX_PLATFORM_BAREMETAL)
     // Per-process by default. Host test binaries share namespace names (several
     // use "knx_objects") and wipe the namespace on startup, so a single shared
     // root means concurrently running tests delete each other's state.
     return resolvedRootDir();
+#else
+    // No filesystem; the product supplies its own persistence.
+    return std::string();
 #endif
 }
 
@@ -99,7 +102,7 @@ constexpr std::array<char, 6> makeCompactKey(uint16_t keyId)
 
 } // namespace
 
-#ifdef ESP_PLATFORM
+#if defined(ESP_PLATFORM)
 /**
  * @brief ESP32 NVS-based persistence implementation
  */
@@ -367,7 +370,7 @@ private:
     bool _initialized;
 };
 
-#else // Linux/other platforms
+#elif !defined(KNX_PLATFORM_BAREMETAL)
 
 /**
  * @brief File-based persistence implementation
@@ -599,12 +602,26 @@ private:
 
 #endif
 
+namespace {
+PersistenceFactory g_persistenceFactory = nullptr;
+}  // namespace
+
+void setPersistenceFactory(PersistenceFactory factory) {
+    g_persistenceFactory = factory;
+}
+
 // Factory function
 std::unique_ptr<ObjectPersistence> createPersistence() {
-#ifdef ESP_PLATFORM
+    if (g_persistenceFactory != nullptr) {
+        return g_persistenceFactory();
+    }
+#if defined(ESP_PLATFORM)
     return std::make_unique<NvsPersistence>();
-#else
+#elif !defined(KNX_PLATFORM_BAREMETAL)
     return std::make_unique<FilePersistence>();
+#else
+    // A bare-metal build has no default storage; the product registers one.
+    return nullptr;
 #endif
 }
 

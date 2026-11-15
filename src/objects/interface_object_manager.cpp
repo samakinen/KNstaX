@@ -262,6 +262,10 @@ util::Result<void> InterfaceObjectManager::init(bool enablePersistence,
     
     if (_persistenceEnabled) {
         _persistence = createPersistence();
+        if (!_persistence) {
+            KNX_LOGE(TAG, "Persistence enabled but no backend is available");
+            return util::ErrorCode::NotInitialized;
+        }
         const std::string ns = persistenceNamespace.empty() ? "knx_objects" : std::string(persistenceNamespace);
         auto initRes = _persistence->init(ns);
         if (initRes.isError()) {

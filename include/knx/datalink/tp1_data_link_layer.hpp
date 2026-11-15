@@ -253,7 +253,7 @@ struct Tp1DataLinkConfig {
     uint32_t rxTaskStackSize{config::RX_TASK_STACK_SIZE};  // RX task stack size in bytes
     uint32_t rxTaskPriority{5};      // RX task priority (0 = lowest)
     uint32_t txMutexTimeout{1000};   // TX mutex timeout in milliseconds
-    bool enableRxTask{true};         // Run RX processing on a background task
+    bool enableRxTask{config::RX_TASK_ENABLED_DEFAULT};  // Run RX processing on a background task; false: the main loop calls processRxAvailable()
     
     static Tp1DataLinkConfig defaults() {
         return Tp1DataLinkConfig{};

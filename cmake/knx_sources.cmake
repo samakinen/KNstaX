@@ -72,13 +72,25 @@ set(KNX_SOURCES_CORE
 )
 
 # --- TP1 medium ----------------------------------------------------------
-set(KNX_SOURCES_TP1
+# The MAC-side physical layer every TP1 backend sits behind.
+set(KNX_SOURCES_TP1_COMMON
     "src/physical/tp1_mac_physical.cpp"
+)
+
+# The ESP-IDF bit-bang backend and the factory that creates it. A backend is
+# selected at build time; a build that uses another one does not compile these.
+set(KNX_SOURCES_TP1_BITBANG_ESPIDF
     "src/physical/bitbang_driver_timer_isr.cpp"
     "src/physical/bitbang_driver_timer_isr_espidf.cpp"
     "src/physical/bitbang_medium_backend_adapter.cpp"
     "src/physical/timer_gpio_hal_espidf.cpp"
     "src/physical/physical_factory.cpp"
+)
+
+# Everything the ESP-IDF and host builds have always built for TP1.
+set(KNX_SOURCES_TP1
+    ${KNX_SOURCES_TP1_COMMON}
+    ${KNX_SOURCES_TP1_BITBANG_ESPIDF}
 )
 
 # --- KNXnet/IP medium ----------------------------------------------------
@@ -192,5 +204,11 @@ set(KNX_SOURCES_PLATFORM_ESPIDF
 
 set(KNX_SOURCES_PLATFORM_LINUX
     "src/platform/linux_platform.cpp"
+)
+
+# Single-threaded targets without an RTOS (KNX_PLATFORM=baremetal). Portable;
+# a host build may compile it too, to run the platform's unit tests.
+set(KNX_SOURCES_PLATFORM_COOPERATIVE
+    "src/platform/cooperative_platform.cpp"
 )
 

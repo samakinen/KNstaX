@@ -307,6 +307,7 @@ validation on real transceivers.
 - GCC 13+, Clang 17+, AppleClang 16+ or MSVC 19.38+ (C++23)
 - CMake 3.21+
 - ESP-IDF 5.3+ for ESP32 targets
+- Cortex-M without an RTOS: `-DKNX_PLATFORM=baremetal` builds and links (see ARCHITECTURE.md, "Cooperative mode"). It has not run on hardware, and the reference device does not yet fit a 128 KiB / 20 KiB part; see `docs/design/cortex-m-tpuart2-support.md` §9.1.
 
 ### Installing as an ESP-IDF component
 
