@@ -393,6 +393,35 @@ group objects as opaque transport for larger blobs, and budget for it: the cost
 is paid twice per object, so a 40-object device pays 80× whatever you add.
 Oversized payloads are rejected with `BufferTooSmall`, never truncated.
 
+## Heap policy: lock the heap after start-up
+
+In a profile with `KNX_HEAP_POLICY=init_only` (`tp1-small`, `tp1-standard`) the
+stack allocates while it starts and not afterwards. Call `knx::heap::lock()`
+(`knx/util/heap.hpp`) once your own start-up is over, after
+`startCommissionedProduct()` returns and your product has built what it needs.
+From then on an allocation through `operator new` is a defect: it traps in a
+debug build, and in a release build it fails as an exhausted heap does
+(`operator new` aborts, `new (std::nothrow)` returns null). Your own code is
+included: the lock covers every allocation in the image, not only the stack's.
+
+- Persistence is part of this. A `Persistence` backend should write to its own
+  storage (flash) and not allocate per save; the stack's save buffer is
+  reserved when persistence starts.
+- Register `knx::heap::setHighWaterHook()` with a function that returns your
+  allocator's peak (on newlib, the highest `_sbrk` break minus the heap start);
+  `knx::heap::highWater()` then reports it. `_sbrk` is yours, so the stack
+  cannot read it.
+- `knx::heap::setViolationHandler()` lets a test run on and list every
+  allocation after the lock (its size and caller) instead of trapping. The size
+  gate (`test/baremetal/size_gate`) does this.
+- In a `free` profile (the default on hosts and ESP-IDF) `lock()` only records
+  the state; calling it is harmless.
+- Capacities that are promises for the whole run are reserved when the stack
+  starts: the transport connection entries (one on an end device), the group
+  objects and their value pool, the persistence save buffer. A host-side table
+  that grows after start (`BusAccessUnit::addGroupObject`, an ETS-driven table
+  beyond what was reserved) allocates and so belongs before `lock()`.
+
 ## Persistence schema version — bump it when the layout changes
 
 ```cpp

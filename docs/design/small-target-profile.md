@@ -160,7 +160,7 @@ copy.
 | Symbol | Choices | `tp1-small` |
 |---|---|---|
 | `KNX_PLATFORM` | `espidf`, `linux`, `macos`, `windows`, `baremetal` (exists as a CMake variable) | `baremetal` |
-| `KNX_HEAP_POLICY` | `free` (today), `init_only` (allocation after `heap::lock()` traps in debug builds and fails in release), `arena` (one static arena of `KNX_HEAP_ARENA_BYTES`, no `malloc`) | `init_only` |
+| `KNX_HEAP_POLICY` | `free` (today), `init_only` (allocation after `heap::lock()` traps in debug builds and fails in release; built in S4), `arena` (one static arena of `KNX_HEAP_ARENA_BYTES`, no `malloc`; not built) | `init_only` |
 | `KNX_PERSISTENCE_BACKEND` | `nvs`, `file`, `flash_log` (K5), `product` (factory only) | `flash_log` |
 | `KNX_CALLBACK_CAPTURE_BYTES` | Cap on the inline capture of the stack's `InplaceFunction` callbacks (32 or 64 today; 0 keeps them; never raises a size). Built in S2 as a Capacities symbol, not a policy; the product's own callbacks are not affected | 8 (`tp1-standard` 8; the host profiles 0) |
 
@@ -284,21 +284,74 @@ what was reserved; a product that registers everything at start never sees that.
 
 ### 6.3 S3: interface object property storage (RAM and flash)
 
-**Today.** `GenericInterfaceObject` stores values in
-`std::map<PropertyID, std::vector<uint8_t>>`, with registration tables built at run time.
+**What the attribution found (the premise changed).** The S3 sketch assumed that
+`GenericInterfaceObject`'s `std::map<PropertyID, std::vector<uint8_t>>` and its run-time registration
+tables were a large part of the `tp1-small` heap. Measured, they are not on that device: a
+`GenericInterfaceObject` (2296 B, of which the two fixed 64-entry handler tables are most) exists only
+for the *reference* object types a product or the management model asks for, and the 60-object
+reference device asks for none, so no property map is built. Where the 1.7 KB in the
+`InterfaceObjectManager` went is stated in §9 (S3/S4 status): it was a second, never used set of table
+objects.
 
-**Proposed.** Property declarations become `constexpr` tables, as most of them already are in
-source. Values live in one flat buffer per object, sized from the declarations. Persistence
-keys become the existing `u16` ids, and the `std::string` key surface is no longer needed on
-small targets. This also removes `std::map` and `std::string` from the steady-state code paths.
+**Built.**
+
+- The `InterfaceObjectManager` no longer owns a second set of tables. Its default constructor (used
+  by tests) allocates them; the BAU's manager, built over the BAU's own objects, owns none: 1668 B.
+- Steady-state allocation in the stack's own code was removed where the traffic run found it (§6.4):
+  the connection table's entries and the persistence save buffer.
+
+**Not built.** A flat per-object value buffer and `constexpr` handler tables for
+`GenericInterfaceObject`. The declarations (`referenceObjectProperties()`) are already `constexpr`
+tables, but their `maxElements` is the protocol's limit (0xFFFF for a dozen properties, such as the
+cEMI additional info types or the E-Mode lists), reported by the property description service, not a
+storage capacity. A buffer sized from them is either huge or needs a *second* number per property, a
+declared storage capacity (a capacity is a promise, §3.3 rule 2), which only the product that
+instantiates the object can choose. That is a design decision for the products that use reference
+objects (the IP and coupler profiles), not a saving on `tp1-small`, and it changes what a write of
+more than the capacity returns, so it was not done here. `std::string` keys remain in the persistence
+interface (`ObjectPersistence::save/load(const std::string&)`) for the named records; the interface
+objects' records already use the `u16` ids on the save path.
 
 ### 6.4 S4: allocation policy (RAM; K7 step 8)
 
-With `KNX_HEAP_POLICY=init_only`, all allocation happens while `startCommissionedProduct()`
-runs. `knx::heap::lock()` then makes further allocation an error, a trap in debug builds, and
-the high-water mark is reported. With `arena`, `operator new` serves from one static block and
-there is no `malloc` at all. That keeps newlib's allocator out of the image and makes the RAM
-figure a link-time constant.
+**Built.** `KNX_HEAP_POLICY` (Kconfig choice, menu "Memory"; §4.3): `free` (the default on host,
+`full` and ESP-IDF) and `init_only` (`tp1-small`, `tp1-standard`).
+
+- `include/knx/util/heap.hpp`, `src/util/heap.cpp`: `heap::lock()`, `unlock()`, `isLocked()`,
+  `allocationCount()`, `violationCount()`, `setViolationHandler()`, `setHighWaterHook()`,
+  `highWater()` and the decision function `admit()`.
+- With `init_only` the library replaces the allocating `operator new` (and `new[]`, and the
+  `nothrow` forms) with ones that ask `admit()` first and then call `malloc`; `operator delete` is the
+  toolchain's. Locked, a debug build (no `NDEBUG`) executes `__builtin_trap()`; a release build refuses
+  the allocation, which for `operator new` ends in `std::abort()` (the stack is built with
+  `-fno-exceptions`, so that is what an exhausted heap does anyway; with exceptions it throws
+  `std::bad_alloc`) and for `new (std::nothrow)` is a null return. A violation handler, when installed,
+  is told the size and the return address and the allocation goes ahead (the gate uses this to list
+  every steady-state allocation).
+- **Who locks.** The product calls `heap::lock()` when its own start-up is over, not the runtime: a
+  lock inside `startCommissionedProduct()` would also cover whatever the product allocates afterwards
+  (a flash driver, an application task), which is the product's to decide. The product authoring
+  guide says so.
+- **High-water mark.** `_sbrk` belongs to the product, so `highWater()` calls a hook the product
+  registers (the gate registers its `_sbrk` mark). No counting allocator is built into the library: an
+  unsized `operator delete` cannot know a block's size without a header on every allocation.
+- **`arena`** (one static block, no `malloc`) is not implemented; it would also need the `operator
+  delete` side and a fixed-block allocator, and nothing has asked for the link-time-constant RAM
+  figure yet.
+
+**The check.** The gate image locks the heap after start-up and then runs its whole traffic sequence
+(§7). Allocations that run found, and what was done:
+
+| Found | Size | Action |
+|---|---|---|
+| `ConnectionTable::createConnection` (entry, state machine, vector slot) | 60 + 36 + 4 B per T_Connect | entries and state machines built in `init()`, kept in a spare list |
+| `InterfaceObjectManager::saveToPersistence` (a `std::vector` per record) | 1 to 5 B, 35 times | one buffer reserved when persistence starts (642 B; +1 KiB with Data Secure) |
+| The gate's persistence stand-in (`std::map` nodes, vector copies) | 32 B nodes and copies, 18 times | not the stack's: the stand-in now keeps its records in static storage, as a flash log would |
+
+After these, the traffic run makes 0 allocations while locked.
+
+**A trade made.** The save buffer is a permanent 642 B (the largest record is the association table
+image); the transient vectors it replaces cost less at their peak but cannot exist under the lock.
 
 ## 7. Size gate and CI
 
@@ -330,7 +383,7 @@ measured" and their RAM figure is static data only. The CI job is `size-gate` in
   budget moves towards the target as the work lands, until the two are equal.
 - **The heap figure includes traffic.** The emulator variant feeds recorded telegrams through a
   scripted backend, so the measured high-water mark covers receive and send, not only start-up.
-  (Not done yet: today's run is start-up plus 200 idle loop iterations; see the C4 status.)
+  (Done in S3/S4 step 0: `traffic.hpp` in the gate; the run also locks the heap after start-up and reports every allocation after that, see §6.4.)
 - **The resolved `knx.config` is printed** with every result (the `knx-config/knx.config` of the
   gate's build tree).
 
@@ -762,6 +815,105 @@ were already within the margin.
   datapoints. Without `KNX_DPT_FLOAT` it is already `uint32_t` and no soft-float is linked
   (the gate forbids `Dpt9::` and `dptValueAsScalar`).
 
+### S3/S4 status
+
+Done in part (§6.3 and §6.4 say what was built and what was not). Step by step, each leaving the host
+suites green (full 154, `host-small` 141, `host-minimal` 102) and the gate passing. Figures are the
+`tp1-small` Cortex-M3 reference device; heap is the high-water mark of the emulator run.
+
+| Step | Flash | Static RAM | Heap, start-up | Heap, with traffic | Static + heap, with traffic |
+|---|---:|---:|---:|---:|---:|
+| After S2 (idle run, no traffic) | 79335 B | 1443 B | 13488 B | (13488 B) | 14931 B |
+| 0. The gate runs bus traffic through a scripted backend | 79335 B | 1443 B | 13488 B | 14532 B | 15975 B |
+| 1. `InterfaceObjectManager` stops owning a second set of tables | 79079 B | 1443 B | 11736 B | 12780 B | 14223 B |
+| 2. Connection entries and the save buffer at start-up; `init_only` policy; the gate locks the heap | 79780 B | 1456 B | 12500 B | 12500 B | **13956 B** |
+
+The other configurations after step 2: Cortex-M0+ flash 82857 B (static RAM 1456 B); `tp1-standard`,
+Cortex-M4 flash 98020 B (static RAM 1609 B). The `tp1-small` RAM budget went from 15360 B to 16384 B for
+step 0 (the honest figure was above the old one) and to 14336 B after step 2.
+
+**Step 0: the heap with traffic.** The emulator variant of the gate starts the device with a scripted
+`Tp1MediumBackend` (`test/baremetal/size_gate/traffic.hpp`, in the emulator image only). It delivers
+telegrams through the backend's event callback, as the driver's receive path does, and answers every
+transmission with the ACK event of a TP1 driver; the stack's receive queue, data link, transport,
+application layer and management services all run. The sequence: the individual address and seven
+group addresses set the way a commissioning leaves them; group writes to each datapoint type, two group
+reads the device answers, a read response, the product's publishes (twice), and a management session
+from 1.1.11 (T_Connect, A_PropertyValue_Read and _Write, A_Memory_Write and _Read of the application
+code and group address table segments, A_DeviceDescriptor_Read, T_Disconnect, with the tool's T_ACKs).
+19 frames sent, 19 confirmed; five connected responses (property read and write, two memory
+responses to the reads, device descriptor); the two memory writes are not answered, as the service says with verify mode off. The inbound ports observed 8 values. Not in the sequence:
+a full ETS download of the tables (the address table is bound through the runtime's binding call, and
+a memory write into the table segments is made, but no load-complete event), the device's own read
+requests, and data secure. Result: **+1044 B over start-up and 56 allocations after start-up**,
+before any change to the stack.
+
+**Step 1: attribution** (`sizeof` on the `tp1-small` configuration, Cortex-M3; the allocation sizes
+are from the gate's allocation profile at the end of start-up):
+
+| Heap item | Bytes | Made of |
+|---|---:|---|
+| `CommissionedProductRuntime` | 2224 | endpoint runtime, bindings, parameter state, publish queue (done in S1) |
+| `InterfaceObjectManager` | 1772 | **1668 B: a second, never used set of the five table objects** (removed, step 1); 104 B own state |
+| `DeviceModel` | 1764 | the four memory-mapped load segments: 258 (group address table) + 642 (association table) + 514 (group object table) + 256 (application code) = 1670 B; 94 B own state |
+| `BusAccessUnit` | 1696 | the table objects it owns: device object 280, address table 272, association table 980, application program 120, group object table 16 (1668 B); 28 B own state |
+| `Tp1DataLinkLayer` | 1168 | frame pool 576, group address list 260, last-received cache 36, transmit and receive operations 56 + 20, statistics 28; the rest is own state |
+| Group object entries | 968 | 60 x 16 B and the allocator's header |
+| `ApplicationLayer` | 792 | inline `ManagementServer` 632 (registered objects 132, memory segment bindings 392), send pipeline 100 |
+| `BusAccessStackPort` | 328 | group address list 260 |
+| `TransportLayer` | 296 | receive queue 88, connection table 36 |
+| `Tp1MacPhysical` | 240 | receive queue and ACK state |
+| `GroupRuntime` | 216 | automatic response queue 64, rate limiter 28 |
+| `PropertyServices`, `MemoryService`, `NetworkLayer`, others | about 300 | 112, 104, 80 |
+| Not attributed one by one | about 800 | allocations of 260, 248, 176 and 136 B, and about 30 under 120 B |
+
+`GenericInterfaceObject` (2296 B) is absent from the profile (§6.3). `DeviceObject` keeps its serial
+number, hardware type, order info and description as `std::vector`/`std::string` (the small 6 and 10
+byte allocations); `std::map` is not used on the `tp1-small` heap path at all.
+
+**The address-table-related containers** (not deduplicated here; queued separately):
+
+| Container | Owner | Bytes (128 addresses, 160 associations) |
+|---|---|---:|
+| Group address table | `AddressTableObject` in the BAU | 264 (272 with its object state) |
+| Group address list | `BusAccessStackPort` | 260 |
+| Group address list | `Tp1DataLinkLayer` | 260 |
+| Group address load segment | `DeviceModel` | 258 |
+| Association table | `AssociationTableObject` in the BAU (entries 640 + by-address index 320) | 972 (980) |
+| Association load segment | `DeviceModel` | 642 |
+| Group object table load segment | `DeviceModel` | 514 |
+| (The `InterfaceObjectManager`'s unused copies of the first and fifth rows' tables) | removed in step 1 | (264 + 972) |
+
+Today the group address list exists four times (1042 B) and the association table twice (1614 B). The
+load segments (1670 B in all, with the application code segment) are the staging copies of an ETS
+download; only the application code segment is a segment of its own.
+
+**Step 2.** The connection table and the save buffer are described in §6.4, with the allocation the
+locked run found and the gate's own persistence stand-in. The new unit tests are `test_heap_policy`
+(the decision function, the handler contract, the high-water hook) and `test_ReusedEntryStartsClean`
+in `test_connection_table`; `test_knx_genconfig` checks the policy per profile.
+
+- **No allocation after start-up.** The gate prints `heap_locked_allocations=0` and
+  `heap_high_water` equal to `heap_after_start`. This covers receive and send of group traffic, the
+  automatic read responses, the publishes, a management session and the persistence saves the
+  commissioning writes cause.
+- **What the lock does not prove.** A full ETS download (the load state machine for each table, with
+  the table applying 128 + 160 entries), the secure paths and the `tp1-standard` feature set are not
+  in the run. The `tp1-standard` profile is set to `init_only` as the design says, but its secure
+  persistence records are sized by a guess (+1 KiB) and nothing locks it under traffic; until that is
+  run, a `tp1-standard` product that locks the heap is untested.
+- **Persistence-format impact: none.** The stored keys, values and the schema version are unchanged;
+  the save path builds the same records in a different buffer.
+- **API changes.** New: `knx/util/heap.hpp`, `KNX_HEAP_POLICY`. Changed: none for products. The
+  `InterfaceObjectManager`'s default-constructed objects are behind a pointer (nothing outside the
+  manager used the members). `ConnectionTable::init()` now allocates (one entry per allowed
+  connection).
+- **ESP32 / Habinari.** The `knx_*.cpp` of the Habinari firmware compile (syntax check against the
+  ESP-IDF stubs, both media): no change needed. ESP-IDF builds keep `KNX_HEAP_POLICY=free`.
+- **Flash.** +701 B over step 1 (79079 B to 79780 B; +445 B over the S2 figure): the policy and its `operator new` about
+  140 B, the connection spare list and the changed save path the rest. The gate's flash budget is
+  unchanged (81152 B).
+
 ## 10. Projection and decision points
 
 Estimated `tp1-small` figures for the 60-object reference device after each stage. Only the
@@ -775,6 +927,7 @@ first row is measured.
 | S1 | about 88 KiB | about 18 KiB | **78.1 KiB flash, 31.8 KiB RAM (1.4 static + 30.4 heap)**; on the representative device with bindings, S1 took 108275 B / 42423 B down to 79925 B / 32551 B |
 | S2 | | | **77.5 KiB flash, 14.6 KiB RAM (1.4 static + 13.2 heap)** (with the callback capture size) |
 | S2 + S3 + S4 | about 80–85 KiB | about 8–10 KiB | |
+| S3 + S4 (as built) | | | **77.9 KiB flash, 13.6 KiB RAM (1.4 static + 12.2 heap), with traffic and the heap locked** |
 
 **Decision point after S1.** If the measurement is more than about 10 % above the projection
 on either axis, stop and review before S2–S4. The options then are deeper reductions in
@@ -853,6 +1006,36 @@ fall-back is not needed on present evidence. The next review is after S2.
 - **Outcome.** The GD32F303CC fall-back is still not needed on present evidence. The work continues
   with S3 (interface object property storage, `DeviceModel`, `BusAccessUnit`) and S4; the next review is
   after S3.
+
+**Review after S3 and S4 (16 November 2026).** Measured on the `tp1-small` Cortex-M3 reference device,
+with bus traffic and the heap locked after start-up: flash 77.9 KiB (79780 B), static RAM 1456 B, heap
+12500 B (the same at start-up and after the traffic run), **KNstaX RAM 13956 B (13.6 KiB)**.
+
+- **Against 10240 B: 3716 B over.** Not met. The three steps took the figure from 15975 B (the honest
+  starting point, with traffic) to 13956 B: 2.0 KB, almost all of it the unused second set of tables in
+  the `InterfaceObjectManager`. The property storage S3 was sketched around is not on this device (§6.3).
+- **Against 12288 B (the board budget, which counts group objects separately): about 470 B over.**
+  The group objects are about 1.2 KB of the figure (entries 960 B and the value pool), so the KNstaX
+  share without them is about 12.7 KB. Which of the two targets applies is the owner's decision.
+- **The device's constraint: 20 KiB RAM and 128 KiB flash for everything.** KNstaX takes 13.6 KiB of
+  the 20 KiB (67 %) and 77.9 KiB of the 128 KiB of flash (61 %), leaving 6.4 KiB of RAM and 50 KiB of
+  flash for the product, the board support and the stack. The figure is a high-water mark with
+  traffic, not a start-up number, and it is final for the run: with the heap locked it cannot grow.
+- **What is left, in order of size** (all attributed in §9; none done here):
+  - the load segments (1670 B): staging copies of an ETS download of three tables and the application
+    code, next to the tables themselves;
+  - the duplicated lists: the group address list four times (1042 B) and the association table twice
+    (1614 B). Removing the copies in the stack port and the data link layer and the association
+    segment would take about 1.1 KB without touching behaviour that a table load shows; this is queued
+    separately;
+  - `CommissionedProductRuntime` 2224 B, the data link layer's frame pool (576 B), the management
+    server's memory segment bindings (392 B for what is four segments);
+  - the property storage rewrite of §6.3, if a product that uses reference objects needs it.
+  With the load segments and the two list copies in the stack port and the data link layer (about
+  2.2 KB) the figure would be near 11.8 KB: above 10240 B, below 12288 B.
+- **Outcome.** The 12288 B reading of the target is reachable with the duplicates removed; the 10240 B
+  one is not on present evidence even with the segments removed. The GD32F303CC
+  fall-back is not needed for RAM on the 20 KiB device.
 
 ## 11. Risks
 

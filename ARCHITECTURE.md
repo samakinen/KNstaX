@@ -255,6 +255,13 @@ same table ceilings and the product's APDU length. A product's `maxApduLength` m
 `KNX_MAX_APDU_LENGTH`. The host suite runs against the small values with the `host-small` profile
 (`-DKNX_HOST_PROFILE=host-small`, excluding the `needs-full-capacity` label).
 
+**Heap policy** (`KNX_HEAP_POLICY`, Kconfig menu "Memory"): `free` (the default) leaves `operator new` to the
+toolchain. `init_only` (`tp1-small`, `tp1-standard`) replaces it: the stack allocates while it starts, the
+product calls `knx::heap::lock()` when start-up is over (`knx/util/heap.hpp`), and a later allocation traps in
+a debug build and fails in a release build as an exhausted heap does. The size gate runs its traffic sequence
+with the heap locked, which is the check that the steady state allocates nothing. The `arena` policy of the
+design is not implemented. See the product authoring guide for what a product has to do.
+
 Embedded TP1 backend selection is compile-time driven through Kconfig. `KNX_TP1_BITBANG` is the only choice today; the factory builds the canonical TP1 composition over it.
 
 Bitbang builds also consume board/transceiver traits from Kconfig, including:
