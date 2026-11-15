@@ -35,6 +35,7 @@ SECTIONS
     _sidata = LOADADDR(.data);
     .data : {
         . = ALIGN(4); _sdata = .;
+        *(.ramfunc .ramfunc.*)   /* KNX_ISR_RAM: copied to RAM with .data */
         *(.data .data.*)
         . = ALIGN(4); _edata = .;
     } > RAM AT > FLASH

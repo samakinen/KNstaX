@@ -14,14 +14,17 @@ extern int main(void);
 void Reset_Handler(void);
 void SysTick_Handler(void);
 static void Default_Handler(void) { for (;;) {} }
+/* External interrupt 0: the board UART of the measured image (uart_stub.hpp). */
+void Uart_IRQHandler(void) __attribute__((weak, alias("Default_Handler")));
 
 __attribute__((section(".isr_vector"), used))
-void (*const g_vectors[16])(void) = {
+void (*const g_vectors[17])(void) = {
     (void (*)(void))(&_estack), Reset_Handler,
     Default_Handler, Default_Handler, Default_Handler, Default_Handler, Default_Handler,
     0, 0, 0, 0,
     Default_Handler, Default_Handler, 0, Default_Handler,
     SysTick_Handler,
+    Uart_IRQHandler,
 };
 
 void Reset_Handler(void) {

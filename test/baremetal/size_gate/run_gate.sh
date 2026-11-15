@@ -60,6 +60,16 @@ CONFIGURE_ARGS="-DKNX_SIZE_GATE_PROFILE=$PROFILE -DKNX_ARM_CPU=$CPU"
 cmake -S "$HERE" -B "$BUILD/gate" -G Ninja -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" $CONFIGURE_ARGS >/dev/null \
     && cmake --build "$BUILD/gate" || { echo "error: the reference device did not link" >&2; exit 2; }
 
+# Code placed in RAM (KNX_ISR_RAM) keeps running while flash is erased only if it
+# never calls into flash. The linker reaches flash from RAM through a veneer it
+# places next to the caller, so a veneer at a RAM address is such a call.
+RAM_VENEERS=$(arm-none-eabi-nm -C "$BUILD/gate/size_gate.elf" \
+    | awk '$1 >= "20000000" && $1 < "40000000" && /_veneer/ {print $3}')
+if [ -n "$RAM_VENEERS" ]; then
+    echo "error: code placed in RAM calls into flash: $RAM_VENEERS" >&2
+    exit 1
+fi
+
 HEAP_ARG=""
 case "$CPU" in
     cortex-m3) QEMU_MACHINE=mps2-an385 ;;

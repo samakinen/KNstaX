@@ -96,7 +96,9 @@ def kind_of(section):
     if section.startswith(('.text', '.rodata', '.init', '.fini', '.preinit_array', '.init_array',
                            '.fini_array', '.ARM')):
         return 'flash'
-    if section.startswith('.data'):
+    # Code placed in RAM (KNX_ISR_RAM) is copied there like initialised data, so
+    # it costs both: its load image in flash and the copy in RAM.
+    if section.startswith(('.data', '.ramfunc')):
         return 'data'
     if section.startswith(('.bss', 'COMMON')) or section == 'COMMON':
         return 'bss'

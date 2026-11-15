@@ -3,16 +3,20 @@
 
 /**
  * @file main.cpp
- * @brief Size gate reference device: starts the stack with a null TP1 backend
+ * @brief Size gate reference device: starts the stack with the TP-UART backend
  *
  * Built only to be linked and measured (see CMakeLists.txt and
  * scripts/ci/knstax_size_budget.py). It starts the commissioned product with
  * 60 group objects through the real runtime, so the linked image contains the
- * code a TP1 end device needs. The TP-UART backend, the flash persistence and
- * the board support a real product adds are not part of the KNstaX share.
+ * code a TP1 end device needs. The flash persistence and the board support a
+ * real product adds are not part of the KNstaX share.
  *
- * The image that is measured for flash and static RAM starts the device and runs
- * it with a null backend. The emulator variant (KNX_SIZE_GATE_SEMIHOST) measures
+ * The image that is measured for flash and static RAM starts the device with the
+ * TP-UART backend over a stub board UART (uart_stub.hpp), so the backend is in
+ * the KNstaX share; that image is linked, not run. The backend object is on the
+ * heap and not in the emulator's figure: the device budget reserves RAM for it
+ * ("TP-UART buffers"), and the emulator run prints its size
+ * (tpuart_backend_bytes) to compare. The emulator variant (KNX_SIZE_GATE_SEMIHOST) measures
  * the heap: it starts the same device with a scripted backend (traffic.hpp), sets
  * the individual address and the group addresses the way a commissioning would,
  * and runs the bus traffic a device meets in service, so that the high-water mark
@@ -23,7 +27,7 @@
 #include "stub_product.hpp"
 
 #include "knx/objects/object_persistence.hpp"
-#include "knx/physical/null_tp1_medium_backend.hpp"
+#include "knx/physical/tpuart_medium_backend.hpp"
 #include "knx/platform/cooperative_platform.hpp"
 #include "knx/util/heap.hpp"
 
@@ -38,6 +42,8 @@ extern "C" std::size_t g_heap_high_water;  // syscalls.c: peak of the heap break
 extern "C" void knx_size_gate_print_profile();  // syscalls.c: malloc size histogram
 extern "C" uint32_t knx_size_gate_malloc_calls();  // syscalls.c: malloc() calls so far
 #include "traffic.hpp"
+#else
+#include "uart_stub.hpp"
 #endif
 
 namespace {
@@ -167,6 +173,8 @@ void reportTraffic() {
 }
 
 [[noreturn]] void reportAndExit() {
+    writeNumber("tpuart_backend_bytes=", sizeof(knx::physical::TpUartMediumBackend));
+    writeNumber("scripted_backend_bytes=", sizeof(size_gate::traffic::ScriptedBackend));
     writeNumber("heap_before_start=", g_heapBeforeStart);
     writeNumber("heap_after_start=", g_heapAfterStart);
     reportTraffic();
@@ -293,7 +301,8 @@ int main() {
 #if defined(KNX_SIZE_GATE_SEMIHOST)
         std::unique_ptr<knx::physical::Tp1MediumBackend>(new size_gate::traffic::ScriptedBackend()));
 #else
-        std::unique_ptr<knx::physical::Tp1MediumBackend>(new knx::physical::NullTp1MediumBackend()));
+        std::unique_ptr<knx::physical::Tp1MediumBackend>(
+            new knx::physical::TpUartMediumBackend(size_gate::uart::makeHal(), platform)));
 #endif
     if (started.isError()) {
         for (;;) {

@@ -207,6 +207,80 @@ chip. What is worth keeping:
 - the shape of its adapter tests;
 - its notes mapping `SAVE` and `U_State` to link state, already reflected in `link_state.hpp`.
 
+### 3.8 Status of K3 (15 November 2026)
+
+Implemented and host-tested: `TpUartMediumBackend`
+(`include/knx/physical/tpuart_medium_backend.hpp`), `Tp1CapabilityProfile::transceiverRepeats`
+with the one-attempt rule in `Tp1DataLinkLayer::pollTransmit`, and `KNX_ISR_RAM`
+(`include/knx/platform/isr_ram.hpp`). `test_tpuart_medium_backend` (ctest label `tpuart`, 29
+tests) runs the backend against a scripted TP-UART2 on `UartHalVirtual`, and runs the data link
+layer over it. Never run against a real chip.
+
+Where it differs from §3.1–3.6:
+
+- **Family.** `TpUartFamily` is a runtime value, not a traits type: the differences are three
+  request encodings, and one `.cpp` keeps the code out of the headers. Only `TpUart2` exists.
+- **Acknowledge table.** One sorted copy under a sequence counter, not two buffers swapped by
+  pointer. The interrupt does not acknowledge from a table it saw being rewritten; the sender
+  repeats. It needs no interrupt masking and works where the interrupt runs on another core.
+- **The 2 ms gap** is checked in the interrupt, from the timestamps the UART HAL passes, not from
+  `service()`. A partial frame is discarded when the next octet comes, so `service()` needs no
+  microsecond clock in the board's time domain.
+- **BUSY.** Besides `setLocalBusy()`, the interrupt answers BUSY when the receive ring has no
+  free slot, so a frame it could not store is repeated, not lost.
+- **The own address** is acknowledged by the chip; the backend writes `U_AckInformation` for it
+  only to refuse it with BUSY.
+- **Negative `L_Data.con`** becomes `TxAckResponse` with `Tp1AckClass::None`. The data link layer
+  treats it as "nobody listening" for a group frame (sent), and as a failure for an individual
+  frame. A missing confirmation (1 s) is a `TxAckDeadlineMiss`, which fails every frame and
+  resets the chip.
+- **`U_State` bits.** The temperature warning gives `Degraded`. Slave collision, receive, transmit
+  and protocol errors report single events, so they are kept in the statistics and do not take
+  the link down. No answer to two `U_State.req` in a row, a failed reset or an asserted `SAVE`
+  gives `Down`.
+- **Requests between frames.** `U_SetAddress` after `setOwnAddress()` and `U_State.req` are sent
+  from `service()` only while no frame is being fed to the chip.
+- **The receive ring** is 4 slots of `min(MAX_TP1_FRAME_LENGTH, 64)` octets. One slot is always
+  the frame being assembled, so 3 complete frames wait for `service()`.
+
+To confirm on a real TP-UART2 (with B5 of the H8i8o checklist):
+
+1. `U_AckInformation` written between the `U_L_Data` pairs of a frame being fed is accepted (the
+   backend relies on it; it feeds at most `txQueueLimitOctets` ahead).
+2. The deadline for `U_AckInformation` after the address type octet, against the default limit
+   of 4 queued octets (about 2.3 ms at 19200 baud).
+3. `U_MxRstCnt` (0x24) takes the BUSY count in bits 7–5 and the NACK count in bits 2–0.
+4. The chip sends `L_Data.con` for every frame, also those to the individual address FFFFh.
+5. `U_AckInformation` with the busy bit for a frame to the own address overrides the chip's own
+   acknowledge.
+6. The chip answers `U_State.req` with exactly one `U_State.ind`, and its bits as listed in §3.2.
+
+**Size (tp1-small, Cortex-M3; the gate's measured image now carries the backend over a stub
+UART):**
+
+| | Before K3 | With K3 |
+|---|---:|---:|
+| KNstaX flash | 79,890 B | 83,504 B |
+| KNstaX RAM, static + heap | 13,460 B | 14,192 B |
+| of which code in RAM (`.ramfunc`, the receive path) | – | 714 B |
+| Backend object (heap; reserved apart as "TP-UART buffers", 512 B) | – | 608 B |
+| H8i8o device RAM (sum with reservations) | 20,116 / 20,480 B | **20,848 / 20,480 B** |
+| H8i8o device flash | 111,975 / 131,072 B | 115,589 / 131,072 B |
+
+Two corrections to the gate came with this. It did not count code placed in RAM at all (the
+`.ramfunc` input sections were neither flash nor RAM to it), and it now fails if code in RAM
+calls into flash (a veneer at a RAM address). The first run found such a call
+(`std::atomic<bool>::load`, not inlined at `-Os`); the flags are `std::atomic<uint8_t>` now.
+
+**The device RAM check fails by 368 B**, and by 464 B counting the backend object's excess over
+its reservation. The planned 2.5 KiB margin is still inside the sum. The cause is that the
+H8i8o budget (01 §4.2) has no line for code in RAM, although its §6.3 plans to run the receive
+path and the vector table from there. The receive path is about 250 instructions and has nothing
+left to merge; moving the counters and frame validation to `service()` would save perhaps 80 B.
+Which way to close the gap is the owner's decision and is pending.
+`budgets/tp1-small-m3.json` and `tp1-standard-m4.json` are not raised to the new figures until
+then, so the gate fails as it should.
+
 ## 4. K2: UART HAL
 
 A C interface in the style of `timer_gpio_hal.h`, so a board can implement it without C++:
