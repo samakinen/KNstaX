@@ -67,6 +67,9 @@ GroupRuntime::GroupRuntime(platform::Platform& platform, BusAccessStackPort* sta
           sizeof(PendingInboundGroupEvent),
           INBOUND_GROUP_EVENT_QUEUE_CAPACITY))
 {
+    // One read-request sender for the whole group object table.
+    _groupObjectTable.store().setReadRequestSender(
+        [this](const GroupAddress& address) { return requestGroupValue(address); });
 }
 
 // ─── Lifecycle ───────────────────────────────────────────────────────────────
@@ -158,12 +161,7 @@ GroupObjectIndex GroupRuntime::addGroupObject(const GroupAddress& address,
     config.dpt = dpt;
     config.flags = flags;
 
-    auto obj = std::make_unique<application::GroupObject>(config);
-    obj->setReadRequestSender([this](const GroupAddress& addr) {
-        return requestGroupValue(addr);
-    });
-
-    GroupObjectIndex index = _groupObjectTable.addGroupObject(std::move(obj));
+    GroupObjectIndex index = _groupObjectTable.addGroupObject(config);
     if (!index.isValid()) {
         return GroupObjectIndex::invalid();
     }
@@ -402,8 +400,7 @@ util::Result<void> GroupRuntime::setGroupObjectTransmitPolicy(
     if (object == nullptr) {
         return util::ErrorCode::InvalidParameter;
     }
-    object->setTransmitPolicy(policy);
-    return util::Result<void>::ok();
+    return object->setTransmitPolicy(policy);
 }
 
 util::Result<application::GroupObjectTransmitPolicy>

@@ -157,6 +157,12 @@ constexpr size_t MAX_GROUP_OBJECT_PAYLOAD_BYTES = CONFIG_KNX_MAX_GROUP_OBJECT_PA
 static_assert(MAX_GROUP_OBJECT_PAYLOAD_BYTES <= MAX_APDU_LENGTH,
               "A group object payload cannot exceed the maximum APDU");
 
+/// Inline capture bytes of a stack-internal callback whose default is `today`.
+constexpr size_t callbackBytes(size_t today) noexcept
+{
+    return today;
+}
+
 /**
  * @brief Seconds a management client should wait after a master reset.
  *

@@ -36,13 +36,7 @@ constexpr const char* TAG = "KNX.Obj.GroupObjectTable";
 // the Address Table, referenced through the Association Table) nor the value.
 
 size_t descriptorCount(const GroupObjectTableDomain& domain) {
-    size_t count = 0;
-    for (const auto& obj : domain.objects()) {
-        if (obj) {
-            ++count;
-        }
-    }
-    return count;
+    return domain.size();
 }
 
 util::Result<uint16_t> getObjectType(const GroupObjectTableDomain& /*domain*/) {
@@ -90,18 +84,12 @@ util::Result<void> readTableData(
         return util::Result<void>::err(util::ErrorCode::OutOfRange);
     }
 
-    size_t slot = 0;
-    for (const auto& obj : domain->objects()) {
-        if (!obj) {
-            continue;
+    for (size_t slot = first; slot < first + elementCount; ++slot) {
+        const auto* obj = domain->get(GroupObjectTableDomain::Index{static_cast<uint16_t>(slot)});
+        auto res = out.u16be(obj->descriptor());
+        if (res.isError()) {
+            return res;
         }
-        if (slot >= first && slot < first + elementCount) {
-            auto res = out.u16be(obj->descriptor());
-            if (res.isError()) {
-                return res;
-            }
-        }
-        ++slot;
     }
     return util::Result<void>::ok();
 }
@@ -227,64 +215,64 @@ util::Result<GroupObjectTableDomain::Index> toDomainIndex(GroupObjectIndex index
 
 // === GroupObjectTableDomain ===
 
-util::Result<GroupObjectTableDomain::Index> GroupObjectTableDomain::add(std::unique_ptr<application::GroupObject> obj) {
-    if (_objects.size() >= kMaxObjects || !obj) {
+util::Result<GroupObjectTableDomain::Index> GroupObjectTableDomain::add(const application::GroupObjectConfig& config) {
+    if (_store->append(config) == nullptr) {
         return util::Result<GroupObjectTableDomain::Index>(util::ErrorCode::InvalidParameter);
     }
-    const Index index{static_cast<uint16_t>(_objects.size())};
-    _objects.push_back(std::move(obj));
-    return index;
+    return Index{static_cast<uint16_t>(_store->size() - 1u)};
+}
+
+util::Result<GroupObjectTableDomain::Index> GroupObjectTableDomain::add(std::unique_ptr<application::GroupObject> obj) {
+    if (!obj || _store->appendCopy(*obj) == nullptr) {
+        return util::Result<GroupObjectTableDomain::Index>(util::ErrorCode::InvalidParameter);
+    }
+    return Index{static_cast<uint16_t>(_store->size() - 1u)};
 }
 
 util::Result<void> GroupObjectTableDomain::remove(Index index) {
-    if (index.value >= _objects.size()) {
+    if (!_store->erase(index.value)) {
         return util::Result<void>::err(util::ErrorCode::InvalidParameter);
     }
-    _objects.erase(index.value);
     return util::Result<void>::ok();
 }
 
 application::GroupObject* GroupObjectTableDomain::get(Index index) {
-    if (index.value >= _objects.size()) {
-        return nullptr;
-    }
-    return _objects[index.value].get();
+    return _store->at(index.value);
 }
 
 const application::GroupObject* GroupObjectTableDomain::get(Index index) const {
-    if (index.value >= _objects.size()) {
-        return nullptr;
-    }
-    return _objects[index.value].get();
+    return _store->at(index.value);
 }
 
 uint16_t GroupObjectTableDomain::size() const {
-    return static_cast<uint16_t>(_objects.size());
+    return _store->size();
 }
 
 void GroupObjectTableDomain::clear() {
-    _objects.clear();
+    _store->clear();
 }
 
-void GroupObjectTableDomain::reserve(uint16_t capacity) {
-    (void)capacity;
+void GroupObjectTableDomain::reserve(uint16_t objects, size_t valueBytes) {
+    _store->reserve(objects, valueBytes);
 }
 
 util::Result<void> GroupObjectTableDomain::load(std::vector<std::unique_ptr<application::GroupObject>> objects) {
     if (objects.size() > kMaxObjects) {
         return util::Result<void>::err(util::ErrorCode::InvalidParameter);
     }
-    _objects.clear();
+    _store->clear();
     for (auto& obj : objects) {
-        _objects.push_back(std::move(obj));
+        if (!obj || _store->appendCopy(*obj) == nullptr) {
+            return util::Result<void>::err(util::ErrorCode::InvalidParameter);
+        }
     }
     return util::Result<void>::ok();
 }
 
 util::Result<size_t> GroupObjectTableDomain::findAllByAddress(const GroupAddress& address, std::span<GroupObjectIndex> out) const {
     size_t required = 0;
-    for (size_t i = 0; i < _objects.size(); ++i) {
-        if (_objects[i] && _objects[i]->getAddress() == address) {
+    for (uint16_t i = 0; i < _store->size(); ++i) {
+        if (_store->at(i)->getAddress() == address) {
             ++required;
         }
     }
@@ -298,34 +286,29 @@ util::Result<size_t> GroupObjectTableDomain::findAllByAddress(const GroupAddress
     }
 
     size_t written = 0;
-    for (size_t i = 0; i < _objects.size(); ++i) {
-        if (_objects[i] && _objects[i]->getAddress() == address) {
-            out[written++] = GroupObjectIndex(static_cast<uint16_t>(i));
+    for (uint16_t i = 0; i < _store->size(); ++i) {
+        if (_store->at(i)->getAddress() == address) {
+            out[written++] = GroupObjectIndex(i);
         }
     }
     return written;
 }
 
 util::Result<size_t> GroupObjectTableDomain::getAllAddresses(std::span<GroupAddress> out) const {
-    size_t count = 0;
-    for (const auto& obj : _objects) {
-        if (obj) ++count;
-    }
+    const size_t count = _store->size();
     if (out.empty()) return count;
     if (out.size() < count) {
         return util::ErrorCode::BufferTooSmall;
     }
-    size_t written = 0;
-    for (const auto& obj : _objects) {
-        if (!obj) continue;
-        out[written++] = obj->getAddress();
+    for (uint16_t i = 0; i < count; ++i) {
+        out[i] = _store->at(i)->getAddress();
     }
-    return written;
+    return count;
 }
 
 bool GroupObjectTableDomain::isValid() const {
-    for (const auto& obj : _objects) {
-        if (!obj || !obj->isValid()) {
+    for (uint16_t i = 0; i < _store->size(); ++i) {
+        if (!_store->at(i)->isValid()) {
             return false;
         }
     }
@@ -338,13 +321,12 @@ GroupObjectTableDomain::Statistics GroupObjectTableDomain::getStatistics() const
     stats.validObjects = 0;
     stats.activeObjects = 0;
 
-    for (const auto& obj : _objects) {
-        if (obj) {
-            if (obj->isValid()) {
-                stats.validObjects++;
-                if (!obj->getRawValue().empty()) {
-                    stats.activeObjects++;
-                }
+    for (uint16_t i = 0; i < _store->size(); ++i) {
+        const auto* obj = _store->at(i);
+        if (obj->isValid()) {
+            stats.validObjects++;
+            if (!obj->getRawValue().empty()) {
+                stats.activeObjects++;
             }
         }
     }
@@ -355,10 +337,8 @@ GroupObjectTableDomain::Statistics GroupObjectTableDomain::getStatistics() const
 
 uint16_t GroupObjectTableDomain::countUniqueAddresses() const {
     std::set<uint16_t> uniqueAddrs;
-    for (const auto& obj : _objects) {
-        if (obj) {
-            uniqueAddrs.insert(obj->getAddress().raw);
-        }
+    for (uint16_t i = 0; i < _store->size(); ++i) {
+        uniqueAddrs.insert(_store->at(i)->getAddress().raw);
     }
     return static_cast<uint16_t>(uniqueAddrs.size());
 }
@@ -366,9 +346,6 @@ uint16_t GroupObjectTableDomain::countUniqueAddresses() const {
 // === GroupObjectTableObject ===
 
 GroupObjectTableObject::GroupObjectTableObject() {
-    constexpr uint16_t kDefaultReserve = 32;
-    _table.reserve(kDefaultReserve);
-
     const auto validation = validatePropertyTable(kGroupObjectTableHandlers, kGroupObjectTableHandlerCount);
     if (validation.isError()) {
         KNX_LOGE("KNX.GOTable", "Invalid property handler table (err=%d)", static_cast<int>(validation.error()));
@@ -381,6 +358,15 @@ KernelBinding GroupObjectTableObject::kernelBinding() const {
     binding.handlerCount = kGroupObjectTableHandlerCount;
     binding.context = PropertyContext{const_cast<GroupObjectTableDomain*>(&_table), _validationPolicy};
     return binding;
+}
+
+GroupObjectIndex GroupObjectTableObject::addGroupObject(const application::GroupObjectConfig& config) {
+    auto res = _table.add(config);
+    if (res.isError()) {
+        KNX_LOGW("KNX.GOTable", "Group object table full");
+        return GroupObjectIndex::invalid();
+    }
+    return GroupObjectIndex(res.value().value);
 }
 
 GroupObjectIndex GroupObjectTableObject::addGroupObject(std::unique_ptr<application::GroupObject> obj) {
@@ -429,8 +415,8 @@ util::Result<void> GroupObjectTableObject::loadTable(std::vector<std::unique_ptr
     return _table.load(std::move(objects));
 }
 
-void GroupObjectTableObject::reserve(uint16_t capacity) {
-    _table.reserve(capacity);
+void GroupObjectTableObject::reserve(uint16_t objects, size_t valueBytes) {
+    _table.reserve(objects, valueBytes);
 }
 
 util::Result<size_t> GroupObjectTableObject::getAllAddresses(std::span<GroupAddress> out) const {

@@ -52,6 +52,9 @@ public:
 
     static constexpr uint16_t kMaxObjects = 256;
 
+    /// Add an object built from `config` (preferred: no intermediate object).
+    util::Result<Index> add(const application::GroupObjectConfig& config);
+    /// Add a copy of `obj`; its state moves into the table and `obj` is discarded.
     util::Result<Index> add(std::unique_ptr<application::GroupObject> obj);
     util::Result<void> remove(Index index);
 
@@ -60,7 +63,12 @@ public:
 
     uint16_t size() const;
     void clear();
-    void reserve(uint16_t capacity);
+    /// Reserve room for `objects` objects and `valueBytes` bytes of values up front.
+    void reserve(uint16_t objects, size_t valueBytes = 0);
+
+    /// The table-wide state: value pool, callbacks.
+    application::GroupObjectStore& store() { return *_store; }
+    const application::GroupObjectStore& store() const { return *_store; }
 
     util::Result<void> load(std::vector<std::unique_ptr<application::GroupObject>> objects);
 
@@ -77,22 +85,10 @@ public:
     };
     Statistics getStatistics() const;
 
-    const util::FixedVector<std::unique_ptr<application::GroupObject>, kMaxObjects>& objects() const { return _objects; }
-
     /// Nth populated object in table order, or nullptr when `slot` is past the
     /// end.  Table order is what PID_TABLE descriptor indices refer to.
     application::GroupObject* objectAt(size_t slot) {
-        size_t seen = 0;
-        for (auto& obj : _objects) {
-            if (!obj) {
-                continue;
-            }
-            if (seen == slot) {
-                return obj.get();
-            }
-            ++seen;
-        }
-        return nullptr;
+        return slot < _store->size() ? _store->at(static_cast<uint16_t>(slot)) : nullptr;
     }
 
     // KNX 03.05.02 load state (PID_LOAD_STATE_CONTROL), driven by the ETS
@@ -105,7 +101,7 @@ public:
 
 private:
     uint16_t countUniqueAddresses() const;
-    util::FixedVector<std::unique_ptr<application::GroupObject>, kMaxObjects> _objects;
+    std::unique_ptr<application::GroupObjectStore> _store{std::make_unique<application::GroupObjectStore>()};
     uint8_t _loadState{1};  // loadstate::kLoaded — firmware boots with usable objects
 };
 
@@ -137,6 +133,8 @@ public:
      * @param obj Group object (ownership transferred)
         * @return Object index (0-based) or `GroupObjectIndex::invalid()` if full/invalid
      */
+    GroupObjectIndex addGroupObject(const application::GroupObjectConfig& config);
+    /// As above from an object built on its own: its state is copied into the table.
     GroupObjectIndex addGroupObject(std::unique_ptr<application::GroupObject> obj);
     
     /**
@@ -190,7 +188,10 @@ public:
     /**
      * @brief Reserve capacity for objects
      */
-    void reserve(uint16_t capacity);
+    void reserve(uint16_t objects, size_t valueBytes = 0);
+
+    /// Table-wide callbacks and value pool.
+    application::GroupObjectStore& store() { return _table.store(); }
 
     // === Runtime State ===
     

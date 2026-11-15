@@ -92,6 +92,13 @@ bool ProductPortCore::isPortLinked(uint16_t slot) const
 
 Result<void> ProductPortCore::registerGroupObjects()
 {
+    // One allocation for all objects and one for all values, sized from the ports.
+    size_t valueBytes = 0;
+    for (uint16_t slot = 0; slot < _portCount; ++slot) {
+        valueBytes += application::groupObjectValueBytes(_ports[slot].dpt);
+    }
+    _bau->groupObjectTable().reserve(_portCount, valueBytes);
+
     for (uint16_t slot = 0; slot < _portCount; ++slot) {
         const PortDescriptor& port = _ports[slot];
 
@@ -106,8 +113,7 @@ Result<void> ProductPortCore::registerGroupObjects()
         config.flags.readOnInit = port.readOnInit();
         config.flags.priority = port.priority;
 
-        auto object = std::make_unique<application::GroupObject>(config);
-        const GroupObjectIndex index = _bau->groupObjectTable().addGroupObject(std::move(object));
+        const GroupObjectIndex index = _bau->groupObjectTable().addGroupObject(config);
         if (!index.isValid() || index.value() != slot) {
             return ErrorCode::ResourceUnavailable;
         }

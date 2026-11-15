@@ -14,7 +14,10 @@
 #include "knx/util/fixed_vector.hpp"
 #include "knx/util/inplace_function.hpp"
 #include "knx/util/result.hpp"
+#include <cstdint>
+#include <memory>
 #include <span>
+#include <vector>
 
 namespace knx {
 namespace application {
@@ -204,17 +207,53 @@ constexpr GroupObjectFlags decodeGroupObjectDescriptor(uint16_t descriptor,
     return flags;
 }
 
+
 /**
- * @brief Group object callback
+ * @brief Value bytes a group object of this datapoint type reserves in its table's value pool.
+ *
+ * The canonical payload width rounded up to whole octets; a datapoint the
+ * stack does not know gets the general bound, so a raw-payload object still
+ * has room.
  */
-using GroupObjectCallback = util::InplaceFunction<void(const GroupAddress&, std::span<const uint8_t>), 64>;
-using GroupReadRequestCallback = util::InplaceFunction<util::Result<void>(const GroupAddress&), 64>;
+constexpr uint8_t groupObjectValueBytes(DptId dpt) noexcept {
+    const uint16_t octets = dptPayloadOctets(dpt);
+    return static_cast<uint8_t>(octets == 0u ? config::MAX_GROUP_OBJECT_PAYLOAD_BYTES : octets);
+}
+
+/**
+ * @brief Table-wide callbacks (one of each, however many group objects there are).
+ *
+ * The value callback runs after a value is stored, whether it was set locally
+ * or received from the bus. It gets the object's index in its table
+ * (GroupObjectIndex::invalid() for an object created on its own), so one
+ * callback serves the whole table. The read-request sender issues an
+ * A_GroupValue_Read for an object's address.
+ */
+using GroupObjectCallback =
+    util::InplaceFunction<void(GroupObjectIndex, std::span<const uint8_t>), config::callbackBytes(64)>;
+using GroupReadRequestCallback =
+    util::InplaceFunction<util::Result<void>(const GroupAddress&), config::callbackBytes(64)>;
+
+struct PolicyState;
+class GroupObjectStore;
 
 /**
  * @brief Group object
- * 
+ *
  * Represents a KNX group data point with value storage and communication flags.
- * 
+ *
+ * A group object is 16 bytes of state (on a 32-bit target): address, datapoint
+ * type, packed flags, and the offset and length of its value in the owning
+ * GroupObjectStore's value pool. Values, the transmit-policy state of the few
+ * objects that have a policy, and the callbacks live in the store, once for the
+ * whole table. Objects of a table are reached through the table
+ * (GroupObjectTableObject::getGroupObject, BusAccessUnit::groupObject) and stay
+ * valid until the table grows past the capacity it reserved; a product that
+ * registers its objects up front never sees that.
+ *
+ * An object constructed directly (tests, tools) owns a private one-object store.
+ * Adding it to a table copies its state into the table.
+ *
  * @thread_safety Owner-context only. GroupObject is intentionally unsynchronized
  * and should be owned by a single runtime context, typically the BAU or
  * commissioned-product `loop()`.
@@ -222,69 +261,82 @@ using GroupReadRequestCallback = util::InplaceFunction<util::Result<void>(const 
 class GroupObject {
 public:
     explicit GroupObject(const GroupObjectConfig& config);
-    virtual ~GroupObject();
+    ~GroupObject();
 
-    DptId dptId() const noexcept { return _config.dpt; }
+    GroupObject(const GroupObject&) = delete;
+    GroupObject& operator=(const GroupObject&) = delete;
+
+    DptId dptId() const noexcept { return _dpt; }
 
     /// Full KNX communication-flag set (C/R/W/T/U/I + priority).
-    const GroupObjectFlags& flags() const noexcept { return _config.flags; }
-    void setFlags(const GroupObjectFlags& flags) noexcept { _config.flags = flags; }
+    GroupObjectFlags flags() const noexcept {
+        GroupObjectFlags f;
+        f.communication = bit(kBitComm);
+        f.read = bit(kBitRead);
+        f.write = bit(kBitWrite);
+        f.transmit = bit(kBitTransmit);
+        f.update = bit(kBitUpdate);
+        f.readOnInit = bit(kBitReadOnInit);
+        f.priority = priority();
+        return f;
+    }
+    void setFlags(const GroupObjectFlags& flags) noexcept;
 
     /// Transmission priority used for telegrams this object originates.
-    Priority priority() const noexcept { return _config.flags.priority; }
+    Priority priority() const noexcept { return static_cast<Priority>((_bits >> kPrioShift) & 0x03u); }
 
     // Individual flag accessors.  Each already folds in Communication enable,
     // so callers cannot accidentally honour R/W/T/U on a disabled object.
-    bool communicationEnabled() const noexcept { return _config.flags.communication; }
-    bool readable() const noexcept { return _config.flags.communication && _config.flags.read; }
-    bool writable() const noexcept { return _config.flags.communication && _config.flags.write; }
-    bool transmit() const noexcept { return _config.flags.communication && _config.flags.transmit; }
-    bool updatable() const noexcept { return _config.flags.communication && _config.flags.update; }
-    bool readOnInit() const noexcept { return _config.flags.communication && _config.flags.readOnInit; }
+    bool communicationEnabled() const noexcept { return bit(kBitComm); }
+    bool readable() const noexcept { return bit(kBitComm) && bit(kBitRead); }
+    bool writable() const noexcept { return bit(kBitComm) && bit(kBitWrite); }
+    bool transmit() const noexcept { return bit(kBitComm) && bit(kBitTransmit); }
+    bool updatable() const noexcept { return bit(kBitComm) && bit(kBitUpdate); }
+    bool readOnInit() const noexcept { return bit(kBitComm) && bit(kBitReadOnInit); }
 
     /// Table 53 Value Field Type code for this object's current payload width.
     uint8_t valueFieldType() const noexcept;
 
     /// This object's entry in the Group Object Table (03/05/01 Table 52).
     uint16_t descriptor() const noexcept {
-        return encodeGroupObjectDescriptor(_config.flags, valueFieldType());
+        return encodeGroupObjectDescriptor(flags(), valueFieldType());
     }
-    
+
     /**
      * @brief Get group address
      */
-    GroupAddress getAddress() const noexcept { return _config.address; }
-    
+    GroupAddress getAddress() const noexcept { return _address; }
+
     /**
      * @brief Get current value as bool
      * @thread_safety Owner-context only; do not call concurrently with mutation.
      */
     bool asBool() const;
-    
+
     /**
      * @brief Get current value as uint8
      * @thread_safety Owner-context only; do not call concurrently with mutation.
      */
     uint8_t asUint8() const;
-    
+
     /**
      * @brief Get current value as float
      * @thread_safety Owner-context only; do not call concurrently with mutation.
      */
     float asFloat() const;
-    
+
     /**
      * @brief Set value from bool
      * @thread_safety Owner-context only.
      */
     util::Result<void> setValue(bool value);
-    
+
     /**
      * @brief Set value from uint8
      * @thread_safety Owner-context only.
      */
     util::Result<void> setValue(uint8_t value);
-    
+
     /**
      * @brief Set value from float
      * @thread_safety Owner-context only.
@@ -302,7 +354,7 @@ public:
      * @thread_safety Owner-context only; do not call concurrently with mutation.
      */
     util::Result<DptValue> value() const;
-    
+
     /**
      * @brief Which inbound service delivered a value.
      *
@@ -325,36 +377,25 @@ public:
      */
     util::Result<void> receiveValue(std::span<const uint8_t> data,
                                     ValueSource source = ValueSource::Write);
-    
-    /**
-     * @brief Get raw value
-     * @thread_safety Owner-context only. The returned span aliases internal storage.
-     */
-    std::span<const uint8_t> getRawValue() const noexcept { return _rawValue.span(); }
-    
-    /**
-     * @brief Set callback for value changes
-     * @thread_safety Owner-context only - register during initialization.
-     */
-    void setCallback(GroupObjectCallback callback);
 
     /**
-     * @brief Set sender used to issue group-value read requests
-     * @thread_safety Owner-context only - register during initialization.
+     * @brief Get raw value
+     * @thread_safety Owner-context only. The returned span aliases the table's value pool
+     * and is valid until the table next grows.
      */
-    void setReadRequestSender(GroupReadRequestCallback callback);
-    
+    std::span<const uint8_t> getRawValue() const noexcept;
+
     /**
      * @brief Request current value from bus
      * @thread_safety Owner-context only.
      */
     util::Result<void> requestValue();
-    
+
     /**
      * @brief Check if value is valid
      * @thread_safety Owner-context only; do not call concurrently with mutation.
      */
-    bool isValid() const noexcept { return _valid; }
+    bool isValid() const noexcept { return bit(kBitValid); }
 
     // ── Outbound transmit policy (send-on-change / cyclic / min-interval) ─────
     // Decision helpers are pure functions of the current value, the last
@@ -362,9 +403,14 @@ public:
     // clock, so they are fully deterministic and host-testable. The publish path
     // (see BusAccessUnit::sendGroupValueForObject) evaluates them and calls
     // noteTransmitted() when a telegram actually goes on the wire.
+    //
+    // The policy and the last-transmitted copy are kept only for objects that
+    // were given a policy; an object without one behaves as the inert default
+    // (every publish is sent) and keeps no transmit history.
 
-    void setTransmitPolicy(const GroupObjectTransmitPolicy& policy) noexcept { _config.transmitPolicy = policy; }
-    const GroupObjectTransmitPolicy& transmitPolicy() const noexcept { return _config.transmitPolicy; }
+    /// Returns ResourceUnavailable when the table cannot hold another policy.
+    util::Result<void> setTransmitPolicy(const GroupObjectTransmitPolicy& policy);
+    GroupObjectTransmitPolicy transmitPolicy() const noexcept;
 
     /// Decide what to do with a publish of the current value at `nowMs`.
     /// @thread_safety Owner-context only.
@@ -376,8 +422,8 @@ public:
     /// True when a previously deferred publish is now clear of the min-interval.
     bool readyToSendDeferred(uint32_t nowMs) const noexcept;
 
-    bool pendingSend() const noexcept { return _pendingSend; }
-    void setPendingSend(bool pending) noexcept { _pendingSend = pending; }
+    bool pendingSend() const noexcept { return bit(kBitPending); }
+    void setPendingSend(bool pending) noexcept { setBit(kBitPending, pending); }
 
     /// Snapshot the current value as "last transmitted" and stamp the time.
     /// Call exactly when a telegram for this object is actually emitted.
@@ -385,21 +431,102 @@ public:
     void noteTransmitted(uint32_t nowMs);
 
 private:
+    friend class GroupObjectStore;
+
+    GroupObject() = default;  // table slots, initialised by the store
+
+    static constexpr unsigned kBitComm = 0, kBitRead = 1, kBitWrite = 2, kBitTransmit = 3,
+                              kBitUpdate = 4, kBitReadOnInit = 5, kPrioShift = 6, kBitValid = 8,
+                              kBitPending = 9, kBitOwnsStore = 10;
+    static constexpr uint8_t kNoPolicy = 0xFF;
+
+    bool bit(unsigned n) const noexcept { return (_bits >> n) & 1u; }
+    void setBit(unsigned n, bool on) noexcept {
+        _bits = static_cast<uint16_t>(on ? (_bits | (1u << n)) : (_bits & ~(1u << n)));
+    }
+    void init(GroupObjectStore* store, const GroupObjectConfig& config);
+    void copyFrom(const GroupObject& other) noexcept;
+    util::Result<void> storeValue(std::span<const uint8_t> data);
+    GroupObjectIndex index() const noexcept;
+    PolicyState* policyState() noexcept;
+    const PolicyState* policyState() const noexcept;
+
     /// DPT-aware "did the value move enough to count as a change?" comparison
     /// between the current value and the last transmitted value.
-    bool changedSignificantly() const;
+    bool changedSignificantly(const PolicyState& state) const;
 
-    GroupObjectConfig _config;
-    RawValueBuffer _rawValue;
-    bool _valid;
-    GroupObjectCallback _callback;
+    GroupObjectStore* _store{nullptr};
+    DptId _dpt{};
+    GroupAddress _address{};
+    uint16_t _bits{0};        // flags C/R/W/T/U/I, priority, valid, pending, owns-store
+    uint16_t _valueOffset{0}; // into the store's value pool
+    uint8_t _valueLength{0};
+    uint8_t _policy{kNoPolicy}; // index into the store's policy table
+};
+
+#if INTPTR_MAX == INT32_MAX
+static_assert(sizeof(GroupObject) <= 16, "GroupObject must stay at 16 bytes on a 32-bit target");
+#endif
+
+/// Transmit-policy state of one object: the policy, and the last transmitted value and time.
+struct PolicyState {
+    GroupObjectTransmitPolicy policy{};
+    uint32_t lastSentMs{0};
+    uint16_t lastSentOffset{0};  // copy of the value, in the value pool
+    uint8_t  lastSentLength{0};
+    bool     lastSentValid{false};
+};
+
+/**
+ * @brief The state of one group object table: objects, values, policies, callbacks.
+ *
+ * Allocated once at initialisation when the owner reserves the object count and
+ * value bytes up front (a product knows both); objects added beyond the
+ * reservation grow the storage.
+ */
+class GroupObjectStore {
+public:
+    GroupObjectStore() = default;
+    ~GroupObjectStore();
+    GroupObjectStore(const GroupObjectStore&) = delete;
+    GroupObjectStore& operator=(const GroupObjectStore&) = delete;
+
+    /// Reserve room for `objects` objects and `valueBytes` bytes of values (the
+    /// sum of groupObjectValueBytes() over them). Pointers to objects of a
+    /// non-empty store are invalidated when this grows it.
+    void reserve(uint16_t objects, size_t valueBytes);
+
+    /// Append an object; nullptr when `maxObjects` are present.
+    GroupObject* append(const GroupObjectConfig& config);
+    /// Append a copy of `source` (config, value, policy state).
+    GroupObject* appendCopy(const GroupObject& source);
+    /// Remove the object at `index`; later objects move down by one.
+    bool erase(uint16_t index);
+    void clear();
+
+    uint16_t size() const noexcept { return _count; }
+    GroupObject* at(uint16_t index) noexcept { return index < _count ? &_entries[index] : nullptr; }
+    const GroupObject* at(uint16_t index) const noexcept { return index < _count ? &_entries[index] : nullptr; }
+
+    void setValueCallback(GroupObjectCallback callback) { _onValue = std::move(callback); }
+    void setReadRequestSender(GroupReadRequestCallback callback) { _readRequestSender = std::move(callback); }
+
+    static constexpr uint16_t kMaxObjects = 256;
+
+private:
+    friend class GroupObject;
+
+    uint16_t allocateValue(size_t bytes);
+    uint8_t policySlot(GroupObject& object);
+    uint16_t indexOf(const GroupObject* object) const noexcept;
+
+    std::unique_ptr<GroupObject[]> _entries;
+    uint16_t _count{0};
+    uint16_t _capacity{0};
+    std::vector<uint8_t> _pool;
+    std::vector<PolicyState> _policies;
+    GroupObjectCallback _onValue;
     GroupReadRequestCallback _readRequestSender;
-
-    // Transmit-policy state.
-    RawValueBuffer _lastSentRaw;
-    bool     _lastSentValid{false};
-    uint32_t _lastSentMs{0};
-    bool     _pendingSend{false};
 };
 
 } // namespace application
