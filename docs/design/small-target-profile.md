@@ -899,7 +899,7 @@ byte allocations); `std::map` is not used on the `tp1-small` heap path at all.
 | Group object table load segment | `DeviceModel` | 514 |
 | (The `InterfaceObjectManager`'s unused copies of the first and fifth rows' tables) | removed in step 1 | (264 + 972) |
 
-Today the group address list exists four times (1042 B) and the association table twice (1614 B). The
+At that point the group address list existed four times (1042 B; two copies are gone, see the follow-up below) and the association table twice (1614 B). The
 load segments (1670 B in all, with the application code segment) are the staging copies of an ETS
 download; only the application code segment is a segment of its own.
 
@@ -917,6 +917,8 @@ in `test_connection_table`; `test_knx_genconfig` checks the policy per profile.
   in the run. The `tp1-standard` profile is set to `init_only` as the design says, but its secure
   persistence records are sized by a guess (+1 KiB) and nothing locks it under traffic; until that is
   run, a `tp1-standard` product that locks the heap is untested.
+  (Since then the download and the `tp1-standard` feature set without Secure are in the run; see
+  "Follow-up: ETS download, one address list, whole device" below. The secure paths still are not.)
 - **Persistence-format impact: none.** The stored keys, values and the schema version are unchanged;
   the save path builds the same records in a different buffer.
 - **API changes.** New: `knx/util/heap.hpp`, `KNX_HEAP_POLICY`. Changed: none for products. The
@@ -928,6 +930,97 @@ in `test_connection_table`; `test_knx_genconfig` checks the policy per profile.
 - **Flash.** +701 B over step 1 (79079 B to 79780 B; +445 B over the S2 figure): the policy and its `operator new` about
   140 B, the connection spare list and the changed save path the rest. The gate's flash budget is
   unchanged (81152 B).
+
+### Follow-up: ETS download, one address list, whole device
+
+Figures are the `tp1-small` Cortex-M3 reference device, heap measured with the traffic and locked
+after start-up. "Heap, start-up" is the high-water mark when the device has started; "heap, with
+download" is the peak at the end of the run, which includes the ETS download, its persistence saves
+and the flush at A_Restart.
+
+| Step | Flash | Static RAM | Heap, start-up | Heap, with download (peak) | KNstaX total |
+|---|---:|---:|---:|---:|---:|
+| Before (S3/S4 step 2; the traffic had no download) | 79780 B | 1456 B | 12500 B | (12500 B) | 13956 B |
+| 1. A full ETS download in the traffic | 79780 B | 1456 B | 12500 B | 12500 B | 13956 B |
+| 2. One copy of the group address list | 79890 B | 1456 B | 12004 B | 12004 B | **13460 B** |
+| 3. Load segments | not done, see below | | | | |
+
+**Step 1: the download.** `traffic.hpp` builds the session from `downloadLikeEts` of
+`test_ets_connected_session.cpp`: T_Connect; for the address table (index 1), association table (2)
+and group object table (3) in turn Unload, StartLoading, A_Memory_Write in 12-octet frames (the most
+a 15-octet APDU carries), one A_Memory_Read of the first chunk, LoadCompleted (frames 40 ms apart);
+eight group telegrams on the downloaded addresses (writes, reads the device answers, a read
+response); A_Restart, which ends the emulator run through the platform's restart hook. The tables
+are those of a real I/O module of this size: 60 group addresses (1/0/1 to 1/0/60, one per object),
+80 associations (each object to its address, and 20 objects that also listen to the address of
+another object of their type) and 60 group object descriptors. The reference device has no
+parameters, so there is no application code segment; Verify Mode is off. 71 more frames reach the
+device, and the gate checks that the ports then observed exactly the values the downloaded tables
+route (15 in all, 7 after the download) before it accepts the heap figure.
+- **Finding: nothing allocates.** Zero allocations with the heap locked through the download, the
+  persistence saves it causes (each table's LoadCompleted marks the state dirty and the coalesced
+  save follows) and the flush at A_Restart; the peak equals the start-up figure. The connection
+  entries and the save buffer moved to start-up earlier (§6.4) are what made that so.
+- **Limits.** The restart ends the run, so the group traffic runs before it and the boot that follows
+  a restart (the restore from persistence) is not run. The additional load controls of ETS's
+  DefaultProcedure (segment allocation, data relative allocation) are not sent: the stack treats the
+  event as a no-op and the segments sit at fixed addresses. The associations use the port slot as
+  ASAP (0-based), because the stack applies ASAP unchanged as the group object index.
+
+**Step 2: one copy of the address list** (`ARCHITECTURE.md`, "Who owns the group address list").
+The list existed in the address table (264 B), the stack port (260 B), the data link layer (260 B) and
+the `DeviceModel` load segment (258 B). The stack port's and the data link layer's lists are gone:
+the data link layers filter and acknowledge on the address table's own storage through a view
+(span and sorted flag) that the stack port publishes after every change of the table. Heap 12500 B
+to 12004 B (the two lists, 496 B with their allocator headers), flash +110 B. The acknowledge list the
+physical layer takes is still built into a transient array and replaced under the backend's own
+lock, so the interrupt-side matcher never reads the table; the publication is a pointer-and-count
+store in the stack's own context. A data link layer used on its own keeps `addGroupAddress()` with a
+list made on first use (tests). One behaviour changes, deliberately: an address that is no longer
+in the table is no longer accepted or acknowledged. The old lists only grew, so after an Unload or a
+download with fewer addresses the device went on acknowledging the old ones until the next restart
+(test: `test_group_address_filter_follows_the_address_table`).
+
+**Step 3: the load segments, not done (decision for the owner).** What the code does:
+- Tables are canonical; the segment is staging. A_Memory_Write lands in the segment; at LoadCompleted
+  `applyLoadedTableSegment` parses it into the table (address and association table; the application
+  code segment goes to `ApplicationProgramObject::setProgramData`; the group object table segment is
+  accepted and not applied, its content being firmware-defined). Only the tables are persisted. Memory
+  reads (including Verify Mode's read-back) read the segment, not the table: after a boot the segment
+  is zeros, and after the firmware binds an address the segment still holds what ETS wrote.
+- So a staging buffer is needed during a download (the table is only built at LoadCompleted, and a
+  verification read before it must return what was written; a write is not entry-aligned either: a
+  12-octet chunk of the association table straddles entries), but the four copies need not exist
+  at once. One buffer of 642 B would replace 1670 B (about 1020 B of heap; the device RAM headroom
+  would go from 364 B to about 1380 B).
+- What cannot be kept with one shared buffer. (a) Two tables staged at the same time (StartLoading on
+  two objects before either is completed) would overwrite each other: it can be refused cleanly (a
+  write guard claims the buffer; a refused write and a LoadCompleted without staging fail the load
+  state, which ETS reports), but today it works. (b) A memory read of a segment that is not the one
+  in the buffer cannot return what was written. For the address and association tables it could be
+  served from the table (a different answer after a boot and after a firmware-side change, a better
+  one); the group object table segment has no table behind it and would read as zeros once the buffer
+  is taken. (c) It needs a read hook on a memory region (the management server only has a write
+  guard and a fixed storage span today).
+- Whether ETS ever interleaves the loads or reads a segment back after LoadCompleted is not known
+  from this repository (the sequence ETS makes in `test_ets_connected_session.cpp` is sequential, with
+  the read-back before LoadCompleted). It should be confirmed with an ETS6 download on the H8i8o
+  before any of this is built. As a build option (`tp1-small` only, off elsewhere) the deployed
+  ESP32 devices would keep today's behaviour exactly. Persistence format and power-cut recovery do
+  not depend on any of it.
+
+**Step 4: `tp1-standard`.** `run_gate.sh` runs the Cortex-M4 reference device on `mps2-an386`
+with the same traffic and the heap locked. Flash 98264 B, static RAM 1609 B, heap 18304 B at start-up
+and at the end (**19913 B in all**), zero allocations after start-up, download applied. The
+`init_only` policy of the profile stands, for this feature set. It has no Data Secure yet (K6), so the
+secure persistence records and the secure paths are still not under the lock. The RAM budget of the
+profile now counts the heap: 20480 B (it was a static-only 1792 B). The Cortex-M0+ device is linked,
+not run (flash 82959 B, static RAM 1456 B).
+
+**Step 5: the whole device.** `tp1-small-m3.json` has a `device` section (§7). With the figures above:
+RAM 13460 (KNstaX) + 2560 + 512 + 1024 + 2560 = **20116 of 20480 B, headroom 364 B**; flash 79890
+(KNstaX) + 7509 (runtime) + 12288 + 4096 + 8192 = **111975 of 131072 B, headroom 19097 B**. The RAM
+budget of the per-share check is lowered to 13824 B.
 
 ## 10. Projection and decision points
 
@@ -1051,6 +1144,31 @@ with bus traffic and the heap locked after start-up: flash 77.9 KiB (79780 B), s
 - **Outcome.** The 12288 B reading of the target is reachable with the duplicates removed; the 10240 B
   one is not on present evidence even with the segments removed. The GD32F303CC
   fall-back is not needed for RAM on the 20 KiB device.
+
+**Review after the ETS download, the single address list and the device check (16 November 2026).**
+Measured on the `tp1-small` Cortex-M3 reference device with the ETS download in the traffic and the
+heap locked: flash 78.0 KiB (79890 B), static RAM 1456 B, heap 12004 B (start-up and peak),
+**KNstaX RAM 13460 B (13.1 KiB)**.
+
+- **The download was the open question of the last review, and it is closed:** no allocation under
+  the lock through a full download of 60 addresses, 80 associations and 60 group object descriptors,
+  its saves and the restart flush. The 12.5 KB figure was not hiding a download peak.
+- **The constraint that counts is now measured.** The whole device (KNstaX plus the H8i8o
+  reservations, §7) needs 20116 of 20480 B of RAM: **headroom 364 B**, and 19097 B of 131072 B of
+  flash. Flash has room (the 8 KiB "Data Secure, stretch" line of the board budget would fit in the headroom). RAM
+  has almost none: 364 B for anything the reservations do not name (Data Secure's 1.5 KiB RAM
+  stretch does not fit; group objects are inside the KNstaX figure here, so the board's separate
+  2 KiB line is not additional).
+- **What is left, in order of size.** The load segments (1670 B; about 1020 B recoverable with one
+  shared staging buffer, at the cost described under step 3 of the follow-up, which needs the
+  owner's decision and an ETS check); `CommissionedProductRuntime` 2224 B; the data link layer's
+  frame pool (576 B); the management server's memory segment bindings (392 B); the association
+  table's by-address index (320 B).
+- **Against 10240 B and 12288 B.** 3220 B over the first, 1172 B over the second. With the shared
+  staging buffer the figure would be near 12.4 KB: still above 12288 B by about 150 B, with the
+  device headroom near 1.4 KB.
+- **`tp1-standard`** (no Secure yet) measures 19913 B under the lock with zero allocations: the
+  `init_only` policy stands for it.
 
 ## 11. Risks
 
