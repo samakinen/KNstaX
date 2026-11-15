@@ -68,16 +68,46 @@ target. That file is not an illustration — it is the definition the
   `onCommand`, `onStateWrite`, `provideState`, `onParameterChanged`,
   `onProgrammingModeChanged`, `onLifecycleChanged`, `onFault`.
 
-  Callback slots default to `std::function` (heap-backed). Pass an explicit
-  capacity to use `InplaceFunction<…, N>` (fixed-size, allocation-free):
+  A binding is stored as a three-word entry, and only for the ports that can
+  use it: command and state-write handlers for ports that accept bus writes,
+  state providers for readable ports. Registering a handler a port cannot use
+  (`onCommand` on a read-only state port, `provideState` on a port that is not
+  readable) is a compile-time error.
+
+  A callable that is trivially copyable and no larger than a pointer (a
+  captureless lambda, a function pointer, a lambda capturing one pointer,
+  reference or integer) is stored inside the entry and costs no memory beyond
+  it. A larger or non-trivial capture (a `std::string`, a `std::shared_ptr`,
+  several references) is allocated on the heap, which is the default. Pass a
+  non-zero capacity to forbid the heap altogether; the number is then the
+  maximum capture size in bytes:
 
   ```cpp
-  makeCommissionedBindings<64>(kMyProduct)   // 64-byte bounded slots
+  makeCommissionedBindings<8>(kMyProduct)   // no heap; captures of at most 8 bytes
       .onCommand<Port::Relay>([](bool v) { gpio_set(PIN, v); })
       .provideState<Port::Relay>([]() -> bool { return gpio_read(PIN); });
   ```
 
-  A compile-time error is emitted if any lambda captures more than N bytes.
+  A compile-time error is emitted for any callable that does not fit inline or
+  is larger than N bytes. The inline limit is `sizeof(void*)`, so 4 bytes on a
+  Cortex-M: capture a pointer to the state the handler needs rather than the
+  state itself. The bindings are move-only.
+
+- `CommissionedProductRuntime::compiledEndpoint()` (and
+  `EndpointRuntime::compiledDefinition()`) build the compiled definition, the
+  runtime and export descriptors with the port keys and display names, on demand
+  and return it **by value**. The runtime does not keep a copy; the port table it
+  works from is read-only data and carries no strings. Bind the result with
+  `const auto compiled = app.compiledEndpoint();` (or `const auto&`, which keeps
+  the temporary alive) and use it for diagnostics, such as logging the ports a
+  project left unlinked. `EndpointRuntime::identity()` returns the product
+  identity without building anything.
+
+  Publishes and read responses requested before the stack has started are queued
+  and sent when it starts. The queue is twice the port count by default; the
+  `KNX_PENDING_ACTION_CAPACITY` option (Kconfig, menu Capacities) sets a smaller
+  fixed size, 8 in the `tp1-small` profile. A request made with the queue full
+  fails with `QueueFull`.
 
 - `startCommissionedProduct(...)` — assembles the stack, wires persistence and
   management, and returns a `CommissionedProductRuntime`.
@@ -247,12 +277,14 @@ On constrained embedded targets where heap allocation must be avoided, pass a
 capacity to `makeCommissionedBindings`:
 
 ```cpp
-makeCommissionedBindings<64>(kMyProduct)
+makeCommissionedBindings<8>(kMyProduct)
 ```
 
-Each callback slot uses `InplaceFunction<Signature, 64>` instead of
-`std::function`. The compiler emits a `static_assert` failure if any lambda
-captures more than 64 bytes.
+The number is the maximum capture size in bytes of a binding, and with it the
+bindings never allocate. A callable has to be trivially copyable and fit in a
+pointer (`sizeof(void*)`, 4 bytes on a Cortex-M); the compiler emits a
+`static_assert` failure for any other. With the default capacity of 0 the same
+callables are stored inline and larger ones go to the heap.
 
 The CO-table size is bounded at compile time by the number of ports in the
 definition — it is impossible to register more communication objects than the

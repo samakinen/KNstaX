@@ -15,6 +15,16 @@ Current product/runtime authoring model:
 - `RuntimeServices` is the injected environment and protocol-engine service boundary
 - exporter metadata is derived from the same definition source rather than duplicated in handwritten runtime code
 
+The commissioned product layer is table-driven. An endpoint definition compiles to one `constexpr`
+port table (`kPortTable`, in `knx/product/impl/model/port_table.hpp`): a 14-byte descriptor per port, slot
+equal to index, no strings. The port keys and display names are a second table that only the exporter and
+tests read. `EndpointRuntime<Definition, Capacity>` is a thin shell over `ProductPortCore`
+(`src/product/product_port_core.cpp`), which works on ports by slot: group-object registration, address
+binding, transmit policy, bus-write dispatch, state providers, publish and the pending-action queue. The
+typed API (`publish<Id>(v)`, `onCommand<Id>(fn)`) is inline wrappers that pass the port's slot, and bindings
+are type-erased entries kept only for the ports that can use them. See
+`docs/design/small-target-profile.md` (6.1 and the S1 status).
+
 RF is not part of the current repository architecture.
 
 The codebase is structured so protocol logic remains portable while backend availability is selected by platform and build configuration. Host builds exist primarily for fast regression, interoperability, and architecture validation.
@@ -233,8 +243,9 @@ otherwise. The older `-DKNX_FEATURE_*` options still work as overrides. See
 **Capacities** (Kconfig menu "Capacities", defined in every build, no fallback in `config.hpp`):
 `KNX_MAX_APDU_LENGTH`, `KNX_TP1_RX_QUEUE_FRAMES`, `KNX_TRANSPORT_RX_QUEUE`,
 `KNX_ADDRESS_TABLE_ENTRIES`, `KNX_ASSOCIATION_TABLE_ENTRIES`, `KNX_ADDITIONAL_INDIVIDUAL_ADDRESSES`,
-`KNX_SEND_PIPELINE_DEPTH` and `KNX_MAX_GROUP_OBJECT_PAYLOAD_BYTES`. Their defaults are the values the
-stack had before they were options (254, 32, 8, 256, 512, 16, 8, 16), so ESP-IDF and the `full` and
+`KNX_SEND_PIPELINE_DEPTH`, `KNX_MAX_GROUP_OBJECT_PAYLOAD_BYTES` and `KNX_PENDING_ACTION_CAPACITY` (the product
+runtime's queue of publishes made before start; 0 means twice the port count). Their defaults are the values the
+stack had before they were options (254, 32, 8, 256, 512, 16, 8, 16, 0), so ESP-IDF and the `full` and
 `host-test` profiles are unchanged; `tp1-small` and `tp1-standard` set smaller ones. Buffers derive from
 them: the longest TP1 frame is the APDU length plus 8 octets for standard frames only (23 for 15) or
 plus 9 with extended frames (263 for 254), see `config::MAX_TP1_FRAME_LENGTH`. A full table or queue

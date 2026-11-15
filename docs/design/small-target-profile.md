@@ -140,6 +140,7 @@ on hardware before its `tp1-small` default is fixed at `n`.
 | `KNX_ADDITIONAL_INDIVIDUAL_ADDRESSES` | `MAX_ADDITIONAL_INDIVIDUAL_ADDRESSES` (16) | 0 | 4 | 16 |
 | `KNX_MAX_GROUP_OBJECT_PAYLOAD_BYTES` | (exists) | 14 | 14 | 16 |
 | `KNX_SEND_PIPELINE_DEPTH` | A_send pipeline queue | 2 | 4 | 8 |
+| `KNX_PENDING_ACTION_CAPACITY` | Product runtime queue of publishes made before start (2 × port count; 0 keeps that) | 8 | 16 | 0 |
 | `KNX_APPLICATION_SEGMENT_BYTES` | Parameter memory held in RAM | from the product (§5) | | |
 
 **Maximum APDU length** is the largest single lever. With `KNX_MAX_APDU_LENGTH = 15` (standard
@@ -187,31 +188,50 @@ also reduce the size of the ESP32 builds.
 
 ### 6.1 S1: table-driven product runtime (flash)
 
-**Today.** `EndpointRuntime` and the binding machinery are templates instantiated per port, so
-each port brings its own copy of the publish, receive, persistence and read-response code:
-about 500 B of flash per port.
+**Before.** `EndpointRuntime` and the binding machinery were templates instantiated per port: a
+write dispatcher (about 200 B) and a read preparer (about 58 B) per port, two 60-entry
+member-function-pointer tables of them, three `std::function`s per port in a `std::tuple`, a
+run-time linear search of the descriptors in every typed `publish`, and the port keys and display
+names as rodata. The runtime object held a RAM copy of the runtime and export descriptors (4 KB) and
+a pending-action queue of twice the port count (4.8 KB).
 
-**Proposed.** The product definition compiles to one `constexpr` array of port descriptors:
+**Implemented** (S1 status, §9, has the measurements):
 
-```cpp
-struct PortDescriptor {
-    uint16_t objectNumber;
-    application::DptId dpt;
-    uint8_t valueBytes;
-    uint8_t codec;        // index into the codec table the product links
-    uint8_t flags;        // C/R/W/T/U/I + priority
-    uint8_t persistence;  // none / state / command
-};
-```
+- **Port table.** The endpoint definition compiles to one `static constexpr` table,
+  `kPortTable<Definition>`, of 14-byte `PortDescriptor`s: logical id, DPT, value type, flags
+  (readable, writable, transmit, receivable, persisted, read-on-init), priority, direction, and two
+  ranks. The slot of a port is its index and its group-object index. The table is rodata and has no
+  strings and no `GroupObject` types. Keys and display names are a separate `kPortNames` table that
+  only the exporter and the tests read. Encoding and decoding stay the existing dynamic
+  `encodeDptValue` / `decodeDptValue` keyed by value type; there is no codec table.
+- **Descriptors on demand.** `compiledDefinition()` (and `compiledEndpoint()`) build the runtime and
+  export descriptors from the two tables and return them by value; the runtime keeps a copy of the
+  small definition (identity, persistence and security policy), not the descriptors. The exporter's
+  output is byte-identical.
+- **Type-erased bindings.** A binding is `{ thunk, manage, ctx }`. A trivially copyable callable of at
+  most a pointer's size is stored in `ctx` with one thunk per callable type; anything else is
+  heap-allocated and freed by `manage`, which keeps the default `BindingCapacity` of 0 working. With
+  `BindingCapacity > 0` the heap is forbidden and a callable that does not fit is a `static_assert`.
+  Entries exist only for the ports that can use them, indexed by the table's ranks: command and
+  state-write entries for ports that accept bus writes, state providers for readable ports.
+  A binding a port cannot use is a compile-time error.
+- **`ProductPortCore`.** One non-template class in `src/product/` (in the core source list) does what
+  was per-port code: group-object registration (one loop), address binding, transmit policy,
+  `isPortLinked`, seeding of readable state, the write and read callbacks, `dispatchWrite(slot)`,
+  publish and read-response start, and the pending-action queue. `EndpointRuntime<Def, Cap>` is a shell:
+  the core plus the storage sized from the type, and the typed API as inline wrappers that pass the
+  slot as a compile-time constant (`publish<Id>(v)` is one `DptValue` construction and one call). The
+  core reaches group objects only through `setGroupObjectValue`, `sendGroupValueForObject` /
+  `respondGroupValueForObject`, `groupObject()` and `isGroupObjectLinked`, so S2 replaces the body of
+  its registration loop and those calls.
+- **Pending actions** are a Kconfig capacity, `KNX_PENDING_ACTION_CAPACITY` (§4.2): 0 is twice the port
+  count (host-test, full, ESP-IDF), 8 on `tp1-small`, `host-small` and `host-minimal`, 16 on
+  `tp1-standard`. A full queue answers `QueueFull`.
 
-A single, non-template runtime walks this table. The typed API the product uses
-(`publish<Port::X>(bool)`, `onStateWrite<Port::X>(…)`) stays the same, but becomes a thin inline
-wrapper that encodes with the port's codec and calls the generic runtime with the port's
-index. The per-port binding callbacks move into one array of function pointer plus context.
-
-*Expected effect:* about 25–30 KB of flash for 60 ports. This is the largest single item.
-*Compatibility:* the product authoring API is unchanged. The exporter reads the same
-descriptors.
+*Compatibility.* The typed API keeps its signatures and error results. Changes: `compiledDefinition()`
+and `compiledEndpoint()` return by value (a `const auto&` binding still works); `EndpointBindings` is
+move-only and `PortBindingSlot` is gone; `BindingCapacity > 0` means "maximum inline capture bytes, no
+heap"; `PendingBusAction<Id>` is one record whose `logicalId` is its 16-bit value.
 
 ### 6.2 S2: compact group objects (RAM; K7 step 4)
 
@@ -312,7 +332,7 @@ measured" and their RAM figure is static data only. The CI job is `size-gate` in
 | C2 | Capacities as options (§4.2), including `KNX_MAX_APDU_LENGTH`, with a full-capacity test per table | K7.5 | **Measure `tp1-small`** |
 | C3 | Feature gates (§4.1): coupler, Security Interface Object, GO diagnostics, optional management services, DPT families | K7.1–K7.3 | **Done: tp1-small flash 134995 to 99907 B, see C3 status** |
 | C4 | Size gate in CI, per profile, with ratcheting budgets | K7.7 | **Done: see C4 status** |
-| S1 | Table-driven product runtime | — | **Measure: decision point** (§10) |
+| S1 | Table-driven product runtime | — | **Done: tp1-small flash 108275 to 79925 B, heap 40980 to 31108 B; decision point reached, see S1 status and §10** |
 | S2 | Compact group objects | K7.4 | Measure |
 | S3 | Interface object property storage | — | Measure |
 | S4 | Allocation policy | K7.8 | Measure; `tp1-small` budget enforced |
@@ -591,6 +611,76 @@ in it was run locally in the `knstax-qemu` and `knstax-host` images, and the YAM
   200 idle loops. No heap run for `tp1-standard` or the Cortex-M0+ (QEMU has no `mps2-an385`
   equivalent in the set used here; `mps2-an386` is Cortex-M4 and could serve `tp1-standard`).
 
+### S1 status
+
+Done (§6.1 describes what was built). Seven changes, each leaving the host suites green and the gate
+passing, with the figure of every step measured on the `tp1-small` Cortex-M3 reference device.
+
+**The reference device changed first (step 0).** The gate device started the product with no
+bindings and no publishes, so the binding storage and the dispatch code a real product pays for were
+only partly measured. `test/baremetal/size_gate/main.cpp` now binds a handler on every port (each
+captures a small index and has its own callable type, as per-channel handlers do; command, state write
+and state provider as each port allows) and calls `publish` once per datapoint type. That raised the
+baseline by 8368 B of flash, and the three budget files with it (`tp1-standard` too, because the three
+configurations share the device). The "Before" row below is that baseline; the 99907 B of the C3 status
+is the old, less representative device.
+
+| Step | Flash | Static RAM | Heap | Static + heap |
+|---|---:|---:|---:|---:|
+| C3 device (no bindings), for reference | 99907 B | 1379 B | 40980 B | 42359 B |
+| 0. Bindings and publishes in the device (baseline) | 108275 B | 1443 B | 40980 B | 42423 B |
+| 1. Port table and names table; descriptors built from them | 108561 B | 1443 B | 40620 B | 42063 B |
+| 2. No stored `_compiled`; `compiledDefinition()` by value | 100051 B | 1443 B | 37092 B | 38535 B |
+| 3. Type-erased bindings | 95991 B | 1443 B | 35556 B | 36999 B |
+| 4. `ProductPortCore`; per-slot templates and tables removed | 80031 B | 1443 B | 35588 B | 37031 B |
+| 5. Pending-action capacity (8 on `tp1-small`) | 79925 B | 1443 B | 31108 B | 32551 B |
+| 6. Names proven absent (gate check; no code change) | 79925 B | 1443 B | 31108 B | 32551 B |
+
+S1 takes 28350 B (26 %) out of the flash and 9872 B out of the heap, a flash saving at the top of the
+25–30 KB the design expected. The runtime flash (C and C++ runtime) stays 7551 B. The other
+configurations: Cortex-M0+ flash 114058 to 82683 B; `tp1-standard`, Cortex-M4 flash 127059 to 98911 B
+(static RAM 1596 B; its heap is not run). The budgets were lowered to the new figures plus the margin:
+`tp1-small` M3 81664 B flash and 33280 B RAM, M0+ 84480 B flash, `tp1-standard` 101120 B flash.
+
+- **What the steps did.** Step 1 adds the 840 B port table (60 × 14 B) and changes nothing else. Step
+  2 is the biggest RAM item on its own: the compiled definition (3.9 KB of descriptors copied into the
+  runtime object) and, in flash, the export descriptors and the port names it pulled into the image.
+  Step 3 replaces the 2960 B of `std::function` slots with 1344 B of entries (44 receive ports × 2 + 24
+  readable ports, 12 B each) and the `std::function` managers. Step 4 removes the per-port templates
+  (the 12 KB of dispatchers, the read preparers, their two tables) and the run-time descriptor search;
+  the core is compiled once (after LTO its largest out-of-line functions are `publishStarted`, 608 B, and
+  `drainPendingActions`, 448 B). Step 5 is the queue: 60 × 2 × 40 B = 4800 B becomes 8 × 40 B.
+- **Runtime object.** The heap allocation of `CommissionedProductRuntime` went from 12184 B to 2272 B (the
+  `EndpointRuntime` inside it is 2088 B, the core 36 B). What is
+  left is the 1344 B of binding entries, the 320 B queue, the configured group addresses, the copy of
+  the definition (about 120 B) and the parameter state.
+- **Call-site cost.** `publish<Id>(v)` builds a `DptValue` and calls the core with the slot. Six extra
+  `publish<…>(bool)` call sites in the gate device cost 196 B (33 B each), so a scalar fast path would
+  save a few hundred bytes for a product with dozens of sites. Not worth a second code path; not done.
+- **Ports that cannot use a binding.** `onCommand` and `onStateWrite` on a port that accepts no bus
+  writes, and `provideState` on a port that is not readable, were accepted before and never called.
+  They are `static_assert`s now (the conformance evidence for compile-time port direction already
+  claimed it). The Habinari firmware's bindings (`knx_group_reads.cpp`, `knx_group_writes.cpp`) and
+  every KNstaX test and host example compile with this.
+- **Names.** Keys and display names are only in `kPortNames`. The gate's new `forbid_strings` (budget
+  file) and `--forbid-string` look for text in the bytes of the ELF; the three budgets forbid one key of
+  each port family. At the commit before the port table those strings are in the ELF, so the check does
+  fail when they come back. The product's own identity strings (`productKey`, display name, order
+  number) are still reachable through the definition copy the runtime keeps, a few tens of bytes.
+- **`DptValue` for state providers and writes.** The decode on a bus write and the encode of a provider
+  still build a `DptValue`, which holds a `float` and a `std::string` in its variant (32 B on a
+  32-bit target). Removing that is S2.
+- **Out of scope, noted.** `ParameterState::applyFromBytesAt<I>` is a per-parameter template, so it
+  still costs code per parameter (possible S1b). Runtime persistence semantics were not touched
+  (`persisted` is still export-only).
+- **Behaviour changes to know.** A bus write whose value does not match the port type and for which no
+  handler is bound now yields `OperationNotReady`, not `DecodeFailed` (the callback discards the
+  result; with a handler bound it is still `DecodeFailed`). A full pending-action queue is `QueueFull`
+  as before; only the size differs.
+- **Heap profile after S1** (`alloc <count> x <bytes>`): 60 x 240, 2796, 2720, 2272, 1764, 1224, 1032,
+  528, 488, 376, 344, 320. The group objects are 14400 B of the 31108 B (46 %); the runtime object is the
+  2272. S2 owns the first, S3 and S4 the rest. The 2796, 2720 and 1764 B items are not attributed here.
+
 ## 10. Projection and decision points
 
 Estimated `tp1-small` figures for the 60-object reference device after each stage. Only the
@@ -600,14 +690,39 @@ first row is measured.
 |---|---:|---:|---|
 | Today (M1) | 132 KiB, measured | 67 KiB, measured | |
 | C2 | | | 131.8 KiB flash, 43.2 KiB RAM (1.7 static + 41.5 heap) |
-| C2 + C3 | about 115 KiB | about 30 KiB | |
-| S1 | about 88 KiB | about 18 KiB |
-| S2 + S3 + S4 | about 80–85 KiB | about 8–10 KiB |
+| C2 + C3 | about 115 KiB | about 30 KiB | 97.6 KiB flash, 41.4 KiB RAM (1.3 static + 40.0 heap) |
+| S1 | about 88 KiB | about 18 KiB | **78.1 KiB flash, 31.8 KiB RAM (1.4 static + 30.4 heap)**; on the representative device with bindings, S1 took 108275 B / 42423 B down to 79925 B / 32551 B |
+| S2 + S3 + S4 | about 80–85 KiB | about 8–10 KiB | |
 
 **Decision point after S1.** If the measurement is more than about 10 % above the projection
 on either axis, stop and review before S2–S4. The options then are deeper reductions in
 `BusAccessUnit`, the application layer and the data link layer, or accepting `tp1-standard` as
 the smallest supported tier. The H8i8o board would then need the GD32F303CC (h8i8o decision D2).
+
+**Evaluation (after S1).**
+
+- **Flash: inside the projection.** 78.1 KiB against about 88 KiB, 11 % below, and under the 90112 B
+  target (88 KiB) by 10 KB. The Cortex-M0+ build is 80.7 KiB and `tp1-standard` 96.6 KiB. The
+  projection of 88 KiB assumed S1 would save about 27 KiB; it saved 27.7 KiB on the device that carries
+  bindings.
+- **RAM: more than 10 % above the projection, by the rule a stop-and-review.** 31.8 KiB against about
+  18 KiB is 77 % above. The projection assumed S1 would take about 12 KiB of RAM off; it took 9.6 KiB
+  (the study had expected about 10 KB from the runtime object, which the measurement confirms: 12184 B
+  to 2272 B, and 4.5 KB of that is the queue). Most of the gap is older than S1: the projection for
+  C2 + C3 was about 30 KiB and the measurement was 41.4 KiB, because C2 and C3 move flash and tables,
+  not the group objects and the interface object storage that hold the RAM (S2, S3). The expected next
+  step is S2: 14400 B of the 31108 B of heap are the 60 group objects (240 B each), and §6.2 expects
+  about 13 KiB back, leaving about 19 KiB. S3 and S4 then have to remove roughly another 9 KiB to
+  reach the 8–10 KiB projection, from the 16.7 KB of other heap items (2796, 2720, 2272, 1764, ...) that are
+  not yet attributed. That is a larger step than the §10 projection implied, and this document does not
+  decide whether it is reachable.
+- **What this means for the options.** The flash axis no longer needs `BusAccessUnit`, application
+  layer or data link layer reductions: the 90112 B flash target is met with 10 KB of margin.
+  The RAM axis is what S2–S4 have to carry; the `tp1-small` RAM target of 10240 B is reachable only if
+  S2 delivers its 13 KiB and S3 and S4 together remove about 9 KiB more. The review the rule asks for
+  is therefore an S2 estimate check (a measured group object size, and an attribution of the 2796, 2720
+  and 1764 B allocations) before S3 and S4 are committed to, and, failing that, the GD32F303CC
+  fall-back (h8i8o decision D2). The decision is the owner's.
 
 ## 11. Risks
 
