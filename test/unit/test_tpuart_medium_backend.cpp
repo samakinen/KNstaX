@@ -137,7 +137,7 @@ private:
             acks.push_back(octet);
         } else if (octet == 0x24u) {
             _argsPending = 1u;
-        } else if (octet == 0xF1u) {
+        } else if (octet == 0x28u) {
             _argsPending = 2u;
         } else if ((octet & 0xC0u) == 0x80u) {
             _dataIndex = octet & 0x3F;
@@ -151,7 +151,7 @@ private:
     {
         if (_request == 0x24u) {
             repetitions = _args[0];
-        } else if (_request == 0xF1u) {
+        } else if (_request == 0x28u) {
             address = static_cast<uint16_t>((_args[0] << 8) | _args[1]);
         }
     }
@@ -340,7 +340,7 @@ void test_init_resets_and_configures_the_chip(void)
     TEST_ASSERT_EQUAL_UINT32(19200u, f.uart.config()->baud);
     TEST_ASSERT_EQUAL_INT(KNX_UART_HAL_PARITY_EVEN, f.uart.config()->parity);
     // U_Reset.req, U_SetAddress, U_MxRstCnt (3 BUSY, 3 NACK), U_State.req.
-    const std::vector<uint8_t> expected{0x01, 0xF1, 0x11, 0x0A, 0x24, 0x63, 0x02};
+    const std::vector<uint8_t> expected{0x01, 0x28, 0x11, 0x0A, 0x24, 0x63, 0x02};
     TEST_ASSERT_EQUAL_UINT32(expected.size(), f.chip.hostOctets.size());
     TEST_ASSERT_EQUAL_MEMORY(expected.data(), f.chip.hostOctets.data(), expected.size());
     TEST_ASSERT_EQUAL_INT(static_cast<int>(Tp1MediumState::Idle), static_cast<int>(f.backend->getState()));

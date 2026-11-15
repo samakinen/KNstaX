@@ -84,15 +84,17 @@ Tp1DataLinkLayer
 
 ### 3.2 Protocol essentials
 
-The values below are from the Siemens TP-UART2 technical manual. They are cross-checked against
-`thelsing/knx`'s `tpuart_data_link_layer.cpp`, which is known to work with a TP-UART2.
+The values below were taken as the Siemens TP-UART2 technical manual's, cross-checked against
+`thelsing/knx`'s `tpuart_data_link_layer.cpp`. That cross-check was not good enough: the
+`U_SetAddress` value was the NCN5120's, and the H8i8o showed it (§3.8). Trust a value here once
+§3.8 records it as seen on a chip; the manual itself has not been at hand.
 
 | Item | Value |
 |---|---|
 | Host link | 19200 baud, 8E1 (verify against the chip's configuration on the board) |
 | `U_Reset.req` / `.ind` | 0x01 / 0x03 |
 | `U_State.req` / `.ind` | 0x02 / `xxxxx111`; bits 7–3 = slave collision, receive error, transmit error, protocol error, temperature warning |
-| `U_SetAddress.req` | 0xF1 + address high + low. NCN5120: plus one dummy octet. |
+| `U_SetAddress.req` | TP-UART2: **0x28** + address high + low (confirmed on the H8i8o). NCN5120: 0xF1 + address high + low + one dummy octet; the TP-UART2 ignores 0xF1 and raises its receive-error flag. |
 | `U_AckInformation` | 0x10, ORed with: 0x04 = NACK, 0x02 = BUSY, 0x01 = addressed (acknowledge this frame) |
 | `U_Busmon.req` | 0x05 |
 | `U_L_DataStart` / `_Continue` / `_End` | 0x80, 0x80 \| index (1–63), 0x40 \| length (7–63); one data octet follows each |
@@ -257,7 +259,8 @@ To confirm on a real TP-UART2 (with B5 of the H8i8o checklist):
    backend relies on it; it feeds at most `txQueueLimitOctets` ahead).
 2. The deadline for `U_AckInformation` after the address type octet, against the default limit
    of 4 queued octets (about 2.3 ms at 19200 baud).
-3. `U_MxRstCnt` (0x24) takes the BUSY count in bits 7–5 and the NACK count in bits 2–0.
+3. ~~`U_MxRstCnt` (0x24) takes the BUSY count in bits 7–5 and the NACK count in bits 2–0.~~ The
+   NACK count is **confirmed** (below); the BUSY count is not yet seen.
 4. The chip sends `L_Data.con` for every frame, also those to the individual address FFFFh.
 5. `U_AckInformation` with the busy bit for a frame to the own address overrides the chip's own
    acknowledge.
@@ -287,9 +290,14 @@ passive, quiet bus):
   2.7 ms after the frame end, the acknowledge window. Another device on this bus acknowledges
   every group frame, so the chip's own repetitions and a negative confirmation are still to be
   seen (with an individually addressed frame to an absent device).
-- Right after `U_SetAddress` (`F1`) the chip sent an unrequested `U_State.ind` `47` (receive
-  error flag). Whether the address took effect is still to be checked: frames to 1.1.4 must be
-  acknowledged by the chip.
+- **`U_SetAddress` is 28h on the TP-UART2, not F1h.** After `F1 11 04` the chip sent an
+  unrequested `U_State.ind` `47` (receive error flag), and ETS6's frames to 1.1.4 (a device
+  info read, four times) each went out four times: not acknowledged. After `28 11 04` the state
+  stayed `07`, and the same ETS6 frames went out once each: the chip acknowledged them. F1h is
+  the NCN5120's request; the §3.2 table had taken it for both.
+- `U_MxRstCnt` (`24`) with `21` (one BUSY, one NACK repetition): the frame to the absent 1.1.250
+  went out twice, then a negative confirmation. The NACK count is in bits 2–0 as assumed; the
+  BUSY count (bits 7–5) cannot be seen on this bus, where nothing answers BUSY.
 - An individually addressed frame to an absent device (1.1.4 → 1.1.250): the chip sent it four
   times, 17.3 ms apart, setting the repeat flag itself (CTRL `BC` → `9C`, FCS recomputed), echoed
   every copy, and confirmed negatively (`0B`) 2.7 ms after the last one. So its default is 3

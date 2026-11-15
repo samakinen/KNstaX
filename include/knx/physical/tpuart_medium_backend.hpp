@@ -133,7 +133,10 @@ public:
     static constexpr uint8_t U_MXRSTCNT_REQ = 0x24u;
     static constexpr uint8_t U_L_DATA_START_CONTINUE = 0x80u;
     static constexpr uint8_t U_L_DATA_END = 0x40u;
-    static constexpr uint8_t U_SET_ADDRESS_REQ = 0xF1u;
+    /// 28h on the TP-UART2 (confirmed on the H8i8o: frames to the address are
+    /// then acknowledged by the chip). F1h is the NCN5120's; the TP-UART2
+    /// ignores it and raises its receive-error flag.
+    static constexpr uint8_t U_SET_ADDRESS_REQ = 0x28u;
     static constexpr uint8_t U_RESET_IND = 0x03u;
     static constexpr uint8_t U_STATE_IND_MASK = 0x07u;
     static constexpr uint8_t U_STATE_IND = 0x07u;
