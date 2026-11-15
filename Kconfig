@@ -596,6 +596,33 @@ menu "KNX Stack Configuration"
 
     endmenu
 
+    menu "Memory"
+
+        choice KNX_HEAP_POLICY
+            prompt "Heap policy"
+            default KNX_HEAP_POLICY_FREE
+            help
+                What the stack may do with the heap once it has started.
+
+            config KNX_HEAP_POLICY_FREE
+                bool "free"
+                help
+                    Allocate and free through the toolchain's operator new as
+                    needed (the default).
+
+            config KNX_HEAP_POLICY_INIT_ONLY
+                bool "init_only"
+                help
+                    The stack allocates while it starts and the product calls
+                    knx::heap::lock() when start-up is over (see
+                    knx/util/heap.hpp). An allocation after that traps in a
+                    debug build and fails as an exhausted heap does in a
+                    release build. Replaces operator new with one that asks
+                    the policy first.
+        endchoice
+
+    endmenu
+
     menu "Logging"
         
         config KNX_LOG_LEVEL

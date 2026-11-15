@@ -25,6 +25,7 @@
 #include "knx/objects/object_persistence.hpp"
 #include "knx/physical/null_tp1_medium_backend.hpp"
 #include "knx/platform/cooperative_platform.hpp"
+#include "knx/util/heap.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -89,6 +90,32 @@ void writeNumber(const char* label, std::size_t value) {
 
 std::uint32_t g_mallocAfterStart = 0;
 
+// The heap is locked once the device has started (knx::heap::lock()); every
+// allocation after that is a violation. The emulator variant records them, so the
+// run lists each steady-state allocation (its caller's address, to be looked up in
+// the ELF, and its size) instead of stopping at the first.
+struct Violation {
+    const void* caller;
+    std::size_t size;
+    std::uint32_t count;
+};
+Violation g_violations[24] = {};
+
+void recordViolation(std::size_t size, const void* caller) {
+    for (auto& v : g_violations) {
+        if (v.count == 0u) {
+            v = {caller, size, 1u};
+            return;
+        }
+        if (v.caller == caller && v.size == size) {
+            ++v.count;
+            return;
+        }
+    }
+}
+
+std::size_t readHighWater() { return g_heap_high_water; }
+
 void reportTraffic() {
     using size_gate::traffic::g_stats;
     writeNumber("traffic_injected=", g_stats.injected);
@@ -119,6 +146,14 @@ void reportTraffic() {
     }
     writeNumber("traffic_observed_by_product=", g_observed);
     writeNumber("malloc_calls_after_start=", knx_size_gate_malloc_calls() - g_mallocAfterStart);
+    writeNumber("heap_locked_allocations=", static_cast<std::uint32_t>(knx::heap::violationCount()));
+    for (const auto& v : g_violations) {
+        if (v.count == 0u) break;
+        writeNumber("heap_violation_caller=", reinterpret_cast<std::uintptr_t>(v.caller));
+        writeNumber("heap_violation_bytes=", v.size);
+        writeNumber("heap_violation_count=", v.count);
+    }
+    writeNumber("heap_api_high_water=", knx::heap::highWater());
 }
 
 [[noreturn]] void reportAndExit() {
@@ -248,9 +283,15 @@ int main() {
     }
     auto app = std::move(started.value());
     publishOnce(*app);
+#if !defined(KNX_SIZE_GATE_SEMIHOST)
+    knx::heap::lock();  // start-up is over: from here an allocation is a defect (KNX_HEAP_POLICY=init_only)
+#endif
 #if defined(KNX_SIZE_GATE_SEMIHOST)
     g_heapAfterStart = g_heap_high_water;
     g_mallocAfterStart = knx_size_gate_malloc_calls();
+    knx::heap::setHighWaterHook(&readHighWater);
+    knx::heap::setViolationHandler(&recordViolation);
+    knx::heap::lock();
     writeNumber("heap_start_profile:", 0);
     knx_size_gate_print_profile();
 

@@ -63,6 +63,7 @@ set(KNX_SOURCES_CORE
 
     # Utilities
     "src/util/log.cpp"
+    "src/util/heap.cpp"
 )
 
 # --- TP1 medium ----------------------------------------------------------

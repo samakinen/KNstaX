@@ -48,7 +48,7 @@ def test_host_test_profile_is_everything_on():
     for macro in ('CONFIG_KNX_BUILD_TP1 1', 'CONFIG_KNX_BUILD_NETIP 1', 'CONFIG_KNX_ENABLE_COUPLER 1',
                   'CONFIG_KNX_ENABLE_TUNNELING 1', 'CONFIG_KNX_ENABLE_SECURITY 1',
                   'CONFIG_KNX_BUILD_VIRTUAL_BUS 1', 'CONFIG_KNX_BUILD_TEST_HOOKS 1',
-                  'CONFIG_KNX_LOG_LEVEL 5'):
+                  'CONFIG_KNX_LOG_LEVEL 5', 'CONFIG_KNX_HEAP_POLICY_FREE 1'):
         assert f'#define {macro}' in lines, macro
 
 
@@ -59,6 +59,7 @@ def test_tp1_small_is_tp1_only_baremetal_without_logs():
     assert '#define CONFIG_KNX_STANDALONE_PLATFORM_BAREMETAL 1' in text
     assert '#define CONFIG_KNX_BUILD_TP1 1' in text
     assert '#define CONFIG_KNX_LOG_LEVEL 0' in text
+    assert '#define CONFIG_KNX_HEAP_POLICY_INIT_ONLY 1' in text
     for absent in ('CONFIG_KNX_BUILD_NETIP', 'CONFIG_KNX_ENABLE_TUNNELING', 'CONFIG_KNX_ENABLE_COUPLER',
                    'CONFIG_KNX_ENABLE_SECURITY', 'CONFIG_KNX_BUILD_VIRTUAL_BUS',
                    'CONFIG_KNX_BUILD_ETS_TOOLING', 'CONFIG_KNX_BUILD_TEST_HOOKS', 'CONFIG_KNX_BUILD_ZLIB',
