@@ -651,6 +651,9 @@ else()
             LABELS ${TP1_VIRTUAL_UNIT} TIMEOUT 20)
         knx_add_test(test_timer_gpio_hal_virtual SOURCES test/unit/test_timer_gpio_hal_virtual.cpp
             LABELS ${TP1_VIRTUAL_UNIT})
+        knx_add_test(test_uart_hal_virtual
+            SOURCES test/unit/test_uart_hal_virtual.cpp test/unit/uart_hal_c_board.c
+            LABELS ${TP1_VIRTUAL_UNIT})
         knx_add_test(test_tp1_bitbang_virtual_bus SOURCES test/unit/test_tp1_bitbang_virtual_bus.cpp
             LABELS ${TP1_VIRTUAL_UNIT})
         knx_add_test(test_tp1_bitbang_virtual_faults SOURCES test/unit/test_tp1_bitbang_virtual_faults.cpp

@@ -228,6 +228,43 @@ The RX callback carries parity and framing error flags, so the RX engine can cou
 octet. The ESP-IDF build gets an implementation too. That lets an ESP32 + TP-UART or NCN5120
 board use the backend, and it is the second user that keeps the interface honest.
 
+### 4.1 Status of K2 (15 November 2026)
+
+Done. The interface is `include/knx/physical/uart_hal.h`; the header, not the sketch above, is
+the contract. It differs from the sketch in these ways:
+
+- **Shape.** It follows `timer_gpio_hal.h`: a context plus an ops struct, `bool` results and
+  inline helpers that check for a valid HAL. The line format is a `knx_uart_hal_config_t`
+  (baud and parity; always 8 data bits and 1 stop bit).
+- **Timestamps.** The RX callback receives each octet with its error flags (parity, framing,
+  noise, overrun) and a wrapping 32-bit microsecond timestamp taken by the board. The RX engine
+  needs it for the 2 ms gap, and the board's interrupt is the only place it is accurate.
+- **Pins.** The optional pins are `set_reset(asserted)` and `read_save()`. They are logical
+  (the board applies polarity), and either may be NULL.
+- **Concurrency.** `write()` is all-or-nothing. It may be called from the RX callback, and the
+  octets of one call stay contiguous against the other context.
+
+Tests and implementations:
+
+- `UartHalVirtual` (host only, in the virtual sources) plays the far end. It delivers octets to
+  the callback, decides when queued TX octets leave the wire, and records which writes came
+  from the RX callback. K4 builds the chip simulator on it.
+- `test_uart_hal_virtual` covers the contract. It includes a small board implementation written
+  in C (`test/unit/uart_hal_c_board.c`), which proves the header works from C.
+- The header also compiles with `-Werror` as C99 and as C++23 for Cortex-M3.
+
+Not done:
+
+- **The ESP-IDF implementation.** A per-octet RX callback needs a custom UART interrupt rather
+  than the IDF UART driver, and no ESP32 + TP-UART board exists to test it on. It waits for
+  one.
+
+**Constraint for K3.** An octet written from the RX callback queues behind whatever the main
+context has already queued. If the TX engine handed a whole frame (up to 2 × 64 octets, about
+70 ms at 19200 baud) to the HAL at once, a `U_AckInformation` written while a frame arrives would
+reach the chip long after its deadline. The TX engine must therefore feed `U_L_Data` pairs
+incrementally and keep only a few octets queued. §3.5 is to be read with this in mind.
+
 ## 5. K4: TP-UART chip simulator
 
 `VirtualTpUartChip` sits between the backend's UART HAL and the existing virtual TP1 bus

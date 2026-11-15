@@ -183,6 +183,7 @@ set(KNX_SOURCES_ETS
 # --- Virtual TP1 bus simulator (host builds only) ------------------------
 set(KNX_SOURCES_VIRTUAL
     "src/physical/timer_gpio_hal_virtual.cpp"
+    "src/physical/uart_hal_virtual.cpp"
     "src/physical/virtual_time_engine.cpp"
     "src/physical/virtual_tp1_bus_peer.cpp"
     "src/physical/virtual_tp1_trace.cpp"
