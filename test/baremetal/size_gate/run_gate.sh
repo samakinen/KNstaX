@@ -74,6 +74,10 @@ elif command -v qemu-system-arm >/dev/null 2>&1; then
     echo "$RUN"
     HEAP=$(echo "$RUN" | sed -n 's/^heap_high_water=\([0-9][0-9]*\).*/\1/p')
     [ -n "$HEAP" ] || { echo "error: the emulator run reported no heap figure" >&2; exit 2; }
+    # A heap figure from a run in which the scripted ETS download did not take effect says
+    # nothing about the download, so it is not a result.
+    echo "$RUN" | grep -q '^download_applied=1' \
+        || { echo "error: the emulator run's ETS download did not take effect (see download_* above)" >&2; exit 2; }
     HEAP_ARG="--heap-high-water $HEAP"
 else
     echo "note: qemu-system-arm not found; the heap is not measured and RAM is checked for static data only"

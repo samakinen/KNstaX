@@ -89,6 +89,8 @@ void writeNumber(const char* label, std::size_t value) {
 }
 
 std::uint32_t g_mallocAfterStart = 0;
+std::size_t g_heapBeforeDownload = 0;
+std::uint32_t g_restartRequested = 0;
 
 // The heap is locked once the device has started (knx::heap::lock()); every
 // allocation after that is a violation. The emulator variant records them, so the
@@ -145,6 +147,14 @@ void reportTraffic() {
         semihost(0x04, text);
     }
     writeNumber("traffic_observed_by_product=", g_observed);
+    writeNumber("traffic_observed_expected=", size_gate::traffic::kExpectedObserved);
+    writeNumber("download_restart_requested=", g_restartRequested);
+    // The download took effect when the group traffic on the downloaded addresses reached the
+    // ports it should (the three tables were applied, the group address list followed), and
+    // the device ended the session with its restart.
+    writeNumber("download_applied=",
+                (g_restartRequested != 0u && g_observed == size_gate::traffic::kExpectedObserved) ? 1u : 0u);
+    writeNumber("heap_before_download=", g_heapBeforeDownload);
     writeNumber("malloc_calls_after_start=", knx_size_gate_malloc_calls() - g_mallocAfterStart);
     writeNumber("heap_locked_allocations=", static_cast<std::uint32_t>(knx::heap::violationCount()));
     for (const auto& v : g_violations) {
@@ -264,6 +274,14 @@ int main() {
     hooks.millis = &hookMillis;
     hooks.micros = &hookMicros;
     hooks.idle = &hookIdle;
+#if defined(KNX_SIZE_GATE_SEMIHOST)
+    // A_Restart ends the ETS download. The device would reset here; the emulator run ends
+    // instead (the stack has flushed what is dirty and answered the tool before it calls this).
+    hooks.restart = [](void*) {
+        g_restartRequested = 1;
+        reportAndExit();
+    };
+#endif
     static knx::platform::CooperativePlatform platform(hooks);
 
     auto bindings = knx::product::makeCommissionedBindings(size_gate::kProduct);
@@ -316,6 +334,7 @@ int main() {
     }
     for (uint16_t loop = 0; loop < kLoops; ++loop) {
         g_millis = g_millis + 5u;  // no SysTick on the emulator's timer path; advance time by hand
+        if (loop == kEtsStartLoop) g_heapBeforeDownload = g_heap_high_water;
         tick(loop);
         if (loop == kPublishAtLoop || loop == kRepublishAtLoop) publishOnce(*app);
         app->loop();

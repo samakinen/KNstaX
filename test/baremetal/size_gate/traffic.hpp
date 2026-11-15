@@ -23,7 +23,10 @@
  * read response, the device's own publishes, and one management session from an
  * individual address: T_Connect, A_PropertyValue_Read and _Write,
  * A_Memory_Write and _Read of the application code and the group address table
- * segments, A_DeviceDescriptor_Read, T_Disconnect.
+ * segments, A_DeviceDescriptor_Read, T_Disconnect. It ends with a full ETS
+ * download (see "The ETS download" below): the three tables through the load
+ * state machines and the memory segments, group traffic on the downloaded
+ * addresses, and A_Restart, which ends the run.
  */
 
 #pragma once
@@ -186,10 +189,12 @@ private:
 
 // ── The script ──────────────────────────────────────────────────────────────
 
+inline constexpr size_t kStepBodyBytes = 24;  // the longest frame below: a 12-octet A_Memory_Write is 22
+
 struct Step {
     uint16_t atLoop;
     uint8_t length;
-    std::array<uint8_t, 16> body;  // ctrl, src(2), dst(2), npci, tpdu...; checksum is added
+    std::array<uint8_t, kStepBodyBytes> body;  // ctrl, src(2), dst(2), npci, tpdu...; checksum is added
 };
 
 // Individually addressed frames from the peer to the device, system priority.
@@ -197,7 +202,7 @@ struct Step {
 // Group frames from the peer, low priority.
 #define KNX_GATE_GROUP(hi, lo) 0xBC, 0x11, 0x0B, hi, lo
 
-inline constexpr std::array<Step, 22> kScript{{
+inline constexpr std::array<Step, 22> kBaseScript{{
     // Group traffic: a write to each datapoint type the device has.
     {20, 8, {KNX_GATE_GROUP(0x08, 0x01), 0xE1, 0x00, 0x81}},         // switch on
     {30, 8, {KNX_GATE_GROUP(0x08, 0x02), 0xE1, 0x00, 0x00}},         // read request: the device answers
@@ -228,10 +233,212 @@ inline constexpr std::array<Step, 22> kScript{{
 
 inline constexpr uint16_t kPublishAtLoop = 100;
 inline constexpr uint16_t kRepublishAtLoop = 450;
-inline constexpr uint16_t kLoops = 600;
 
 #undef KNX_GATE_TO_DEVICE
 #undef KNX_GATE_GROUP
+
+// ── The ETS download ────────────────────────────────────────────────────────
+//
+// What ETS does to a device with the SystemB (mask 07B0) procedure, as the
+// session tests do it (test_ets_connected_session.cpp, downloadLikeEts): for
+// the address table, the association table and the group object table in turn,
+// PID_LOAD_STATE_CONTROL (5) Unload, StartLoading, the table segment by
+// A_Memory_Write (12 octets per frame, the most a 15-octet APDU carries), one
+// A_Memory_Read to check it, LoadCompleted; then A_Restart. The reference device
+// has no parameters, so there is no application code segment to write. Verify
+// Mode is off, as it is for most downloads: the writes are not answered.
+//
+// The tables are the size of a real I/O module's: 60 group addresses (1/0/1 to
+// 1/0/60, one per group object), 80 associations (each object to its own
+// address, and 20 objects that also listen to the address of another object of
+// the same type) and 60 group object descriptors. Group object n is port n, so
+// the address table index of port n is n + 1 and its address is 0x0801 + n.
+
+inline constexpr uint16_t kEtsStartLoop = 600;   // T_Connect
+inline constexpr uint16_t kEtsFrameGap = 8;      // loops (5 ms each) per frame: 40 ms, a TP1 frame and its ACK
+inline constexpr size_t kEtsAddresses = 60;
+inline constexpr size_t kEtsAssociations = 80;
+inline constexpr size_t kEtsObjects = 60;
+inline constexpr size_t kSegmentChunk = 12;
+
+inline constexpr uint16_t kAddressSegmentBase = 0x4000;      // objects::tableseg
+inline constexpr uint16_t kAssociationSegmentBase = 0x4400;
+inline constexpr uint16_t kGroupObjectSegmentBase = 0x5000;
+
+/// The second object (0-based port) that listens to the address of port @p port, or -1.
+constexpr int extraListener(size_t port) {
+    if (port < 8) return static_cast<int>(port + 8);                       // switch commands 1..8 also on 9..16
+    if (port >= 16 && port < 20) return static_cast<int>(port + 12);       // switch states 1..4 also on 13..16
+    if (port >= 32 && port < 36) return static_cast<int>(port + 4);        // switch in/out 1..4 also on 5..8
+    if (port >= 40 && port < 44) return static_cast<int>(port + 4);        // percent 1..4 also on 5..8
+    return -1;
+}
+
+constexpr uint16_t etsGroupAddress(size_t port) { return static_cast<uint16_t>(0x0801u + port); }
+
+struct Segment {
+    std::array<uint8_t, 2 + 4 * kEtsAssociations> bytes{};  // the longest of the three
+    size_t length = 0;
+};
+
+constexpr void put16(Segment& s, uint16_t v) {
+    s.bytes[s.length++] = static_cast<uint8_t>(v >> 8);
+    s.bytes[s.length++] = static_cast<uint8_t>(v & 0xFFu);
+}
+
+constexpr Segment makeAddressSegment() {
+    Segment s;
+    put16(s, kEtsAddresses);
+    for (size_t port = 0; port < kEtsAddresses; ++port) put16(s, etsGroupAddress(port));
+    return s;
+}
+
+constexpr Segment makeAssociationSegment() {
+    Segment s;
+    put16(s, kEtsAssociations);
+    uint16_t entries = 0;
+    for (size_t port = 0; port < kEtsObjects; ++port) {  // sorted by address table index
+        const uint16_t tsap = static_cast<uint16_t>(port + 1u);
+        put16(s, tsap);
+        put16(s, static_cast<uint16_t>(port));
+        ++entries;
+        if (const int other = extraListener(port); other >= 0) {
+            put16(s, tsap);
+            put16(s, static_cast<uint16_t>(other));
+            ++entries;
+        }
+    }
+    s.bytes[0] = static_cast<uint8_t>(entries >> 8);
+    s.bytes[1] = static_cast<uint8_t>(entries & 0xFFu);
+    return s;
+}
+
+constexpr Segment makeGroupObjectSegment() {
+    Segment s;
+    put16(s, kEtsObjects);
+    for (size_t port = 0; port < kEtsObjects; ++port) put16(s, 0x0044u);  // descriptor: accepted, not applied
+    return s;
+}
+
+inline constexpr uint16_t kMaxSteps = 140;
+
+struct Script {
+    std::array<Step, kMaxSteps> steps{};
+    uint16_t count = 0;
+    uint16_t lastLoop = 0;  // the loop of the A_Restart
+    uint16_t downloadDoneLoop = 0;  // LoadCompleted of the last table
+};
+
+struct ScriptBuilder {
+    Script script;
+    uint16_t loop = 0;
+    uint8_t seq = 0;  // the tool's N(S)
+
+    constexpr Step& next(uint16_t atLoop) {
+        Step& step = script.steps[script.count++];
+        step.atLoop = atLoop;
+        step.length = 0;
+        return step;
+    }
+    static constexpr void put(Step& step, uint8_t v) { step.body[step.length++] = v; }
+
+    /// A numbered management request from the tool: apciHi (the two APCI bits in the TPCI octet),
+    /// the APCI octet and the data.
+    constexpr void connected(uint8_t apciHi, uint8_t apciLo, const uint8_t* data, size_t count) {
+        Step& step = next(loop);
+        put(step, 0xB0);
+        put(step, 0x11); put(step, 0x0B);  // from 1.1.11
+        put(step, 0x11); put(step, 0x0A);  // to 1.1.10
+        put(step, static_cast<uint8_t>(0x60u | (1u + count)));
+        put(step, static_cast<uint8_t>(0x40u | ((seq & 0x0Fu) << 2) | apciHi));
+        put(step, apciLo);
+        for (size_t i = 0; i < count; ++i) put(step, data[i]);
+        seq = static_cast<uint8_t>((seq + 1u) & 0x0Fu);
+        loop = static_cast<uint16_t>(loop + kEtsFrameGap);
+    }
+
+    constexpr void unnumbered(uint8_t tpci) {
+        Step& step = next(loop);
+        for (uint8_t v : {0xB0, 0x11, 0x0B, 0x11, 0x0A, 0x60}) put(step, v);
+        put(step, tpci);
+        loop = static_cast<uint16_t>(loop + kEtsFrameGap);
+    }
+
+    /// PID_LOAD_STATE_CONTROL of interface object @p object: one event octet.
+    constexpr void loadEvent(uint8_t object, uint8_t event) {
+        const uint8_t data[] = {object, 0x05, 0x10, 0x01, event};
+        connected(0x03, 0xD7, data, sizeof(data));  // A_PropertyValue_Write
+    }
+
+    constexpr void group(uint16_t address, const uint8_t* apdu, size_t count) {
+        Step& step = next(loop);
+        for (uint8_t v : {0xBC, 0x11, 0x0B}) put(step, v);
+        put(step, static_cast<uint8_t>(address >> 8));
+        put(step, static_cast<uint8_t>(address & 0xFFu));
+        for (size_t i = 0; i < count; ++i) put(step, apdu[i]);
+        loop = static_cast<uint16_t>(loop + kEtsFrameGap);
+    }
+
+    constexpr void table(uint8_t object, uint16_t base, const Segment& segment) {
+        loadEvent(object, 0x04);  // Unload
+        loadEvent(object, 0x01);  // StartLoading
+        for (size_t offset = 0; offset < segment.length; offset += kSegmentChunk) {
+            const size_t count = segment.length - offset < kSegmentChunk ? segment.length - offset : kSegmentChunk;
+            uint8_t data[2 + kSegmentChunk]{};
+            const uint16_t address = static_cast<uint16_t>(base + offset);
+            data[0] = static_cast<uint8_t>(address >> 8);
+            data[1] = static_cast<uint8_t>(address & 0xFFu);
+            for (size_t i = 0; i < count; ++i) data[2 + i] = segment.bytes[offset + i];
+            connected(0x02, static_cast<uint8_t>(0x80u | count), data, 2 + count);  // A_Memory_Write
+        }
+        const uint8_t verify[] = {static_cast<uint8_t>(base >> 8), static_cast<uint8_t>(base & 0xFFu)};
+        connected(0x02, static_cast<uint8_t>(0x00u | kSegmentChunk), verify, 2);  // A_Memory_Read of the first chunk
+        loadEvent(object, 0x02);  // LoadCompleted
+    }
+};
+
+constexpr Script makeScript() {
+    ScriptBuilder b;
+    for (const Step& step : kBaseScript) b.script.steps[b.script.count++] = step;
+
+    b.loop = kEtsStartLoop;
+    b.unnumbered(0x80);  // T_Connect
+    b.table(1, kAddressSegmentBase, makeAddressSegment());
+    b.table(2, kAssociationSegmentBase, makeAssociationSegment());
+    b.table(3, kGroupObjectSegmentBase, makeGroupObjectSegment());
+    b.script.downloadDoneLoop = static_cast<uint16_t>(b.loop - kEtsFrameGap);
+
+    // Group traffic on the downloaded addresses, while the tables are still unsaved. Each
+    // frame names the port it reaches: port n is on 0x0801 + n.
+    const uint8_t sw[] = {0xE1, 0x00, 0x81};                // port 0 and 8 (command): switch on
+    const uint8_t percent[] = {0xE2, 0x00, 0x80, 0x7F};     // port 40 and 44
+    const uint8_t read[] = {0xE1, 0x00, 0x00};              // read request
+    const uint8_t dimming[] = {0xE1, 0x00, 0x89};           // port 48
+    const uint8_t sceneControl[] = {0xE2, 0x00, 0x80, 0x05};  // port 52
+    const uint8_t sceneNumber[] = {0xE2, 0x00, 0x80, 0x02};   // port 56
+    const uint8_t response[] = {0xE1, 0x00, 0x41};          // read response, to port 32 and 36
+    b.group(etsGroupAddress(0), sw, sizeof(sw));
+    b.group(etsGroupAddress(40), percent, sizeof(percent));
+    b.group(etsGroupAddress(16), read, sizeof(read));       // switch state 1 answers
+    b.group(etsGroupAddress(48), dimming, sizeof(dimming));
+    b.group(etsGroupAddress(52), sceneControl, sizeof(sceneControl));
+    b.group(etsGroupAddress(56), sceneNumber, sizeof(sceneNumber));
+    b.group(etsGroupAddress(32), response, sizeof(response));
+    b.group(etsGroupAddress(32), read, sizeof(read));       // switch in/out 1 answers
+
+    b.connected(0x03, 0x80, nullptr, 0);  // A_Restart, basic restart
+    b.script.lastLoop = static_cast<uint16_t>(b.loop - kEtsFrameGap);
+    return b.script;
+}
+
+inline constexpr Script kScriptData = makeScript();
+static_assert(kScriptData.count <= kMaxSteps, "raise kMaxSteps");
+
+/// Values the inbound ports observe in all: 8 before the download, and after it one write on
+/// ports 0 and 8, one on 40 and 44, and one each on 48, 52 and 56.
+inline constexpr uint32_t kExpectedObserved = 8u + 7u;
+
+inline constexpr uint16_t kLoops = kScriptData.lastLoop + 200u;  // the run ends at the restart; this is the cap
 
 
 // What the tool does for the numbered data frames the device sent: a T_ACK
@@ -251,7 +458,8 @@ inline void deliverToolAck() {
 // Delivers whatever the script has for this loop.
 inline void tick(uint16_t loop) {
     if (g_backend == nullptr) return;
-    for (const Step& step : kScript) {
+    for (uint16_t i = 0; i < kScriptData.count; ++i) {
+        const Step& step = kScriptData.steps[i];
         if (step.atLoop == loop) {
             g_backend->deliver(std::span<const uint8_t>(step.body.data(), step.length));
         }
