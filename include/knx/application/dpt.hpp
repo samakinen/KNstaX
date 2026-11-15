@@ -265,7 +265,7 @@ struct symbol : detail::DptFamilyOff##family {};
  */
 class DptValue {
 public:
-    enum class Type {
+    enum class Type : uint8_t {
         Unsupported,
         Boolean,
         Controlled1Bit,

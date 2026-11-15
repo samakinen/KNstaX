@@ -186,9 +186,40 @@ void test_product_compiler_export_descriptor_roundtrips_through_existing_exporte
     TEST_ASSERT_TRUE(json.find("\"groupObjectCount\":4") != std::string::npos);
 }
 
+// The port table is the one source of the runtime and export descriptors: the
+// slot is the index, ranks count the ports that can use a binding entry, and
+// the names live in their own table.
+void test_port_table_is_the_source_of_slots_ranks_and_names(void)
+{
+    constexpr const auto& table = kPortTable<decltype(kCompilerThermostatDefinition)>;
+    constexpr const auto& names = kPortNames<decltype(kCompilerThermostatDefinition)>;
+    static_assert(sizeof(PortDescriptor) <= 16u, "a port descriptor stays small");
+    static_assert(table.size() == 4u && names.size() == 4u);
+
+    // Setpoint (in/out), measured temperature (state out), HVAC mode (in/out), heating output (state out).
+    TEST_ASSERT_EQUAL_UINT16(10u, table[0].logicalId);
+    TEST_ASSERT_EQUAL_UINT16(90u, table[2].logicalId);
+    TEST_ASSERT_TRUE(table[0].acceptsWrites() && table[0].readable() && table[0].transmit());
+    TEST_ASSERT_TRUE(!table[1].acceptsWrites() && table[1].readable());
+    TEST_ASSERT_EQUAL_UINT16(0u, table[0].receiveRank);
+    TEST_ASSERT_EQUAL_UINT16(kNoBindingRank, table[1].receiveRank);
+    TEST_ASSERT_EQUAL_UINT16(1u, table[2].receiveRank);
+    TEST_ASSERT_EQUAL_UINT16(0u, table[0].stateRank);
+    TEST_ASSERT_EQUAL_UINT16(1u, table[1].stateRank);
+    TEST_ASSERT_EQUAL_UINT16(3u, table[3].stateRank);
+    TEST_ASSERT_EQUAL_UINT(2u, kReceivePortCount<decltype(kCompilerThermostatDefinition)>);
+    TEST_ASSERT_EQUAL_UINT(4u, kStatePortCount<decltype(kCompilerThermostatDefinition)>);
+    TEST_ASSERT_TRUE(table[2].valueType == DptValue::Type::HvacMode);
+    TEST_ASSERT_EQUAL_UINT16(2u, findPortSlot(table.data(), table.size(), 90u));
+    TEST_ASSERT_EQUAL_UINT16(kNoSlot, findPortSlot(table.data(), table.size(), 91u));
+    TEST_ASSERT_EQUAL_STRING("hvac_mode", std::string(names[2].key).c_str());
+    TEST_ASSERT_EQUAL_STRING("HVAC mode", std::string(names[2].displayName).c_str());
+}
+
 int main(void)
 {
     UNITY_BEGIN();
+    RUN_TEST(test_port_table_is_the_source_of_slots_ranks_and_names);
     RUN_TEST(test_product_maxapdulength_is_one_value_within_the_configured_maximum);
     RUN_TEST(test_product_compiler_derives_runtime_descriptor_set_from_definition);
     RUN_TEST(test_product_compiler_uses_one_compiled_source_for_runtime_and_export_metadata);

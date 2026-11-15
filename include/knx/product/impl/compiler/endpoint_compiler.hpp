@@ -11,6 +11,7 @@
 #include "knx/product/export_descriptor.hpp"
 #include "knx/product/product_api_types.hpp"
 #include "knx/product/impl/model/endpoint_definition.hpp"
+#include "knx/product/impl/model/port_table.hpp"
 
 #include <array>
 #include <cstddef>
@@ -117,63 +118,76 @@ constexpr application::DptValue::Type valueTypeForDpt(application::DptId dpt) no
     return application::dptValueTypeFor(dpt);
 }
 
-template <typename PortIdEnum, typename PortSpec>
-constexpr auto makeRuntimeCommunicationObjectDescriptor(uint16_t slot)
+/// The runtime descriptor of one port, built on demand from its table entry.
+template <typename PortIdEnum>
+constexpr auto makeRuntimeCommunicationObjectDescriptor(uint16_t slot, const PortDescriptor& port)
     -> RuntimeCommunicationObjectDescriptor<PortIdEnum>
 {
     return RuntimeCommunicationObjectDescriptor<PortIdEnum>{
         .slot = slot,
-        .logicalId = PortSpec::logicalId,
+        .logicalId = static_cast<PortIdEnum>(port.logicalId),
         .exportNumber = slot,
         .defaultAddress = GroupAddress{},
-        .dpt = PortSpec::dpt,
-        .valueType = valueTypeForDpt(PortSpec::dpt),
-        .direction = PortSpec::direction,
-        .readable = PortSpec::readable,
-        .writable = PortSpec::writable,
-        .transmit = PortSpec::transmit,
-        .receivable = PortSpec::receivable,
-        .persisted = PortSpec::persisted,
-        .readOnInit = PortSpec::readOnInit,
-        .priority = PortSpec::priority,
+        .dpt = port.dpt,
+        .valueType = port.valueType,
+        .direction = port.direction,
+        .readable = port.readable(),
+        .writable = port.writable(),
+        .transmit = port.transmit(),
+        .receivable = port.receivable(),
+        .persisted = port.persisted(),
+        .readOnInit = port.readOnInit(),
+        .priority = port.priority,
     };
 }
 
-template <typename PortSpec>
-constexpr auto makeExportCommunicationObjectDescriptorForPort(uint16_t exportNumber)
+/// The export descriptor of one port: its table entry plus its names.
+constexpr auto makeExportCommunicationObjectDescriptorForPort(uint16_t exportNumber,
+                                                              const PortDescriptor& port,
+                                                              const PortNames& names)
     -> ExportCommunicationObjectDescriptor
 {
     return makeExportCommunicationObjectDescriptor(
         exportNumber,
-        PortSpec::logicalId,
-        PortSpec::key.view(),
-        PortSpec::displayName.view(),
+        port.logicalId,
+        names.key,
+        names.displayName,
         GroupAddress{},
-        PortSpec::dpt,
-        valueTypeForDpt(PortSpec::dpt),
-        PortSpec::readable,
-        PortSpec::writable,
-        PortSpec::transmit,
-        PortSpec::receivable,
-        PortSpec::persisted,
-        PortSpec::readOnInit,
+        port.dpt,
+        port.valueType,
+        port.readable(),
+        port.writable(),
+        port.transmit(),
+        port.receivable(),
+        port.persisted(),
+        port.readOnInit(),
         true /* communication enable: a declared port is always wired up */);
 }
 
-template <typename PortIdEnum, typename PortsTuple, size_t... Indices>
-constexpr auto makeRuntimeCommunicationObjects(std::index_sequence<Indices...>)
-    -> std::array<RuntimeCommunicationObjectDescriptor<PortIdEnum>, sizeof...(Indices)>
+template <typename PortIdEnum, size_t Count>
+constexpr auto makeRuntimeCommunicationObjects(const std::array<PortDescriptor, Count>& table)
+    -> std::array<RuntimeCommunicationObjectDescriptor<PortIdEnum>, Count>
 {
-    return {makeRuntimeCommunicationObjectDescriptor<PortIdEnum, std::tuple_element_t<Indices, PortsTuple>>(
-        static_cast<uint16_t>(Indices))...};
+    std::array<RuntimeCommunicationObjectDescriptor<PortIdEnum>, Count> objects{};
+    for (size_t slot = 0; slot < Count; ++slot) {
+        objects[slot] = makeRuntimeCommunicationObjectDescriptor<PortIdEnum>(static_cast<uint16_t>(slot),
+                                                                             table[slot]);
+    }
+    return objects;
 }
 
-template <typename PortsTuple, size_t... Indices>
-constexpr auto makeExportCommunicationObjects(std::index_sequence<Indices...>)
-    -> std::array<ExportCommunicationObjectDescriptor, sizeof...(Indices)>
+template <size_t Count>
+constexpr auto makeExportCommunicationObjects(const std::array<PortDescriptor, Count>& table,
+                                              const std::array<PortNames, Count>& names)
+    -> std::array<ExportCommunicationObjectDescriptor, Count>
 {
-    return {makeExportCommunicationObjectDescriptorForPort<std::tuple_element_t<Indices, PortsTuple>>(
-        static_cast<uint16_t>(Indices))...};
+    std::array<ExportCommunicationObjectDescriptor, Count> objects{};
+    for (size_t slot = 0; slot < Count; ++slot) {
+        objects[slot] = makeExportCommunicationObjectDescriptorForPort(static_cast<uint16_t>(slot),
+                                                                       table[slot],
+                                                                       names[slot]);
+    }
+    return objects;
 }
 
 template <typename PortIdEnum, size_t Count>
@@ -373,11 +387,11 @@ constexpr auto compileEndpointDefinition(const DefinitionT& definition)
 {
     using cleaned_definition_t = std::remove_cvref_t<DefinitionT>;
     using port_id_type = typename cleaned_definition_t::port_id_type;
-    using ports_tuple = typename cleaned_definition_t::ports_tuple;
 
-    constexpr auto indices = std::make_index_sequence<cleaned_definition_t::kPortCount>{};
-    constexpr auto runtimeObjects = detail::makeRuntimeCommunicationObjects<port_id_type, ports_tuple>(indices);
-    constexpr auto exportObjects = detail::makeExportCommunicationObjects<ports_tuple>(indices);
+    constexpr auto runtimeObjects =
+        detail::makeRuntimeCommunicationObjects<port_id_type>(kPortTable<cleaned_definition_t>);
+    constexpr auto exportObjects =
+        detail::makeExportCommunicationObjects(kPortTable<cleaned_definition_t>, kPortNames<cleaned_definition_t>);
 
     return CompiledEndpointDefinition<DefinitionT>{
         .identity = RuntimeProductIdentity{
