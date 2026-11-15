@@ -335,11 +335,11 @@ else()
 
     if(KNX_FEATURE_TP1)
         if(KNX_PLATFORM STREQUAL "baremetal")
-            # The bit-bang backend is ESP-IDF only. The product adds its own
-            # backend (for example a TP-UART one) to its target.
-            list(APPEND COMMON_SOURCES ${KNX_SOURCES_TP1_COMMON})
+            # The bit-bang backend is ESP-IDF only. The TP-UART backend is
+            # built; a product that uses another backend links none of it.
+            list(APPEND COMMON_SOURCES ${KNX_SOURCES_TP1_COMMON} ${KNX_SOURCES_TP1_TPUART})
         else()
-            list(APPEND COMMON_SOURCES ${KNX_SOURCES_TP1})
+            list(APPEND COMMON_SOURCES ${KNX_SOURCES_TP1} ${KNX_SOURCES_TP1_TPUART})
         endif()
     endif()
     if(KNX_FEATURE_NETIP)
@@ -654,6 +654,8 @@ else()
         knx_add_test(test_uart_hal_virtual
             SOURCES test/unit/test_uart_hal_virtual.cpp test/unit/uart_hal_c_board.c
             LABELS ${TP1_VIRTUAL_UNIT})
+        knx_add_test(test_tpuart_medium_backend SOURCES test/unit/test_tpuart_medium_backend.cpp
+            LABELS tp1 tpuart unit)
         knx_add_test(test_tp1_bitbang_virtual_bus SOURCES test/unit/test_tp1_bitbang_virtual_bus.cpp
             LABELS ${TP1_VIRTUAL_UNIT})
         knx_add_test(test_tp1_bitbang_virtual_faults SOURCES test/unit/test_tp1_bitbang_virtual_faults.cpp

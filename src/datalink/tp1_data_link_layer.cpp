@@ -294,6 +294,33 @@ util::Result<Tp1DataLinkLayer::TxProgressState> Tp1DataLinkLayer::pollTransmit()
             return outcome.error();
         }
 
+        // A transceiver that repeats by itself (TP-UART) has already spent the
+        // 03/02/02 budget when it confirms: its outcome is final. A negative
+        // confirmation does not say whether the peer answered NACK, BUSY or
+        // nothing; for a group frame it is taken as "nobody listening", which
+        // the repeating path below also treats as sent. A Timeout here means
+        // the transceiver itself did not answer, and fails every frame.
+        if (outcome.value() != physical::TxOutcomeState::Pending && _physicalPort.mediumRepeats != nullptr &&
+            _physicalPort.mediumRepeats(_physicalPort.context)) {
+            const auto finalOutcome = outcome.value();
+            const bool groupUnconfirmed = (finalOutcome == physical::TxOutcomeState::TransmissionFailed ||
+                                           finalOutcome == physical::TxOutcomeState::Busy) &&
+                                          txFrameIsGroupAddressed();
+            finishTxOperation();
+            if (finalOutcome == physical::TxOutcomeState::Success || groupUnconfirmed) {
+                _stats.txFrames.fetch_add(1, std::memory_order_relaxed);
+                return TxProgressState::Success;
+            }
+            switch (finalOutcome) {
+                case physical::TxOutcomeState::Busy:
+                    return TxProgressState::Busy;
+                case physical::TxOutcomeState::Timeout:
+                    return TxProgressState::Timeout;
+                default:
+                    return TxProgressState::TransmissionFailed;
+            }
+        }
+
         switch (outcome.value()) {
             case physical::TxOutcomeState::Pending:
                 return TxProgressState::Pending;

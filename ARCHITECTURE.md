@@ -194,7 +194,13 @@ enforces that document.
 
 ### Other TP1 backends
 
-Bit-bang is the only TP1 backend. A transceiver with its own MAC (NCN5120 and similar) would be integrated as another `Tp1MediumBackend`, reusing the same TP1 MAC policy engine instead of defining a parallel TP1 architecture.
+`TpUartMediumBackend` (`src/physical/tpuart_medium_backend.cpp`) is a second `Tp1MediumBackend`, for a transceiver with its own MAC on a host UART (the Siemens TP-UART2; an NCN5120 differs in a few requests and is not coded yet). It talks to the board through the C interface `knx_uart_hal_t` (`include/knx/physical/uart_hal.h`).
+
+- The chip owns bit timing, bus access, sending the L2 acknowledge, observing the acknowledge of our own frame and repetition. The backend therefore reports `Tp1CapabilityProfile::transceiverRepeats`, and `Tp1DataLinkLayer` makes exactly one attempt per frame and takes the chip's `L_Data.con` as the final outcome. A negative confirmation does not say whether the peer answered NACK, BUSY or nothing, so for a group frame it is treated as "nobody listening" (sent), as the bit-bang path treats an unanswered group frame after its repetitions.
+- The acknowledge decision for group addresses (and assumed individual addresses) is made in the UART receive interrupt, which writes `U_AckInformation` as soon as the destination is known; the chip acknowledges the own individual address itself. The interrupt reads the backend's own sorted copy of the list under a sequence counter: a frame that arrives while the list is being rewritten is not acknowledged, and its sender repeats it.
+- The receive path runs from RAM on bare metal (`KNX_ISR_RAM`, `include/knx/platform/isr_ram.hpp`) and never calls out of it; the size gate fails if it does.
+
+Design, protocol values and status: `docs/design/cortex-m-tpuart2-support.md` §3.
 
 ## Platform boundary
 
@@ -217,7 +223,7 @@ A target without an RTOS builds with `-DKNX_PLATFORM=baremetal` (standalone CMak
 - No default `ObjectPersistence`. The product registers one with `objects::setPersistenceFactory()`.
 - No system-clock fallback in `util::nowMs()` / `util::delayMs()`: time comes from the platform, which `BusAccessStackPort` now also hands to `Tp1MacPhysical`.
 
-The bit-bang backend is not built in this mode; the product adds its own `Tp1MediumBackend`. `test/baremetal/size_gate` links a reference device in this configuration and checks it against flash and RAM budgets (`test/baremetal/size_gate/run_gate.sh`). Status of the bare-metal work and the measured sizes: `docs/design/cortex-m-tpuart2-support.md`.
+The bit-bang backend is not built in this mode; the product passes a `Tp1MediumBackend`, normally `TpUartMediumBackend` over its board's UART. `test/baremetal/size_gate` links a reference device in this configuration and checks it against flash and RAM budgets (`test/baremetal/size_gate/run_gate.sh`). Status of the bare-metal work and the measured sizes: `docs/design/cortex-m-tpuart2-support.md`.
 
 ## Execution model
 

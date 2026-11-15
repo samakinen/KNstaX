@@ -508,6 +508,8 @@ private:
 #if KNX_FEATURE_COUPLER
         void (*setGroupAckFilter)(void*, const physical::GroupAckFilter*){nullptr};
 #endif
+        /// The medium repeats frames itself; null or false: this layer repeats.
+        bool (*mediumRepeats)(const void*){nullptr};
         // True when the physical can notify the RX task about queued frames.
         // Physicals without it (e.g. the IP adapters, which only surface
         // frames when polled) are polled on a short interval instead of the
@@ -602,6 +604,14 @@ private:
                 }
             },
 #endif
+            .mediumRepeats = [] (const void* context) -> bool {
+                if constexpr (requires(const ConcretePhysical* p) { { p->mediumRepeats() } -> std::same_as<bool>; }) {
+                    return static_cast<const ConcretePhysical*>(context)->mediumRepeats();
+                } else {
+                    (void)context;
+                    return false;
+                }
+            },
             .hasQueueNotify = requires(ConcretePhysical* p,
                                        physical::Tp1MediumBackend::QueueNotifyCallback cb,
                                        void* ctx) { p->setQueueNotifyCallback(cb, ctx); },

@@ -75,9 +75,8 @@ about every gap between the current state and a certifiable device.
   sub-type per signal — a contact reported as 1.001 instead of 1.019 works on
   the wire but shows up in ETS as a switch.
 - **TP1 over a timer-ISR software bit-bang backend** behind a medium-neutral
-  MAC engine. TP1 is bit-bang only; a driver for a transceiver with its own MAC
-  (NCN5120 and similar) can be added behind the same `Tp1MediumBackend`
-  interface without changing anything above it.
+  MAC engine. A TP-UART2 backend over a board UART exists for bare-metal
+  builds; it is host-tested only and has not yet run against a real chip.
 - **KNXnet/IP** tunnelling and routing, compiled out entirely on a TP1-only
   build — CI proves the gate by failing if a gated-out medium so much as
   compiles.

@@ -82,6 +82,13 @@ set(KNX_SOURCES_TP1_BITBANG_ESPIDF
     "src/physical/physical_factory.cpp"
 )
 
+# The TP-UART backend: portable, over a board's knx_uart_hal_t. Built for
+# bare-metal and host builds; the ESP-IDF component does not offer it until
+# there is an ESP-IDF UART HAL implementation.
+set(KNX_SOURCES_TP1_TPUART
+    "src/physical/tpuart_medium_backend.cpp"
+)
+
 # Everything the ESP-IDF and host builds have always built for TP1.
 set(KNX_SOURCES_TP1
     ${KNX_SOURCES_TP1_COMMON}

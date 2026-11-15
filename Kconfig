@@ -27,9 +27,11 @@ menu "KNX Stack Configuration"
             prompt "TP1 Physical Layer"
             default KNX_TP1_BITBANG
             help
-                The software bit-bang backend is the only TP1 backend. A
-                transceiver with its own MAC (NCN5120 and similar) would be
-                another entry here, implemented as a Tp1MediumBackend.
+                The software bit-bang backend is the only TP1 backend an
+                ESP-IDF build offers. The TP-UART2 backend
+                (TpUartMediumBackend) is built for standalone and bare-metal
+                builds, where the product passes it to the stack; it becomes
+                an entry here once there is an ESP-IDF UART HAL for it.
 
             config KNX_TP1_BITBANG
                 bool "Bit-Bang (Software)"

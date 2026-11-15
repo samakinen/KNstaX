@@ -70,6 +70,11 @@ struct Tp1CapabilityProfile {
     bool supportsDiagnosticsSnapshot{false};
     /// Backend can report medium health independently of bus traffic.
     bool supportsLinkStateIndication{false};
+    /// The transceiver repeats a frame after BUSY, NACK or no acknowledge by
+    /// itself (TP-UART, NCN5120), and its confirmation is the final outcome.
+    /// The data link layer then makes exactly one attempt per frame; repeating
+    /// on top would send a frame up to 16 times.
+    bool transceiverRepeats{false};
 };
 
 struct Tp1MediumConfig {

@@ -107,6 +107,10 @@ public:
     PhysicalLayerState getState() const;
     util::Result<void> setBusMonitorMode(Toggle mode);
 
+    /// The medium repeats frames itself (Tp1CapabilityProfile::transceiverRepeats);
+    /// the data link layer must not repeat on top.
+    bool mediumRepeats() const { return _backend->getCapabilities().transceiverRepeats; }
+
     /**
      * @brief Current health of the medium underneath this physical
      *

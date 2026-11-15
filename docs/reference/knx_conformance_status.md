@@ -238,7 +238,8 @@ Behaviour required of Type 1 and covered by tests in `test_device_object.cpp`:
 | Medium | Status |
 |---|---|
 | TP1 — timer-ISR bitbang | Primary, and the only path validated on real hardware. |
-| TP1 — TPUART / NCN5120 | **Not implemented.** TP1 is bit-bang only; a driver could be added behind the same `Tp1MediumBackend` interface. |
+| TP1 — TP-UART2 | **Implemented, host-tested only.** `TpUartMediumBackend` over a board's `knx_uart_hal_t` (standalone and bare-metal builds; no ESP-IDF UART HAL yet). Tested against a scripted chip that follows the TP-UART2 manual; **never run against a real TP-UART2.** The items to confirm on a chip are listed in `docs/design/cortex-m-tpuart2-support.md` §3.8. |
+| TP1 — NCN5120 | **Not implemented.** The TP-UART backend is structured for it (`TpUartFamily`), but the differences are not coded until a board can test them. |
 | KNXnet/IP tunnelling (unicast) | Implemented; compiled out entirely unless `CONFIG_KNX_MEDIUM_IP` / `KNX_FEATURE_NETIP` is set. **Validated only by host interop against `xknx`** — never against real ETS or a real gateway. |
 | KNXnet/IP routing (multicast) | Implemented as a KNX IP medium (03/02/06), not only as a transport: Core discovery and self-description are answered, the system-broadcast domain is carried on ROUTING_SYSTEM_BROADCAST, the egress budget and ROUTING_BUSY back-off are enforced, and the Device Descriptor reports the KNX IP mask version. Wire formats are covered octet by octet by host tests against the specification's own layouts. **Still never run against real ETS or on hardware.** |
 | KNXnet/IP Core (server side) | SEARCH_REQUEST, SEARCH_REQUEST_EXTENDED and DESCRIPTION_REQUEST are answered, with the full Search Request Parameter set including the unknown-SRP rule. Mandatory for Device Class C (03/08/01 Table 2). Shares the routing socket, so it is present exactly when routing is. |
