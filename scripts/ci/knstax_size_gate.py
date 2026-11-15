@@ -22,6 +22,7 @@ Usage:
   knstax_size_gate.py --map size_gate.elf.map --budget budgets/tp1-small-m3.json
                       [--heap-high-water BYTES] [--top N] [--json FILE]
                       [--elf size_gate.elf [--nm arm-none-eabi-nm]] [--forbid PATTERN]...
+                      [--forbid-string TEXT]...
                       [--config knx.config] [--baseline earlier.json]
 
 Budgets ratchet (small-target-profile.md section 7). There is one budget file
@@ -59,8 +60,14 @@ the gate. This is how the gate proves that a feature switched off in Kconfig is
 absent from the image rather than merely small, which the map alone cannot say
 under LTO.
 
+Forbidden strings: a "forbid_strings" list (also --forbid-string, repeatable)
+is looked up as plain text in the bytes of the ELF, the way `strings` would find
+it, so it covers read-only data and symbol names alike. This is how the gate
+proves that text the device never needs (the port keys and display names of a
+product, which only the exporter reads) is absent from the image.
+
 Exit status: 0 within budget and nothing forbidden linked, 1 over budget or a
-forbidden pattern found, 2 the map or the ELF could not be read.
+forbidden pattern or string found, 2 the map or the ELF could not be read.
 
 Why a new script rather than knstax_size_budget.py: that one reads ESP-IDF
 maps and counts one archive. This one reads a Cortex-M map, has two budgets
@@ -168,6 +175,13 @@ def forbidden_symbols(elf, nm, patterns, totals):
     return {pattern: sorted({n for n in names if pattern in n})[:6] for pattern in patterns}
 
 
+def forbidden_strings(elf, texts):
+    """Return the texts that occur as bytes anywhere in the ELF file."""
+    with open(elf, 'rb') as handle:
+        image = handle.read()
+    return [text for text in texts if text.encode('utf-8') in image]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--map', required=True)
@@ -181,6 +195,8 @@ def main():
     parser.add_argument('--elf', help='the linked ELF; with it, the "forbid" patterns of the budget are checked against its symbols')
     parser.add_argument('--nm', default='arm-none-eabi-nm', help='nm of the target toolchain (default %(default)s)')
     parser.add_argument('--forbid', action='append', default=[], help='one more forbidden pattern (repeatable)')
+    parser.add_argument('--forbid-string', action='append', default=[],
+                        help='text that must not occur in the ELF (repeatable; with the budget\'s "forbid_strings")')
     parser.add_argument('--top', type=int, default=12)
     parser.add_argument('--json', help='write the figures to this file')
     args = parser.parse_args()
@@ -281,6 +297,26 @@ def main():
                 print(f'FAIL: "{pattern}" reached the link: {", ".join(found[pattern][:3])}')
             else:
                 print(f'  ok: "{pattern}" absent')
+        print()
+
+    # Text the device must not carry: looked up in the bytes of the ELF.
+    texts = list(budget.get('forbid_strings', [])) + list(args.forbid_string)
+    if texts:
+        if not args.elf:
+            print('error: forbidden strings given but no --elf to search', file=sys.stderr)
+            return 2
+        try:
+            present = forbidden_strings(args.elf, texts)
+        except OSError as error:
+            print(f'error: cannot read the ELF: {error}', file=sys.stderr)
+            return 2
+        print('Forbidden strings (text the device must not carry):')
+        for text in texts:
+            if text in present:
+                failed = True
+                print(f'FAIL: "{text}" is in the image')
+            else:
+                print(f'  ok: "{text}" absent')
         print()
 
     figures = {

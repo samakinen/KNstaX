@@ -2,9 +2,10 @@
   "profile": "tp1-standard",
   "cpu": "cortex-m4",
   "margin_percent": 2,
-  "flash": {"budget": 129792, "target": 143360},
+  "flash": {"budget": 101120, "target": 143360},
   "ram": {"budget": 1792, "target": 32768, "includes_heap": false},
   "runtime_flash": {"budget": 17408, "target": null},
+  "forbid_strings": ["sw_in_1", "sw_state_16", "sw_io_8", "value_in_1", "dim_in_4", "scene_ctl_1", "scene_num_4"],
   "forbid": [
     "FilterTable",
     "TwoPortCoupler",
