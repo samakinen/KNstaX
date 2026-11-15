@@ -332,6 +332,10 @@ else()
 
     set(COMMON_SOURCES ${KNX_SOURCES_CORE})
     knx_optional_sources(COMMON_SOURCES)
+    # Flash persistence: what a bare-metal product stores through. Portable,
+    # so host builds compile and test it; a product that registers another
+    # backend links none of it.
+    list(APPEND COMMON_SOURCES ${KNX_SOURCES_PERSISTENCE_FLASH_LOG})
 
     if(KNX_FEATURE_TP1)
         if(KNX_PLATFORM STREQUAL "baremetal")
@@ -560,6 +564,10 @@ else()
         knx_add_test(test_bau_router_role NEEDS COUPLER SOURCES test/integration/test_bau_router_role.cpp LABELS integration)
         knx_add_test(test_cooperative_platform SOURCES test/unit/test_cooperative_platform.cpp LABELS unit)
         knx_add_test(test_persistence_factory SOURCES test/unit/test_persistence_factory.cpp LABELS unit)
+        # Flash persistence on the flash simulator, with a power cut at every step.
+        knx_add_test(test_flash_log SOURCES test/unit/test_flash_log.cpp LABELS unit persistence)
+        knx_add_test(test_flash_log_persistence SOURCES test/integration/test_flash_log_persistence.cpp
+            LABELS integration persistence)
         knx_add_test(test_persistence_schema_version SOURCES test/integration/test_persistence_schema_version.cpp
             LABELS integration RUN_SERIAL)
         knx_add_test(test_link_monitor SOURCES test/unit/test_link_monitor.cpp LABELS physical unit)

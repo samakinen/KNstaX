@@ -89,6 +89,13 @@ set(KNX_SOURCES_TP1_TPUART
     "src/physical/tpuart_medium_backend.cpp"
 )
 
+# Persistence for MCUs without NVS: a log over a board's knx_flash_hal_t.
+# Portable; built for bare-metal and host builds. ESP-IDF has NVS.
+set(KNX_SOURCES_PERSISTENCE_FLASH_LOG
+    "src/objects/flash_log.cpp"
+    "src/objects/flash_log_persistence.cpp"
+)
+
 # Everything the ESP-IDF and host builds have always built for TP1.
 set(KNX_SOURCES_TP1
     ${KNX_SOURCES_TP1_COMMON}
@@ -191,6 +198,7 @@ set(KNX_SOURCES_ETS
 set(KNX_SOURCES_VIRTUAL
     "src/physical/timer_gpio_hal_virtual.cpp"
     "src/physical/uart_hal_virtual.cpp"
+    "src/objects/flash_hal_virtual.cpp"
     "src/physical/virtual_time_engine.cpp"
     "src/physical/virtual_tp1_bus_peer.cpp"
     "src/physical/virtual_tp1_trace.cpp"

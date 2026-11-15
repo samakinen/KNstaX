@@ -422,6 +422,57 @@ included: the lock covers every allocation in the image, not only the stack's.
   that grows after start (`BusAccessUnit::addGroupObject`, an ETS-driven table
   beyond what was reserved) allocates and so belongs before `lock()`.
 
+## Persistence on MCUs without NVS: `FlashLog`
+
+ESP-IDF stores commissioned state in NVS and hosts in files. A bare-metal build
+has no default and stores through what the product registers with
+`objects::setPersistenceFactory()`. For internal flash that is
+`objects::FlashLog` (`knx/objects/flash_log.hpp`) behind
+`objects::FlashLogPersistence`.
+
+The board describes a region of its flash and implements erase, program and
+read for it, in C (`knx_flash_hal_t`, `knx/objects/flash_hal.h`):
+
+```cpp
+static knx::objects::FlashLog g_log(board::flashHal());  // two banks, e.g. 2 × 4 KiB
+
+int main() {
+    knx::objects::setPersistenceFactory([]() -> std::unique_ptr<knx::objects::ObjectPersistence> {
+        return std::make_unique<knx::objects::FlashLogPersistence>(g_log);
+    });
+    auto app = std::move(knx::product::startCommissionedProduct(/* ... */).value());
+    for (;;) {
+        app->loop();
+        (void)g_log.service();  // erases one page, or compacts, when there is work
+    }
+}
+```
+
+What to know:
+
+- **The region** is reserved for the stack: an even number of pages, split into
+  two banks. Keep it out of the linker script's flash.
+- **Saves never erase.** They program into space erased beforehand, so a save
+  takes microseconds per write unit and can run on a power-fail warning.
+  Erasing is `service()`'s job, one page per call, so the CPU stalls on an
+  erase only when the main loop chooses. On most parts an erase stops code
+  running from flash for milliseconds; put interrupt code that must keep
+  running in RAM.
+- **Power cuts.** A record cut short is ignored, so each id keeps either its
+  old or its new value. The stack's own bank switch on top makes a whole ETS
+  download atomic: the next boot has the previous download or the new one,
+  never a mixture.
+- **Size the banks** for the live state twice over plus a reserve: a full save
+  writes every record again before dropping the old ones. A save that needs a
+  compaction while the spare bank still waits for its erase fails with
+  `StorageFull`, so call `service()` from every loop iteration.
+  `statistics().freeBytes` shows the room left after a download.
+- **String keys** (`save(std::string, ...)`) are not stored and return
+  `OperationNotSupported`. The stack uses the numeric ids only; the string half
+  serves the KNXnet/IP multicast timer, which a TP1 device does not have.
+- On parts with ECC flash (STM32G0, L4), the HAL's `read` must report an ECC
+  error as a failed read instead of faulting.
+
 ## Persistence schema version — bump it when the layout changes
 
 ```cpp

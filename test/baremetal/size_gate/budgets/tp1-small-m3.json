@@ -2,10 +2,10 @@
   "profile": "tp1-small",
   "cpu": "cortex-m3",
   "margin_percent": 2,
-  "flash": {"budget": 85760, "target": 90112},
+  "flash": {"budget": 88064, "target": 90112},
   "ram": {"budget": 14592, "target": 10240, "includes_heap": true,
           "target_note": "design target of the H8i8o budget (KNstaX 10 KiB, group objects counted apart); the device check below is the binding constraint"},
-  "runtime_flash": {"budget": 7680, "target": 8192},
+  "runtime_flash": {"budget": 7424, "target": 8192},
   "device": {
     "name": "H8i8o, GD32F103CB; reservations from the H8i8o 01-system-design.md section 4.2",
     "ram_total": 20480,

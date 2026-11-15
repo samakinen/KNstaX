@@ -8,8 +8,8 @@
  * Built only to be linked and measured (see CMakeLists.txt and
  * scripts/ci/knstax_size_budget.py). It starts the commissioned product with
  * 60 group objects through the real runtime, so the linked image contains the
- * code a TP1 end device needs. The flash persistence and the board support a
- * real product adds are not part of the KNstaX share.
+ * code a TP1 end device needs. The board support a real product adds is not
+ * part of the KNstaX share.
  *
  * The image that is measured for flash and static RAM starts the device with the
  * TP-UART backend over a stub board UART (uart_stub.hpp), so the backend is in
@@ -21,11 +21,17 @@
  * the individual address and the group addresses the way a commissioning would,
  * and runs the bus traffic a device meets in service, so that the high-water mark
  * covers receive and send as well as start-up.
+ *
+ * Persistence is FlashLog over the board's flash (flash_board.hpp), in the
+ * KNstaX share like the backend: a stand-in flash controller in the measured
+ * image, flash kept in RAM in the emulator variant.
  */
 
-#include "ram_persistence.hpp"
+#include "flash_board.hpp"
 #include "stub_product.hpp"
 
+#include "knx/objects/flash_log.hpp"
+#include "knx/objects/flash_log_persistence.hpp"
 #include "knx/objects/object_persistence.hpp"
 #include "knx/physical/tpuart_medium_backend.hpp"
 #include "knx/platform/cooperative_platform.hpp"
@@ -60,8 +66,10 @@ uint32_t hookMillis(void*) { return g_millis; }
 uint64_t hookMicros(void*) { return static_cast<uint64_t>(g_millis) * 1000u; }
 void hookIdle(void*) { asm volatile("wfi"); }
 
+knx::objects::FlashLog g_flashLog(size_gate::flash::makeHal());
+
 std::unique_ptr<knx::objects::ObjectPersistence> makePersistence() {
-    return std::make_unique<size_gate::RamPersistence>();
+    return std::make_unique<knx::objects::FlashLogPersistence>(g_flashLog);
 }
 
 #if defined(KNX_SIZE_GATE_SEMIHOST)
@@ -340,6 +348,7 @@ int main() {
     for (int i = 0; i < 20; ++i) {  // let the stack settle after the configuration
         g_millis = g_millis + 5u;
         app->loop();
+        (void)g_flashLog.service();
     }
     for (uint16_t loop = 0; loop < kLoops; ++loop) {
         g_millis = g_millis + 5u;  // no SysTick on the emulator's timer path; advance time by hand
@@ -347,11 +356,13 @@ int main() {
         tick(loop);
         if (loop == kPublishAtLoop || loop == kRepublishAtLoop) publishOnce(*app);
         app->loop();
+        (void)g_flashLog.service();
     }
     reportAndExit();
 #else
     for (;;) {
         app->loop();
+        (void)g_flashLog.service();
         asm volatile("wfi");
     }
 #endif

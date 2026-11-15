@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | **Accepted** 15 November 2026, including the compact profile (K7) as KNstaX scope even though it changes core structures such as group object storage. The first target runs bare metal with no RTOS. **K1 is implemented** (§6.3). **K7 is started and the size gate (M1) is missed** (§9.1). Everything else is not implemented. Per DEVELOPMENT_GUIDELINES, README.md and the conformance status must not claim more than ships with tests. |
+| Status | **Accepted** 15 November 2026, including the compact profile (K7) as KNstaX scope even though it changes core structures such as group object storage. The first target runs bare metal with no RTOS. **K1 is implemented** (§6.3), and so are **K2** (§4.1), **K3** (§3.8) and **K5** (§7.1), host-tested. **K7 is started and the size gate (M1) is missed** (§9.1). Everything else is not implemented. Per DEVELOPMENT_GUIDELINES, README.md and the conformance status must not claim more than ships with tests. |
 | Motivating product | H8i8o 8DI/8DO module: GD32F103CB (Cortex-M3, 128 KiB flash, 20 KiB RAM) + Siemens TP-UART2. Its design lives in the h8i8o repository, `docs/design/`. |
 | Principle | Everything here is generic. A different board, MCU, I/O count or TP-UART-family chip should be able to use it unchanged. Board facts (pins, clocks, flash geometry) stay in the product repository. |
 
@@ -488,6 +488,74 @@ wins.
   and NVS. `listKeys()` is not needed on this path.
 - **Tests.** A host flash simulator cuts power at every program and erase step and checks that
   the last committed state survives.
+
+### 7.1 Status of K5 (16 November 2026)
+
+Implemented and host-tested: `knx_flash_hal_t` (`include/knx/objects/flash_hal.h`), `FlashLog`
+(`include/knx/objects/flash_log.hpp`, the log itself) and `FlashLogPersistence` (the
+`ObjectPersistence` adapter). The header of `flash_log.hpp` is the format's specification. Never
+run on a real flash.
+
+Where it differs from the sketch above:
+
+- **HAL shape.** As K2: `bool` results, a context, and the geometry in its own struct. `read` is
+  required (a memory-mapped flash implements it with `memcpy`). Programs never cross a page.
+- **Engine and adapter.** The log is its own class, owned by the product, and the adapter only
+  refers to it. Every adapter the stack creates (`createPersistence()` is called more than once)
+  then sees the same records.
+- **Records** carry a header check besides the CRC: `{id, length, ~(id ^ length ^ 5AA5h), CRC}`,
+  then the data. The header, with the data's CRC, is written first, so a record cut short fails
+  its CRC and is skipped. A header that fails its check (cut while the header itself was
+  written) ends the readable log; the bank takes no more records and the next save compacts.
+  Every id is usable, 0xFFFF included (the stack's schema version uses it). `eraseById` writes a
+  tombstone.
+- **No index in RAM.** A lookup scans the active bank and checks the CRC of the records of that
+  id. The object is about 90 B; nothing is allocated except the caller's output vector.
+- **Erase timing.** `service()` erases one page per call, and otherwise compacts ahead of need
+  when the free space is below a reserve (half a bank by default), but only if compacting gives
+  the reserve back: a bank full of live data is not compacted and erased again on every call.
+  A save that needs a compaction while the spare bank waits for its erase fails with
+  `StorageFull`. `eraseAll()` (factory reset, schema change) is a compaction that copies
+  nothing and erases the spare bank itself if it must. `mount()` formats a region with no valid
+  bank.
+- **Verification.** Every program is read back, and every erased page checked blank.
+- **String keys** return `OperationNotSupported`. Only the KNXnet/IP multicast timer uses them.
+  `listKeys()` returns the ids as the other backends name them (`dXXXX`).
+
+Tests (ctest label `persistence`):
+
+- `test_flash_log` (16 tests) runs `FlashLog` on `FlashHalVirtual`. The simulator enforces
+  the HAL contract (alignment, no write unit programmed twice) and can cut power. A cut program
+  leaves its write unit with only some of its bits cleared, and a cut erase leaves half its page
+  erased. A scenario of saves, erases, compactions, service steps and an `eraseAll()` runs once
+  for every step at which power can be cut, with write units of 1, 2 and 8 octets. After each
+  cut a remount must find the state before or after the interrupted operation, and the log must
+  then take further saves. With the CRC check disabled, these tests fail.
+- `test_flash_log_persistence` runs `InterfaceObjectManager` on `FlashLogPersistence`. A second
+  download is saved with power cut at every step, on the H8i8o geometry and on small banks
+  that force a compaction in the middle of the save. The next boot has the first or the second
+  download, whole.
+
+Size (the gate now links `FlashLog` over a stand-in flash controller, and the emulator run uses
+it over flash held in RAM for the ETS download):
+
+| | Before K5 | K5 |
+|---|---:|---:|
+| KNstaX flash, tp1-small Cortex-M3 | 84,142 B | 86,518 B |
+| C/C++ runtime flash (the gate's `std::map` stand-in is gone) | 7,509 B | 7,067 B |
+| KNstaX RAM, static + heap | 14,378 B | 14,432 B |
+| H8i8o device RAM, as the gate sums it | 20,386 / 20,480 B | 20,440 / 20,480 B |
+| H8i8o device flash | 116,227 / 131,072 B | 118,161 / 131,072 B |
+
+The flash budgets of the three reference configurations were raised by what the persistence
+adds, and the runtime budgets lowered. The Cortex-M0+ static RAM budget (2,304 B) was already
+exceeded before K5 (2,322 B); it is now 2,464 B against 2,420 B measured.
+
+Not done:
+
+- A board implementation for the H8i8o (GD32F103 FMC), and a measurement of the page erase
+  time there (H8i8o bring-up B9).
+- The power-fail save path (K10).
 
 ## 8. K6: software AES-128
 
