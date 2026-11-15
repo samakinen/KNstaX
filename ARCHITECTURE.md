@@ -243,9 +243,10 @@ otherwise. The older `-DKNX_FEATURE_*` options still work as overrides. See
 **Capacities** (Kconfig menu "Capacities", defined in every build, no fallback in `config.hpp`):
 `KNX_MAX_APDU_LENGTH`, `KNX_TP1_RX_QUEUE_FRAMES`, `KNX_TRANSPORT_RX_QUEUE`,
 `KNX_ADDRESS_TABLE_ENTRIES`, `KNX_ASSOCIATION_TABLE_ENTRIES`, `KNX_ADDITIONAL_INDIVIDUAL_ADDRESSES`,
-`KNX_SEND_PIPELINE_DEPTH`, `KNX_MAX_GROUP_OBJECT_PAYLOAD_BYTES` and `KNX_PENDING_ACTION_CAPACITY` (the product
-runtime's queue of publishes made before start; 0 means twice the port count). Their defaults are the values the
-stack had before they were options (254, 32, 8, 256, 512, 16, 8, 16, 0), so ESP-IDF and the `full` and
+`KNX_SEND_PIPELINE_DEPTH`, `KNX_MAX_GROUP_OBJECT_PAYLOAD_BYTES`, `KNX_PENDING_ACTION_CAPACITY` (the product
+runtime's queue of publishes made before start; 0 means twice the port count) and `KNX_CALLBACK_CAPTURE_BYTES`
+(a cap on the inline capture of the stack's `util::InplaceFunction` callbacks; 0 keeps their 32 or 64 bytes). Their defaults are the values the
+stack had before they were options (254, 32, 8, 256, 512, 16, 8, 16, 0, 0), so ESP-IDF and the `full` and
 `host-test` profiles are unchanged; `tp1-small` and `tp1-standard` set smaller ones. Buffers derive from
 them: the longest TP1 frame is the APDU length plus 8 octets for standard frames only (23 for 15) or
 plus 9 with extended frames (263 for 254), see `config::MAX_TP1_FRAME_LENGTH`. A full table or queue

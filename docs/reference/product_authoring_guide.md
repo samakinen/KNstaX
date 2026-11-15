@@ -109,6 +109,13 @@ target. That file is not an illustration — it is the definition the
   fixed size, 8 in the `tp1-small` profile. A request made with the queue full
   fails with `QueueFull`.
 
+  The communication objects are one table, allocated once at start from the port
+  table: 16 bytes per port on a 32-bit target plus the datapoint's value bytes.
+  The product API does not change. In a profile that sets
+  `KNX_CALLBACK_CAPTURE_BYTES` (8 in `tp1-small` and `tp1-standard`), the stack's
+  own callbacks keep only that many bytes of capture; the bindings you register
+  are not affected (`BindingCapacity` sizes those).
+
 - `startCommissionedProduct(...)` — assembles the stack, wires persistence and
   management, and returns a `CommissionedProductRuntime`.
 - `DeviceLifecycleState` — a three-state enum (`Uncommissioned`, `Commissioning`,

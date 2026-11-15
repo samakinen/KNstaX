@@ -162,7 +162,7 @@ copy.
 | `KNX_PLATFORM` | `espidf`, `linux`, `macos`, `windows`, `baremetal` (exists as a CMake variable) | `baremetal` |
 | `KNX_HEAP_POLICY` | `free` (today), `init_only` (allocation after `heap::lock()` traps in debug builds and fails in release), `arena` (one static arena of `KNX_HEAP_ARENA_BYTES`, no `malloc`) | `init_only` |
 | `KNX_PERSISTENCE_BACKEND` | `nvs`, `file`, `flash_log` (K5), `product` (factory only) | `flash_log` |
-| `KNX_CALLBACK_CAPTURE_BYTES` | Default capture size of `InplaceFunction` callbacks inside the stack (64 today) | 8 |
+| `KNX_CALLBACK_CAPTURE_BYTES` | Cap on the inline capture of the stack's `InplaceFunction` callbacks (32 or 64 today; 0 keeps them; never raises a size). Built in S2 as a Capacities symbol, not a policy; the product's own callbacks are not affected | 8 (`tp1-standard` 8; the host profiles 0) |
 
 ## 5. Values that come from the product
 
@@ -235,28 +235,52 @@ heap"; `PendingBusAction<Id>` is one record whose `logicalId` is its 16-bit valu
 
 ### 6.2 S2: compact group objects (RAM; K7 step 4)
 
-**Today.** `GroupObject` is 248 B: configuration with a `double` threshold, two 16-byte value
-buffers, and two `InplaceFunction`s of 64 bytes each.
+**Was.** A `GroupObject` was a 240 B heap object (248 B with the allocator's header): configuration
+with a `double` threshold, two value buffers, two `InplaceFunction`s of 64 bytes, and the transmit
+policy state. The group object table object held them through 256 `unique_ptr` slots (1040 B).
 
-**Proposed.** The runtime owns group-object state as one table:
+**Built.** The group objects of a device are one table, a `GroupObjectStore`
+(`include/knx/application/group_object.hpp`), owned by the `GroupObjectTableObject`. It holds:
 
-```cpp
-struct GroupObjectState {          // 8 bytes
-    uint16_t valueOffset;          // into the value pool
-    uint8_t  descriptorIndex;      // into the constexpr PortDescriptor table
-    uint8_t  flags;                // valid, pending send, update received, ...
-    uint32_t lastSentMs;           // only where a transmit policy is set (side table otherwise)
-};
-```
+- **Entries**, one array allocated once. A `GroupObject` *is* an entry: 16 B on a 32-bit target
+  (`static_assert`ed): the store pointer, the datapoint type, the address, 11 bits of flags and
+  state (C/R/W/T/U/I, priority, valid, pending send), the offset and length of the value, and the
+  index of its policy state. The member functions are the old ones, so callers and tests compile
+  unchanged. `flags()` and `transmitPolicy()` return by value (they are packed), and the virtual
+  destructor is gone.
+- **One value pool** (`std::vector<uint8_t>`, reserved once). An object takes
+  `groupObjectValueBytes(dpt)` bytes: the datapoint's width in whole octets, or
+  `KNX_MAX_GROUP_OBJECT_PAYLOAD_BYTES` for a datapoint the stack does not know. `ProductPortCore`
+  reserves the entries and the pool from its port table (`registerGroupObjects`); objects added one
+  at a time (`BusAccessUnit::addGroupObject`, an ETS-driven table) grow both, with exact-size
+  reallocations.
+- **A policy side table.** The transmit policy (`GroupObjectTransmitPolicy`, with its threshold
+  `double`, or `uint32_t` without `KNX_DPT_FLOAT`), the last-sent time and the last-sent copy of the
+  value, only for objects that were given a policy other than the inert default. An object without
+  one keeps no transmit history and publishes every value, as the inert policy always did. At most 255
+  objects can have a policy (an 8-bit index); the 256th gets `ResourceUnavailable`.
+- **One value callback and one read-request sender** for the whole table, instead of two
+  `InplaceFunction<…, 64>` per object. The value callback is called with the object's index.
+  `GroupRuntime` installs the sender, so product objects (which were registered without one) can
+  also issue reads.
 
-- **Values** live in one byte pool sized from the DPTs. The "last sent" copy exists only for
-  objects with send-on-change.
-- **Transmit policies** (threshold, cyclic, minimum interval) go in a side table for the
-  objects that have one. The threshold becomes an integer in the DPT's raw units, which removes
-  the soft-float dependency.
-- **Callbacks:** one for the whole table, called with the object index.
+An object built on its own (`GroupObject(config)`, used by tests and tools) owns a private one-object
+store; `addGroupObject(std::unique_ptr<GroupObject>)` copies its state into the table. New in the
+table API: `addGroupObject(const GroupObjectConfig&)`, `reserve(objects, valueBytes)` and
+`store()`. `GroupObject*` and the span from `getRawValue()` stay valid until the table grows past
+what was reserved; a product that registers everything at start never sees that.
 
-*Expected effect:* about 13 KiB of RAM for 60 objects (248 B to about 10–16 B each).
+**Changed behaviour.**
+
+- A payload longer than its datapoint's width is refused with `BufferTooSmall`; before, it was
+  stored up to `KNX_MAX_GROUP_OBJECT_PAYLOAD_BYTES` and failed when decoded.
+- An object that transmitted before it was given a policy has no baseline when the policy arrives, so
+  its first publish afterwards goes out regardless of send-on-change.
+- Per-object `setCallback` and `setReadRequestSender` are gone (nothing in the stack, the tests, the
+  examples or the Habinari firmware used them); the store has the table-wide ones.
+
+*Result:* 60 objects take 960 B of entries and a pool of a few hundred bytes instead of 15 440 B
+(14 400 B of objects and the 1040 B table). See the S2 status in §9.
 
 ### 6.3 S3: interface object property storage (RAM and flash)
 
@@ -681,6 +705,63 @@ configurations: Cortex-M0+ flash 114058 to 82683 B; `tp1-standard`, Cortex-M4 fl
   528, 488, 376, 344, 320. The group objects are 14400 B of the 31108 B (46 %); the runtime object is the
   2272. S2 owns the first, S3 and S4 the rest. The 2796, 2720 and 1764 B items are not attributed here.
 
+### S2 status
+
+Done (§6.2 describes what was built), together with the callback capture size of §4.3. Two changes,
+each leaving the host suites green (full 153, `host-small` 140, `host-minimal` 101) and the gate
+passing. Figures are the `tp1-small` Cortex-M3 reference device.
+
+| Step | Flash | Static RAM | Heap | Static + heap |
+|---|---:|---:|---:|---:|
+| After S1 (baseline) | 79925 B | 1443 B | 31108 B | 32551 B |
+| 1. Group objects as a 16 B entry in one store (pool, policy side table, table callbacks) | 80642 B | 1443 B | 15592 B | 17035 B |
+| 2. `KNX_CALLBACK_CAPTURE_BYTES` = 8 | 79335 B | 1443 B | 13488 B | 14931 B |
+
+The other configurations after step 2: Cortex-M0+ flash 82638 B (static RAM 1443 B); `tp1-standard`,
+Cortex-M4 flash 97715 B (static RAM 1596 B). The budgets were lowered to the new figures plus the
+margin: `tp1-small` M3 81152 B flash and 15360 B RAM, `tp1-standard` 99840 B flash; the M0+ budgets
+were already within the margin.
+
+- **Group objects.** `sizeof(GroupObject)` went from 240 B to 16 B (`static_assert` on 32-bit
+  targets). For the 60 objects of the reference device that is 14 400 B of objects and 1040 B of
+  table slots (15 440 B) replaced by 960 B of entries and a value pool of a few hundred bytes
+  (about 20 B per object in all): 15.5 KB of heap, a little more than the 13.6 KiB §6.2 expected,
+  because the 1040 B pointer table went too. The flash cost is 717 B: the store, the side-table code
+  and the exact-size `std::vector` growth.
+- **Callback capture.** Setting the capture to 8 took 2104 B of heap and 1307 B of flash out
+  (smaller callback objects need fewer and smaller copy and move thunks). The §10 review expected about
+  2 KiB. Only one stack-internal lambda captured more than a pointer: `BusAccessStackPort`'s inbound
+  callback copied the product's callback into itself; it now captures `this`. Everything else fits in
+  8 bytes, including the `tp1-standard` feature set (Secure, the management services) and, checked by
+  compiling the library alone, the `host-small` feature set (netip, coupler, Secure).
+- **Where the option is on.** `tp1-small` and `tp1-standard` set 8. `full`, `host-test`, `host-small`
+  and `host-minimal` keep 0: with 8, the tests of the host profiles fail to compile, because they pass
+  lambdas that capture several locals (`[&]` over two or more variables, 16 to 60 B) to the public
+  setters: 34 sites in 25 test files and the interop peers. Those are callbacks whose capture the
+  test controls, so they were not rewritten. The consequence is that the host profiles do not
+  themselves check that the stack's own lambdas fit in 8 bytes; the two gate images do, and the
+  `host-small` library compiled at 8 when tried by hand. A permanent check would build the library
+  alone at 8 for the host-small features. The aliases for the product's callbacks (bindings, endpoint
+  policies, lifecycle and fault observers) are not affected by the option in any profile.
+- **Heap profile after S2** (`alloc <count> x <bytes>`, Cortex-M3): 2224, 1772, 1764, 1696, 1168, 968,
+  792, 328, 296, 260, 248, 240. The 968 is the group object entries (60 × 16 B and the allocator's
+  header). The group object table object (1040 B) is gone. The other items were not re-attributed
+  one by one; the callback-heavy ones (the interface object manager, `BusAccessUnit`, the data link
+  layer) are the ones that shrank.
+- **Behaviour changes to know.** A payload longer than its datapoint is refused (`BufferTooSmall`);
+  an object that sent before it got a transmit policy publishes once regardless of send-on-change
+  after the policy arrives; the group object table's read-request sender is installed by
+  `GroupRuntime` for every object, product objects included. The inbound callback of the stack port is
+  read when it runs, not copied at install time. Per-object `setCallback` and `setReadRequestSender`
+  are removed (no users).
+- **Compatibility.** The Habinari firmware's `knx_*.cpp` compile (syntax check against the ESP-IDF
+  stubs, both media); it uses no `GroupObject` API. `GroupObject` and the table accept the calls the
+  tests use; `flags()` and `transmitPolicy()` return by value now.
+- **The threshold is still a `double` with `KNX_DPT_FLOAT`.** §6.2's idea of an integer threshold in
+  the datapoint's raw units is not done: it would change what ETS parameters mean for float
+  datapoints. Without `KNX_DPT_FLOAT` it is already `uint32_t` and no soft-float is linked
+  (the gate forbids `Dpt9::` and `dptValueAsScalar`).
+
 ## 10. Projection and decision points
 
 Estimated `tp1-small` figures for the 60-object reference device after each stage. Only the
@@ -692,6 +773,7 @@ first row is measured.
 | C2 | | | 131.8 KiB flash, 43.2 KiB RAM (1.7 static + 41.5 heap) |
 | C2 + C3 | about 115 KiB | about 30 KiB | 97.6 KiB flash, 41.4 KiB RAM (1.3 static + 40.0 heap) |
 | S1 | about 88 KiB | about 18 KiB | **78.1 KiB flash, 31.8 KiB RAM (1.4 static + 30.4 heap)**; on the representative device with bindings, S1 took 108275 B / 42423 B down to 79925 B / 32551 B |
+| S2 | | | **77.5 KiB flash, 14.6 KiB RAM (1.4 static + 13.2 heap)** (with the callback capture size) |
 | S2 + S3 + S4 | about 80–85 KiB | about 8–10 KiB | |
 
 **Decision point after S1.** If the measurement is more than about 10 % above the projection
@@ -754,6 +836,23 @@ group objects at most 2 KiB. Measured the way the gate measures, the board's bud
 
 **Outcome.** The work continues with S2, with the callback capture size added to it. The GD32F303CC
 fall-back is not needed on present evidence. The next review is after S2.
+
+**Review after S2 (16 November 2026).** Measured on the `tp1-small` Cortex-M3 reference device: flash
+77.5 KiB (79335 B), RAM 14.6 KiB (14931 B: 1443 B static and 13488 B heap).
+
+- **RAM: below the review's estimate.** The review projected about 16 KiB after S2 and the callback
+  capture size; the measurement is 14.6 KiB. S2 took 15.5 KB off the heap (the estimate was 13.6) and
+  the capture size 2.1 KB (the estimate was about 2). The §10 projection for S2 + S3 + S4 was 8–10 KiB,
+  so S3 and S4 have to remove 4.6 to 6.6 KiB more from the interface object manager (2224 B),
+  `BusAccessUnit`, `DeviceModel` (1764 B) and the rest of the heap list in the S2 status.
+- **The board's budget.** The group objects are about 1.2 KB, inside the 2 KiB the H8i8o budget gives
+  them separately; the KNstaX share without them is about 13.4 KiB against the board's 10 KiB. The
+  owner's reading of "which RAM target" (the Review above) still applies.
+- **Flash: unchanged in effect.** 77.5 KiB, 10.5 KiB under the 90112 B target. S2 cost 717 B of flash
+  and the capture size gave 1307 B back.
+- **Outcome.** The GD32F303CC fall-back is still not needed on present evidence. The work continues
+  with S3 (interface object property storage, `DeviceModel`, `BusAccessUnit`) and S4; the next review is
+  after S3.
 
 ## 11. Risks
 
