@@ -1528,7 +1528,7 @@ public:
                 // The group the device is on now, which after a start with a
                 // stored group is not the one in the options.
                 description.routingMulticastAddress = physical.multicastGroup();
-                description.maxLocalApduLength = _runtime.compiledDefinition().identity.maxApduLength;
+                description.maxLocalApduLength = _runtime.identity().maxApduLength;
                 // The same mask version setDeviceMedium() puts in the Device
                 // Descriptor, from the same table — ETS cross-checks the two.
                 description.deviceDescriptorType0 =
@@ -1544,7 +1544,7 @@ public:
                 // Falling back to the model still beats an empty field, which
                 // ETS shows as a blank row.
                 const std::string_view name =
-                    friendlyName.empty() ? std::string_view(_runtime.compiledDefinition().identity.orderNumber)
+                    friendlyName.empty() ? std::string_view(_runtime.identity().orderNumber)
                                          : std::string_view(friendlyName);
                 const size_t nameLength = std::min(name.size(), description.friendlyName.size());
                 std::copy_n(name.begin(), nameLength, description.friendlyName.begin());
@@ -2134,7 +2134,10 @@ public:
     /// Compiled endpoint view: runtime communication-object descriptors plus the
     /// export descriptors that carry each port's key and display name. Useful
     /// for diagnostics such as reporting which ports a project left unlinked.
-    const auto& compiledEndpoint() const
+    /// Built on demand and returned by value (it is as large as the port table's
+    /// descriptors, which the runtime does not keep in RAM); `const auto&`
+    /// bound to the result keeps it alive for the scope.
+    auto compiledEndpoint() const
     {
         return _runtime.compiledDefinition();
     }

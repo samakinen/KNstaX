@@ -22,6 +22,7 @@
 #include "knx/physical/tp1_medium_backend.hpp"
 #include "knx/product/impl/bindings/endpoint_bindings.hpp"
 #include "knx/product/impl/compiler/endpoint_compiler.hpp"
+#include "knx/product/impl/model/port_table.hpp"
 #include "knx/util/log.hpp"
 #include "knx/util/result.hpp"
 
@@ -101,7 +102,7 @@ public:
     EndpointRuntime(const definition_type& definition,
                     bindings_type&& bindings,
                     EndpointInstanceConfig config)
-        : _compiled(compileEndpointDefinition(definition))
+        : _definition(definition)
         , _bindings(std::move(bindings))
         , _config(config)
     {
@@ -113,9 +114,22 @@ public:
     EndpointRuntime(EndpointRuntime&&) = delete;
     EndpointRuntime& operator=(EndpointRuntime&&) = delete;
 
-    const auto& compiledDefinition() const
+    /// The compiled definition (runtime and export descriptors), built on
+    /// demand from the port tables and returned by value: the runtime keeps
+    /// only its identity and a pointer to the rodata port table, not a RAM copy
+    /// of every descriptor. A caller that wants a reference binds it to a
+    /// local (`const auto compiled = runtime.compiledDefinition();`), which
+    /// the copy elision makes free. Diagnostics and tests use this; the
+    /// firmware's own paths read the identity or the port table.
+    auto compiledDefinition() const
     {
-        return _compiled;
+        return compileEndpointDefinition(_definition);
+    }
+
+    /// The product identity this runtime was built from.
+    const ProductIdentity& identity() const
+    {
+        return _definition.identity;
     }
 
     const auto& instanceConfig() const
@@ -136,15 +150,15 @@ public:
             return util::ErrorCode::InvalidAddress;
         }
 
-        const auto* descriptor = _compiled.descriptorFor(logicalId);
+        const auto* descriptor = descriptorFor(logicalId);
         if (descriptor == nullptr) {
             return util::ErrorCode::InvalidParameter;
         }
 
-        _configuredGroupAddresses[descriptor->slot] = address;
+        _configuredGroupAddresses[slotOf(*descriptor)] = address;
 
         if (_bau) {
-            return _bau->bindGroupObjectToAddress(GroupObjectIndex(descriptor->slot), address);
+            return _bau->bindGroupObjectToAddress(GroupObjectIndex(slotOf(*descriptor)), address);
         }
 
         return util::Result<void>::ok();
@@ -179,14 +193,14 @@ public:
     util::Result<void> setTransmitPolicy(port_id_type logicalId,
                                          const application::GroupObjectTransmitPolicy& policy)
     {
-        const auto* descriptor = _compiled.descriptorFor(logicalId);
+        const auto* descriptor = descriptorFor(logicalId);
         if (descriptor == nullptr) {
             return util::ErrorCode::InvalidParameter;
         }
         if (!_bau) {
             return util::ErrorCode::OperationNotReady;
         }
-        return _bau->setGroupObjectTransmitPolicy(GroupObjectIndex(descriptor->slot), policy);
+        return _bau->setGroupObjectTransmitPolicy(GroupObjectIndex(slotOf(*descriptor)), policy);
     }
 
     /// True when the project (ETS download or applyCommissionedGroupAddress)
@@ -195,11 +209,11 @@ public:
     /// to tell an unused datapoint from a transmitting one.
     bool isPortLinked(port_id_type logicalId) const
     {
-        const auto* descriptor = _compiled.descriptorFor(logicalId);
+        const auto* descriptor = descriptorFor(logicalId);
         if (descriptor == nullptr || !_bau) {
             return false;
         }
-        return _bau->isGroupObjectLinked(GroupObjectIndex(descriptor->slot));
+        return _bau->isGroupObjectLinked(GroupObjectIndex(slotOf(*descriptor)));
     }
 
     template <auto LogicalId>
@@ -212,14 +226,14 @@ public:
     util::Result<application::GroupObjectTransmitPolicy>
     transmitPolicy(port_id_type logicalId) const
     {
-        const auto* descriptor = _compiled.descriptorFor(logicalId);
+        const auto* descriptor = descriptorFor(logicalId);
         if (descriptor == nullptr) {
             return util::ErrorCode::InvalidParameter;
         }
         if (!_bau) {
             return util::ErrorCode::OperationNotReady;
         }
-        return _bau->groupObjectTransmitPolicy(GroupObjectIndex(descriptor->slot));
+        return _bau->groupObjectTransmitPolicy(GroupObjectIndex(slotOf(*descriptor)));
     }
 
 #if KNX_FEATURE_TP1
@@ -394,11 +408,11 @@ public:
     util::Result<void> publish(port_id_type logicalId,
                                ValueT value)
     {
-        const auto* descriptor = _compiled.descriptorFor(logicalId);
+        const auto* descriptor = descriptorFor(logicalId);
         if (descriptor == nullptr) {
             return util::ErrorCode::InvalidParameter;
         }
-        if (!descriptor->transmit) {
+        if (!descriptor->transmit()) {
             return util::ErrorCode::AccessDenied;
         }
         if (isInitialIndividualAddress(individualAddress())) {
@@ -408,13 +422,13 @@ public:
         const auto runtimeValue = detail::makeRuntimeValue(value);
 
         if (_bau) {
-            return publishStarted(GroupObjectIndex(descriptor->slot), runtimeValue);
+            return publishStarted(GroupObjectIndex(slotOf(*descriptor)), runtimeValue);
         }
 
         return enqueue(PendingBusAction<port_id_type>{
             .kind = PendingBusActionKind::Publish,
             .logicalId = logicalId,
-            .slot = descriptor->slot,
+            .slot = slotOf(*descriptor),
             .value = runtimeValue,
         });
     }
@@ -422,11 +436,11 @@ public:
     template <auto LogicalId>
     util::Result<void> requestReadResponse()
     {
-        const auto* descriptor = _compiled.descriptorFor(LogicalId);
+        const auto* descriptor = descriptorFor(static_cast<port_id_type>(LogicalId));
         if (descriptor == nullptr) {
             return util::ErrorCode::InvalidParameter;
         }
-        if (!descriptor->readable) {
+        if (!descriptor->readable()) {
             return util::ErrorCode::AccessDenied;
         }
         if (isInitialIndividualAddress(individualAddress())) {
@@ -439,13 +453,13 @@ public:
         }
 
         if (_bau) {
-            return respondStarted(GroupObjectIndex(descriptor->slot), detail::makeRuntimeValue(state.value()));
+            return respondStarted(GroupObjectIndex(slotOf(*descriptor)), detail::makeRuntimeValue(state.value()));
         }
 
         return enqueue(PendingBusAction<port_id_type>{
             .kind = PendingBusActionKind::ReadResponse,
             .logicalId = LogicalId,
-            .slot = descriptor->slot,
+            .slot = slotOf(*descriptor),
             .value = detail::makeRuntimeValue(state.value()),
         });
     }
@@ -453,11 +467,11 @@ public:
     template <auto LogicalId>
     util::Result<void> handleIncomingWrite(port_value_t<definition_type, LogicalId> value)
     {
-        const auto* descriptor = _compiled.descriptorFor(LogicalId);
+        const auto* descriptor = descriptorFor(static_cast<port_id_type>(LogicalId));
         if (descriptor == nullptr) {
             return util::ErrorCode::InvalidParameter;
         }
-        if (!descriptor->receivable && !descriptor->writable) {
+        if (!descriptor->acceptsWrites()) {
             return util::ErrorCode::AccessDenied;
         }
 
@@ -839,9 +853,9 @@ public:
         // .knxprod; the buffers behind it are sized by CONFIG_KNX_MAX_APDU_LENGTH.
         // A constexpr definition cannot get here (makeEndpointDefinition()
         // rejects it at compile time); this catches one built at run time.
-        if (_compiled.identity.maxApduLength > config::MAX_APDU_LENGTH) {
+        if (_definition.identity.maxApduLength > config::MAX_APDU_LENGTH) {
             KNX_LOGE("KNX.Product", "Product maxApduLength %u exceeds CONFIG_KNX_MAX_APDU_LENGTH %u",
-                     static_cast<unsigned>(_compiled.identity.maxApduLength),
+                     static_cast<unsigned>(_definition.identity.maxApduLength),
                      static_cast<unsigned>(config::MAX_APDU_LENGTH));
             _bau.reset();
             return util::ErrorCode::InvalidParameter;
@@ -897,51 +911,51 @@ public:
         // the Device Descriptor before it will download, and the mask version
         // it expects depends on the medium (07B0h on TP1, 57B0h on KNX IP).
         // The product already states which; nothing used to act on it.
-        _bau->management().setDeviceMedium(knxMediumType(_compiled.identity.medium));
+        _bau->management().setDeviceMedium(knxMediumType(_definition.identity.medium));
 
         auto& device = _bau->deviceObject();
-        device.setManufacturerId(_compiled.identity.manufacturerId);
-        device.setFirmwareRevision(_compiled.identity.firmwareRevision);
-        device.setMaxApduLength(_compiled.identity.maxApduLength);
+        device.setManufacturerId(_definition.identity.manufacturerId);
+        device.setFirmwareRevision(_definition.identity.firmwareRevision);
+        device.setMaxApduLength(_definition.identity.maxApduLength);
 
         // PID_HARDWARE_TYPE (03/05/01 §4.3.28): MSB must be 00h; the remaining
         // five octets are the manufacturer's hardware identifier. Encoded here
         // as manufacturer id + hardware serial so it is unique per product and
         // matches Hardware/@SerialNumber in the exported knxprod.
-        const uint16_t manufacturerValue = _compiled.identity.manufacturerId.value();
-        const uint16_t hardwareSerial = _compiled.identity.hardwareSerialNumber;
+        const uint16_t manufacturerValue = _definition.identity.manufacturerId.value();
+        const uint16_t hardwareSerial = _definition.identity.hardwareSerialNumber;
         const uint8_t hardwareType[6] = {
             0x00,
             static_cast<uint8_t>((manufacturerValue >> 8) & 0xFFu),
             static_cast<uint8_t>(manufacturerValue & 0xFFu),
-            _compiled.identity.hardwareVersion,
+            _definition.identity.hardwareVersion,
             static_cast<uint8_t>((hardwareSerial >> 8) & 0xFFu),
             static_cast<uint8_t>(hardwareSerial & 0xFFu),
         };
         device.setHardwareType(hardwareType);
 
-        device.setOrderInfo(std::string(_compiled.identity.orderNumber));
+        device.setOrderInfo(std::string(_definition.identity.orderNumber));
 
         // PID_VERSION as DPT_Version: magic 0 (no versioning scheme change),
         // version = hardware version, revision = firmware revision.
         device.setVersion(0,
-                          _compiled.identity.hardwareVersion,
-                          _compiled.identity.firmwareRevision);
+                          _definition.identity.hardwareVersion,
+                          _definition.identity.firmwareRevision);
 
         auto& program = _bau->applicationProgram();
-        program.setApplicationManufacturer(_compiled.identity.manufacturerId.value());
-        program.setApplicationNumber(_compiled.identity.applicationNumber);
-        program.setApplicationVersion(static_cast<uint8_t>(_compiled.identity.applicationVersion & 0xFFu));
+        program.setApplicationManufacturer(_definition.identity.manufacturerId.value());
+        program.setApplicationNumber(_definition.identity.applicationNumber);
+        program.setApplicationVersion(static_cast<uint8_t>(_definition.identity.applicationVersion & 0xFFu));
         // PID_PROGRAM_VERSION (PDT_GENERIC_05): manufacturer id, application
         // number, version — ETS overwrites this block during the download.
-        const uint16_t manufacturer = _compiled.identity.manufacturerId.value();
-        const uint16_t appNumber = _compiled.identity.applicationNumber;
+        const uint16_t manufacturer = _definition.identity.manufacturerId.value();
+        const uint16_t appNumber = _definition.identity.applicationNumber;
         const uint8_t programVersionBlock[objects::ApplicationProgramObject::kProgramVersionSize] = {
             static_cast<uint8_t>((manufacturer >> 8) & 0xFFu),
             static_cast<uint8_t>(manufacturer & 0xFFu),
             static_cast<uint8_t>((appNumber >> 8) & 0xFFu),
             static_cast<uint8_t>(appNumber & 0xFFu),
-            static_cast<uint8_t>(_compiled.identity.applicationVersion & 0xFFu),
+            static_cast<uint8_t>(_definition.identity.applicationVersion & 0xFFu),
         };
         program.setProgramVersionBlock(programVersionBlock);
     }
@@ -977,21 +991,22 @@ public:
 
     util::Result<void> registerGroupObjects()
     {
-        for (const auto& descriptor : _compiled.runtime.communicationObjects) {
+        for (size_t slot = 0; slot < portTable().size(); ++slot) {
+            const PortDescriptor& descriptor = portTable()[slot];
             application::GroupObjectConfig config{};
-            config.address = _configuredGroupAddresses[descriptor.slot];
+            config.address = _configuredGroupAddresses[slot];
             config.dpt = descriptor.dpt;
             config.flags.communication = true;
-            config.flags.read = descriptor.readable;
-            config.flags.write = descriptor.writable;
-            config.flags.transmit = descriptor.transmit;
-            config.flags.update = descriptor.receivable;
-            config.flags.readOnInit = descriptor.readOnInit;
+            config.flags.read = descriptor.readable();
+            config.flags.write = descriptor.writable();
+            config.flags.transmit = descriptor.transmit();
+            config.flags.update = descriptor.receivable();
+            config.flags.readOnInit = descriptor.readOnInit();
             config.flags.priority = descriptor.priority;
 
             auto object = std::make_unique<application::GroupObject>(config);
             const GroupObjectIndex index = _bau->groupObjectTable().addGroupObject(std::move(object));
-            if (!index.isValid() || index.value() != descriptor.slot) {
+            if (!index.isValid() || index.value() != slot) {
                 reportFault({FaultCode::InternalError, "EndpointRuntime slot registration failed"});
                 return util::ErrorCode::ResourceUnavailable;
             }
@@ -1018,13 +1033,13 @@ public:
 
     util::Result<void> applyConfiguredGroupAddresses()
     {
-        for (const auto& descriptor : _compiled.runtime.communicationObjects) {
-            const GroupAddress address = _configuredGroupAddresses[descriptor.slot];
+        for (size_t slot = 0; slot < portTable().size(); ++slot) {
+            const GroupAddress address = _configuredGroupAddresses[slot];
             if (!address.isValid()) {
                 continue;
             }
 
-            const auto bind = _bau->bindGroupObjectToAddress(GroupObjectIndex(descriptor.slot), address);
+            const auto bind = _bau->bindGroupObjectToAddress(GroupObjectIndex(static_cast<uint16_t>(slot)), address);
             if (bind.isError()) {
                 return bind.error();
             }
@@ -1035,8 +1050,8 @@ public:
 
     void seedReadableState()
     {
-        for (const auto& descriptor : _compiled.runtime.communicationObjects) {
-            (void)prepareStartedRead(GroupObjectIndex(descriptor.slot));
+        for (size_t slot = 0; slot < portTable().size(); ++slot) {
+            (void)prepareStartedRead(GroupObjectIndex(static_cast<uint16_t>(slot)));
         }
     }
 
@@ -1148,7 +1163,24 @@ public:
     inline static constexpr auto kReadPreparers =
         makeReadPrepareTable(std::make_index_sequence<definition_type::kPortCount>{});
 
-    CompiledEndpointDefinition<definition_type> _compiled;
+    static constexpr const auto& portTable()
+    {
+        return kPortTable<definition_type>;
+    }
+
+    /// The table entry of a port, or nullptr for a logical id this product does not declare.
+    static const PortDescriptor* descriptorFor(port_id_type logicalId)
+    {
+        const auto slot = findPortSlot(portTable().data(), portTable().size(), static_cast<uint16_t>(logicalId));
+        return slot == kNoSlot ? nullptr : &portTable()[slot];
+    }
+
+    static uint16_t slotOf(const PortDescriptor& descriptor)
+    {
+        return static_cast<uint16_t>(&descriptor - portTable().data());
+    }
+
+    definition_type _definition;
     bindings_type _bindings;
     EndpointInstanceConfig _config{};
     bool _programmingModeActive{false};
