@@ -724,6 +724,37 @@ the smallest supported tier. The H8i8o board would then need the GD32F303CC (h8i
   and 1764 B allocations) before S3 and S4 are committed to, and, failing that, the GD32F303CC
   fall-back (h8i8o decision D2). The decision is the owner's.
 
+**Review (16 November 2026).** The heap left after S1 is now fully attributed (`sizeof` on the
+`tp1-small` configuration, Cortex-M3):
+
+| Heap item | Bytes | Addressed by |
+|---|---:|---|
+| 60 group objects, 240 B each | 14 400 | S2 |
+| `InterfaceObjectManager` | 2 796 | S3 |
+| `BusAccessUnit` | 2 720 | S3, callback capture size |
+| Product runtime (`CommissionedProductRuntime`) | 2 272 | done in S1 |
+| `DeviceModel` | 1 764 | S3 |
+| `Tp1DataLinkLayer` | 1 224 | callback capture size |
+| Group object table object | 1 040 | S2, S3 |
+| `ApplicationLayer` | 1 032 | callback capture size |
+| Association table (160 entries) | 980 | capacity (done in C2) |
+| `ManagementServer` | 768 | callback capture size |
+| `TransportLayer`, `GroupRuntime`, address table, device object, others | about 2 100 | |
+
+The stack's internal callbacks are 65 `InplaceFunction` types with 32 or 64 bytes of inline storage,
+almost all of which capture only `this`. Making that storage a build option (§4.3,
+`KNX_CALLBACK_CAPTURE_BYTES`) is expected to remove about 2 KiB. With S2 (about 13.6 KiB) the device
+is projected at about 16 KiB, which leaves S3 and S4 to find about 4–6 KiB in the interface object
+manager, `BusAccessUnit` and `DeviceModel` (8.5 KB between them).
+
+**Which RAM target.** The gate counts the group objects in the KNstaX share. The H8i8o budget
+(h8i8o `01-system-design.md` §4.2) lists them separately: KNstaX static and heap at most 10 KiB, and
+group objects at most 2 KiB. Measured the way the gate measures, the board's budget is therefore
+12 KiB, not 10. The owner should confirm this reading before the gate target is changed.
+
+**Outcome.** The work continues with S2, with the callback capture size added to it. The GD32F303CC
+fall-back is not needed on present evidence. The next review is after S2.
+
 ## 11. Risks
 
 | Risk | Mitigation |
