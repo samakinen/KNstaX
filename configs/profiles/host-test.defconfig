@@ -1,0 +1,14 @@
+# Host build for the test suite: every medium and every tool on, as the
+# standalone CMake options defaulted before profiles existed.
+CONFIG_KNX_STANDALONE_PLATFORM_AUTO=y
+CONFIG_KNX_BUILD_TP1=y
+CONFIG_KNX_BUILD_NETIP=y
+CONFIG_KNX_ENABLE_TUNNELING=y
+CONFIG_KNX_ENABLE_COUPLER=y
+CONFIG_KNX_ENABLE_SECURITY=y
+CONFIG_KNX_BUILD_VIRTUAL_BUS=y
+CONFIG_KNX_BUILD_ETS_TOOLING=y
+CONFIG_KNX_BUILD_TEST_HOOKS=y
+CONFIG_KNX_BUILD_ZLIB=y
+# Every log level compiled in, filtered at run time.
+CONFIG_KNX_LOG_LEVEL=5

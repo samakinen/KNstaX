@@ -11,15 +11,19 @@
 
 // Compile-time log level configuration
 // Define KNX_LOG_LEVEL_COMPILE to one of these values to disable logs at compile time.
-// On ESP-IDF builds the Kconfig option KNX_LOG_LEVEL (menuconfig) provides the value.
-#if __has_include("sdkconfig.h")
+// The Kconfig option KNX_LOG_LEVEL provides the value: through sdkconfig.h on
+// ESP-IDF, through the generated knx/autoconf.h in a standalone build (the
+// profile sets it). The symbol has no dependency, so both always define it.
+#if __has_include("knx/autoconf.h")
+#include "knx/autoconf.h"
+#elif __has_include("sdkconfig.h")
 #include "sdkconfig.h"
 #endif
 #ifndef KNX_LOG_LEVEL_COMPILE
     #if defined(CONFIG_KNX_LOG_LEVEL)
         #define KNX_LOG_LEVEL_COMPILE CONFIG_KNX_LOG_LEVEL
     #else
-        #define KNX_LOG_LEVEL_COMPILE 5  // Default: all logs compiled in (runtime-filtered)
+        #error "CONFIG_KNX_LOG_LEVEL is not defined: build with the KNstaX configuration (ESP-IDF Kconfig, or knx_configure() in CMake)"
     #endif
 #endif
 

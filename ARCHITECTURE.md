@@ -210,6 +210,26 @@ Host tests are expected to follow the same high-level semantics as embedded buil
 
 ## Configuration model
 
+`Kconfig` is the one configuration schema. ESP-IDF resolves it with its own tooling
+(`sdkconfig.h`). A standalone CMake build (host tests, bare metal) resolves it at configure
+time with the vendored Kconfiglib (`tools/kconfig/knx_genconfig.py`), from a **profile**, a
+defconfig fragment under `configs/profiles/` (`host-test`, `full`, `tp1-small`,
+`tp1-standard`), plus the product's own override fragments. The result is the generated
+`knx/autoconf.h`, which carries the same `CONFIG_KNX_*` macros as `sdkconfig.h`; `config.hpp`
+includes whichever exists. The resolved configuration is also written as `knx.config` in
+`<build>/knx-config/`, and as `knx_config.cmake` for CMake to choose source groups from.
+
+Symbols that exist only in standalone builds (platform, `KNX_BUILD_TP1`, `KNX_BUILD_NETIP`,
+the virtual bus, ETS tooling, test hooks, zlib) are in `Kconfig.standalone`, which ESP-IDF
+never reads. A standalone build keeps `KNX_MEDIUM` at its default and selects media with
+`KNX_BUILD_*`, because a host build compiles TP1 and KNXnet/IP together while an ESP-IDF image
+is one medium.
+
+A product calls `knx_configure(PROFILE <name> OVERRIDES <files>...)` before
+`add_subdirectory(KNstaX)`; a build that does not gets `tp1-small` on bare metal and `host-test`
+otherwise. The older `-DKNX_FEATURE_*` options still work as overrides. See
+[docs/design/small-target-profile.md](docs/design/small-target-profile.md).
+
 Embedded TP1 backend selection is compile-time driven through Kconfig. `KNX_TP1_BITBANG` is the only choice today; the factory builds the canonical TP1 composition over it.
 
 Bitbang builds also consume board/transceiver traits from Kconfig, including:

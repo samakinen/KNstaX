@@ -1,0 +1,15 @@
+# Every device feature the stack has, without the test infrastructure: a
+# product image that is a coupler and a KNXnet/IP client, with KNX Secure.
+# Differs from host-test in having no virtual bus and no test hooks, and in
+# the log level.
+CONFIG_KNX_STANDALONE_PLATFORM_AUTO=y
+CONFIG_KNX_BUILD_TP1=y
+CONFIG_KNX_BUILD_NETIP=y
+CONFIG_KNX_ENABLE_TUNNELING=y
+CONFIG_KNX_ENABLE_COUPLER=y
+CONFIG_KNX_ENABLE_SECURITY=y
+CONFIG_KNX_BUILD_VIRTUAL_BUS=n
+CONFIG_KNX_BUILD_ETS_TOOLING=y
+CONFIG_KNX_BUILD_TEST_HOOKS=n
+CONFIG_KNX_BUILD_ZLIB=y
+CONFIG_KNX_LOG_LEVEL=3

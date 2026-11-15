@@ -10,24 +10,23 @@
 #   cmake --build build/size_gate
 #
 # This is its own project (not part of the host build) because it needs the
-# cross toolchain. KNstaX is added as a subdirectory with KNX_PLATFORM=baremetal.
+# cross toolchain. KNstaX is configured with the tp1-small profile (baremetal, TP1
+# only, log level 0 = no log strings) and added as a subdirectory.
 
 cmake_minimum_required(VERSION 3.21)
 project(KNstaXSizeGate LANGUAGES C CXX)
 
-set(KNX_PLATFORM baremetal CACHE STRING "" FORCE)
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE MinSizeRel CACHE STRING "" FORCE)
 endif()
 
 # Release-grade flags: this is the configuration the budget is defined for.
 option(KNX_SIZE_GATE_LTO "Link with -flto, as a product would" ON)
-set(KNX_SIZE_GATE_LOG_LEVEL 0 CACHE STRING "KNX_LOG_LEVEL_COMPILE for the gate (0 = no log strings)")
 
 get_filename_component(KNX_ROOT ${CMAKE_CURRENT_LIST_DIR}/../../.. ABSOLUTE)
+include(${KNX_ROOT}/cmake/knx_config.cmake)
+knx_configure(PROFILE tp1-small)
 add_subdirectory(${KNX_ROOT} knstax EXCLUDE_FROM_ALL)
-
-target_compile_definitions(knx_core PUBLIC KNX_LOG_LEVEL_COMPILE=${KNX_SIZE_GATE_LOG_LEVEL})
 
 # Emulator variant: -DKNX_SIZE_GATE_SEMIHOST=ON links for an address map with code
 # at 0 (QEMU mps2-an385) and ends the run by printing the heap high-water mark.

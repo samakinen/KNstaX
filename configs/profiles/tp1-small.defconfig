@@ -1,0 +1,14 @@
+# A TP1 end device on a small Cortex-M part: no log strings, nothing a bus
+# device does not need. Capacities arrive with the small-target profile's
+# later work items; this fragment only selects what is built.
+CONFIG_KNX_STANDALONE_PLATFORM_BAREMETAL=y
+CONFIG_KNX_BUILD_TP1=y
+CONFIG_KNX_BUILD_NETIP=n
+CONFIG_KNX_ENABLE_TUNNELING=n
+CONFIG_KNX_ENABLE_COUPLER=n
+CONFIG_KNX_ENABLE_SECURITY=n
+CONFIG_KNX_BUILD_VIRTUAL_BUS=n
+CONFIG_KNX_BUILD_ETS_TOOLING=n
+CONFIG_KNX_BUILD_TEST_HOOKS=n
+CONFIG_KNX_BUILD_ZLIB=n
+CONFIG_KNX_LOG_LEVEL=0

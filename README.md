@@ -302,6 +302,28 @@ runtime and commissioning flows. On top of it:
 Virtual and host results do not substitute for HIL electrical and timing
 validation on real transceivers.
 
+### Choosing what is built (standalone CMake)
+
+What a standalone build contains is a **profile**: a defconfig fragment under
+`configs/profiles/` over the `Kconfig` schema. A host build uses `host-test` (every medium
+and tool on), `-DKNX_PLATFORM=baremetal` uses `tp1-small`. A product picks its own before it
+adds KNstaX, and may override single symbols in a fragment of its own:
+
+```cmake
+include(${KNSTAX_DIR}/cmake/knx_config.cmake)
+knx_configure(PROFILE tp1-small
+              OVERRIDES ${CMAKE_CURRENT_SOURCE_DIR}/knx.defconfig)   # e.g. CONFIG_KNX_LOG_LEVEL=1
+add_subdirectory(${KNSTAX_DIR} knstax)
+```
+
+Profiles are `host-test`, `full`, `tp1-small` and `tp1-standard`; `PROFILE` also takes the path
+of a fragment. A fragment is `CONFIG_KNX_X=value` lines; an unknown symbol or a value Kconfig
+rejects stops the configure step. The resolved configuration is written to
+`<build>/knx-config/knx.config`, and `cmake --build <build> --target knx_menuconfig` edits it.
+The older options (`-DKNX_FEATURE_NETIP=OFF`, `-DKNX_SECURE_ENABLED=OFF`, and the like) still work
+as overrides over the profile, but are deprecated. `BUILD_TESTS` and `KNX_BUILD_EXAMPLES` stay
+plain CMake options. Python 3 is needed at configure time.
+
 ### Requirements
 
 - GCC 13+, Clang 17+, AppleClang 16+ or MSVC 19.38+ (C++23)

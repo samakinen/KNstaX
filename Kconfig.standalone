@@ -1,0 +1,101 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2025-2026 Sami Mäkinen
+
+# Symbols that exist only in standalone CMake builds (host tests, bare metal).
+#
+# ESP-IDF reads `Kconfig` and nothing else, so none of this reaches it. The
+# standalone generator (tools/kconfig/knx_genconfig.py) reads
+# tools/kconfig/Kconfig.standalone.top, which sources `Kconfig` first and this
+# file second.
+#
+# Why this file exists
+# --------------------
+# `KNX_MEDIUM` in `Kconfig` is a choice: an ESP-IDF image is one medium. A host
+# build compiles TP1 *and* KNXnet/IP together (the suite exercises the couplers
+# between them) and a bare-metal device is TP1 only. So a standalone build
+# leaves KNX_MEDIUM at its default (TP1, which also keeps the TP1 menu visible)
+# and selects what is compiled with KNX_BUILD_TP1 and KNX_BUILD_NETIP below.
+# The generator refuses a standalone configuration that selects KNX_MEDIUM_IP.
+#
+# The coupler and tunnelling switches are the ESP-IDF symbols themselves
+# (KNX_ENABLE_COUPLER, KNX_ENABLE_TUNNELING): they are redefined here with a
+# second prompt gated on the standalone medium switches, because the originals
+# are only visible under the matching KNX_MEDIUM choice.
+
+menu "Standalone build (not seen by ESP-IDF)"
+
+    choice KNX_STANDALONE_PLATFORM
+        prompt "Platform"
+        default KNX_STANDALONE_PLATFORM_AUTO
+        help
+            Platform layer. AUTO picks the host platform CMake detects
+            (linux, macos or windows); a bare-metal build needs a toolchain
+            file for the target and must be selected explicitly.
+
+        config KNX_STANDALONE_PLATFORM_AUTO
+            bool "Detect the host platform"
+
+        config KNX_STANDALONE_PLATFORM_LINUX
+            bool "linux"
+
+        config KNX_STANDALONE_PLATFORM_MACOS
+            bool "macos"
+
+        config KNX_STANDALONE_PLATFORM_WINDOWS
+            bool "windows"
+
+        config KNX_STANDALONE_PLATFORM_BAREMETAL
+            bool "baremetal (single-threaded, no RTOS)"
+    endchoice
+
+    config KNX_BUILD_TP1
+        bool "Build the TP1 medium"
+        default y
+        help
+            Compile the TP1 data link layer. On the baremetal platform the
+            bit-bang backend is not built; the product adds its own.
+
+    config KNX_BUILD_NETIP
+        bool "Build the KNXnet/IP medium"
+        default y
+        help
+            Compile the KNXnet/IP medium. Independent of KNX_BUILD_TP1: a host
+            build has both.
+
+    config KNX_BUILD_VIRTUAL_BUS
+        bool "Build the virtual TP1 bus simulator"
+        default y
+        help
+            Host-test facility (virtual time, virtual bit-bang bus).
+
+    config KNX_BUILD_ETS_TOOLING
+        bool "Build the ETS import/migration tooling"
+        default y
+
+    config KNX_BUILD_TEST_HOOKS
+        bool "Build the mock TP1 physical entry points the host tests use"
+        default y
+
+    config KNX_BUILD_ZLIB
+        bool "Use zlib for KNXprog DEFLATE support, when found"
+        default y
+
+    # The ESP-IDF mbedtls component defines this one; standalone builds never
+    # ship mbedTLS 4, so it is simply off. Defined here so that the
+    # dependency in `Kconfig` refers to a symbol that exists.
+    config MBEDTLS_VER_4_X_SUPPORT
+        bool
+        default n
+
+    # Second definitions of two symbols from `Kconfig`: same type, visible in a
+    # standalone build whatever KNX_MEDIUM says.
+    config KNX_ENABLE_COUPLER
+        bool "Coupler group acknowledge"
+        depends on KNX_BUILD_TP1
+
+    config KNX_ENABLE_TUNNELING
+        bool "Enable Tunneling"
+        depends on KNX_BUILD_NETIP && !(KNX_ENABLE_SECURITY && MBEDTLS_VER_4_X_SUPPORT)
+        default y
+
+endmenu

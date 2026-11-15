@@ -182,24 +182,79 @@ else()
     cmake_minimum_required(VERSION 3.21)
     project(KNstaX VERSION ${KNX_VERSION_NUMERIC} LANGUAGES C CXX)
 
-    # KNX_PLATFORM=baremetal: a single-threaded target without an RTOS (see
-    # include/knx/platform/cooperative_platform.hpp). Host-only groups and
-    # media a small end device never links default to OFF; the product can
-    # still override any of them on the command line. KNX_PLATFORM must be
-    # given explicitly, with a toolchain file for the target.
-    if(DEFINED KNX_PLATFORM AND KNX_PLATFORM STREQUAL "baremetal")
-        foreach(_knx_off IN ITEMS KNX_SECURE_ENABLED KNX_ZLIB_ENABLED KNX_FEATURE_COUPLER
-                KNX_FEATURE_NETIP KNX_FEATURE_TUNNELING KNX_FEATURE_VIRTUAL_BUS
-                KNX_FEATURE_ETS_TOOLING KNX_ENABLE_TEST_HOOKS BUILD_TESTS)
-            if(NOT DEFINED ${_knx_off})
-                set(${_knx_off} OFF CACHE BOOL "Default for KNX_PLATFORM=baremetal")
-            endif()
-        endforeach()
+    # ========================================================================
+    # Configuration
+    #
+    # `Kconfig` (plus Kconfig.standalone) is the one schema; a profile under
+    # configs/profiles/ says what this build contains. A product calls
+    # knx_configure() before add_subdirectory(); a build that has not picks
+    # tp1-small for KNX_PLATFORM=baremetal (a single-threaded target without an
+    # RTOS, see include/knx/platform/cooperative_platform.hpp, which must be
+    # given explicitly with a toolchain file) and host-test otherwise. The
+    # legacy -DKNX_FEATURE_* / -DKNX_SECURE_ENABLED style options still work as
+    # overrides. See cmake/knx_config.cmake.
+    # ========================================================================
+    include("${CMAKE_CURRENT_LIST_DIR}/cmake/knx_config.cmake")
+    get_property(_knx_configured GLOBAL PROPERTY KNX_CONFIGURED SET)
+    if(NOT _knx_configured)
+        if(DEFINED KNX_PLATFORM AND KNX_PLATFORM STREQUAL "baremetal")
+            knx_configure(PROFILE tp1-small)
+        else()
+            knx_configure(PROFILE host-test)
+        endif()
+    endif()
+    if(NOT KNX_CONFIG_DIR)
+        set(KNX_CONFIG_DIR "${CMAKE_BINARY_DIR}/knx-config")
+    endif()
+    include("${KNX_CONFIG_DIR}/knx_config.cmake")
+
+    # The variables the rest of this file (and the product) read, derived from
+    # the resolved configuration.
+    macro(_knx_from_config var symbol)
+        if(CONFIG_${symbol})
+            set(${var} ON)
+        else()
+            set(${var} OFF)
+        endif()
+    endmacro()
+    _knx_from_config(KNX_SECURE_ENABLED KNX_ENABLE_SECURITY)
+    _knx_from_config(KNX_ZLIB_ENABLED KNX_BUILD_ZLIB)
+    _knx_from_config(KNX_FEATURE_TP1 KNX_BUILD_TP1)
+    _knx_from_config(KNX_FEATURE_NETIP KNX_BUILD_NETIP)
+    _knx_from_config(KNX_FEATURE_COUPLER KNX_ENABLE_COUPLER)
+    _knx_from_config(KNX_FEATURE_TUNNELING KNX_ENABLE_TUNNELING)
+    _knx_from_config(KNX_FEATURE_VIRTUAL_BUS KNX_BUILD_VIRTUAL_BUS)
+    _knx_from_config(KNX_FEATURE_ETS_TOOLING KNX_BUILD_ETS_TOOLING)
+    _knx_from_config(KNX_ENABLE_TEST_HOOKS KNX_BUILD_TEST_HOOKS)
+
+    if(CONFIG_KNX_STANDALONE_PLATFORM_BAREMETAL)
+        set(KNX_PLATFORM "baremetal")
+    elseif(CONFIG_KNX_STANDALONE_PLATFORM_LINUX)
+        set(KNX_PLATFORM "linux")
+    elseif(CONFIG_KNX_STANDALONE_PLATFORM_MACOS)
+        set(KNX_PLATFORM "macos")
+    elseif(CONFIG_KNX_STANDALONE_PLATFORM_WINDOWS)
+        set(KNX_PLATFORM "windows")
+    else()
+        # Detect the host platform.
+        if(WIN32 OR CYGWIN)
+            set(KNX_PLATFORM "windows")
+        elseif(APPLE)
+            set(KNX_PLATFORM "macos")
+        elseif(UNIX AND NOT APPLE)
+            set(KNX_PLATFORM "linux")
+        else()
+            message(FATAL_ERROR "Unknown platform. Please set CONFIG_KNX_STANDALONE_PLATFORM_* in the profile")
+        endif()
     endif()
 
-    option(KNX_SECURE_ENABLED "Enable KNX Secure features (mbedTLS AES + PBKDF2 required)" ON)
+    # The test suite is a host facility: a bare-metal build has no use for it
+    # unless asked (BUILD_TESTS is a build-tree choice, not device configuration).
+    if(KNX_PLATFORM STREQUAL "baremetal" AND NOT DEFINED BUILD_TESTS)
+        set(BUILD_TESTS OFF CACHE BOOL "Default for KNX_PLATFORM=baremetal")
+    endif()
+
     option(KNX_BUILD_EXAMPLES "Build standalone examples" OFF)
-    option(KNX_ZLIB_ENABLED "Enable optional zlib/DEFLATE support for the KNXprog importer" ON)
 
     include(CheckIncludeFileCXX)
     check_include_file_cxx("mbedtls/aes.h" HAVE_MBEDTLS_AES)
@@ -236,19 +291,7 @@ else()
     # Platform Selection
     # ========================================================================
 
-    # Detect platform if not specified
-    if(NOT DEFINED KNX_PLATFORM)
-        if(WIN32 OR CYGWIN)
-            set(KNX_PLATFORM "windows")
-        elseif(APPLE)
-            set(KNX_PLATFORM "macos")
-        elseif(UNIX AND NOT APPLE)
-            set(KNX_PLATFORM "linux")
-        else()
-            message(FATAL_ERROR "Unknown platform. Please specify -DKNX_PLATFORM=linux|macos|windows|baremetal")
-        endif()
-    endif()
-
+    # KNX_PLATFORM was resolved from the configuration above.
     message(STATUS "Building KNX Stack for platform: ${KNX_PLATFORM}")
     message(STATUS "")
     message(STATUS "Crypto Backends:")
@@ -266,23 +309,20 @@ else()
     # ------------------------------------------------------------------
     # Feature selection (standalone/host).
     #
-    # Host builds default to every medium ON because the test suite exercises
-    # TP1, KNXnet/IP and the couplers between them.  A host build can still
-    # opt out (-DKNX_FEATURE_NETIP=OFF) to reproduce a target-shaped link and
-    # verify that the TP1-only configuration really is self-contained.
+    # The KNX_FEATURE_* variables below come from the configuration (see
+    # "Configuration" above). The host-test profile has every medium ON
+    # because the test suite exercises TP1, KNXnet/IP and the couplers
+    # between them; a target-shaped link is another profile, or an overrides
+    # fragment (CONFIG_KNX_BUILD_NETIP=n).
     #
     # The shape the Habinari knxip image ships (TP1 off, KNXnet/IP and Secure
-    # on, no tunnelling client) is:
-    #   -DKNX_FEATURE_TP1=OFF -DKNX_FEATURE_TUNNELING=OFF
-    #   -DKNX_FEATURE_VIRTUAL_BUS=OFF -DKNX_ENABLE_TEST_HOOKS=OFF -DBUILD_TESTS=OFF
+    # on, no tunnelling client) is the overrides fragment:
+    #   CONFIG_KNX_BUILD_TP1=n
+    #   CONFIG_KNX_ENABLE_TUNNELING=n
+    #   CONFIG_KNX_BUILD_VIRTUAL_BUS=n
+    #   CONFIG_KNX_BUILD_TEST_HOOKS=n
+    # together with -DBUILD_TESTS=OFF.
     # ------------------------------------------------------------------
-    option(KNX_FEATURE_TP1 "Build the TP1 medium" ON)
-    option(KNX_FEATURE_COUPLER "Build the coupler group-acknowledge hook in the TP1 receive path; CONFIG_KNX_ENABLE_COUPLER on ESP-IDF" ON)
-    option(KNX_FEATURE_NETIP "Build the KNXnet/IP medium" ON)
-    option(KNX_FEATURE_TUNNELING "Build the KNXnet/IP client role (tunnelling, secure sessions); CONFIG_KNX_ENABLE_TUNNELING on ESP-IDF" ON)
-    option(KNX_FEATURE_VIRTUAL_BUS "Build the virtual TP1 bus simulator" ON)
-    option(KNX_FEATURE_ETS_TOOLING "Build the ETS import/migration tooling" ON)
-    option(KNX_ENABLE_TEST_HOOKS "Build the mock TP1 physical entry points the host tests use" ON)
 
     set(COMMON_SOURCES ${KNX_SOURCES_CORE})
 
@@ -374,8 +414,11 @@ else()
         ${PLATFORM_SOURCES}
     )
 
+    # The generated knx/autoconf.h (CONFIG_KNX_* macros) is on the public
+    # include path, so "knx/config.hpp" finds it in the library and in the product.
     target_include_directories(knx_core PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<BUILD_INTERFACE:${KNX_CONFIG_DIR}>
         $<INSTALL_INTERFACE:include>
     )
 
@@ -543,6 +586,10 @@ else()
         # Medium, mask version and master-data ids in the catalogue entry (pure Python).
         knx_add_test(test_exporter_medium
             COMMAND ${Python3_EXECUTABLE} ${KNXPROD_EXPORTER_DIR}/test_exporter_medium.py
+            LABELS script)
+        # Configuration generator: profiles resolve, bad fragments fail (pure Python).
+        knx_add_test(test_knx_genconfig
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/kconfig/test_knx_genconfig.py
             LABELS script)
 
         knx_add_test(test_frame_codec_errors SOURCES test/unit/test_frame_codec_errors.cpp LABELS unit)
@@ -1030,6 +1077,8 @@ if(NOT DEFINED IDF_PATH AND NOT COMMAND idf_component_register)
     )
 
     install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include/ DESTINATION include)
+    # The configuration the library was built with; config.hpp includes it.
+    install(FILES ${KNX_CONFIG_DIR}/knx/autoconf.h DESTINATION include/knx)
 
     install(EXPORT KNstaXTargets
         FILE KNstaXTargets.cmake

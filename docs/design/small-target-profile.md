@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | **Proposed**, 16 November 2026. Nothing here is implemented. |
+| Status | **Proposed**, 16 November 2026. Work item C1 (§9) is implemented, see "C1 status"; nothing else here is. |
 | Goal | KNstaX runs as a TP1 end device on a Cortex-M with **128 KiB of flash and 20 KiB of RAM**, and every other target chooses, at build time, the features and capacities it needs. |
 | Motivating product | H8i8o (GD32F103CB + TP-UART2), the only STM32-class TP-UART board available for testing. Its design is in the h8i8o repository, `docs/design/`. |
 | Builds on | [cortex-m-tpuart2-support.md](cortex-m-tpuart2-support.md): K1 (bare-metal build, done), K7 (compact profile, which this document replaces and extends), and the M1 measurement in its §9.1. |
@@ -308,6 +308,59 @@ bring-up do not depend on this work and proceed in parallel. They are needed for
 
 Each item is a separate change with its own measurement, so the effect of every step is on
 record in this document's history and in CI.
+
+### C1 status
+
+C1 is in: behaviour-neutral infrastructure. The host build's compile definitions are
+identical to those before it, and the size gate reports the same figures (flash 135585 B, RAM
+static 1772 B, heap high-water 66700 B). What landed:
+
+- Kconfiglib 14.1.0 (`kconfiglib.py` and `menuconfig.py`, ISC) vendored in `tools/kconfig/`,
+  with `knx_genconfig.py`, which resolves a top Kconfig and an ordered list of defconfig
+  fragments into `knx/autoconf.h`, `knx_config.cmake` and `knx.config`. It fails on an unknown
+  symbol, a malformed line, or a value Kconfig does not honour (out of range, or hidden by an
+  unmet dependency). Each fragment is held to its own assignments, so a later override that
+  turns a dependency off (no KNXnet/IP) may take a symbol set earlier (tunnelling) with it.
+- `Kconfig.standalone`, sourced only through `tools/kconfig/Kconfig.standalone.top`: the
+  platform, `KNX_BUILD_TP1`, `KNX_BUILD_NETIP`, `KNX_BUILD_VIRTUAL_BUS`,
+  `KNX_BUILD_ETS_TOOLING`, `KNX_BUILD_TEST_HOOKS` and `KNX_BUILD_ZLIB`. `Kconfig`, which
+  ESP-IDF reads, is unchanged.
+- `configs/profiles/`: `host-test` (what a host build was before), `full`, `tp1-small` and
+  `tp1-standard`. The last two select what is built and the log level only; capacities
+  arrive with C2.
+- `cmake/knx_config.cmake`: `knx_configure(PROFILE <name> [OVERRIDES <files>...])`, called
+  by a product before `add_subdirectory`, or by KNstaX itself with `tp1-small` (baremetal) or
+  `host-test`. A `knx_menuconfig` target edits the resolved configuration.
+- `config.hpp` and `log.hpp` include `knx/autoconf.h` when it exists, `sdkconfig.h`
+  otherwise.
+- The size gate is configured with `knx_configure(PROFILE tp1-small)`; its log level comes
+  from the profile.
+- The legacy options (`-DKNX_FEATURE_*`, `-DKNX_SECURE_ENABLED`, `-DKNX_ZLIB_ENABLED`,
+  `-DKNX_ENABLE_TEST_HOOKS`, `-DKNX_PLATFORM`) still work, as a generated override fragment.
+
+Deviations from §3:
+
+- **The medium.** `KNX_MEDIUM` is a choice in `Kconfig` (an ESP-IDF image is one medium); a
+  host build has TP1 and KNXnet/IP together. A standalone build leaves `KNX_MEDIUM` at TP1 and
+  selects what is compiled with `KNX_BUILD_TP1` and `KNX_BUILD_NETIP`; the generator refuses
+  `KNX_MEDIUM_IP` in that mode. `KNX_ENABLE_COUPLER` and `KNX_ENABLE_TUNNELING` are the ESP-IDF
+  symbols themselves, given a second definition in `Kconfig.standalone` that is visible
+  whenever the standalone switch for their medium is on.
+- **`config.hpp` still has some fallbacks.** `#error` replaces the default only where the
+  symbol has no dependency and is therefore defined by ESP-IDF as well: the RX task stack, the
+  group object payload, the restart time (`config.hpp`) and the log level (`log.hpp`). The
+  KNXnet/IP settings sit under the IP-medium menu, which an ESP-IDF TP1 image does not
+  define and a standalone build leaves hidden, so they keep their defaults. Bools that are
+  `n` are absent by design, so the feature macros keep "absent means off". The
+  `KNX_FEATURE_*` macros are still derived as §3.1 says.
+- **`full` is not `host-test`.** `host-test` is exactly the previous host default (the
+  identity C1 is gated on); `full` is every device feature without the virtual bus and the
+  test hooks, at log level 3.
+- **Tunnelling follows KNXnet/IP.** With KNXnet/IP off the tunnelling switch is off too, so
+  the tunnelling tests are no longer registered in a `-DKNX_FEATURE_NETIP=OFF` host build.
+  Before, they were registered there although they cannot build.
+- The legacy options are not announced with `message(DEPRECATION)`, which is silent by
+  default; the build prints one status line naming the options it applied.
 
 ## 10. Projection and decision points
 

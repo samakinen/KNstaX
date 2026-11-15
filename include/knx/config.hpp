@@ -6,12 +6,24 @@
  * @brief KNX Stack Configuration
  * 
  * This file contains compile-time configuration for the KNX stack.
- * Values can be overridden via Kconfig or build definitions.
+ * The values come from Kconfig: through sdkconfig.h on ESP-IDF, through the
+ * generated knx/autoconf.h in a standalone CMake build (knx_configure(), a
+ * profile under configs/profiles/). The media and feature flags may also be
+ * given as build definitions.
+ *
+ * A symbol that Kconfig defines without a dependency (the task stack, the group
+ * object payload, the restart time) is present in both and has no fallback
+ * here: a build without the configuration stops with #error rather than
+ * silently taking a number. Symbols under a menu that depends on the medium
+ * (the KNXnet/IP ones) are absent from an ESP-IDF TP1 image, and bools that are
+ * n are absent everywhere, so those keep a fallback.
  */
 
 #pragma once
 
-#if __has_include("sdkconfig.h")
+#if __has_include("knx/autoconf.h")
+#include "knx/autoconf.h"
+#elif __has_include("sdkconfig.h")
 #include "sdkconfig.h"
 #endif
 #include <cstddef>
@@ -36,7 +48,7 @@ namespace config {
 #ifdef CONFIG_KNX_RX_TASK_STACK_SIZE
     constexpr uint32_t RX_TASK_STACK_SIZE = CONFIG_KNX_RX_TASK_STACK_SIZE;
 #else
-    constexpr uint32_t RX_TASK_STACK_SIZE = 3072;
+#   error "CONFIG_KNX_RX_TASK_STACK_SIZE is not defined: build with the KNstaX configuration (ESP-IDF Kconfig, or knx_configure() in CMake)"
 #endif
 
 // ============================================================================
@@ -66,7 +78,7 @@ constexpr size_t MAX_APDU_LENGTH = 254;        // Maximum APDU length
 #ifdef CONFIG_KNX_MAX_GROUP_OBJECT_PAYLOAD_BYTES
 constexpr size_t MAX_GROUP_OBJECT_PAYLOAD_BYTES = CONFIG_KNX_MAX_GROUP_OBJECT_PAYLOAD_BYTES;
 #else
-constexpr size_t MAX_GROUP_OBJECT_PAYLOAD_BYTES = 16;
+#   error "CONFIG_KNX_MAX_GROUP_OBJECT_PAYLOAD_BYTES is not defined: build with the KNstaX configuration (ESP-IDF Kconfig, or knx_configure() in CMake)"
 #endif
 static_assert(MAX_GROUP_OBJECT_PAYLOAD_BYTES <= MAX_APDU_LENGTH,
               "A group object payload cannot exceed the maximum APDU");
@@ -91,9 +103,12 @@ static_assert(MAX_GROUP_OBJECT_PAYLOAD_BYTES <= MAX_APDU_LENGTH,
 #ifdef CONFIG_KNX_RESTART_PROCESS_TIME_S
 constexpr uint16_t RESTART_PROCESS_TIME_S = CONFIG_KNX_RESTART_PROCESS_TIME_S;
 #else
-constexpr uint16_t RESTART_PROCESS_TIME_S = 0;
+#   error "CONFIG_KNX_RESTART_PROCESS_TIME_S is not defined: build with the KNstaX configuration (ESP-IDF Kconfig, or knx_configure() in CMake)"
 #endif
 
+// The KNXnet/IP settings below live under the IP-medium menu, so an ESP-IDF TP1
+// image does not define them, and a standalone build leaves that menu hidden:
+// they keep their defaults.
 #ifdef CONFIG_KNX_IP_PORT
     constexpr uint16_t IP_PORT = CONFIG_KNX_IP_PORT;
 #else
@@ -129,7 +144,7 @@ constexpr uint16_t RESTART_PROCESS_TIME_S = 0;
 // ============================================================================
 
 // KNX_FEATURE_NETIP / KNX_FEATURE_TP1 are set by the build system (Kconfig in
-// ESP-IDF mode, CMake options in standalone mode) and gate whole media out of
+// ESP-IDF mode, the resolved profile in standalone mode) and gate whole media out of
 // the build, headers included.  The fallbacks below only apply to consumers
 // that compile a translation unit without the KNstaX build system, and they
 // deliberately default to "everything available" so such a build still works.
@@ -155,7 +170,7 @@ constexpr uint16_t RESTART_PROCESS_TIME_S = 0;
 // receive path (physical::GroupAckFilter): the hook in the receive ISR and the
 // plumbing to it. An end device never needs it, and the ISR is IRAM. Set by
 // the build system (CONFIG_KNX_ENABLE_COUPLER on ESP-IDF, the
-// KNX_FEATURE_COUPLER CMake option on a host build); the fallback follows the
+// KNX_FEATURE_COUPLER variable derived from CONFIG_KNX_ENABLE_COUPLER on a standalone build); the fallback follows the
 // same rule as the media flags.
 #ifndef KNX_FEATURE_COUPLER
 #  if defined(CONFIG_KNX_ENABLE_COUPLER)
@@ -185,7 +200,7 @@ constexpr uint16_t RESTART_PROCESS_TIME_S = 0;
 // tunnelling client, so an image that is only commissioned by ETS builds
 // without it and links none of that code; the public entry points that would
 // construct a client are absent, not stubbed. Set by the build system from
-// CONFIG_KNX_ENABLE_TUNNELING (ESP-IDF) or KNX_FEATURE_TUNNELING (host); the
+// CONFIG_KNX_ENABLE_TUNNELING (both ESP-IDF and standalone); the
 // fallback follows the same "everything available" contract as above.
 #ifndef KNX_IP_TUNNELING
 #  if defined(CONFIG_KNX_ENABLE_TUNNELING)

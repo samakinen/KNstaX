@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2025-2026 Sami Mäkinen
+
+# Top-level file of the standalone configuration: the ESP-IDF schema plus the
+# standalone-only symbols. Paths are relative to the KNstaX root, which the
+# generator sets as $srctree.
+
+mainmenu "KNstaX standalone configuration"
+
+source "Kconfig"
+source "Kconfig.standalone"
