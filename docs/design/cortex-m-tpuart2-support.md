@@ -271,6 +271,13 @@ passive, quiet bus):
 - `U_State.req` is answered by exactly one `U_State.ind` about 1.4 ms later: `07`, no flags,
   twelve times in a row.
 - `U_ProductID.req` (`20`) is answered with `41`.
+- Received frames (a second device on the bus, about 7 minutes): 10 standard frames, every FCS
+  correct, no octet errors. The chip passes each octet on **as it arrives from the bus**,
+  1.352–1.355 ms apart (one TP1 character, 13 bit times), not after the frame end. So the
+  destination and address type are known at octet index 5, and a 9-octet frame still has
+  three octets (about 4 ms) on the bus: room for the backend's acknowledge path (at most
+  `txQueueLimitOctets` = 4 queued, about 2.3 ms). The chip's actual deadline is still item 2.
+- Repeated frames come with CTRL bit 5 cleared, 15.9 ms after the previous copy started.
 
 **Size (tp1-small, Cortex-M3; the gate's measured image now carries the backend over a stub
 UART):**
