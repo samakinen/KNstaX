@@ -63,7 +63,7 @@ constexpr auto kTpProduct = makeCommissionedProduct(
             .applicationNumber  = 77,
             .applicationVersion = 1,
             .firmwareRevision   = 1,
-            .maxApduLength      = 254,
+            .maxApduLength      = knx::config::MAX_APDU_LENGTH,
         },
         PersistencePolicy{
             .namespacePrefix = "tp_policy",
@@ -216,7 +216,7 @@ constexpr auto kD9Product = makeCommissionedProduct(
             .applicationNumber  = 78,
             .applicationVersion = 1,
             .firmwareRevision   = 1,
-            .maxApduLength      = 254,
+            .maxApduLength      = knx::config::MAX_APDU_LENGTH,
         },
         PersistencePolicy{
             .namespacePrefix = "tp_dpt9",

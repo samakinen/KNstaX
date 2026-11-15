@@ -155,6 +155,9 @@ public:
     /// Additional Individual Addresses acknowledged besides the own one
     /// (tunnel addresses of a KNXnet/IP interface).
     static constexpr uint8_t MAX_ACK_INDIVIDUAL_ADDRESSES = 16;
+    static_assert(MAX_ACK_GROUP_ADDRESSES >= config::ADDRESS_TABLE_ENTRIES
+                      && MAX_ACK_INDIVIDUAL_ADDRESSES >= config::ADDITIONAL_INDIVIDUAL_ADDRESSES,
+                  "the ISR acknowledge tables must hold what the data link layer can publish");
 
     /// Tries for one send() before a frame that keeps losing bitwise
     /// arbitration is abandoned. Losing arbitration is normal bus access, not
@@ -287,7 +290,13 @@ public:
 
 private:
     // Full L_Data_Extended frame: 8-octet header + 254-octet APDU + check octet.
+    // The software bit-bang backend runs on ESP32 and host simulations, not on
+    // the small parts, so it stays sized for the longest frame whatever
+    // KNX_MAX_APDU_LENGTH is; the MAC layer drops anything above the
+    // configured length before it reaches the upper layers.
     static constexpr size_t MAX_TELEGRAM_SIZE = 263;
+    static_assert(MAX_TELEGRAM_SIZE >= config::MAX_TP1_FRAME_LENGTH,
+                  "the bit-bang telegram buffer must hold the configured longest frame");
     // Power of two so ring wrap-around is an AND mask and the free-running
     // 32-bit producer/consumer indices stay exact across overflow.
     static constexpr size_t MESSAGE_QUEUE_CAPACITY = 128;

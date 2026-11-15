@@ -347,6 +347,84 @@ menu "KNX Stack Configuration"
                 Oversized payloads are rejected, never truncated.
     endmenu
 
+    menu "Capacities"
+
+        # Not conditional on a medium: every build defines these, so config.hpp
+        # has no fallback for any of them. The defaults are the values the stack
+        # had before they were configurable. A capacity is a promise: when the
+        # table or queue is full the stack answers with an error (and the KNX
+        # negative response where one exists), never an overwrite.
+
+        config KNX_MAX_APDU_LENGTH
+            int "Maximum APDU length (octets)"
+            default 254
+            range 15 254
+            help
+                The largest APDU the device accepts and sends, which is also the
+                value it reports in PID_MAX_APDU_LENGTH. Every frame buffer, the
+                receive queues and the transport buffers are sized from it.
+
+                15 or less means standard frames only: a TP1 frame is then at
+                most 23 octets (03/02/02), and an extended frame addressed to the
+                device is dropped at the data link layer. Above 15 the buffers
+                are sized for an extended frame (APDU + 9 octets, 263 for 254).
+                A product's ProductIdentity::maxApduLength must not exceed it.
+
+        config KNX_TP1_RX_QUEUE_FRAMES
+            int "TP1 receive queue (frames)"
+            default 32
+            range 2 32
+            help
+                Frames the TP1 MAC layer buffers between the medium and the data
+                link layer, each sized for the longest frame. When it is nearly
+                full the device answers new frames with BUSY; if it is full a
+                frame already acknowledged is dropped and counted.
+
+        config KNX_TRANSPORT_RX_QUEUE
+            int "Transport layer receive queue (frames)"
+            default 8
+            range 1 8
+            help
+                Frames the transport layer queues for processing. A frame that
+                arrives while it is full is dropped and counted.
+
+        config KNX_ADDRESS_TABLE_ENTRIES
+            int "Group address table entries"
+            default 256
+            range 1 256
+            help
+                Capacity of the address table, and of the group address list the
+                data link layer filters on. ETS is told this size in the .knxprod;
+                a table that does not fit is refused with a negative response.
+
+        config KNX_ASSOCIATION_TABLE_ENTRIES
+            int "Association table entries"
+            default 512
+            range 1 512
+            help
+                Capacity of the association table. ETS is told this size in the
+                .knxprod; a table that does not fit is refused with a negative
+                response.
+
+        config KNX_ADDITIONAL_INDIVIDUAL_ADDRESSES
+            int "Additional individual addresses"
+            default 16
+            range 0 16
+            help
+                Individual addresses the data link layer answers to besides its
+                own (the tunnel addresses of a KNXnet/IP interface). 0 for an end
+                device. Setting more is refused with an error.
+
+        config KNX_SEND_PIPELINE_DEPTH
+            int "Send outcome queue depth"
+            default 8
+            range 1 8
+            help
+                Send outcomes the application layer holds for the application to
+                collect. When it is full the oldest outcome is dropped and
+                counted.
+    endmenu
+
     menu "Task Configuration"
         
         config KNX_RX_TASK_STACK_SIZE

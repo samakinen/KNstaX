@@ -93,8 +93,8 @@ enum class LDataService {
  */
 struct LDataFrame {
     // KNX TP1 constraints
-    static constexpr size_t MAX_APDU_SIZE = 254;  // Maximum data size per KNX spec
-    static constexpr size_t MAX_FRAME_SIZE = 256; // Max frame including header bytes
+    static constexpr size_t MAX_APDU_SIZE = config::MAX_APDU_LENGTH;  // KNX_MAX_APDU_LENGTH (254 at most per 03/02/02)
+    static constexpr size_t MAX_FRAME_SIZE = config::MAX_TPDU_LENGTH; // TPDU capacity: 2-byte header + MAX_APDU_SIZE
     bool standardFrame;      // True for standard, false for extended
     bool repeated;           // True = this frame is a repetition. The TP1/cEMI
                              // wire bit is inverted (1 = not repeated); the
@@ -113,7 +113,7 @@ struct LDataFrame {
     
     // TPDU (TPCI/APCI header + APDU payload bytes)
     // Canonical representation across the stack.
-    // Bounded to MAX_FRAME_SIZE (256 bytes): 2-byte header + 254-byte APDU.
+    // Bounded to MAX_FRAME_SIZE: 2-byte header + MAX_APDU_SIZE (256 at 254).
     util::FixedVector<uint8_t, MAX_FRAME_SIZE> tpdu;
     
     LDataFrame() 
@@ -165,7 +165,7 @@ struct LDataFrame {
             return false;
         }
 
-        // Check APDU payload size limit (254 bytes for TP1)
+        // Check APDU payload size limit (KNX_MAX_APDU_LENGTH)
         if (knx::protocol::tpduPayloadLength(tpdu) > MAX_APDU_SIZE) {
             return false;
         }
@@ -293,7 +293,7 @@ struct Tp1DataLinkConfig {
  */
 class Tp1DataLinkLayer {
 public:
-    static constexpr size_t MAX_GROUP_ADDRESSES = 256;
+    static constexpr size_t MAX_GROUP_ADDRESSES = config::ADDRESS_TABLE_ENTRIES;
 
     using ProgressState = util::OperationProgressState;
     using TxProgressState = util::OperationProgressState;
@@ -396,7 +396,7 @@ public:
     void setPromiscuousMode(PromiscuousMode mode);
 
     /// Maximum number of additional Individual Addresses.
-    static constexpr size_t MAX_ADDITIONAL_INDIVIDUAL_ADDRESSES = 16;
+    static constexpr size_t MAX_ADDITIONAL_INDIVIDUAL_ADDRESSES = config::ADDITIONAL_INDIVIDUAL_ADDRESSES;
 
     /**
      * @brief Individual Addresses this line assumes besides its own: the
@@ -651,8 +651,9 @@ private:
         uint32_t physicalOutcomeSequence{0};
         uint64_t retryNotBeforeMs{0};
         size_t length{0};
-        // Sized for a full L_Data_Extended frame: 8-byte header + 254-byte APDU + FCS.
-        std::array<uint8_t, 263> buffer{};
+        // Sized for the longest frame the configured APDU length allows: a full
+        // L_Data_Extended frame (263) at 254, a standard frame (23) at 15.
+        std::array<uint8_t, config::MAX_TP1_FRAME_LENGTH> buffer{};
         constexpr std::span<uint8_t> availableSpan() noexcept {return std::span<uint8_t>(buffer);} 
         constexpr std::span<uint8_t> filledSpan() noexcept {return std::span<uint8_t>(buffer).first(length);}
         constexpr std::span<const uint8_t> filledSpan() const noexcept {return std::span<const uint8_t>(buffer).first(length);}

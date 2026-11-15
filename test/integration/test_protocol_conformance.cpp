@@ -271,9 +271,10 @@ void test_memory_read_basic(void) {
 }
 
 void test_memory_read_max_length(void) {
-    // Maximum read length is 63 bytes per KNX spec
-    
-    TEST_ASSERT_EQUAL(63, MemoryService::MAX_MEMORY_BYTES);
+    // Maximum read length is 63 bytes per KNX spec, less what a short
+    // configured APDU cannot carry (address and count take 3 octets of it).
+    constexpr size_t kExpected = knx::config::MAX_APDU_LENGTH - 3u < 63u ? knx::config::MAX_APDU_LENGTH - 3u : 63u;
+    TEST_ASSERT_EQUAL(kExpected, MemoryService::MAX_MEMORY_BYTES);
     
     AddressSpace addrSpace;
     // Add region for testing
@@ -297,13 +298,13 @@ void test_memory_read_max_length(void) {
     });
     
     IndividualAddress source(1, 1, 1);
-    auto result63 = memService.handleReadRequest(source, 63, MemoryAddress(0x0000));
-    TEST_ASSERT_TRUE(result63.isOk());
-    TEST_ASSERT_EQUAL(63, responseData.size());
+    auto resultMax = memService.handleReadRequest(source, static_cast<uint8_t>(kExpected), MemoryAddress(0x0000));
+    TEST_ASSERT_TRUE(resultMax.isOk());
+    TEST_ASSERT_EQUAL(kExpected, responseData.size());
     
-    // Test that 64 bytes is rejected
-    auto result64 = memService.handleReadRequest(source, 64, MemoryAddress(0x0000));
-    TEST_ASSERT_FALSE(result64.isOk());
+    // One more than the maximum is rejected
+    auto resultOver = memService.handleReadRequest(source, static_cast<uint8_t>(kExpected + 1u), MemoryAddress(0x0000));
+    TEST_ASSERT_FALSE(resultOver.isOk());
 }
 
 void test_memory_write_basic(void) {

@@ -200,8 +200,11 @@ private:
 
     // An anonymous union leaves the slots unconstructed until an element is
     // placed in them; for trivial T it keeps the class trivially copyable.
+    // A zero capacity (a configured size of 0) still needs one slot, as a
+    // zero-length array is not standard C++; no element is ever constructed
+    // in it, because every insertion checks _size against Capacity first.
     union {
-        T _items[Capacity];
+        T _items[Capacity == 0 ? 1 : Capacity];
     };
     size_t _size{0};
 };

@@ -18,21 +18,29 @@
 
 #pragma once
 
+#include "knx/config.hpp"
+
 #include <cstdint>
 
 namespace knx {
 namespace objects {
 namespace tableseg {
 
-// Group address table (object index 1): count + 256 × 2-byte group address
-// (capacity matches AddressTableDomain::kMaxEntries).
+// Group address table (object index 1): count + KNX_ADDRESS_TABLE_ENTRIES ×
+// 2-byte group address (capacity matches AddressTableDomain::kMaxEntries).
+// A write that runs past the segment is refused by the memory service, with
+// the negative response of the service used.
 constexpr uint32_t kGroupAddressTableBase = 0x4000;
-constexpr uint32_t kGroupAddressTableSize = 2u + 256u * 2u;
+constexpr uint32_t kGroupAddressTableSize = 2u + static_cast<uint32_t>(config::ADDRESS_TABLE_ENTRIES) * 2u;
 
-// Association table (object index 2): count + 512 × 4-byte TSAP/ASAP entry
-// (capacity matches AssociationTableDomain::kMaxEntries).
+// Association table (object index 2): count + KNX_ASSOCIATION_TABLE_ENTRIES ×
+// 4-byte TSAP/ASAP entry (capacity matches AssociationTableDomain::kMaxEntries).
 constexpr uint32_t kAssociationTableBase = 0x4400;
-constexpr uint32_t kAssociationTableSize = 2u + 512u * 4u;
+constexpr uint32_t kAssociationTableSize = 2u + static_cast<uint32_t>(config::ASSOCIATION_TABLE_ENTRIES) * 4u;
+static_assert(kGroupAddressTableBase + kGroupAddressTableSize <= kAssociationTableBase,
+              "the group address segment must not run into the association segment");
+static_assert(kAssociationTableBase + kAssociationTableSize <= 0x5000u,
+              "the association segment must not run into the group object segment");
 
 // Group object table (object index 3): count + 256 × 2-byte descriptor
 // (capacity matches GroupObjectTableDomain::kMaxObjects). Content is accepted

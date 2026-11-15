@@ -40,7 +40,7 @@ constexpr auto kCompilerSwitchDefinition =
             .applicationNumber = 1,
             .applicationVersion = 1,
             .firmwareRevision = 1,
-            .maxApduLength = 254,
+            .maxApduLength = knx::config::MAX_APDU_LENGTH,
         },
         PersistencePolicy{
             .namespacePrefix = "tp1_switch",
@@ -94,7 +94,7 @@ constexpr auto kCompilerThermostatDefinition =
             .applicationNumber = 2,
             .applicationVersion = 1,
             .firmwareRevision = 3,
-            .maxApduLength = 254,
+            .maxApduLength = knx::config::MAX_APDU_LENGTH,
         },
         PersistencePolicy{
             .namespacePrefix = "tp1_thermostat",
@@ -114,6 +114,18 @@ static_assert(kCompiledThermostat.exportDescriptor.communicationObjects[2].logic
 
 void setUp(void) {}
 void tearDown(void) {}
+
+// The product's APDU length is the one source for the device (PID_MAX_APDU_LENGTH)
+// and the export, and it never exceeds the configured KNX_MAX_APDU_LENGTH
+// (makeEndpointDefinition() fails to compile for a constexpr product that does).
+void test_product_maxapdulength_is_one_value_within_the_configured_maximum(void)
+{
+    static_assert(ProductIdentity{}.maxApduLength == knx::config::MAX_APDU_LENGTH,
+                  "an unset maxApduLength is the configured maximum");
+    constexpr auto compiled = compileEndpointDefinition(kCompilerSwitchDefinition);
+    TEST_ASSERT_TRUE(compiled.identity.maxApduLength <= knx::config::MAX_APDU_LENGTH);
+    TEST_ASSERT_EQUAL_UINT16(compiled.identity.maxApduLength, compiled.exportDescriptor.identity.maxApduLength);
+}
 
 void test_product_compiler_derives_runtime_descriptor_set_from_definition(void)
 {
@@ -177,6 +189,7 @@ void test_product_compiler_export_descriptor_roundtrips_through_existing_exporte
 int main(void)
 {
     UNITY_BEGIN();
+    RUN_TEST(test_product_maxapdulength_is_one_value_within_the_configured_maximum);
     RUN_TEST(test_product_compiler_derives_runtime_descriptor_set_from_definition);
     RUN_TEST(test_product_compiler_uses_one_compiled_source_for_runtime_and_export_metadata);
     RUN_TEST(test_product_compiler_export_descriptor_roundtrips_through_existing_exporter_pipeline);

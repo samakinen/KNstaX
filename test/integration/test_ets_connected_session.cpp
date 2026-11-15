@@ -495,6 +495,53 @@ void test_full_ets_commissioning_sequence_with_verify_mode(void) {
     downloadLikeEts(true);
 }
 
+// Capacity: the group address table segment is KNX_ADDRESS_TABLE_ENTRIES long.
+// A write that runs past its end is refused with the negative A_Memory_Response
+// (count 0) and changes nothing; a count above the capacity is a failed load
+// (load state Error), not a truncated table.
+void test_group_address_segment_refuses_what_does_not_fit(void) {
+    assignAddressLikeEts();
+    injectTpdu(kEtsAddress, kCommissionedAddress.raw, AddressType::Individual,
+               std::vector<uint8_t>{0x80});  // T_Connect
+    (void)pumpAndCollect();
+    uint8_t seq = 0;
+    auto sent = connectedRequest(seq++, application::APCIService::AuthorizeRequest, 0,
+                                 {0x00, 0xFF, 0xFF, 0xFF, 0xFF});
+    TEST_ASSERT_NOT_NULL(findResponse(sent, kFullMask,
+        static_cast<uint16_t>(application::APCIService::AuthorizeResponse)));
+    // Verify Mode on, so a refused A_Memory_Write is answered.
+    sent = connectedRequest(seq++, application::APCIService::PropertyValueWrite, 0,
+                            {0x00, 0x0E, 0x10, 0x01, 0x04});
+    TEST_ASSERT_NOT_NULL(findResponse(sent, kFullMask,
+        static_cast<uint16_t>(application::APCIService::PropertyValueResponse)));
+    sent = connectedRequest(seq++, application::APCIService::PropertyValueWrite, 0,
+                            {0x01, 0x05, 0x10, 0x01, 0x01});  // StartLoading, Group Address Table
+
+    const uint32_t base = objects::tableseg::kGroupAddressTableBase;
+    const uint32_t end = base + objects::tableseg::kGroupAddressTableSize;
+    TEST_ASSERT_EQUAL_UINT32(2u + 2u * config::ADDRESS_TABLE_ENTRIES,
+                             objects::tableseg::kGroupAddressTableSize);
+
+    // Two octets starting at the segment's last octet: one inside, one outside.
+    const uint32_t last = end - 1u;
+    sent = connectedRequest(seq++, application::APCIService::MemoryWrite, 2,
+                            {static_cast<uint8_t>(last >> 8), static_cast<uint8_t>(last & 0xFFu), 0xAA, 0xBB});
+    const auto* refused = findResponse(sent, kGroupMask,
+        static_cast<uint16_t>(application::APCIService::MemoryResponse));
+    TEST_ASSERT_NOT_NULL(refused);
+    TEST_ASSERT_EQUAL_HEX16(0x240u, refused->apci);  // count 0: the negative response
+
+    // An entry count of capacity + 1 followed by LoadCompleted.
+    const uint16_t tooMany = static_cast<uint16_t>(config::ADDRESS_TABLE_ENTRIES + 1u);
+    sent = connectedRequest(seq++, application::APCIService::MemoryWrite, 2,
+                            {static_cast<uint8_t>(base >> 8), static_cast<uint8_t>(base & 0xFFu),
+                             static_cast<uint8_t>(tooMany >> 8), static_cast<uint8_t>(tooMany & 0xFFu)});
+    sent = connectedRequest(seq++, application::APCIService::PropertyValueWrite, 0,
+                            {0x01, 0x05, 0x10, 0x01, 0x02});  // LoadCompleted
+    TEST_ASSERT_EQUAL_UINT16(0u, gBau->addressTable().entryCount());
+    TEST_ASSERT_EQUAL_UINT8(objects::loadstate::kError, gBau->addressTable().loadState());
+}
+
 // The same services on the wrong communication mode are not executed: a
 // broadcast A_Memory_Write and a group-addressed A_PropertyValue_Write reach
 // the device (promiscuous link layer) but change nothing.
@@ -1117,10 +1164,11 @@ void test_routing_group_factory_reset_without_ia_keeps_it(void) {
 #endif  // KNX_FEATURE_NETIP
 
 /**
- * Three ctest entries run this binary, one group each, so that no single entry
+ * Four ctest entries run this binary, one group each, so that no single entry
  * spends its whole timeout pumping a sequence of connected requests:
- * "session" (download, master reset, sequence numbers), "keys" (A_Key_Write)
- * and "routing" (PID_ROUTING_MULTICAST_ADDRESS). No argument runs everything.
+ * "session" (download, master reset, sequence numbers), "capacity" (a table
+ * segment that does not fit), "keys" (A_Key_Write) and "routing"
+ * (PID_ROUTING_MULTICAST_ADDRESS). No argument runs everything.
  */
 int main(int argc, char** argv) {
     const std::string group = argc > 1 ? argv[1] : "all";
@@ -1144,6 +1192,10 @@ int main(int argc, char** argv) {
         RUN_TEST(test_ets_prologue_numbers_every_response_in_order);
         RUN_TEST(test_lost_ack_does_not_freeze_send_sequence);
         RUN_TEST(test_requests_are_acked_with_their_own_sequence_number);
+    }
+    // Runs under any configured capacity, unlike "session" (see needs-full-capacity).
+    if (all || group == "capacity") {
+        RUN_TEST(test_group_address_segment_refuses_what_does_not_fit);
     }
     if (all || group == "keys") {
         RUN_TEST(test_unkeyed_device_authorises_every_key_at_level_zero);

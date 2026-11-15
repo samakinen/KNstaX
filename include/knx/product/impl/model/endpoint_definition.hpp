@@ -13,10 +13,12 @@
 #pragma once
 
 #include "knx/application/dpt.hpp"
+#include "knx/config.hpp"
 #include "knx/product/product_api_types.hpp"
 #include "knx/types.hpp"
 
 #include <array>
+#include <cstdlib>
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
@@ -60,7 +62,11 @@ struct ProductIdentity {
     uint16_t applicationNumber{0};
     uint16_t applicationVersion{0};
     uint8_t firmwareRevision{0};
-    uint16_t maxApduLength{254};
+    /// Reported in PID_MAX_APDU_LENGTH and written to the .knxprod. Must not
+    /// exceed CONFIG_KNX_MAX_APDU_LENGTH, the largest APDU this build's buffers
+    /// hold (makeEndpointDefinition() and start() refuse a larger value).
+    /// Defaults to that configured maximum.
+    uint16_t maxApduLength{static_cast<uint16_t>(config::MAX_APDU_LENGTH)};
 
     // Hardware identity. These feed both the device's PID_HARDWARE_TYPE /
     // PID_ORDER_INFO / PID_VERSION *and* the generated knxprod's
@@ -347,12 +353,30 @@ struct EndpointDefinition {
     SecurityPolicy security{};
 };
 
+namespace detail {
+
+/// Not constexpr: calling it while a product definition is constant-evaluated is
+/// a compile error, and its name says why. It is only ever called from an
+/// `if consteval` branch, so it never runs.
+inline void product_identity_maxApduLength_exceeds_CONFIG_KNX_MAX_APDU_LENGTH() {}
+
+}  // namespace detail
+
 template <typename PortIdEnum, typename... Ports>
 constexpr auto makeEndpointDefinition(ProductIdentity identity,
                                       PersistencePolicy persistence,
                                       SecurityPolicy security = {})
     -> EndpointDefinition<PortIdEnum, Ports...>
 {
+    // The value comes from the product, the ceiling from the configuration
+    // (small-target-profile.md §5). A `constexpr` product definition fails to
+    // compile here. One built at run time is refused by start() with
+    // InvalidParameter, an error the product can report, rather than a crash.
+    if (identity.maxApduLength > config::MAX_APDU_LENGTH) {
+        if consteval {
+            detail::product_identity_maxApduLength_exceeds_CONFIG_KNX_MAX_APDU_LENGTH();
+        }
+    }
     return EndpointDefinition<PortIdEnum, Ports...>{
         .identity = identity,
         .persistence = persistence,

@@ -32,7 +32,7 @@ constexpr auto kDimmerDefinition = makeEndpointDefinition<
         .applicationNumber = 10,
         .applicationVersion = 1,
         .firmwareRevision = 1,
-        .maxApduLength = 254,
+        .maxApduLength = knx::config::MAX_APDU_LENGTH,
     },
     PersistencePolicy{
         .namespacePrefix = "test_dimmer",
@@ -61,7 +61,7 @@ constexpr auto kSensorDefinition = makeEndpointDefinition<
         .applicationNumber = 11,
         .applicationVersion = 1,
         .firmwareRevision = 1,
-        .maxApduLength = 254,
+        .maxApduLength = knx::config::MAX_APDU_LENGTH,
     },
     PersistencePolicy{
         .namespacePrefix = "test_sensor",

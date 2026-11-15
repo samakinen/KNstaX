@@ -15,6 +15,7 @@
 #pragma once
 
 #include "knx/application/dpt.hpp"
+#include "knx/config.hpp"
 #include "knx/application/property.hpp"
 #include "knx/product/product_api_types.hpp"
 #include "knx/types.hpp"
@@ -90,6 +91,9 @@ struct ExportProductIdentity {
     uint16_t hardwareSerialNumber{1};
     uint8_t hardwareVersion{1};
     std::string_view orderNumber{};
+    /// What the device reports in PID_MAX_APDU_LENGTH: the product's value, which
+    /// never exceeds the firmware's configured KNX_MAX_APDU_LENGTH.
+    uint16_t maxApduLength{static_cast<uint16_t>(config::MAX_APDU_LENGTH)};
 };
 
 struct ExportCommunicationObjectDescriptor {

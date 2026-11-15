@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | **Proposed**, 16 November 2026. Work item C1 (§9) is implemented, see "C1 status"; nothing else here is. |
+| Status | **Proposed**, 16 November 2026. Work items C1 and C2 (§9) are implemented, see "C1 status" and "C2 status"; nothing else here is. |
 | Goal | KNstaX runs as a TP1 end device on a Cortex-M with **128 KiB of flash and 20 KiB of RAM**, and every other target chooses, at build time, the features and capacities it needs. |
 | Motivating product | H8i8o (GD32F103CB + TP-UART2), the only STM32-class TP-UART board available for testing. Its design is in the h8i8o repository, `docs/design/`. |
 | Builds on | [cortex-m-tpuart2-support.md](cortex-m-tpuart2-support.md): K1 (bare-metal build, done), K7 (compact profile, which this document replaces and extends), and the M1 measurement in its §9.1. |
@@ -362,15 +362,111 @@ Deviations from §3:
 - The legacy options are not announced with `message(DEPRECATION)`, which is silent by
   default; the build prints one status line naming the options it applied.
 
+### C2 status
+
+C2 is in: the capacities of §4.2 are Kconfig symbols (menu "Capacities", defined in every build, so
+`config.hpp` has no fallback for them) with the per-profile values of §4.2. The ESP-IDF defaults and
+the `host-test` and `full` profiles carry the values the stack had before: 254, 32, 8, 256, 512, 16,
+8 and, for the group object payload, 16. Every new symbol is in `Kconfig` with that default, so an
+ESP-IDF build is unchanged (it could not be built here).
+
+How each value is used:
+
+- `KNX_MAX_APDU_LENGTH` replaces `config::MAX_APDU_LENGTH`. Every buffer derived from it follows:
+  the TPDU in `LDataFrame` and `TDataFrame`, transport and application buffers, the management
+  response, the memory service limit (`min(63, APDU - 3)`), and the frame size. A TP1 frame is the APDU
+  length plus the fixed octets of 03/02/02 §2.2: a standard frame (CTRL, source, destination, length
+  octet, TPDU of length + 1, FCS) is length + 8 octets, 23 for 15; an extended frame adds CTRLE and is
+  length + 9, 263 for 254. `config::MAX_TP1_FRAME_LENGTH` is that, and the TX buffer of the data
+  link layer and the receive ring slot of `Tp1MacPhysical` use it.
+- The queue and table symbols size `Tp1MacPhysical`, `TransportLayer`, `AddressTableDomain`,
+  `AssociationTableDomain`, `Tp1DataLinkLayer` (group list, additional addresses) and the A_send
+  outcome queue. The memory-mapped table segments (`table_segments.hpp`) are sized from the table
+  capacities, so a write past the end is refused by the memory service with the negative
+  A_Memory_Response. `FixedVector` accepts a capacity of 0 (additional addresses on an end device).
+- The busy reserve of the receive ring is an eighth of the queue, at least one frame (4 of 32, as before).
+
+What a full capacity does (rule 2). Already errors and left as they were: address table add
+(`OutOfRange`), association add (`ResourceUnavailable`), data link group list and additional
+addresses (`BufferTooSmall`), transport queue (drop and count), send outcome queue (drops the oldest and
+counts, a diagnostic feed by design). Fixed: a loaded table segment whose count exceeds the capacity
+was truncated with a warning; it is now refused and the table's load state becomes Error (03/05/01
+§4.23), which ETS reads as a failed download. The frame decoder ignored the result of copying the TPDU;
+a frame longer than the configured maximum is now `InvalidFrameSize` (counted in `decodeFailed`), and
+`Tp1MacPhysical` drops and counts it (`rxOversizedDrops()`), and counts queue overflow
+(`rxQueueOverflowDrops()`). A property read whose value does not fit the APDU is answered with the
+negative response instead of being built and dropped. Each capacity has a host test that fills it to the
+configured value and checks the next one is refused (`test_address_association_tables`,
+`test_datalink_edge_cases`, `test_tp1_mac_physical`, `test_transport_connection`,
+`test_application_layer`, `test_ets_connected_session_capacity`).
+
+Values from the product (§5). `ProductIdentity::maxApduLength` defaults to the configured maximum and
+must not exceed it. A `static_assert` cannot see it, because the identity is a value member of the
+endpoint definition and not part of its type; `makeEndpointDefinition()` is `constexpr` and calls a
+non-`constexpr` function when the value is too large, so a `constexpr` product fails to compile (the
+function's name says why), and `EndpointRuntime::start` returns `InvalidParameter` for a definition built
+at run time. The device reports the product's value in `PID_MAX_APDU_LENGTH`; `DeviceObject` clamps to the
+configured maximum. The exporter's table ceilings were already `kMaxEntries`, hence the configured
+values; it now also reports `maxApduLength` (JSON `capacities`, XML `<MaxApduLength>`).
+
+Deviations and notes:
+
+- **`Tp1MacPhysical::MAX_RX_FRAME_SIZE` was 256 and is now 263 at the full APDU length.** An extended frame
+  of 257 to 263 octets was dropped as oversized: a latent bug, fixed by deriving the size.
+- The software bit-bang drivers stay sized for 263 octets, 256 group addresses and 16 additional
+  addresses; they run on ESP32 and in host simulation, not on the small parts. `static_assert`s check that
+  they hold the configured sizes, and the MAC drops longer frames before the upper layers.
+- The oversized responses of the extended services (`A_PropertyExt*`, function property) that do not fit
+  the APDU are still logged and dropped in `management_server.cpp`; they belong to C3, which gates those
+  services out of `tp1-small`.
+- Every `host-small` failure was a test that assumed the full capacity; none was a defect in the stack.
+  Three expectations (device object default, address table size, memory read limit) are now written
+  against the configuration. The stack fixes above were found by reading the full-capacity paths.
+
+Host suite: `host-test` 153 of 153 (the 152 of before plus the `test_ets_connected_session_capacity`
+group). `host-small` (`-DKNX_HOST_PROFILE=host-small`, `host-small.defconfig`: the host features with
+the `tp1-small` capacities) excludes tests labelled `needs-full-capacity` and passes 140 of 140; 13
+entries carry the label, each failing for a size reason, not a defect:
+
+| Test | Why it needs the full capacity |
+|---|---|
+| `test_product_commissioned_surface` | Tool Key (16 octets) writes and answers exceed a 15-octet APDU |
+| `test_bau_preinit_configuration` | the same Tool Key |
+| `test_bau_onwire` | Data Secure sync frames and Tool Key operations exceed the APDU |
+| `test_data_secure_virtual_tp1` | secured management frames (counter, MAC) exceed the APDU |
+| `test_ets_connected_session` (group `session`) | master-reset tests write a 16-octet Tool Key |
+| `test_ets_connected_session_routing` | the routing group written by serial number does not fit a standard frame |
+| `test_knx_stack_e2e` | the 15-octet extended property description answer does not fit |
+| `test_interface_object_manager`, `test_interface_object_manager_persistence` | the 16-octet KNXnet/IP backbone key does not fit the property buffer |
+| `test_memory_service` | A_MemoryExtended writes and reads of 76 octets |
+| `test_filter_table_type3_download` | router frames longer than 23 octets |
+| `test_tp1_ip_interface`, `test_tp1_ip_interface_bridge` | a bridge needs additional individual addresses (tunnel addresses); `KNX_ADDITIONAL_INDIVIDUAL_ADDRESSES` is 0 |
+
+Size gate, `tp1-small`, same reference device (60 objects, `maxApduLength = 15`), before C2 and after:
+
+| | C1 | C2 |
+|---|---:|---:|
+| KNstaX flash | 135 585 B | **134 995 B** |
+| KNstaX RAM, static | 1 772 B | **1 772 B** |
+| Heap high-water after `startCommissionedProduct()` | 66 700 B | **42 500 B** |
+| Static + heap | 68 472 B | **44 272 B** |
+
+Allocation profile after C2 (`alloc <count> x <bytes>`): 61 x 248, 12 184, 3 056, 2 944, 1 808, 1 224,
+1 040, 528, 488, 416, 384, 344 (the 8 488 B receive ring of `Tp1MacPhysical` is no longer among them; the
+largest remaining items are the group objects at 15 128 B and the product runtime at 12 184 B, which are
+S1 and S2). The saving is 24.2 KB of RAM and 0.6 KB of flash. The flash figure barely moves because the
+capacities size storage, not code.
+
 ## 10. Projection and decision points
 
 Estimated `tp1-small` figures for the 60-object reference device after each stage. Only the
 first row is measured.
 
-| After | Flash (KNstaX) | RAM (KNstaX) |
-|---|---:|---:|
-| Today (M1) | 132 KiB, measured | 67 KiB, measured |
-| C2 + C3 | about 115 KiB | about 30 KiB |
+| After | Flash (KNstaX) | RAM (KNstaX) | Measured |
+|---|---:|---:|---|
+| Today (M1) | 132 KiB, measured | 67 KiB, measured | |
+| C2 | | | 131.8 KiB flash, 43.2 KiB RAM (1.7 static + 41.5 heap) |
+| C2 + C3 | about 115 KiB | about 30 KiB | |
 | S1 | about 88 KiB | about 18 KiB |
 | S2 + S3 + S4 | about 80–85 KiB | about 8–10 KiB |
 

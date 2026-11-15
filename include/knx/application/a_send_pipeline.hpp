@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include "knx/config.hpp"
 #include "knx/types.hpp"
 #include "knx/application/apci_services.hpp"
 #include "knx/transport/transport_layer.hpp"
@@ -132,7 +133,7 @@ private:
     IndividualAddress _ownAddress{0};
     bool _open{false};
 
-    static constexpr size_t TX_OUTCOME_QUEUE_CAPACITY = 8u;
+    static constexpr size_t TX_OUTCOME_QUEUE_CAPACITY = config::SEND_PIPELINE_DEPTH;  // KNX_SEND_PIPELINE_DEPTH
     std::array<ASendOutcome, TX_OUTCOME_QUEUE_CAPACITY> _txOutcomeQueue{};
     size_t _txOutcomeQueueHead{0};
     size_t _txOutcomeQueueCount{0};

@@ -401,6 +401,79 @@ void test_maximum_data_payload(void) {
     }
 }
 
+// Capacity: the group address list holds KNX_ADDRESS_TABLE_ENTRIES addresses;
+// the next one is refused with an error, and nothing is overwritten.
+void test_group_address_capacity_is_a_promise(void) {
+    constexpr size_t kCapacity = datalink::Tp1DataLinkLayer::MAX_GROUP_ADDRESSES;
+    TEST_ASSERT_EQUAL_UINT(config::ADDRESS_TABLE_ENTRIES, kCapacity);
+    dlLayer->clearGroupAddresses();
+    for (size_t i = 0; i < kCapacity; ++i) {
+        TEST_ASSERT_TRUE(dlLayer->addGroupAddress(GroupAddress(static_cast<uint16_t>(0x0800u + i))).isOk());
+    }
+    const auto refused = dlLayer->addGroupAddress(GroupAddress(0x7000u));
+    TEST_ASSERT_TRUE(refused.isError());
+    TEST_ASSERT_EQUAL(static_cast<int>(util::ErrorCode::BufferTooSmall), static_cast<int>(refused.error()));
+    // An address already in the list is still accepted (it takes no new slot),
+    // and removing one makes room.
+    TEST_ASSERT_TRUE(dlLayer->addGroupAddress(GroupAddress(0x0800u)).isOk());
+    TEST_ASSERT_TRUE(dlLayer->removeGroupAddress(GroupAddress(0x0800u)).isOk());
+    TEST_ASSERT_TRUE(dlLayer->addGroupAddress(GroupAddress(0x7000u)).isOk());
+    TEST_ASSERT_TRUE(dlLayer->addGroupAddress(GroupAddress(0x7001u)).isError());
+}
+
+// Capacity: KNX_ADDITIONAL_INDIVIDUAL_ADDRESSES (0 on an end device).
+void test_additional_individual_address_capacity_is_a_promise(void) {
+    constexpr size_t kCapacity = datalink::Tp1DataLinkLayer::MAX_ADDITIONAL_INDIVIDUAL_ADDRESSES;
+    TEST_ASSERT_EQUAL_UINT(config::ADDITIONAL_INDIVIDUAL_ADDRESSES, kCapacity);
+    std::vector<IndividualAddress> addresses;
+    for (size_t i = 0; i < kCapacity; ++i) {
+        addresses.emplace_back(static_cast<uint16_t>(0x1100u + i));
+    }
+    TEST_ASSERT_TRUE(dlLayer->setAdditionalIndividualAddresses(addresses).isOk());
+    addresses.emplace_back(static_cast<uint16_t>(0x1100u + kCapacity));
+    const auto refused = dlLayer->setAdditionalIndividualAddresses(addresses);
+    TEST_ASSERT_TRUE(refused.isError());
+    TEST_ASSERT_EQUAL(static_cast<int>(util::ErrorCode::BufferTooSmall), static_cast<int>(refused.error()));
+}
+
+// Capacity: a frame longer than KNX_MAX_APDU_LENGTH is refused at the data link
+// layer, not truncated, not delivered, and counted. Only meaningful when the
+// configured maximum is below the 254-octet extended-frame limit.
+void test_frame_longer_than_the_configured_apdu_is_dropped_and_counted(void) {
+    if (config::MAX_APDU_LENGTH >= 254u) {
+        return;  // every frame the wire can carry fits
+    }
+    dlLayer->clearGroupAddresses();
+    TEST_ASSERT_TRUE(dlLayer->addGroupAddress(GroupAddress(8, 8, 8)).isOk());
+
+    const size_t tpduLength = config::MAX_TPDU_LENGTH + 1u;  // one octet too many
+    std::vector<uint8_t> raw;
+    raw.push_back(0x3Cu);                    // extended frame, low priority, not repeated
+    raw.push_back(0xE0u);                    // group address, hop count 6
+    raw.push_back(0x11u); raw.push_back(0x14u);   // source 1.1.20
+    raw.push_back(0x40u); raw.push_back(0x08u);   // destination group address
+    raw.push_back(static_cast<uint8_t>(tpduLength - 1u));
+    raw.push_back(0x00u);
+    raw.push_back(0x80u);
+    while (raw.size() < 7u + tpduLength) {
+        raw.push_back(0x11u);
+    }
+    uint8_t checksum = 0xFFu;
+    for (const uint8_t b : raw) {
+        checksum ^= b;
+    }
+    raw.push_back(checksum);
+
+    const auto before = dlLayer->getStatistics();
+    physicalLayer->injectFrame(raw);
+    const auto after = dlLayer->getStatistics();
+    {
+        std::lock_guard<std::mutex> lock(rxMutex);
+        TEST_ASSERT_EQUAL_INT(0, rxCallbackCount);
+    }
+    TEST_ASSERT_EQUAL_UINT32(before.decodeFailed + 1u, after.decodeFailed);
+}
+
 // L2 duplication prevention (03_02_02 §2.3): a repetition of the directly
 // preceding correctly received frame must be indicated to the user only once.
 // Without this, a device answers an L2-repeated IndividualAddress_Read
@@ -479,6 +552,9 @@ int run_all_datalink_edge_case_tests(void) {
     RUN_TEST(test_empty_data_payload);
     RUN_TEST(test_maximum_data_payload);
     RUN_TEST(test_repeated_frame_delivered_only_once);
+    RUN_TEST(test_group_address_capacity_is_a_promise);
+    RUN_TEST(test_additional_individual_address_capacity_is_a_promise);
+    RUN_TEST(test_frame_longer_than_the_configured_apdu_is_dropped_and_counted);
     return UNITY_END();
 }
 

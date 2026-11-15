@@ -24,6 +24,12 @@ OUT_DIR = Path(
     )
 )
 
+# The firmware's configured capacities (Kconfig "Capacities"), handed in by CMake:
+# the exporter must tell ETS the sizes the device was built with.
+ADDRESS_TABLE_ENTRIES = int(os.environ.get('KNX_CONFIG_ADDRESS_TABLE_ENTRIES', '256'))
+ASSOCIATION_TABLE_ENTRIES = int(os.environ.get('KNX_CONFIG_ASSOCIATION_TABLE_ENTRIES', '512'))
+MAX_APDU_LENGTH = int(os.environ.get('KNX_CONFIG_MAX_APDU_LENGTH', '254'))
+
 EXPECTED_EXPORTS = {
     'pilot_a': {
         'profile_key': 'pilot_a_tp1_actuator',
@@ -43,8 +49,11 @@ EXPECTED_EXPORTS = {
             # Stack-wide table ceilings, not per-product counts: what ETS reads
             # as the number of group addresses and associations the device can
             # take. They come from the address/association table domains.
-            'addressTableMaxEntries': 256,
-            'associationTableMaxEntries': 512,
+            'addressTableMaxEntries': ADDRESS_TABLE_ENTRIES,
+            'associationTableMaxEntries': ASSOCIATION_TABLE_ENTRIES,
+            # What the device reports in PID_MAX_APDU_LENGTH: the products here
+            # keep the default, the configured KNX_MAX_APDU_LENGTH.
+            'maxApduLength': MAX_APDU_LENGTH,
             'autoResponseQueueCapacity': 2,
             'transmissionOutcomeQueueCapacity': 4,
         },
@@ -85,8 +94,11 @@ EXPECTED_EXPORTS = {
             # Stack-wide table ceilings, not per-product counts: what ETS reads
             # as the number of group addresses and associations the device can
             # take. They come from the address/association table domains.
-            'addressTableMaxEntries': 256,
-            'associationTableMaxEntries': 512,
+            'addressTableMaxEntries': ADDRESS_TABLE_ENTRIES,
+            'associationTableMaxEntries': ASSOCIATION_TABLE_ENTRIES,
+            # What the device reports in PID_MAX_APDU_LENGTH: the products here
+            # keep the default, the configured KNX_MAX_APDU_LENGTH.
+            'maxApduLength': MAX_APDU_LENGTH,
             'autoResponseQueueCapacity': 2,
             'transmissionOutcomeQueueCapacity': 4,
         },

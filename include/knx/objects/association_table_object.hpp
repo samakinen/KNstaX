@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "knx/config.hpp"
 #include "knx/objects/interface_object.hpp"
 #include "knx/types.hpp"
 #include "knx/util/result.hpp"
@@ -64,7 +65,8 @@ class AssociationTableDomain {
 public:
     using Index = DomainIndex; // 0-based domain index
 
-    static constexpr uint16_t kMaxEntries = 512;
+    /// KNX_ASSOCIATION_TABLE_ENTRIES.
+    static constexpr uint16_t kMaxEntries = static_cast<uint16_t>(config::ASSOCIATION_TABLE_ENTRIES);
 
     util::Result<void> add(const AssociationEntry& entry);
     util::Result<void> remove(Index index);
@@ -184,6 +186,11 @@ public:
      * @brief Clear all entries
      */
     void clearEntries();
+
+    /// PID_LOAD_STATE_CONTROL state (03/05/01 §4.23: 3 = error).
+    uint8_t loadState() const { return _table.loadState(); }
+    /// Record a failed load: ETS reads the error state and reports the download as failed.
+    void setLoadState(uint8_t state) { _table.setLoadState(state); }
 
     /**
      * @brief Set entry at specific index

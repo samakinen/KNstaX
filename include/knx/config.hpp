@@ -55,7 +55,75 @@ namespace config {
 // Buffer Sizes
 // ============================================================================
 
-constexpr size_t MAX_APDU_LENGTH = 254;        // Maximum APDU length
+// ============================================================================
+// Capacities
+//
+// Every capacity comes from Kconfig (menu "Capacities"), which defines all of
+// them in every build, so none has a fallback here. A capacity is a promise: a
+// full table or queue answers with an error, never an overwrite.
+// ============================================================================
+
+#ifndef CONFIG_KNX_MAX_APDU_LENGTH
+#   error "CONFIG_KNX_MAX_APDU_LENGTH is not defined: build with the KNstaX configuration (ESP-IDF Kconfig, or knx_configure() in CMake)"
+#endif
+#ifndef CONFIG_KNX_TP1_RX_QUEUE_FRAMES
+#   error "CONFIG_KNX_TP1_RX_QUEUE_FRAMES is not defined: build with the KNstaX configuration (ESP-IDF Kconfig, or knx_configure() in CMake)"
+#endif
+#ifndef CONFIG_KNX_TRANSPORT_RX_QUEUE
+#   error "CONFIG_KNX_TRANSPORT_RX_QUEUE is not defined: build with the KNstaX configuration (ESP-IDF Kconfig, or knx_configure() in CMake)"
+#endif
+#ifndef CONFIG_KNX_ADDRESS_TABLE_ENTRIES
+#   error "CONFIG_KNX_ADDRESS_TABLE_ENTRIES is not defined: build with the KNstaX configuration (ESP-IDF Kconfig, or knx_configure() in CMake)"
+#endif
+#ifndef CONFIG_KNX_ASSOCIATION_TABLE_ENTRIES
+#   error "CONFIG_KNX_ASSOCIATION_TABLE_ENTRIES is not defined: build with the KNstaX configuration (ESP-IDF Kconfig, or knx_configure() in CMake)"
+#endif
+#ifndef CONFIG_KNX_ADDITIONAL_INDIVIDUAL_ADDRESSES
+#   error "CONFIG_KNX_ADDITIONAL_INDIVIDUAL_ADDRESSES is not defined: build with the KNstaX configuration (ESP-IDF Kconfig, or knx_configure() in CMake)"
+#endif
+#ifndef CONFIG_KNX_SEND_PIPELINE_DEPTH
+#   error "CONFIG_KNX_SEND_PIPELINE_DEPTH is not defined: build with the KNstaX configuration (ESP-IDF Kconfig, or knx_configure() in CMake)"
+#endif
+
+/// Largest APDU the device accepts, sends and reports in PID_MAX_APDU_LENGTH.
+constexpr size_t MAX_APDU_LENGTH = CONFIG_KNX_MAX_APDU_LENGTH;
+static_assert(MAX_APDU_LENGTH >= 15 && MAX_APDU_LENGTH <= 254,
+              "KNX_MAX_APDU_LENGTH must be 15 (standard frames) to 254 (extended frames)");
+
+/// True when the APDU limit allows standard frames only (4-bit length field).
+constexpr bool STANDARD_FRAMES_ONLY = MAX_APDU_LENGTH <= 15;
+
+/**
+ * @brief Longest TP1 frame on the wire, FCS included, for MAX_APDU_LENGTH.
+ *
+ * 03/02/02 §2.2: a standard frame is CTRL (1) + source (2) + destination (2) +
+ * address type/hop count/length (1) + TPDU (length + 1) + FCS (1) = length + 8
+ * octets, 23 for the 15-octet maximum. An extended frame adds CTRLE (1) and
+ * has an 8-bit length: length + 9 octets, 263 for 254.
+ */
+constexpr size_t MAX_TP1_FRAME_LENGTH = MAX_APDU_LENGTH + (STANDARD_FRAMES_ONLY ? 8u : 9u);
+
+/// Largest TPDU (TPCI/APCI octets plus payload) a frame object holds: the two
+/// header octets and MAX_APDU_LENGTH of payload.
+constexpr size_t MAX_TPDU_LENGTH = 2u + MAX_APDU_LENGTH;
+
+/// Frames the TP1 MAC layer queues between the medium and the data link layer.
+constexpr size_t TP1_RX_QUEUE_FRAMES = CONFIG_KNX_TP1_RX_QUEUE_FRAMES;
+static_assert(TP1_RX_QUEUE_FRAMES >= 2, "KNX_TP1_RX_QUEUE_FRAMES must be at least 2");
+/// Frames the transport layer queues for processing.
+constexpr size_t TRANSPORT_RX_QUEUE = CONFIG_KNX_TRANSPORT_RX_QUEUE;
+static_assert(TRANSPORT_RX_QUEUE >= 1, "KNX_TRANSPORT_RX_QUEUE must be at least 1");
+/// Group addresses in the address table and in the data link layer's list.
+constexpr size_t ADDRESS_TABLE_ENTRIES = CONFIG_KNX_ADDRESS_TABLE_ENTRIES;
+static_assert(ADDRESS_TABLE_ENTRIES >= 1, "KNX_ADDRESS_TABLE_ENTRIES must be at least 1");
+/// Entries in the association table.
+constexpr size_t ASSOCIATION_TABLE_ENTRIES = CONFIG_KNX_ASSOCIATION_TABLE_ENTRIES;
+static_assert(ASSOCIATION_TABLE_ENTRIES >= 1, "KNX_ASSOCIATION_TABLE_ENTRIES must be at least 1");
+/// Individual addresses the data link layer answers to besides its own (may be 0).
+constexpr size_t ADDITIONAL_INDIVIDUAL_ADDRESSES = CONFIG_KNX_ADDITIONAL_INDIVIDUAL_ADDRESSES;
+/// Send outcomes the application layer holds for the application to collect.
+constexpr size_t SEND_PIPELINE_DEPTH = CONFIG_KNX_SEND_PIPELINE_DEPTH;
+static_assert(SEND_PIPELINE_DEPTH >= 1, "KNX_SEND_PIPELINE_DEPTH must be at least 1");
 
 /**
  * @brief Payload capacity reserved per group object, in octets.

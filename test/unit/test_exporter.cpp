@@ -234,6 +234,17 @@ void assertDescriptorExportMapping(const DescT& descriptor)
                               + std::to_string(objects::AssociationTableDomain::kMaxEntries)
                               + "</AssociationTableMaxEntries>")
                      != std::string::npos);
+    // The exporter and the firmware read one configuration: the table ceilings
+    // ETS is told are the configured KNX_*_TABLE_ENTRIES, and the APDU length is
+    // what the device reports (the product's value, within KNX_MAX_APDU_LENGTH).
+    TEST_ASSERT_EQUAL_UINT(config::ADDRESS_TABLE_ENTRIES, objects::AddressTableDomain::kMaxEntries);
+    TEST_ASSERT_EQUAL_UINT(config::ASSOCIATION_TABLE_ENTRIES, objects::AssociationTableDomain::kMaxEntries);
+    TEST_ASSERT_TRUE(descriptor.identity.maxApduLength <= config::MAX_APDU_LENGTH);
+    TEST_ASSERT_TRUE(json.find("\"maxApduLength\":" + std::to_string(descriptor.identity.maxApduLength))
+                     != std::string::npos);
+    TEST_ASSERT_TRUE(xml.find("<MaxApduLength>" + std::to_string(descriptor.identity.maxApduLength)
+                              + "</MaxApduLength>")
+                     != std::string::npos);
     TEST_ASSERT_TRUE(json.find("\"autoResponseQueueCapacity\":"
                                + std::to_string(descriptor.capacities.autoResponseQueueCapacity))
                      != std::string::npos);

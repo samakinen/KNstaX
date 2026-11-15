@@ -200,7 +200,10 @@ else()
         if(DEFINED KNX_PLATFORM AND KNX_PLATFORM STREQUAL "baremetal")
             knx_configure(PROFILE tp1-small)
         else()
-            knx_configure(PROFILE host-test)
+            # -DKNX_HOST_PROFILE=host-small runs the host suite with the
+            # tp1-small capacities (configs/profiles/host-small.defconfig).
+            set(KNX_HOST_PROFILE "host-test" CACHE STRING "Profile of a host build (host-test, host-small)")
+            knx_configure(PROFILE ${KNX_HOST_PROFILE})
         endif()
     endif()
     if(NOT KNX_CONFIG_DIR)
@@ -570,7 +573,10 @@ else()
         # knxprod exporter: the two that run the wrapper share its output
         # directory, so they run serially and write into the build tree.
         set(KNXPROD_EXPORTER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/tools/knxprod_exporter)
-        set(KNXPROD_EXPORTER_ENV "KNXPROD_EXPORTER_OUT_DIR=${CMAKE_CURRENT_BINARY_DIR}/knxprod_exporter_artifacts")
+        set(KNXPROD_EXPORTER_ENV "KNXPROD_EXPORTER_OUT_DIR=${CMAKE_CURRENT_BINARY_DIR}/knxprod_exporter_artifacts"
+            "KNX_CONFIG_ADDRESS_TABLE_ENTRIES=${CONFIG_KNX_ADDRESS_TABLE_ENTRIES}"
+            "KNX_CONFIG_ASSOCIATION_TABLE_ENTRIES=${CONFIG_KNX_ASSOCIATION_TABLE_ENTRIES}"
+            "KNX_CONFIG_MAX_APDU_LENGTH=${CONFIG_KNX_MAX_APDU_LENGTH}")
         # Runs the wrapper, then basic XML checks.
         knx_add_test(test_knxprod_exporter
             COMMAND ${Python3_EXECUTABLE} ${KNXPROD_EXPORTER_DIR}/test_validate_knxprod.py
@@ -922,6 +928,23 @@ else()
         endif()
         # Started product runtime
         knx_add_test(test_product_runtime SOURCES test/integration/test_product_runtime.cpp LABELS integration)
+        # The same binary, the table-segment capacity group (runs at every capacity)
+        knx_add_test(test_ets_connected_session_capacity COMMAND $<TARGET_FILE:test_ets_connected_session>
+            ARGS capacity TIMEOUT 30 LABELS integration)
+        # Tests that need more than the tp1-small capacities (a 15-octet APDU, 4 receive
+        # frames, no additional individual addresses) carry needs-full-capacity;
+        # the host-small run excludes them: ctest -LE needs-full-capacity.
+        # Reasons are listed under "C2 status" in docs/design/small-target-profile.md.
+        foreach(_full_capacity_test
+                test_product_commissioned_surface test_knx_stack_e2e test_tp1_ip_interface_bridge
+                test_tp1_ip_interface test_interface_object_manager_persistence test_interface_object_manager
+                test_memory_service test_bau_onwire test_bau_preinit_configuration
+                test_filter_table_type3_download test_data_secure_virtual_tp1
+                test_ets_connected_session test_ets_connected_session_routing)
+            if(TEST ${_full_capacity_test})
+                set_property(TEST ${_full_capacity_test} APPEND PROPERTY LABELS needs-full-capacity)
+            endif()
+        endforeach()
         # Conformance evidence, commissioned path
         knx_add_test(test_conformance_evidence_commissioned
             SOURCES test/conformance/test_conformance_evidence_commissioned.cpp

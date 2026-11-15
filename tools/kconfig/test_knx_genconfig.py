@@ -65,11 +65,66 @@ def test_tp1_small_is_tp1_only_baremetal_without_logs():
         assert absent not in text, f'{absent} must be absent when n'
 
 
-def test_tp1_standard_differs_from_small_only_in_log_level():
-    _, _, small = _run([PROFILES / 'tp1-small.defconfig'])
-    _, _, standard = _run([PROFILES / 'tp1-standard.defconfig'])
-    diff = set(_header(small)) ^ set(_header(standard))
+CAPACITY_SYMBOLS = ('MAX_APDU_LENGTH', 'TP1_RX_QUEUE_FRAMES', 'TRANSPORT_RX_QUEUE', 'ADDRESS_TABLE_ENTRIES',
+                    'ASSOCIATION_TABLE_ENTRIES', 'ADDITIONAL_INDIVIDUAL_ADDRESSES',
+                    'MAX_GROUP_OBJECT_PAYLOAD_BYTES', 'SEND_PIPELINE_DEPTH')
+
+
+def _capacities(profile):
+    rc, err, out = _run([PROFILES / f'{profile}.defconfig'])
+    assert rc == 0, err
+    values = {}
+    for line in _header(out):
+        for symbol in CAPACITY_SYMBOLS:
+            prefix = f'#define CONFIG_KNX_{symbol} '
+            if line.startswith(prefix):
+                values[symbol] = int(line[len(prefix):])
+    return values
+
+
+def _without_capacities(profile):
+    _, _, out = _run([PROFILES / f'{profile}.defconfig'])
+    return {line for line in _header(out)
+            if not any(line.startswith(f'#define CONFIG_KNX_{s} ') for s in CAPACITY_SYMBOLS)}
+
+
+def test_tp1_standard_differs_from_small_only_in_log_level_and_capacities():
+    diff = _without_capacities('tp1-small') ^ _without_capacities('tp1-standard')
     assert diff == {'#define CONFIG_KNX_LOG_LEVEL 0', '#define CONFIG_KNX_LOG_LEVEL 1'}, diff
+
+
+def test_capacities_per_profile():
+    full = dict(MAX_APDU_LENGTH=254, TP1_RX_QUEUE_FRAMES=32, TRANSPORT_RX_QUEUE=8, ADDRESS_TABLE_ENTRIES=256,
+                ASSOCIATION_TABLE_ENTRIES=512, ADDITIONAL_INDIVIDUAL_ADDRESSES=16,
+                MAX_GROUP_OBJECT_PAYLOAD_BYTES=16, SEND_PIPELINE_DEPTH=8)
+    small = dict(MAX_APDU_LENGTH=15, TP1_RX_QUEUE_FRAMES=4, TRANSPORT_RX_QUEUE=2, ADDRESS_TABLE_ENTRIES=128,
+                 ASSOCIATION_TABLE_ENTRIES=160, ADDITIONAL_INDIVIDUAL_ADDRESSES=0,
+                 MAX_GROUP_OBJECT_PAYLOAD_BYTES=14, SEND_PIPELINE_DEPTH=2)
+    standard = dict(MAX_APDU_LENGTH=55, TP1_RX_QUEUE_FRAMES=8, TRANSPORT_RX_QUEUE=4, ADDRESS_TABLE_ENTRIES=255,
+                    ASSOCIATION_TABLE_ENTRIES=400, ADDITIONAL_INDIVIDUAL_ADDRESSES=4,
+                    MAX_GROUP_OBJECT_PAYLOAD_BYTES=14, SEND_PIPELINE_DEPTH=4)
+    assert _capacities('full') == full
+    assert _capacities('host-test') == full
+    assert _capacities('tp1-small') == small
+    assert _capacities('host-small') == small
+    assert _capacities('tp1-standard') == standard
+
+
+def test_capacity_defaults_equal_full_when_unset():
+    # A product that sets no capacity (the ESP-IDF default case) gets today's values.
+    rc, err, out = _run([_fragment('CONFIG_KNX_BUILD_TP1=y\n')])
+    assert rc == 0, err
+    text = '\n'.join(_header(out))
+    for macro in ('CONFIG_KNX_MAX_APDU_LENGTH 254', 'CONFIG_KNX_TP1_RX_QUEUE_FRAMES 32',
+                  'CONFIG_KNX_TRANSPORT_RX_QUEUE 8', 'CONFIG_KNX_ADDRESS_TABLE_ENTRIES 256',
+                  'CONFIG_KNX_ASSOCIATION_TABLE_ENTRIES 512', 'CONFIG_KNX_ADDITIONAL_INDIVIDUAL_ADDRESSES 16',
+                  'CONFIG_KNX_SEND_PIPELINE_DEPTH 8'):
+        assert f'#define {macro}' in text, macro
+
+
+def test_capacity_out_of_range_is_refused():
+    rc, err, _ = _run([_fragment('CONFIG_KNX_MAX_APDU_LENGTH=14\n')])
+    assert rc != 0 and 'MAX_APDU_LENGTH' in err, err
 
 
 def test_every_profile_resolves():

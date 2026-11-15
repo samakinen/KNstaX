@@ -67,7 +67,7 @@ void test_AddressTable_DefaultConstruction() {
     TEST_ASSERT_EQUAL_UINT16(0, addrTable->entryCount());
     TEST_ASSERT_TRUE(addrTable->isEmpty());
     TEST_ASSERT_FALSE(addrTable->isFull());
-    TEST_ASSERT_EQUAL_UINT16(256, addrTable->maxEntries());
+    TEST_ASSERT_EQUAL_UINT16(knx::config::ADDRESS_TABLE_ENTRIES, addrTable->maxEntries());
 }
 
 void test_AddressTable_AddEntry() {
@@ -250,7 +250,7 @@ void test_AssociationTable_DefaultConstruction() {
     TEST_ASSERT_EQUAL_UINT16(0, assocTable->entryCount());
     TEST_ASSERT_TRUE(assocTable->isEmpty());
     TEST_ASSERT_FALSE(assocTable->isFull());
-    TEST_ASSERT_EQUAL_UINT16(512, assocTable->maxEntries());
+    TEST_ASSERT_EQUAL_UINT16(knx::config::ASSOCIATION_TABLE_ENTRIES, assocTable->maxEntries());
 }
 
 void test_AssociationTable_AddEntry() {
@@ -562,11 +562,67 @@ void test_AssociationTable_IndexFollowsEveryMutationAndHasNoPerAddressLimit(void
     TEST_ASSERT_FALSE(table.hasGroupObjects(AddressTableIndex(3)));
 }
 
+// === Capacity: a full table refuses the next entry ===
+
+void test_AddressTable_CapacityIsAPromise(void) {
+    AddressTableObject table;
+    const uint16_t capacity = table.maxEntries();
+    TEST_ASSERT_EQUAL_UINT16(knx::config::ADDRESS_TABLE_ENTRIES, capacity);
+    for (uint16_t i = 0; i < capacity; ++i) {
+        TEST_ASSERT_TRUE(table.addEntry(GroupAddress(static_cast<uint16_t>(0x0800 + i))).isValid());
+    }
+    TEST_ASSERT_TRUE(table.isFull());
+    // The next one is refused (invalid index), and nothing was overwritten.
+    TEST_ASSERT_FALSE(table.addEntry(GroupAddress(0x7000)).isValid());
+    TEST_ASSERT_EQUAL_UINT16(capacity, table.entryCount());
+    TEST_ASSERT_EQUAL_UINT16(0x0800, table.getAddress(AddressTableIndex(1)).raw);
+    TEST_ASSERT_EQUAL_UINT16(static_cast<uint16_t>(0x0800 + capacity - 1),
+                             table.getAddress(AddressTableIndex(capacity)).raw);
+
+    // The same limit applies to bulk loads and to explicit-index writes.
+    std::vector<GroupAddress> tooMany;
+    for (uint32_t i = 0; i <= capacity; ++i) {
+        tooMany.push_back(GroupAddress(static_cast<uint16_t>(0x0800 + i)));
+    }
+    AddressTableObject other;
+    TEST_ASSERT_TRUE(other.loadTable(tooMany).isError());
+    TEST_ASSERT_EQUAL_UINT16(0, other.entryCount());
+    TEST_ASSERT_TRUE(table.setEntryExpand(AddressTableIndex(static_cast<uint16_t>(capacity + 1)),
+                                          GroupAddress(0x7001)).isError());
+    TEST_ASSERT_EQUAL_UINT16(capacity, table.entryCount());
+}
+
+void test_AssociationTable_CapacityIsAPromise(void) {
+    AssociationTableObject table;
+    const uint16_t capacity = table.maxEntries();
+    TEST_ASSERT_EQUAL_UINT16(knx::config::ASSOCIATION_TABLE_ENTRIES, capacity);
+    for (uint16_t i = 0; i < capacity; ++i) {
+        TEST_ASSERT_TRUE(table.addEntry(AssociationEntry(AddressTableIndex(static_cast<uint16_t>(1 + i)),
+                                                         GroupObjectIndex(i))).isOk());
+    }
+    TEST_ASSERT_TRUE(table.isFull());
+    const auto refused = table.addEntry(AssociationEntry(AddressTableIndex(1),
+                                                         GroupObjectIndex(static_cast<uint16_t>(capacity))));
+    TEST_ASSERT_TRUE(refused.isError());
+    TEST_ASSERT_EQUAL_UINT16(capacity, table.entryCount());
+
+    std::vector<AssociationEntry> tooMany;
+    for (uint32_t i = 0; i <= capacity; ++i) {
+        tooMany.push_back(AssociationEntry(AddressTableIndex(static_cast<uint16_t>(1 + i)),
+                                           GroupObjectIndex(static_cast<uint16_t>(i))));
+    }
+    AssociationTableObject other;
+    TEST_ASSERT_TRUE(other.loadTable(tooMany).isError());
+    TEST_ASSERT_EQUAL_UINT16(0, other.entryCount());
+}
+
 // === Main Test Runner ===
 
 int main(int argc, char** argv) {
     UNITY_BEGIN();
 
+    RUN_TEST(test_AddressTable_CapacityIsAPromise);
+    RUN_TEST(test_AssociationTable_CapacityIsAPromise);
     RUN_TEST(test_AddressTable_SortedTableFindsEveryEntryAndRejectsGaps);
     RUN_TEST(test_AddressTable_UnsortedTableStillFindsEntries);
     RUN_TEST(test_AssociationTable_IndexFollowsEveryMutationAndHasNoPerAddressLimit);

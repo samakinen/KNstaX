@@ -209,6 +209,60 @@ void test_local_busy_follows_the_receive_queue_and_is_cleared_on_close() {
     TEST_ASSERT_FALSE(backend->hasEventCallback());
 }
 
+// Capacity: KNX_TP1_RX_QUEUE_FRAMES. When the queue is full the newest frame is
+// dropped and counted; the frames already queued are kept, in order.
+void test_rx_queue_full_drops_the_newest_frame_and_counts_it() {
+    const auto frame = buildGroupFrame();
+    Tp1RxEvent event;
+    event.type = Tp1RxEventType::TelegramEnd;
+    event.frame = frame;
+
+    for (size_t i = 0; i < Tp1MacPhysical::RX_QUEUE_CAPACITY; ++i) {
+        backend->emit(event);
+    }
+    TEST_ASSERT_EQUAL_UINT(0, physicalLayer->rxQueueOverflowDrops());
+    backend->emit(event);
+    backend->emit(event);
+    TEST_ASSERT_EQUAL_UINT(2, physicalLayer->rxQueueOverflowDrops());
+
+    size_t received = 0;
+    while (physicalLayer->receiveFrame(0).isOk()) {
+        ++received;
+        TEST_ASSERT_TRUE(received <= Tp1MacPhysical::RX_QUEUE_CAPACITY);
+    }
+    TEST_ASSERT_EQUAL_UINT(Tp1MacPhysical::RX_QUEUE_CAPACITY, received);
+}
+
+// The busy reserve leaves at least one slot and never exceeds the queue.
+void test_rx_busy_reserve_fits_the_configured_queue() {
+    TEST_ASSERT_TRUE(Tp1MacPhysical::RX_BUSY_RESERVE >= 1u);
+    TEST_ASSERT_TRUE(Tp1MacPhysical::RX_BUSY_RESERVE < Tp1MacPhysical::RX_QUEUE_CAPACITY);
+    TEST_ASSERT_EQUAL_UINT(config::TP1_RX_QUEUE_FRAMES, Tp1MacPhysical::RX_QUEUE_CAPACITY);
+}
+
+// Capacity: the longest frame follows KNX_MAX_APDU_LENGTH (APDU + 8 octets for
+// standard frames only, + 9 with extended frames); a longer one is dropped and counted.
+void test_frame_above_the_configured_maximum_is_dropped_and_counted() {
+    TEST_ASSERT_EQUAL_UINT(config::MAX_TP1_FRAME_LENGTH, Tp1MacPhysical::MAX_RX_FRAME_SIZE);
+    TEST_ASSERT_EQUAL_UINT(config::MAX_APDU_LENGTH <= 15u ? config::MAX_APDU_LENGTH + 8u
+                                                          : config::MAX_APDU_LENGTH + 9u,
+                           Tp1MacPhysical::MAX_RX_FRAME_SIZE);
+
+    std::vector<uint8_t> longest(Tp1MacPhysical::MAX_RX_FRAME_SIZE, 0x11u);
+    Tp1RxEvent event;
+    event.type = Tp1RxEventType::TelegramEnd;
+    event.frame = longest;
+    backend->emit(event);
+    TEST_ASSERT_EQUAL_UINT(0, physicalLayer->rxOversizedDrops());
+    TEST_ASSERT_TRUE(physicalLayer->receiveFrame(0).isOk());
+
+    std::vector<uint8_t> tooLong(Tp1MacPhysical::MAX_RX_FRAME_SIZE + 1u, 0x11u);
+    event.frame = tooLong;
+    backend->emit(event);
+    TEST_ASSERT_EQUAL_UINT(1, physicalLayer->rxOversizedDrops());
+    TEST_ASSERT_FALSE(physicalLayer->receiveFrame(0).isOk());
+}
+
 void test_tx_outcome_is_pending_until_the_backend_reports_one() {
     const uint32_t sequence = beginTransmit();
     TEST_ASSERT_EQUAL(1, backend->sendCalls());
@@ -319,6 +373,9 @@ int main(void) {
 
     RUN_TEST(test_own_address_and_ack_group_addresses_are_forwarded_to_backend);
     RUN_TEST(test_local_busy_follows_the_receive_queue_and_is_cleared_on_close);
+    RUN_TEST(test_rx_queue_full_drops_the_newest_frame_and_counts_it);
+    RUN_TEST(test_rx_busy_reserve_fits_the_configured_queue);
+    RUN_TEST(test_frame_above_the_configured_maximum_is_dropped_and_counted);
     RUN_TEST(test_tx_outcome_is_pending_until_the_backend_reports_one);
     RUN_TEST(test_tx_ack_classes_map_to_outcomes);
     RUN_TEST(test_tx_ack_deadline_miss_reports_timeout_and_a_later_ack_clears_it);

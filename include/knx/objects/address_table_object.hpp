@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "knx/config.hpp"
 #include "knx/objects/interface_object.hpp"
 #include "knx/types.hpp"
 #include "knx/util/result.hpp"
@@ -40,7 +41,8 @@ class AddressTableDomain {
 public:
     using Index = DomainIndex; // 0-based domain index
 
-    static constexpr uint16_t kMaxEntries = 256;
+    /// KNX_ADDRESS_TABLE_ENTRIES.
+    static constexpr uint16_t kMaxEntries = static_cast<uint16_t>(config::ADDRESS_TABLE_ENTRIES);
     static constexpr uint16_t kInvalidIndexValue = 0xFFFF;
 
     static constexpr Index invalidIndex() { return Index{kInvalidIndexValue}; }
@@ -123,6 +125,11 @@ public:
      * @brief Clear all entries from the table
      */
     void clearEntries();
+
+    /// PID_LOAD_STATE_CONTROL state (03/05/01 §4.23: 3 = error).
+    uint8_t loadState() const { return _table.loadState(); }
+    /// Record a failed load: ETS reads the error state and reports the download as failed.
+    void setLoadState(uint8_t state) { _table.setLoadState(state); }
 
     /**
      * @brief Set entry at specific index

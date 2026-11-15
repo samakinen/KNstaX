@@ -291,7 +291,9 @@ void test_ReceiveQueueDropsNewestWhenFull(void) {
     tl->setReceiveCallback(nullptr);
     rx.clear();
 
-    for (uint8_t value = 0u; value < 9u; ++value) {
+    // KNX_TRANSPORT_RX_QUEUE frames fit; the next is dropped and counted.
+    constexpr size_t kCapacity = knx::config::TRANSPORT_RX_QUEUE;
+    for (uint8_t value = 0u; value < kCapacity + 1u; ++value) {
         const auto tpdu = knx::protocol::buildTpdu(
             knx::protocol::TPCIField::create(knx::protocol::TPCI::UnnumberedData),
             application::APCIField(0),
@@ -301,7 +303,7 @@ void test_ReceiveQueueDropsNewestWhenFull(void) {
     }
 
     TEST_ASSERT_EQUAL_UINT32(0u, static_cast<uint32_t>(rx.size()));
-    TEST_ASSERT_EQUAL_UINT32(8u, static_cast<uint32_t>(tl->queuedReceiveCount()));
+    TEST_ASSERT_EQUAL_UINT32(kCapacity, static_cast<uint32_t>(tl->queuedReceiveCount()));
     TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(tl->droppedReceiveFrameCount()));
 
     TDataFrame queued;

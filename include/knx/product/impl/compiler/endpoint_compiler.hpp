@@ -31,7 +31,7 @@ struct RuntimeProductIdentity {
     uint16_t applicationNumber{0};
     uint16_t applicationVersion{0};
     uint8_t firmwareRevision{0};
-    uint16_t maxApduLength{254};
+    uint16_t maxApduLength{static_cast<uint16_t>(config::MAX_APDU_LENGTH)};
     uint16_t hardwareSerialNumber{1};
     uint8_t hardwareVersion{1};
     std::string_view orderNumber{};
@@ -471,6 +471,7 @@ constexpr auto compileEndpointDefinition(const DefinitionT& definition)
                     .hardwareSerialNumber = definition.identity.hardwareSerialNumber,
                     .hardwareVersion = definition.identity.hardwareVersion,
                     .orderNumber = definition.identity.orderNumber,
+                    .maxApduLength = definition.identity.maxApduLength,
                 },
             .features = detail::makeExportFeatureFlags(definition.persistence,
                                                        definition.security,

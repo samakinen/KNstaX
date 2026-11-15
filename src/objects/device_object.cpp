@@ -39,8 +39,8 @@ DeviceObject::DeviceObject()
     , _firmwareRevision(0)
     , _serialNumber(6, 0u)
     , _individualAddress(0)
-    // Full L_Data_Extended support: up to 254-octet APDUs.
-    , _maxApduLength(254)
+    // Up to the configured APDU length (254, L_Data_Extended, at the most).
+    , _maxApduLength(static_cast<uint16_t>(config::MAX_APDU_LENGTH))
     , _loadState(LoadState::Unloaded)
     , _runState(RunState::Halted)
     , _progMode(false)

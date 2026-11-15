@@ -102,7 +102,7 @@ constexpr auto kSwitchDefinition =
             .applicationNumber = 1,
             .applicationVersion = 1,
             .firmwareRevision = 1,
-            .maxApduLength = 254,
+            .maxApduLength = knx::config::MAX_APDU_LENGTH,
         },
         PersistencePolicy{
             .namespacePrefix = "tp1_switch",
@@ -145,7 +145,7 @@ constexpr auto kThermostatDefinition =
             .applicationNumber = 2,
             .applicationVersion = 1,
             .firmwareRevision = 3,
-            .maxApduLength = 254,
+            .maxApduLength = knx::config::MAX_APDU_LENGTH,
         },
         PersistencePolicy{
             .namespacePrefix = "tp1_thermostat",

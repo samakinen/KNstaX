@@ -24,7 +24,11 @@
 namespace knx {
 namespace application {
 
-inline constexpr size_t kMaxMemoryServiceDataBytes = 63u;
+/// Largest A_Memory_Read/Write payload: the 6-bit count tops out at 63, and the
+/// frame carries the address and the count besides the data, so a short
+/// APDU (15 octets: 12 data octets) lowers it.
+inline constexpr size_t kMaxMemoryServiceDataBytes =
+    (config::MAX_APDU_LENGTH - 3u) < 63u ? (config::MAX_APDU_LENGTH - 3u) : 63u;
 using PropertyServiceDataBuffer = util::FixedVector<uint8_t, config::MAX_APDU_LENGTH>;
 using MemoryServiceDataBuffer = util::FixedVector<uint8_t, kMaxMemoryServiceDataBytes>;
 

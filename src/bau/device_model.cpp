@@ -514,8 +514,14 @@ void DeviceModel::applyLoadedTableSegment(InterfaceObjectType objectType)
         const std::span<const uint8_t> segment(_groupAddressSegment);
         uint16_t count = u16at(segment, 0);
         if (count > objects::AddressTableDomain::kMaxEntries) {
-            KNX_LOGW(TAG, "Group address segment count %u exceeds capacity, truncating", count);
-            count = objects::AddressTableDomain::kMaxEntries;
+            // A capacity is a promise: the table is refused, not cut short.
+            // The load state goes to Error (03/05/01 §4.23), which ETS reads
+            // back and reports as a failed download.
+            KNX_LOGE(TAG, "Group address segment holds %u addresses, capacity is %u: load refused",
+                     count, static_cast<unsigned>(objects::AddressTableDomain::kMaxEntries));
+            _addressTable.clearEntries();
+            _addressTable.setLoadState(objects::loadstate::kError);
+            return;
         }
         _addressTable.clearEntries();
         for (uint16_t i = 0; i < count; ++i) {
@@ -529,8 +535,11 @@ void DeviceModel::applyLoadedTableSegment(InterfaceObjectType objectType)
         const std::span<const uint8_t> segment(_associationSegment);
         uint16_t count = u16at(segment, 0);
         if (count > objects::AssociationTableDomain::kMaxEntries) {
-            KNX_LOGW(TAG, "Association segment count %u exceeds capacity, truncating", count);
-            count = objects::AssociationTableDomain::kMaxEntries;
+            KNX_LOGE(TAG, "Association segment holds %u entries, capacity is %u: load refused",
+                     count, static_cast<unsigned>(objects::AssociationTableDomain::kMaxEntries));
+            _associationTable.clearEntries();
+            _associationTable.setLoadState(objects::loadstate::kError);
+            return;
         }
         _associationTable.clearEntries();
         for (uint16_t i = 0; i < count; ++i) {

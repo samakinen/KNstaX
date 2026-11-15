@@ -465,11 +465,13 @@ void test_SendOutcomeQueueRecordsLowerLayerFailure() {
 // transmissions, and the previous drop-newest behaviour additionally logged a
 // warning per frame for a queue nobody was reading.
 void test_SendOutcomeQueueOverwritesOldestWhenFull() {
-    for (uint16_t sub = 1u; sub <= 9u; ++sub) {
+    // KNX_SEND_PIPELINE_DEPTH outcomes fit; one more overwrites the oldest and is counted.
+    constexpr uint16_t kDepth = static_cast<uint16_t>(knx::config::SEND_PIPELINE_DEPTH);
+    for (uint16_t sub = 1u; sub <= kDepth + 1u; ++sub) {
         TEST_ASSERT_TRUE(appLayer->sendGroupValueWrite(GroupAddress(1, 2, sub), std::vector<uint8_t>{0x01}).isOk());
     }
 
-    TEST_ASSERT_EQUAL_UINT32(8u, static_cast<uint32_t>(appLayer->queuedSendOutcomeCount()));
+    TEST_ASSERT_EQUAL_UINT32(kDepth, static_cast<uint32_t>(appLayer->queuedSendOutcomeCount()));
     TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(appLayer->droppedSendOutcomeCount()));
 
     // The first outcome was overwritten, so the queue starts at the second
@@ -478,12 +480,10 @@ void test_SendOutcomeQueueOverwritesOldestWhenFull() {
     TEST_ASSERT_TRUE(appLayer->popSendOutcome(outcome));
     TEST_ASSERT_EQUAL_UINT16(GroupAddress(1, 2, 2).raw, outcome.destination.raw);
 
-    for (uint16_t sub = 3u; sub <= 8u; ++sub) {
+    for (uint16_t sub = 3u; sub <= kDepth + 1u; ++sub) {
         TEST_ASSERT_TRUE(appLayer->popSendOutcome(outcome));
         TEST_ASSERT_EQUAL_UINT16(GroupAddress(1, 2, sub).raw, outcome.destination.raw);
     }
-    TEST_ASSERT_TRUE(appLayer->popSendOutcome(outcome));
-    TEST_ASSERT_EQUAL_UINT16(GroupAddress(1, 2, 9).raw, outcome.destination.raw);
     TEST_ASSERT_EQUAL_UINT32(0u, static_cast<uint32_t>(appLayer->queuedSendOutcomeCount()));
 }
 

@@ -34,7 +34,7 @@ constexpr auto kPolicyDefinition =
             .applicationNumber = 8,
             .applicationVersion = 1,
             .firmwareRevision = 1,
-            .maxApduLength = 254,
+            .maxApduLength = knx::config::MAX_APDU_LENGTH,
         },
         PersistencePolicy{
             .namespacePrefix = "policy_sensor",

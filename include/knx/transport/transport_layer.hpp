@@ -369,7 +369,7 @@ private:
     };
     RetransmissionOperationState _retransmissionOperation{};
 
-    static constexpr size_t RX_QUEUE_CAPACITY = 8u;
+    static constexpr size_t RX_QUEUE_CAPACITY = config::TRANSPORT_RX_QUEUE;  // KNX_TRANSPORT_RX_QUEUE
     std::array<TDataFrame, RX_QUEUE_CAPACITY> _rxQueue{};
     size_t _rxQueueHead{0};
     size_t _rxQueueCount{0};

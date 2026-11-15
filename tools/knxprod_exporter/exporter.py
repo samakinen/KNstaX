@@ -53,7 +53,7 @@ def export_product_json_to_kaenx(json_obj) -> str:
     caps = json_obj.get('capacities', {})
     capacities = ET.SubElement(product, 'Capacities')
     for k in ('groupObjectCount', 'addressTableEntries', 'associationEntries',
-              'addressTableMaxEntries', 'associationTableMaxEntries',
+              'addressTableMaxEntries', 'associationTableMaxEntries', 'maxApduLength',
               'autoResponseQueueCapacity', 'transmissionOutcomeQueueCapacity'):
         ET.SubElement(capacities, k).text = str(caps.get(k, 0))
 

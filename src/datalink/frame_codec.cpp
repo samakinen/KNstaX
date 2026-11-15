@@ -62,7 +62,7 @@ util::Result<size_t> FrameCodec::encodeFrame(const LDataFrame& frame, std::span<
     }
 
     const size_t tpduLength = frame.tpdu.size();
-    if (tpduLength == 0 || tpduLength > 256) {
+    if (tpduLength == 0 || tpduLength > config::MAX_TPDU_LENGTH) {
         KNX_LOGW(TAG, "TPDU length out of range: %zu", tpduLength);
         return util::ErrorCode::InvalidFrameSize;
     }
@@ -224,7 +224,16 @@ util::Result<void> FrameCodec::decodeFrame(std::span<const uint8_t> buffer, LDat
         return util::ErrorCode::InvalidFrameSize;
     }
 
-    frame.tpdu.assign(std::span<const uint8_t>(buffer.data() + idx, tpduLength));
+    // A frame longer than the configured KNX_MAX_APDU_LENGTH is refused, not
+    // truncated: the TPDU does not fit the frame object.
+    if (tpduLength > frame.tpdu.capacity()) {
+        KNX_LOGW(TAG, "TPDU of %zu octets exceeds the configured maximum APDU length (%zu)",
+                 tpduLength, static_cast<size_t>(config::MAX_APDU_LENGTH));
+        return util::ErrorCode::InvalidFrameSize;
+    }
+    if (!frame.tpdu.assign(std::span<const uint8_t>(buffer.data() + idx, tpduLength))) {
+        return util::ErrorCode::InvalidFrameSize;
+    }
 
     if (!frame.isValid()) {
         KNX_LOGD(TAG, "Decoded invalid frame bytes=%s", util::formatHexBytes(buffer).c_str());

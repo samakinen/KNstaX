@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <cstddef>
 
+#include "knx/config.hpp"
 #include "knx/types.hpp"
 
 namespace knx {
@@ -29,7 +30,7 @@ namespace constants {
 namespace protocol {
     // Frame sizes
     constexpr size_t MIN_FRAME_SIZE = 6;
-    constexpr size_t MAX_FRAME_SIZE = 263;
+    constexpr size_t MAX_FRAME_SIZE = config::MAX_TP1_FRAME_LENGTH;  // 263 for a 254-octet APDU, 23 for 15 (config.hpp)
     constexpr size_t STANDARD_FRAME_SIZE = 23;
     constexpr size_t EXTENDED_FRAME_SIZE = 263;
     

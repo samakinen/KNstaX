@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "knx/config.hpp"
 #include "knx/objects/interface_object.hpp"
 #include "knx/types.hpp"
 #include "knx/util/fixed_vector.hpp"
@@ -190,7 +191,12 @@ public:
     IndividualAddress getIndividualAddress() const { return _individualAddress; }
 
     // PID_MAX_APDU_LENGTH (58)
-    void setMaxApduLength(uint16_t length) { _maxApduLength = length; }
+    /// Reported to ETS, so it must be a length the buffers hold: a value above
+    /// config::MAX_APDU_LENGTH is clamped to it and logged by the caller's
+    /// product check (start() refuses such a product before getting here).
+    void setMaxApduLength(uint16_t length) {
+        _maxApduLength = length > config::MAX_APDU_LENGTH ? static_cast<uint16_t>(config::MAX_APDU_LENGTH) : length;
+    }
     uint16_t getMaxApduLength() const { return _maxApduLength; }
 
     // PID_DESCRIPTION (21)
@@ -302,7 +308,7 @@ private:
 
     // Addressing
     IndividualAddress _individualAddress;
-    uint16_t _maxApduLength{254}; // Max APDU (L_Data_Extended supported)
+    uint16_t _maxApduLength{static_cast<uint16_t>(config::MAX_APDU_LENGTH)}; // KNX_MAX_APDU_LENGTH
 
     // State management
     LoadState _loadState{LoadState::Unloaded};

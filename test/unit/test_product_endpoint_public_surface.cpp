@@ -30,7 +30,7 @@ constexpr auto kPublicSwitchDefinition =
             .applicationNumber = 7,
             .applicationVersion = 1,
             .firmwareRevision = 1,
-            .maxApduLength = 254,
+            .maxApduLength = knx::config::MAX_APDU_LENGTH,
         },
         PersistencePolicy{
             .namespacePrefix = "public_switch",

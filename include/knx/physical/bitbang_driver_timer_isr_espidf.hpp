@@ -136,6 +136,8 @@ private:
     // dropped on the floor and the frame handed upwards as if complete — the
     // receive-side twin of the uint8_t transmit length that truncated at 255.
     static constexpr size_t MAX_RX_TELEGRAM_SIZE = 263;
+    static_assert(MAX_RX_TELEGRAM_SIZE >= config::MAX_TP1_FRAME_LENGTH,
+                  "the receive buffer must hold the configured longest frame");
     std::array<uint8_t, MAX_RX_TELEGRAM_SIZE> _activeFrame{};
     // Octets discarded because a telegram exceeded the buffer. Non-zero means a
     // frame reached the upper layers truncated.

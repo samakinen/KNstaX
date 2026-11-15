@@ -22,6 +22,7 @@
 #include "knx/physical/tp1_medium_backend.hpp"
 #include "knx/product/impl/bindings/endpoint_bindings.hpp"
 #include "knx/product/impl/compiler/endpoint_compiler.hpp"
+#include "knx/util/log.hpp"
 #include "knx/util/result.hpp"
 
 #include <algorithm>
@@ -828,6 +829,17 @@ public:
 
     util::Result<void> finishStart()
     {
+        // The product's APDU length is reported to ETS and written to the
+        // .knxprod; the buffers behind it are sized by CONFIG_KNX_MAX_APDU_LENGTH.
+        // A constexpr definition cannot get here (makeEndpointDefinition()
+        // rejects it at compile time); this catches one built at run time.
+        if (_compiled.identity.maxApduLength > config::MAX_APDU_LENGTH) {
+            KNX_LOGE("KNX.Product", "Product maxApduLength %u exceeds CONFIG_KNX_MAX_APDU_LENGTH %u",
+                     static_cast<unsigned>(_compiled.identity.maxApduLength),
+                     static_cast<unsigned>(config::MAX_APDU_LENGTH));
+            _bau.reset();
+            return util::ErrorCode::InvalidParameter;
+        }
         applyIdentity();
         applyPreStartConfiguration();
 

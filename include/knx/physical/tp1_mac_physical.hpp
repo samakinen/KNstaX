@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "knx/config.hpp"
 #include "knx/physical/tp1_medium_backend.hpp"
 #include "knx/physical/tp1_physical_layer.hpp"
 #include "knx/platform/platform.hpp"
@@ -50,12 +51,17 @@ public:
     using ProgressState = util::OperationProgressState;
     using QueueNotifyCallback = Tp1MediumBackend::QueueNotifyCallback;
 
-    static constexpr size_t RX_QUEUE_CAPACITY = 32;
+    /// KNX_TP1_RX_QUEUE_FRAMES.
+    static constexpr size_t RX_QUEUE_CAPACITY = config::TP1_RX_QUEUE_FRAMES;
     /// Free slots kept back when the queue fills: once fewer remain, the ISR
     /// answers new frames with BUSY instead of ACK. They absorb frames that
-    /// were acknowledged before the busy state reached the ISR.
-    static constexpr size_t RX_BUSY_RESERVE = 4;
-    static constexpr size_t MAX_RX_FRAME_SIZE = 256;
+    /// were acknowledged before the busy state reached the ISR. An eighth of
+    /// the queue, at least one slot (4 of 32).
+    static constexpr size_t RX_BUSY_RESERVE = (RX_QUEUE_CAPACITY / 8u) > 1u ? (RX_QUEUE_CAPACITY / 8u) : 1u;
+    /// Longest frame a queue slot holds, FCS included: 263 for the full APDU
+    /// length, 23 for standard frames only (config::MAX_TP1_FRAME_LENGTH).
+    /// A longer frame is dropped and counted in rxOversizedDrops().
+    static constexpr size_t MAX_RX_FRAME_SIZE = config::MAX_TP1_FRAME_LENGTH;
     static constexpr uint32_t DEFAULT_TX_OUTCOME_TIMEOUT_MS = 20u;
 
     explicit Tp1MacPhysical(std::unique_ptr<Tp1MediumBackend> backend);
@@ -86,6 +92,11 @@ public:
     /// into the receive queue and stays valid until the next beginReceive()
     /// or pollReceive(); call those from the same consumer task only.
     util::Result<std::span<const uint8_t>> receivedFrameView();
+
+    /// Frames dropped because they were longer than MAX_RX_FRAME_SIZE.
+    size_t rxOversizedDrops() const { return _rxOversizedDrops.load(std::memory_order_relaxed); }
+    /// Acknowledged frames dropped because the receive queue was full.
+    size_t rxQueueOverflowDrops() const { return _rxOverflowDropsTotal.load(std::memory_order_relaxed); }
 
     void setReceiveCallback(ReceiveCallback callback, void* context);
     void setQueueNotifyCallback(QueueNotifyCallback callback, void* context);
@@ -172,6 +183,8 @@ private:
     // still counted in _rxCount so the producer cannot overwrite it.
     bool _rxHeld{false};
     size_t _rxOverflowDrops{0};
+    std::atomic<size_t> _rxOverflowDropsTotal{0};
+    std::atomic<size_t> _rxOversizedDrops{0};
     bool _localBusyAsserted{false};
     bool _receiveActive{false};
     uint64_t _receiveDeadlineMs{0};

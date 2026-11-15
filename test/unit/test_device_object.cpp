@@ -68,7 +68,7 @@ void tearDown() {
 void test_DeviceObject_DefaultConstruction() {
     TEST_ASSERT_EQUAL_UINT16(0, device->getManufacturerId().value());
     TEST_ASSERT_EQUAL_UINT8(0, device->getFirmwareRevision());
-    TEST_ASSERT_EQUAL_UINT16(254, device->getMaxApduLength()); // Default
+    TEST_ASSERT_EQUAL_UINT16(knx::config::MAX_APDU_LENGTH, device->getMaxApduLength()); // Default: the configured maximum
     TEST_ASSERT_EQUAL(LoadState::Unloaded, device->getLoadState());
     TEST_ASSERT_EQUAL(RunState::Halted, device->getRunState());
     TEST_ASSERT_FALSE(device->getProgMode());
@@ -117,11 +117,19 @@ void test_DeviceObject_IndividualAddress() {
 }
 
 void test_DeviceObject_MaxApduLength() {
-    device->setMaxApduLength(255);
-    TEST_ASSERT_EQUAL_UINT16(255, device->getMaxApduLength());
-    
-    device->setMaxApduLength(64);
-    TEST_ASSERT_EQUAL_UINT16(64, device->getMaxApduLength());
+    // The default is the configured maximum, and nothing larger can be set:
+    // the device reports this value to ETS and its buffers hold no more.
+    const auto configured = static_cast<uint16_t>(knx::config::MAX_APDU_LENGTH);
+    TEST_ASSERT_EQUAL_UINT16(configured, device->getMaxApduLength());
+
+    device->setMaxApduLength(configured);
+    TEST_ASSERT_EQUAL_UINT16(configured, device->getMaxApduLength());
+
+    device->setMaxApduLength(static_cast<uint16_t>(configured + 1u));
+    TEST_ASSERT_EQUAL_UINT16(configured, device->getMaxApduLength());
+
+    device->setMaxApduLength(15);
+    TEST_ASSERT_EQUAL_UINT16(15, device->getMaxApduLength());
 }
 
 void test_DeviceObject_RoutingCount() {

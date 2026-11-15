@@ -107,7 +107,7 @@ void test_InterfaceObjectManager_DescribeProperty_AddressTable_TableData(void) {
     TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(AddressTableProperty::TableData),
                             static_cast<uint8_t>(resolvedPropertyId));
     TEST_ASSERT_EQUAL(knx::application::PropertyDataType::UnsignedInt, type);
-    TEST_ASSERT_EQUAL_UINT16(256, maxElements);
+    TEST_ASSERT_EQUAL_UINT16(knx::config::ADDRESS_TABLE_ENTRIES, maxElements);
     TEST_ASSERT_EQUAL_UINT8(0x03, access); // read+write
 }
 

@@ -95,6 +95,9 @@ std::string exportDescriptorToJson(const DescT& d)
       << ",\"associationEntries\":" << d.capacities.datapointLinkCapacity
       << ",\"addressTableMaxEntries\":" << objects::AddressTableDomain::kMaxEntries
       << ",\"associationTableMaxEntries\":" << objects::AssociationTableDomain::kMaxEntries
+      // What the device reports in PID_MAX_APDU_LENGTH (the product's value,
+      // never above the firmware's KNX_MAX_APDU_LENGTH).
+      << ",\"maxApduLength\":" << d.identity.maxApduLength
       << ",\"autoResponseQueueCapacity\":" << d.capacities.autoResponseQueueCapacity
       << ",\"transmissionOutcomeQueueCapacity\":" << d.capacities.transmissionOutcomeQueueCapacity << "}";
 
@@ -221,6 +224,7 @@ std::string exportDescriptorToKaenxXml(const DescT& d)
     << "</AddressTableMaxEntries>\n";
   o << "      <AssociationTableMaxEntries>" << objects::AssociationTableDomain::kMaxEntries
     << "</AssociationTableMaxEntries>\n";
+  o << "      <MaxApduLength>" << d.identity.maxApduLength << "</MaxApduLength>\n";
   o << "      <AutoResponseQueueCapacity>" << d.capacities.autoResponseQueueCapacity << "</AutoResponseQueueCapacity>\n";
   o << "      <TransmissionOutcomeQueueCapacity>" << d.capacities.transmissionOutcomeQueueCapacity << "</TransmissionOutcomeQueueCapacity>\n";
   o << "    </Capacities>\n";

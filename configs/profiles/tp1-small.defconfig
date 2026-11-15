@@ -1,6 +1,5 @@
 # A TP1 end device on a small Cortex-M part: no log strings, nothing a bus
-# device does not need. Capacities arrive with the small-target profile's
-# later work items; this fragment only selects what is built.
+# device does not need, with the smallest capacities the reference product fits.
 CONFIG_KNX_STANDALONE_PLATFORM_BAREMETAL=y
 CONFIG_KNX_BUILD_TP1=y
 CONFIG_KNX_BUILD_NETIP=n
@@ -12,3 +11,11 @@ CONFIG_KNX_BUILD_ETS_TOOLING=n
 CONFIG_KNX_BUILD_TEST_HOOKS=n
 CONFIG_KNX_BUILD_ZLIB=n
 CONFIG_KNX_LOG_LEVEL=0
+CONFIG_KNX_MAX_APDU_LENGTH=15
+CONFIG_KNX_TP1_RX_QUEUE_FRAMES=4
+CONFIG_KNX_TRANSPORT_RX_QUEUE=2
+CONFIG_KNX_ADDRESS_TABLE_ENTRIES=128
+CONFIG_KNX_ASSOCIATION_TABLE_ENTRIES=160
+CONFIG_KNX_ADDITIONAL_INDIVIDUAL_ADDRESSES=0
+CONFIG_KNX_MAX_GROUP_OBJECT_PAYLOAD_BYTES=14
+CONFIG_KNX_SEND_PIPELINE_DEPTH=2

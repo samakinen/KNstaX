@@ -93,6 +93,17 @@ util::Result<void> PropertyServices::handleValueRead(
                          request.objectIndex.value(), static_cast<uint8_t>(request.propertyId), bytesRead);
                 return util::Result<void>::err(util::ErrorCode::BufferTooSmall);
             }
+            // The response carries object index, property id and count/start
+            // index (4 octets) besides the data, and the whole APDU may not
+            // exceed the configured maximum: a value that does not fit is
+            // answered with the negative response (03/03/07 §3.4.4.1,
+            // elements = 0), not built and then dropped.
+            if (bytesRead + 4u > config::MAX_APDU_LENGTH) {
+                KNX_LOGW(TAG, "Property value does not fit the maximum APDU: obj=%d, prop=%d, bytes=%zu",
+                         request.objectIndex.value(), static_cast<uint8_t>(request.propertyId), bytesRead);
+                sendNegativeResponse();
+                return util::Result<void>::err(util::ErrorCode::BufferTooSmall);
+            }
 
             backendData.resize(bytesRead);
             PropertyValueResponse response;

@@ -475,7 +475,9 @@ void Tp1MacPhysical::handleTp1Event(const Tp1RxEvent& event) {
     // summary on successful decode, or by its "decode failed" WARN.
 
     if (event.frame.size() > MAX_RX_FRAME_SIZE) {
-        KNX_LOGW(TAG, "Dropping oversized TP1 frame: %zu bytes", event.frame.size());
+        _rxOversizedDrops.fetch_add(1, std::memory_order_relaxed);
+        KNX_LOGW(TAG, "Dropping oversized TP1 frame: %zu bytes (maximum %zu)", event.frame.size(),
+                 MAX_RX_FRAME_SIZE);
         return;
     }
 
@@ -487,6 +489,7 @@ void Tp1MacPhysical::handleTp1Event(const Tp1RxEvent& event) {
             // is dropped, so the queue stays in arrival order and the frames
             // that have waited longest are kept.
             ++_rxOverflowDrops;
+            _rxOverflowDropsTotal.fetch_add(1, std::memory_order_relaxed);
             if (_rxOverflowDrops == 1u || (_rxOverflowDrops % 64u) == 0u) {
                 KNX_LOGW(TAG, "RX queue full, dropping acknowledged TP1 frame (%zu drops)", _rxOverflowDrops);
             }

@@ -213,7 +213,7 @@ Host tests are expected to follow the same high-level semantics as embedded buil
 `Kconfig` is the one configuration schema. ESP-IDF resolves it with its own tooling
 (`sdkconfig.h`). A standalone CMake build (host tests, bare metal) resolves it at configure
 time with the vendored Kconfiglib (`tools/kconfig/knx_genconfig.py`), from a **profile**, a
-defconfig fragment under `configs/profiles/` (`host-test`, `full`, `tp1-small`,
+defconfig fragment under `configs/profiles/` (`host-test`, `host-small`, `full`, `tp1-small`,
 `tp1-standard`), plus the product's own override fragments. The result is the generated
 `knx/autoconf.h`, which carries the same `CONFIG_KNX_*` macros as `sdkconfig.h`; `config.hpp`
 includes whichever exists. The resolved configuration is also written as `knx.config` in
@@ -229,6 +229,19 @@ A product calls `knx_configure(PROFILE <name> OVERRIDES <files>...)` before
 `add_subdirectory(KNstaX)`; a build that does not gets `tp1-small` on bare metal and `host-test`
 otherwise. The older `-DKNX_FEATURE_*` options still work as overrides. See
 [docs/design/small-target-profile.md](docs/design/small-target-profile.md).
+
+**Capacities** (Kconfig menu "Capacities", defined in every build, no fallback in `config.hpp`):
+`KNX_MAX_APDU_LENGTH`, `KNX_TP1_RX_QUEUE_FRAMES`, `KNX_TRANSPORT_RX_QUEUE`,
+`KNX_ADDRESS_TABLE_ENTRIES`, `KNX_ASSOCIATION_TABLE_ENTRIES`, `KNX_ADDITIONAL_INDIVIDUAL_ADDRESSES`,
+`KNX_SEND_PIPELINE_DEPTH` and `KNX_MAX_GROUP_OBJECT_PAYLOAD_BYTES`. Their defaults are the values the
+stack had before they were options (254, 32, 8, 256, 512, 16, 8, 16), so ESP-IDF and the `full` and
+`host-test` profiles are unchanged; `tp1-small` and `tp1-standard` set smaller ones. Buffers derive from
+them: the longest TP1 frame is the APDU length plus 8 octets for standard frames only (23 for 15) or
+plus 9 with extended frames (263 for 254), see `config::MAX_TP1_FRAME_LENGTH`. A full table or queue
+returns an error (and the KNX negative response where one exists); the `.knxprod` exporter reports the
+same table ceilings and the product's APDU length. A product's `maxApduLength` may not exceed
+`KNX_MAX_APDU_LENGTH`. The host suite runs against the small values with the `host-small` profile
+(`-DKNX_HOST_PROFILE=host-small`, excluding the `needs-full-capacity` label).
 
 Embedded TP1 backend selection is compile-time driven through Kconfig. `KNX_TP1_BITBANG` is the only choice today; the factory builds the canonical TP1 composition over it.
 
