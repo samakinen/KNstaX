@@ -10,6 +10,13 @@
  * 60 group objects through the real runtime, so the linked image contains the
  * code a TP1 end device needs. The TP-UART backend, the flash persistence and
  * the board support a real product adds are not part of the KNstaX share.
+ *
+ * The image that is measured for flash and static RAM starts the device and runs
+ * it with a null backend. The emulator variant (KNX_SIZE_GATE_SEMIHOST) measures
+ * the heap: it starts the same device with a scripted backend (traffic.hpp), sets
+ * the individual address and the group addresses the way a commissioning would,
+ * and runs the bus traffic a device meets in service, so that the high-water mark
+ * covers receive and send as well as start-up.
  */
 
 #include "ram_persistence.hpp"
@@ -28,6 +35,8 @@
 #if defined(KNX_SIZE_GATE_SEMIHOST)
 extern "C" std::size_t g_heap_high_water;  // syscalls.c: peak of the heap break
 extern "C" void knx_size_gate_print_profile();  // syscalls.c: malloc size histogram
+extern "C" uint32_t knx_size_gate_malloc_calls();  // syscalls.c: malloc() calls so far
+#include "traffic.hpp"
 #endif
 
 namespace {
@@ -38,6 +47,7 @@ constexpr uint32_t kSysTickLoad = 0xE000E014u;
 constexpr uint32_t kCoreClockHz = 8000000u;  // reset-default internal oscillator
 
 volatile uint32_t g_millis = 0;
+volatile uint32_t g_observed = 0;  // handler invocations (the bindings below)
 
 uint32_t hookMillis(void*) { return g_millis; }
 uint64_t hookMicros(void*) { return static_cast<uint64_t>(g_millis) * 1000u; }
@@ -77,9 +87,44 @@ void writeNumber(const char* label, std::size_t value) {
     semihost(0x04, text);  // SYS_WRITE0
 }
 
+std::uint32_t g_mallocAfterStart = 0;
+
+void reportTraffic() {
+    using size_gate::traffic::g_stats;
+    writeNumber("traffic_injected=", g_stats.injected);
+    writeNumber("traffic_tool_acks=", g_stats.toolAcksInjected);
+    writeNumber("traffic_sent=", g_stats.sent);
+    writeNumber("traffic_confirmed=", g_stats.confirmed);
+    writeNumber("traffic_group_writes_sent=", g_stats.groupWrites);
+    writeNumber("traffic_group_reads_sent=", g_stats.groupReads);
+    writeNumber("traffic_group_responses_sent=", g_stats.groupResponses);
+    writeNumber("traffic_link_acks_sent=", g_stats.linkAcks);
+    writeNumber("traffic_connected_data_sent=", g_stats.connectedData);
+    writeNumber("traffic_other_sent=", g_stats.otherSent);
+    for (std::size_t i = 0; i < g_stats.connectedApci.size() && i < g_stats.connectedData; ++i) {
+        writeNumber("traffic_connected_apci=", g_stats.connectedApci[i]);
+    }
+    for (std::size_t i = 0; i < g_stats.sent && i < g_stats.log.size(); ++i) {
+        char text[100];
+        int n = 0;
+        text[n++] = 'f'; text[n++] = 'r'; text[n++] = 'a'; text[n++] = 'm'; text[n++] = 'e'; text[n++] = ' ';
+        for (std::size_t b = 0; b < g_stats.log[i].length && n < 94; ++b) {
+            text[n++] = "0123456789ABCDEF"[g_stats.log[i].bytes[b] >> 4];
+            text[n++] = "0123456789ABCDEF"[g_stats.log[i].bytes[b] & 15];
+            text[n++] = ' ';
+        }
+        text[n++] = '\n';
+        text[n] = 0;
+        semihost(0x04, text);
+    }
+    writeNumber("traffic_observed_by_product=", g_observed);
+    writeNumber("malloc_calls_after_start=", knx_size_gate_malloc_calls() - g_mallocAfterStart);
+}
+
 [[noreturn]] void reportAndExit() {
     writeNumber("heap_before_start=", g_heapBeforeStart);
     writeNumber("heap_after_start=", g_heapAfterStart);
+    reportTraffic();
     knx_size_gate_print_profile();
     char text[40] = "heap_high_water=";
     char digits[12];
@@ -111,7 +156,6 @@ void writeNumber(const char* label, std::size_t value) {
 // callable type. The handlers do nothing but observe the value; what a product
 // does with it is not the KNstaX share.
 
-volatile uint32_t g_observed = 0;
 volatile bool g_state[60] = {};
 
 template <typename ValueT>
@@ -193,7 +237,11 @@ int main() {
         platform,
         size_gate::kProduct,
         std::move(bindings),
+#if defined(KNX_SIZE_GATE_SEMIHOST)
+        std::unique_ptr<knx::physical::Tp1MediumBackend>(new size_gate::traffic::ScriptedBackend()));
+#else
         std::unique_ptr<knx::physical::Tp1MediumBackend>(new knx::physical::NullTp1MediumBackend()));
+#endif
     if (started.isError()) {
         for (;;) {
         }
@@ -202,11 +250,33 @@ int main() {
     publishOnce(*app);
 #if defined(KNX_SIZE_GATE_SEMIHOST)
     g_heapAfterStart = g_heap_high_water;
-#endif
+    g_mallocAfterStart = knx_size_gate_malloc_calls();
+    writeNumber("heap_start_profile:", 0);
+    knx_size_gate_print_profile();
 
-#if defined(KNX_SIZE_GATE_SEMIHOST)
-    for (int i = 0; i < 200; ++i) {
+    // Commissioning, as the tool leaves it: the individual address and the group
+    // addresses of the first port of each datapoint type.
+    using size_gate::Port;
+    using namespace size_gate::traffic;
+    app->deviceObject().setProgModeSilent(knx::Toggle::Enable);  // the address can only be written in programming mode
+    (void)app->deviceObject().writeIndividualAddress(knx::IndividualAddress(1, 1, 10));
+    app->deviceObject().setProgModeSilent(knx::Toggle::Disable);
+    (void)app->applyCommissionedGroupAddresses(
+        knx::product::groupAddressBinding(Port::SwIn1, knx::GroupAddress(kGroupSwitchIn)),
+        knx::product::groupAddressBinding(Port::SwState1, knx::GroupAddress(kGroupSwitchState)),
+        knx::product::groupAddressBinding(Port::SwIo1, knx::GroupAddress(kGroupSwitchIo)),
+        knx::product::groupAddressBinding(Port::ValueIn1, knx::GroupAddress(kGroupPercent)),
+        knx::product::groupAddressBinding(Port::DimIn1, knx::GroupAddress(kGroupDimming)),
+        knx::product::groupAddressBinding(Port::SceneCtl1, knx::GroupAddress(kGroupSceneControl)),
+        knx::product::groupAddressBinding(Port::SceneNum1, knx::GroupAddress(kGroupSceneNumber)));
+    for (int i = 0; i < 20; ++i) {  // let the stack settle after the configuration
+        g_millis = g_millis + 5u;
+        app->loop();
+    }
+    for (uint16_t loop = 0; loop < kLoops; ++loop) {
         g_millis = g_millis + 5u;  // no SysTick on the emulator's timer path; advance time by hand
+        tick(loop);
+        if (loop == kPublishAtLoop || loop == kRepublishAtLoop) publishOnce(*app);
         app->loop();
     }
     reportAndExit();

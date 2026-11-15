@@ -34,7 +34,13 @@ static void semihost_write0(const char* text) {
 static struct { uint32_t size; uint32_t count; } g_profile[PROFILE_SLOTS];
 extern void* __real_malloc(size_t size);
 
+/* Number of malloc() calls so far: the traffic run compares it before and after
+ * the sequence to find allocation in steady state. */
+static uint32_t g_malloc_calls = 0;
+uint32_t knx_size_gate_malloc_calls(void) { return g_malloc_calls; }
+
 void* __wrap_malloc(size_t size) {
+    ++g_malloc_calls;
     uint32_t key = size > 0xFFFEu ? 0xFFFFu : (uint32_t)size;
     for (int i = 0; i < PROFILE_SLOTS; ++i) {
         if (g_profile[i].count == 0u) { g_profile[i].size = key; g_profile[i].count = 1u; break; }
@@ -58,8 +64,8 @@ static void write_decimal(const char* label, unsigned value, const char* suffix)
 
 /* Prints the allocation sizes that account for the most bytes, largest first. */
 void knx_size_gate_print_profile(void) {
-    uint32_t printed[12] = {0};
-    for (int rank = 0; rank < 12; ++rank) {
+    uint32_t printed[32] = {0};
+    for (int rank = 0; rank < 32; ++rank) {
         int best = -1;
         uint32_t best_bytes = 0;
         for (int i = 0; i < PROFILE_SLOTS; ++i) {
