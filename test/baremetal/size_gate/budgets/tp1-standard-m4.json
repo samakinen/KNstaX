@@ -3,7 +3,7 @@
   "cpu": "cortex-m4",
   "margin_percent": 2,
   "flash": {"budget": 99840, "target": 143360},
-  "ram": {"budget": 1792, "target": 32768, "includes_heap": false},
+  "ram": {"budget": 20480, "target": 32768, "includes_heap": true},
   "runtime_flash": {"budget": 17408, "target": null},
   "forbid_strings": ["sw_in_1", "sw_state_16", "sw_io_8", "value_in_1", "dim_in_4", "scene_ctl_1", "scene_num_4"],
   "forbid": [

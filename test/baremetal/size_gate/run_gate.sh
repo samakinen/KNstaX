@@ -4,8 +4,8 @@
 #
 # Bare-metal size gate for one reference device, start to finish:
 #   1. link the reference device with LTO and read flash and static RAM from the map;
-#   2. on the Cortex-M3 configuration, link the emulator variant, run it under QEMU
-#      and read the heap high-water mark (the other cores report "heap not measured");
+#   2. on the Cortex-M3 and Cortex-M4 configurations, link the emulator variant, run it under QEMU
+#      and read the heap high-water mark (Cortex-M0+ reports "heap not measured");
 #   3. check the figures against the budget file of the configuration
 #      (scripts/ci/knstax_size_gate.py), printing the resolved knx.config first.
 #
@@ -13,7 +13,7 @@
 #
 #   profile       core           budget file                       heap run
 #   tp1-small     cortex-m3      budgets/tp1-small-m3.json         QEMU mps2-an385
-#   tp1-standard  cortex-m4      budgets/tp1-standard-m4.json      no
+#   tp1-standard  cortex-m4      budgets/tp1-standard-m4.json      QEMU mps2-an386
 #   tp1-small     cortex-m0plus  budgets/tp1-small-m0plus.json     no
 #
 # Needs arm-none-eabi-gcc, cmake, ninja and python3. The heap run also needs
@@ -61,15 +61,20 @@ cmake -S "$HERE" -B "$BUILD/gate" -G Ninja -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" $
     && cmake --build "$BUILD/gate" || { echo "error: the reference device did not link" >&2; exit 2; }
 
 HEAP_ARG=""
-if [ "$CPU" != "cortex-m3" ]; then
-    echo "note: heap not measured for $CPU (the emulator run is the Cortex-M3 configuration only)"
+case "$CPU" in
+    cortex-m3) QEMU_MACHINE=mps2-an385 ;;
+    cortex-m4) QEMU_MACHINE=mps2-an386 ;;
+    *) QEMU_MACHINE= ;;
+esac
+if [ -z "$QEMU_MACHINE" ]; then
+    echo "note: heap not measured for $CPU (the emulator run covers Cortex-M3 and Cortex-M4; QEMU has no Cortex-M0+ machine in the set used here)"
 elif command -v qemu-system-arm >/dev/null 2>&1; then
     # shellcheck disable=SC2086
     cmake -S "$HERE" -B "$BUILD/gate_qemu" -G Ninja -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" $CONFIGURE_ARGS \
           -DKNX_SIZE_GATE_SEMIHOST=ON >/dev/null \
         && cmake --build "$BUILD/gate_qemu" >/dev/null \
         || { echo "error: the emulator variant did not link" >&2; exit 2; }
-    RUN=$(timeout 60 qemu-system-arm -M mps2-an385 -cpu cortex-m3 -nographic \
+    RUN=$(timeout 60 qemu-system-arm -M "$QEMU_MACHINE" -cpu "$CPU" -nographic \
           -semihosting-config enable=on,target=native -kernel "$BUILD/gate_qemu/size_gate.elf" 2>&1 | tr -d '\r')
     echo "$RUN"
     HEAP=$(echo "$RUN" | sed -n 's/^heap_high_water=\([0-9][0-9]*\).*/\1/p')
