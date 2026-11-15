@@ -176,6 +176,10 @@ TpUartMediumBackend::~TpUartMediumBackend()
 [[gnu::always_inline]] inline void TpUartMediumBackend::finishFrame()
 {
     _rxPhase.store(RxPhase::Idle, std::memory_order_relaxed);
+    if (_rxEcho) {
+        _echoesDropped.increment();
+        return;
+    }
     if (_rxBad) {
         _octetErrorFrames.increment();
         return;
@@ -213,6 +217,7 @@ TpUartMediumBackend::~TpUartMediumBackend()
         _rxExpected = 0u;
         _rxXor = octet;
         _rxBad = false;
+        _rxEcho = false;
         _rxSlots[_rxTail.load(std::memory_order_relaxed)].data[0] = octet;
         _rxPhase.store(RxPhase::InFrame, std::memory_order_relaxed);
         return;
@@ -269,10 +274,21 @@ TpUartMediumBackend::~TpUartMediumBackend()
     if (_rxCount == (standard ? STANDARD_LENGTH_COUNT : EXTENDED_LENGTH_COUNT)) {
         _rxExpected = standard ? static_cast<uint16_t>((octet & STANDARD_LENGTH_MASK) + STANDARD_OVERHEAD)
                                : static_cast<uint16_t>(octet + EXTENDED_OVERHEAD);
-        const size_t destination = standard ? 3u : 4u;
-        const uint8_t addressType = standard ? octet : slot.data[1];
-        decideAck(static_cast<uint16_t>((slot.data[destination] << 8) | slot.data[destination + 1u]),
-                  (addressType & ADDRESS_TYPE_GROUP) != 0u);
+        // The TP-UART2 passes our own frame back while it is on the bus
+        // (seen on the H8i8o, 15 November 2026). A frame from our own address
+        // while one of ours is with the chip is that echo: it is neither
+        // acknowledged (the chip would acknowledge its own frame and confirm
+        // positively whoever listens) nor delivered.
+        const size_t source = standard ? 1u : 2u;
+        _rxEcho = _txOutstanding.load(std::memory_order_acquire) != 0u &&
+                  static_cast<uint16_t>((slot.data[source] << 8) | slot.data[source + 1u]) ==
+                      _ownAddress.load(std::memory_order_relaxed);
+        if (!_rxEcho) {
+            const size_t destination = source + 2u;
+            const uint8_t addressType = standard ? octet : slot.data[1];
+            decideAck(static_cast<uint16_t>((slot.data[destination] << 8) | slot.data[destination + 1u]),
+                      (addressType & ADDRESS_TYPE_GROUP) != 0u);
+        }
     }
 
     if (_rxExpected != 0u && _rxCount >= _rxExpected) {
@@ -302,7 +318,7 @@ util::Result<void> TpUartMediumBackend::init(const Tp1MediumConfig& config)
     _busMonitor = config.busMonitorMode;
     _busMonitorIsr.store(_busMonitor ? 1u : 0u, std::memory_order_relaxed);
     resetRxState();
-    _txPhase = TxPhase::None;
+    setTxPhase(TxPhase::None);
     _error = false;
     _addressPending = false;
 
@@ -334,7 +350,7 @@ void TpUartMediumBackend::close()
     }
     knx_uart_hal_close(&_hal);
     _initialized = false;
-    _txPhase = TxPhase::None;
+    setTxPhase(TxPhase::None);
     resetRxState();
 }
 
@@ -452,7 +468,7 @@ util::Result<size_t> TpUartMediumBackend::sendFrame(std::span<const uint8_t> fra
     _txLength = frame.size();
     _txPosition = 0u;
     _txStartMs = util::nowMs(&_timing);
-    _txPhase = TxPhase::Feeding;
+    setTxPhase(TxPhase::Feeding);
     // A confirmation the chip sent before this frame is not its outcome.
     _confirmsSeen = _confirmCount.load(std::memory_order_acquire);
     pumpTx();
@@ -463,6 +479,14 @@ size_t TpUartMediumBackend::txQueued() const
 {
     const size_t free = knx_uart_hal_tx_free(&_hal);
     return free >= _txCapacity ? 0u : _txCapacity - free;
+}
+
+void TpUartMediumBackend::setTxPhase(TxPhase phase)
+{
+    // Set before the first octet goes to the chip, cleared only once the
+    // outcome is in: every echo (repetitions included) arrives in between.
+    _txPhase = phase;
+    _txOutstanding.store(phase != TxPhase::None ? 1u : 0u, std::memory_order_release);
 }
 
 void TpUartMediumBackend::pumpTx()
@@ -485,7 +509,7 @@ void TpUartMediumBackend::pumpTx()
         ++_txPosition;
     }
     if (_txPhase == TxPhase::Feeding && _txPosition == _txLength) {
-        _txPhase = TxPhase::AwaitConfirm;
+        setTxPhase(TxPhase::AwaitConfirm);
     }
 }
 
@@ -525,7 +549,7 @@ void TpUartMediumBackend::handleIndications()
         _confirmsSeen = confirms;
         const bool positive = _confirmPositive.load(std::memory_order_relaxed) != 0u;
         if (_txPhase == TxPhase::AwaitConfirm) {
-            _txPhase = TxPhase::None;
+            setTxPhase(TxPhase::None);
             // The chip has made its repetitions; a negative confirmation does
             // not say whether the peer answered NACK, BUSY or nothing.
             if (positive) {
@@ -547,7 +571,7 @@ void TpUartMediumBackend::handleIndications()
         _resetsSeen = resets;
         ++_chipResets;
         if (_txPhase != TxPhase::None) {
-            _txPhase = TxPhase::None;
+            setTxPhase(TxPhase::None);
             ++_confirmTimeouts;
             emitTxOutcome(Tp1RxEventType::TxAckDeadlineMiss, Tp1AckClass::None);
         }
@@ -574,7 +598,7 @@ void TpUartMediumBackend::handleTxTimeout()
     if (static_cast<uint32_t>(util::nowMs(&_timing) - _txStartMs) < _config.confirmTimeoutMs) {
         return;
     }
-    _txPhase = TxPhase::None;
+    setTxPhase(TxPhase::None);
     ++_confirmTimeouts;
     emitTxOutcome(Tp1RxEventType::TxAckDeadlineMiss, Tp1AckClass::None);
 
@@ -772,6 +796,7 @@ TpUartStatistics TpUartMediumBackend::statistics() const
     stats.acksSent = _acksSent.read();
     stats.busySent = _busySent.read();
     stats.ackDecisionsDeferred = _ackDecisionsDeferred.read();
+    stats.echoesDropped = _echoesDropped.read();
     stats.ackWriteFailures = _ackWriteFailures.read();
     stats.confirmsPositive = _confirmsPositive;
     stats.confirmsNegative = _confirmsNegative;

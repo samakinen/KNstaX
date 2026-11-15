@@ -176,8 +176,12 @@ enters Transmitting.
   `TxAckResponse`.
 - **Timeout.** No confirmation within 1 s is reported as a deadline miss. The backend then runs
   the reset sequence, because the chip is assumed lost.
-- **Echo.** The TP-UART2 does not echo our own frame as an indication. Busmon mode is the
-  exception.
+- **Echo.** ~~The TP-UART2 does not echo our own frame.~~ It does: on the H8i8o the chip passed
+  our group write back, octet by octet, while it was on the bus, before `L_Data.con`. While a
+  frame of ours is with the chip, the receive interrupt treats a frame from our own address as
+  that echo: it writes no `U_AckInformation` for it (the chip would acknowledge its own frame and
+  the confirmation would be positive whoever listens) and does not deliver it
+  (`TpUartStatistics::echoesDropped`).
 
 ### 3.6 Lifecycle and link state
 
@@ -278,6 +282,14 @@ passive, quiet bus):
   three octets (about 4 ms) on the bus: room for the backend's acknowledge path (at most
   `txQueueLimitOctets` = 4 queued, about 2.3 ms). The chip's actual deadline is still item 2.
 - Repeated frames come with CTRL bit 5 cleared, 15.9 ms after the previous copy started.
+- First transmission (`U_SetAddress` 1.1.4, then one `A_GroupValue_Write` to 31/7/250): the
+  chip passed the frame back as it went out (see **Echo**, §3.5), and confirmed positively
+  2.7 ms after the frame end, the acknowledge window. Another device on this bus acknowledges
+  every group frame, so the chip's own repetitions and a negative confirmation are still to be
+  seen (with an individually addressed frame to an absent device).
+- Right after `U_SetAddress` (`F1`) the chip sent an unrequested `U_State.ind` `47` (receive
+  error flag). Whether the address took effect is still to be checked: frames to 1.1.4 must be
+  acknowledged by the chip.
 
 **Size (tp1-small, Cortex-M3; the gate's measured image now carries the backend over a stub
 UART):**

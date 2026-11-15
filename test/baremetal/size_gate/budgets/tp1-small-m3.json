@@ -10,7 +10,7 @@
     "name": "H8i8o, GD32F103CB; reservations from the H8i8o 01-system-design.md section 4.2",
     "ram_total": 20480,
     "flash_total": 131072,
-    "ram_reserved": {"stack": 2560, "TP-UART backend": 368, "application": 1024, "margin": 2048},
+    "ram_reserved": {"stack": 2560, "TP-UART backend": 376, "application": 1024, "margin": 2048},
     "ram_reserved_note": "TP-UART backend: sizeof(TpUartMediumBackend), a heap object the emulator run does not include (it prints tpuart_backend_bytes); its receive path in RAM is in the KNstaX figure. Margin lowered from 2560 by the owner, 15 Nov 2026, to be rechecked with the whole application image.",
     "flash_reserved": {"application": 12288, "BSP": 4096, "persistence": 8192}
   },

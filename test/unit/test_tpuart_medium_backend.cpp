@@ -59,6 +59,7 @@ public:
     }
 
     bool responsive{true};
+    bool echo{true};  // pass our own frames back, as the real chip does
     Confirm confirm{Confirm::Positive};
     uint8_t stateValue{0x07u};  // U_State.ind, no warning bits
 
@@ -99,6 +100,14 @@ private:
             if (_frameEnds) {
                 _frameEnds = false;
                 frames.push_back(_building);
+                if (echo) {
+                    // The TP-UART2 passes the frame back while it is on the bus
+                    // (seen on the H8i8o), an octet every 1.35 ms.
+                    for (const uint8_t octet : _building) {
+                        _uart.advanceUs(1354u);
+                        (void)_uart.deliverRx(octet);
+                    }
+                }
                 _building.clear();
                 if (confirm == Confirm::Positive) {
                     (void)_uart.deliverRx(0x8Bu);
@@ -484,6 +493,34 @@ void test_confirmation_without_a_frame_is_counted_and_ignored(void)
     f.serviceRound();
     TEST_ASSERT_EQUAL_UINT32(0u, f.countEvents(Tp1RxEventType::TxAckResponse));
     TEST_ASSERT_EQUAL_UINT32(1u, f.backend->statistics().unexpectedConfirms);
+}
+
+void test_own_frame_echoed_by_the_chip_is_neither_acknowledged_nor_delivered(void)
+{
+    Fixture f;
+    TEST_ASSERT_TRUE(f.init().isOk());
+    f.ackGroups({GROUP_IN_TABLE});
+    TEST_ASSERT_TRUE(f.backend->sendFrame(encode(groupWrite(OWN_ADDRESS, GROUP_IN_TABLE, 1))).isOk());
+    for (int i = 0; i < 30 && f.countEvents(Tp1RxEventType::TxAckResponse) == 0u; ++i) {
+        f.serviceRound();
+    }
+    TEST_ASSERT_EQUAL_UINT32(1u, f.countEvents(Tp1RxEventType::TxAckResponse));
+    TEST_ASSERT_EQUAL_UINT32(0u, f.chip.acks.size());  // we did not acknowledge our own frame
+    TEST_ASSERT_EQUAL_UINT32(0u, f.telegrams.size());
+    TEST_ASSERT_EQUAL_UINT32(1u, f.backend->statistics().echoesDropped);
+}
+
+void test_frame_from_own_address_with_nothing_outstanding_is_not_an_echo(void)
+{
+    Fixture f;
+    TEST_ASSERT_TRUE(f.init().isOk());
+    f.ackGroups({GROUP_IN_TABLE});
+    // Another device with our address (a misconfiguration): received like any frame.
+    f.deliver(encode(groupWrite(OWN_ADDRESS, GROUP_IN_TABLE, 1)));
+    f.serviceRound();
+    TEST_ASSERT_EQUAL_UINT32(1u, f.telegrams.size());
+    TEST_ASSERT_EQUAL_UINT32(1u, f.chip.acks.size());
+    TEST_ASSERT_EQUAL_UINT32(0u, f.backend->statistics().echoesDropped);
 }
 
 // --- Receive -------------------------------------------------------------------
@@ -900,6 +937,8 @@ int main(void)
     RUN_TEST(test_send_is_refused_while_a_frame_is_outstanding_or_malformed);
     RUN_TEST(test_missing_confirmation_is_a_deadline_miss_and_resets_the_chip);
     RUN_TEST(test_confirmation_without_a_frame_is_counted_and_ignored);
+    RUN_TEST(test_own_frame_echoed_by_the_chip_is_neither_acknowledged_nor_delivered);
+    RUN_TEST(test_frame_from_own_address_with_nothing_outstanding_is_not_an_echo);
     RUN_TEST(test_received_frame_is_reported_whole);
     RUN_TEST(test_frame_with_bad_checksum_or_octet_error_is_dropped);
     RUN_TEST(test_gap_of_more_than_2ms_discards_a_partial_frame);

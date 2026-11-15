@@ -100,6 +100,7 @@ struct TpUartStatistics {
     uint32_t acksSent{0};             ///< U_AckInformation, addressed
     uint32_t busySent{0};             ///< U_AckInformation, addressed + busy
     uint32_t ackDecisionsDeferred{0}; ///< no acknowledge: the table was being rewritten
+    uint32_t echoesDropped{0};        ///< our own frames the chip passed back while sending them
     uint32_t ackWriteFailures{0};     ///< the UART refused the acknowledge octet
     uint32_t confirmsPositive{0};
     uint32_t confirmsNegative{0};
@@ -253,6 +254,7 @@ private:
     void drainRx();
     void handleIndications();
     void pumpTx();
+    void setTxPhase(TxPhase phase);
     void handleTxTimeout();
     void pollState();
     void updateLinkState();
@@ -307,6 +309,7 @@ private:
     uint16_t _rxExpected{0};
     uint8_t _rxXor{0};
     bool _rxBad{false};
+    bool _rxEcho{false};  ///< the frame being assembled is our own, echoed by the chip
     uint32_t _rxLastUs{0};
 
     // --- Interrupt to main ----------------------------------------------------
@@ -325,6 +328,7 @@ private:
     IsrCounter _acksSent;
     IsrCounter _busySent;
     IsrCounter _ackDecisionsDeferred;
+    IsrCounter _echoesDropped;
     IsrCounter _ackWriteFailures;
 
     // --- Main to interrupt: the acknowledge inputs ---------------------------
@@ -337,6 +341,8 @@ private:
     std::atomic<uint16_t> _ownAddress{0};
     std::atomic<uint8_t> _localBusy{0};
     std::atomic<uint8_t> _busMonitorIsr{0};
+    /// Non-zero while a frame of ours is with the chip (fed, not yet confirmed).
+    std::atomic<uint8_t> _txOutstanding{0};
 #if KNX_FEATURE_COUPLER
     std::atomic<const GroupAckFilter*> _groupAckFilter{nullptr};
 #endif
