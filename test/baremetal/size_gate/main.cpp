@@ -22,6 +22,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <type_traits>
+#include <utility>
 
 #if defined(KNX_SIZE_GATE_SEMIHOST)
 extern "C" std::size_t g_heap_high_water;  // syscalls.c: peak of the heap break
@@ -100,6 +102,70 @@ void writeNumber(const char* label, std::size_t value) {
 }
 #endif
 
+// ── Bindings ────────────────────────────────────────────────────────────────
+//
+// A product binds a handler on every port it uses, so the gate does too: the
+// binding storage and the dispatch code are part of what a device pays. Each
+// handler captures a small index, as a real product's per-channel handlers do
+// (a channel number, a pointer to a channel object), and each port gets its own
+// callable type. The handlers do nothing but observe the value; what a product
+// does with it is not the KNstaX share.
+
+volatile uint32_t g_observed = 0;
+volatile bool g_state[60] = {};
+
+template <typename ValueT>
+void observe(std::size_t index, const ValueT& value) {
+    asm volatile("" : : "r"(&value), "r"(index) : "memory");
+    g_observed = g_observed + 1u;
+}
+
+using Bindings = knx::product::CommissionedBindingsBuilder<
+    std::remove_cvref_t<decltype(size_gate::kProduct)>, knx::product::kDefaultBindingCapacity>;
+
+template <std::size_t First, std::size_t... I>
+void bindCommands(Bindings& bindings, std::index_sequence<I...>) {
+    (bindings.template onCommand<static_cast<size_gate::Port>(First + I)>(
+         [index = First + I](auto value) { observe(index, value); }),
+     ...);
+}
+
+template <std::size_t First, std::size_t... I>
+void bindStateProviders(Bindings& bindings, std::index_sequence<I...>) {
+    (bindings.template provideState<static_cast<size_gate::Port>(First + I)>(
+         [index = First + I]() -> bool { return g_state[index]; }),
+     ...);
+}
+
+template <std::size_t First, std::size_t... I>
+void bindStateWrites(Bindings& bindings, std::index_sequence<I...>) {
+    (bindings.template onStateWrite<static_cast<size_gate::Port>(First + I)>(
+         [index = First + I](bool value) { g_state[index] = value; }),
+     ...);
+}
+
+// Ports 0-15 switch commands, 16-31 switch states, 32-39 switch state in/out,
+// 40-47 percent, 48-51 dimming, 52-55 scene control, 56-59 scene number.
+void bindAllPorts(Bindings& bindings) {
+    bindCommands<0>(bindings, std::make_index_sequence<16>{});
+    bindStateProviders<16>(bindings, std::make_index_sequence<16>{});
+    bindStateProviders<32>(bindings, std::make_index_sequence<8>{});
+    bindStateWrites<32>(bindings, std::make_index_sequence<8>{});
+    bindCommands<40>(bindings, std::make_index_sequence<20>{});
+}
+
+// One publish per datapoint type: the typed call sites a product has.
+template <typename AppT>
+void publishOnce(AppT& app) {
+    using size_gate::Port;
+    (void)app.template publish<Port::SwState1>(true);
+    (void)app.template publish<Port::SwIo1>(false);
+    (void)app.template publish<Port::ValueIn1>(static_cast<uint8_t>(50u));
+    (void)app.template publish<Port::DimIn1>(knx::application::Dpt3Value{});
+    (void)app.template publish<Port::SceneCtl1>(knx::application::Dpt18Value{});
+    (void)app.template publish<Port::SceneNum1>(knx::application::Dpt17Value{});
+}
+
 }  // namespace
 
 extern "C" void SysTick_Handler() { g_millis = g_millis + 1u; }
@@ -121,16 +187,19 @@ int main() {
     hooks.idle = &hookIdle;
     static knx::platform::CooperativePlatform platform(hooks);
 
+    auto bindings = knx::product::makeCommissionedBindings(size_gate::kProduct);
+    bindAllPorts(bindings);
     auto started = knx::product::startCommissionedProduct(
         platform,
         size_gate::kProduct,
-        knx::product::makeCommissionedBindings(size_gate::kProduct),
+        std::move(bindings),
         std::unique_ptr<knx::physical::Tp1MediumBackend>(new knx::physical::NullTp1MediumBackend()));
     if (started.isError()) {
         for (;;) {
         }
     }
     auto app = std::move(started.value());
+    publishOnce(*app);
 #if defined(KNX_SIZE_GATE_SEMIHOST)
     g_heapAfterStart = g_heap_high_water;
 #endif
