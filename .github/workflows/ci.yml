@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2025-2026 Sami Mäkinen
 #
-# Host build and test suite, the same suite under ASan/UBSan, the media gates
-# (including the configuration the Habinari knxip image ships), and the
-# KNXnet/IP interop harness. Everything here runs on a stock Ubuntu runner: no
+# Host build and test suite (also under the host-small and host-minimal
+# profiles), the same suite under ASan/UBSan, the media gates (including the
+# configuration the Habinari knxip image ships), the bare-metal size gate (one
+# reference device per profile and core), and the KNXnet/IP interop harness.
+# Everything here runs on a stock Ubuntu runner: no
 # ESP-IDF and no hardware. The ESP-IDF build of the stack is exercised by the
 # firmware job of the Habinari project, which builds every image that ships.
 
@@ -49,6 +51,126 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure -j"$(nproc)"
+
+  # The suite under the smaller host profiles, so that a feature or capacity
+  # gate cannot rot unseen. Tests that need a feature a profile leaves out are
+  # not registered; those that need full capacities carry the label
+  # needs-full-capacity and are excluded where the profile shrinks them.
+  host-profiles:
+    name: Host build and CTest (profile ${{ matrix.profile }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: host-small
+            ctest_args: -LE needs-full-capacity
+          - profile: host-minimal
+            ctest_args: -LE needs-full-capacity
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build libmbedtls-dev zlib1g-dev python3-xmlschema
+
+      - name: Configure
+        run: >
+          cmake -S . -B build_${{ matrix.profile }} -G Ninja -DCMAKE_BUILD_TYPE=Debug
+          -DBUILD_TESTS=ON -DKNX_HOST_PROFILE=${{ matrix.profile }}
+
+      - name: Build
+        run: cmake --build build_${{ matrix.profile }} -j"$(nproc)"
+
+      - name: Test
+        run: >
+          ctest --test-dir build_${{ matrix.profile }} --output-on-failure -j"$(nproc)"
+          ${{ matrix.ctest_args }}
+
+  # Bare-metal size gate, one reference device per profile and core
+  # (docs/design/small-target-profile.md section 7). Each run links the device
+  # with LTO, checks flash and static RAM against the ratcheting budget of
+  # test/baremetal/size_gate/budgets/<profile>-<core>.json and runs the forbid
+  # list; the Cortex-M3 device is also run under QEMU for the heap high-water
+  # mark. On a pull request the base is measured first, with the same gate, and
+  # the change of every figure is printed and put in the job summary.
+  size-gate:
+    name: Size gate (${{ matrix.profile }}, ${{ matrix.cpu }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: tp1-small-m3
+            profile: tp1-small
+            cpu: cortex-m3
+          - id: tp1-standard-m4
+            profile: tp1-standard
+            cpu: cortex-m4
+          - id: tp1-small-m0plus
+            profile: tp1-small
+            cpu: cortex-m0plus
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-arm-none-eabi libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib \
+            qemu-system-arm cmake ninja-build python3
+
+      # The base's figures come from the base's KNstaX tree measured with this
+      # revision's reference device, so the numbers are comparable. A base that
+      # does not build with it (an API change the device follows) gives no
+      # baseline and the step says so; it never fails the job, and the budget
+      # is not applied to it.
+      - name: Measure the base (pull requests)
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        run: |
+          git worktree add ../knstax_base "${{ github.event.pull_request.base.sha }}"
+          KNX_SIZE_GATE_KNSTAX_ROOT="$PWD/../knstax_base" \
+            sh test/baremetal/size_gate/run_gate.sh "$PWD/build_size_gate_base/${{ matrix.id }}" \
+              ${{ matrix.profile }} ${{ matrix.cpu }} || echo "base: gate exit status $? (the base's own budget does not matter here)"
+          test -f "build_size_gate_base/${{ matrix.id }}/gate_report.json"
+
+      - name: Size gate
+        run: |
+          baseline="$PWD/build_size_gate_base/${{ matrix.id }}/gate_report.json"
+          if [ -f "$baseline" ]; then export KNX_SIZE_GATE_BASELINE="$baseline"; fi
+          sh test/baremetal/size_gate/run_gate.sh "$PWD/build_size_gate/${{ matrix.id }}" \
+            ${{ matrix.profile }} ${{ matrix.cpu }}
+
+      - name: Job summary
+        if: always()
+        run: |
+          report="build_size_gate/${{ matrix.id }}/gate_report.txt"
+          if [ -f "$report" ]; then
+            {
+              echo "### Size gate: ${{ matrix.profile }} on ${{ matrix.cpu }}"
+              echo '```'
+              sed -n '/^Reference device/,$p' "$report"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload the gate report and map file
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: size-gate-${{ matrix.id }}
+          if-no-files-found: warn
+          path: |
+            build_size_gate/${{ matrix.id }}/gate_report.txt
+            build_size_gate/${{ matrix.id }}/gate_report.json
+            build_size_gate/${{ matrix.id }}/gate/size_gate.elf.map
+            build_size_gate/${{ matrix.id }}/gate/knx-config/knx.config
+            build_size_gate_base/${{ matrix.id }}/gate_report.json
 
   sanitizers:
     name: CTest under ASan and UBSan

@@ -265,15 +265,30 @@ CI job with one reference device per profile:
 |---|---|---|---|
 | `tp1-small` | `tp1-small` | Cortex-M3 (QEMU `mps2-an385`) | Flash and RAM budget, forbidden objects, heap high-water under QEMU |
 | `tp1-standard` | `tp1-standard` + Data Secure | Cortex-M4 | Flash and RAM budget |
-| `m0plus-small` | `tp1-small` | Cortex-M0+ | Builds and links (no hardware divide, no unaligned access) |
+| `m0plus-small` | `tp1-small` | Cortex-M0+ | Builds and links (no hardware divide, no unaligned access); flash and static RAM budget |
+
+The gate takes the profile and the core as parameters (`run_gate.sh <build-dir> [profile [cpu]]`,
+or `KNX_SIZE_GATE_PROFILE` and the toolchain's `KNX_ARM_CPU`) and reads the budget file
+`test/baremetal/size_gate/budgets/<profile>-<core>.json` (`tp1-small-m3`, `tp1-standard-m4`,
+`tp1-small-m0plus`). Only the Cortex-M3 device is run under QEMU; the others report "heap not
+measured" and their RAM figure is static data only. The CI job is `size-gate` in
+`.github/workflows/ci.yml`, one matrix entry per reference device.
 
 - **Size change per pull request.** Every change reports its flash and RAM delta per profile.
-  A change that grows `tp1-small` explains why in its description.
-- **Budgets ratchet.** The budget files hold the current figure plus a small margin, and the
-  margin shrinks as the work lands, until the §2 target is the budget.
+  A change that grows `tp1-small` explains why in its description. In CI the `size-gate` job
+  measures the base of the pull request first, with the same reference device (the head's gate
+  against the base's KNstaX tree), and prints the change of each figure; the job summary and the
+  `gate_report.json` artefact carry it.
+- **Budgets ratchet.** Each budget file holds, per figure, the enforced `budget` (the figure
+  when the file was last tightened, plus about 2 %, rounded up to 256 B) and the design `target`
+  (§2). The gate fails only on the budget and prints the distance to the target. A figure more
+  than the margin below its budget produces a note to lower the budget; it does not fail. The
+  budget moves towards the target as the work lands, until the two are equal.
 - **The heap figure includes traffic.** The emulator variant feeds recorded telegrams through a
   scripted backend, so the measured high-water mark covers receive and send, not only start-up.
-- **The resolved `knx.config` is printed** with every result.
+  (Not done yet: today's run is start-up plus 200 idle loop iterations; see the C4 status.)
+- **The resolved `knx.config` is printed** with every result (the `knx-config/knx.config` of the
+  gate's build tree).
 
 ## 8. STM32 as a first-class target
 
@@ -296,7 +311,7 @@ CI job with one reference device per profile:
 | C1 | Kconfig for standalone builds: vendored Kconfiglib, `autoconf.h`, `knx_configure()`, profiles, `config.hpp` without defaults | — | Host suite unchanged; `full` profile builds identical to today |
 | C2 | Capacities as options (§4.2), including `KNX_MAX_APDU_LENGTH`, with a full-capacity test per table | K7.5 | **Measure `tp1-small`** |
 | C3 | Feature gates (§4.1): coupler, Security Interface Object, GO diagnostics, optional management services, DPT families | K7.1–K7.3 | **Done: tp1-small flash 134995 to 99907 B, see C3 status** |
-| C4 | Size gate in CI, per profile, with ratcheting budgets | K7.7 | — |
+| C4 | Size gate in CI, per profile, with ratcheting budgets | K7.7 | **Done: see C4 status** |
 | S1 | Table-driven product runtime | — | **Measure: decision point** (§10) |
 | S2 | Compact group objects | K7.4 | Measure |
 | S3 | Interface object property storage | — | Measure |
@@ -510,7 +525,7 @@ suite's IP and ETS tests need them). A test that needs an absent feature is not 
 C3 takes 35088 B out of the KNstaX flash (the §9.1 upper bounds of 5.5, 3.2 and 8.5 KiB add up to 17 KiB,
 so the gated code carried more with it than those bounds said) and 4280 B out of the C and C++ runtime,
 which is now within its 8192 B budget. Flash is still 9795 B over the 90112 B budget. The heap and static
-RAM moved only by the objects that went; S2 and S3 own the rest. The forbid list (`size_budget.json`,
+RAM moved only by the objects that went; S2 and S3 own the rest. The forbid list (`budgets/tp1-small-m3.json`,
 checked against the ELF's symbols with `nm -C`) passes: no `FilterTable`, `TwoPortCoupler`,
 `RoutingTableControl`, `CouplerRouting`, `SecurityInterfaceObject`, group object diagnostics, DPT 9, 14,
 10, 16 or 232 codec, or `PropertyExtServices` in the image.
@@ -529,6 +544,53 @@ checked against the ELF's symbols with `nm -C`) passes: no `FilterTable`, `TwoPo
   and does not register 36 that need an absent feature (by the first one missing): 9 coupler, 9 Secure, 1 property-ext, 12 float, 5 other DPT
   families or the catalogue. Tests that need only part of a feature (a temperature port in
   a product test) are excluded whole; a port-level split would let them run.
+
+### C4 status
+
+Done, with the limits below. The CI workflow could not be run here (no GitHub Actions); every command
+in it was run locally in the `knstax-qemu` and `knstax-host` images, and the YAML was parsed.
+
+- **Gate structure.** `run_gate.sh <build-dir> [profile [cpu]]` builds the reference device for the
+  profile and core, runs it under QEMU only for Cortex-M3, prints the resolved `knx.config`, and runs
+  `knstax_size_gate.py` with the budget file `budgets/<profile>-<core>.json`. It writes
+  `gate_report.txt` and `gate_report.json` and ends with one summary line carrying profile and core.
+  Exit status: 0 within budget, 1 over, 2 the gate could not run. `size_budget.json` is gone.
+- **Budget format.** Per figure (`flash`, `ram`, `runtime_flash`): `budget` (enforced) and `target`
+  (design, never enforced). Budgets are the initial figure plus 2 %, rounded up to 256 B. A figure
+  more than the margin below its budget prints a note to lower it. A deliberately lowered budget
+  exits 1; the baseline option (`--baseline`, `KNX_SIZE_GATE_BASELINE`) prints the change against an
+  earlier `gate_report.json`.
+
+| Reference | Flash (budget; target) | Static RAM | Heap | Static + heap (budget; target) | Runtime flash (budget; target) |
+|---|---|---:|---:|---|---|
+| `tp1-small`, Cortex-M3 | 99907 B (102144; 90112) | 1379 B | 40980 B | 42359 B (43264; 10240) | 7551 B (7936; 8192) |
+| `tp1-standard`, Cortex-M4 | 118646 B (121088; 143360) | 1532 B | not measured | 1532 B static only (1792; 32768) | 16919 B (17408; none) |
+| `tp1-small`, Cortex-M0+ | 105522 B (107776; 90112) | 1379 B | not measured | 1379 B static only (1536; 10240) | 8394 B (8704; 8192) |
+
+- **`tp1-standard` has no Data Secure yet.** Its defconfig leaves `KNX_ENABLE_SECURITY` off until the
+  portable AES backend (K6) lands, so this reference device is the standard feature set without
+  Secure, and its 140 KiB flash target is not yet a statement about the final profile. Its RAM
+  budget covers static data only, so it says little until a heap run exists for it. The forbid list
+  of this device is the coupler's symbols only.
+- **Cortex-M0+ builds and links.** KNstaX needed no change. The gate's own start-up and board code
+  needed two things: `std::atomic` read-modify-write on ARMv6-M (no `LDREX`) becomes libatomic calls
+  (`__atomic_fetch_add_4`, `__atomic_compare_exchange_1`) that newlib does not provide, so
+  `syscalls.c` supplies interrupt-masking versions for `__ARM_ARCH_6M__`; a product for this core
+  must do the same, or KNstaX should stop using `std::atomic` read-modify-write on the data-link path
+  (`Tp1DataLinkLayer` counters and flags, reached from `Tp1MacPhysical::onTp1Event`). The system-call stubs
+  are now `used`, because under LTO the `tp1-standard` link otherwise lost `_isatty` and `_fstat`.
+  There is no Cortex-M0+ execution test: it is linked, not run.
+- **Pull-request deltas.** Implemented in the job (base measured first, `continue-on-error`). If the
+  base does not build with the head's reference device, the step reports no baseline and the job
+  carries on; to compare by hand, download the `gate_report.json` artefacts of two runs and pass
+  one to the gate with `--baseline`.
+- **Host profiles in CI.** `host-small` and `host-minimal` run in a `host-profiles` job
+  (`-DKNX_HOST_PROFILE=...`, `ctest -LE needs-full-capacity`), both configured with Debug and
+  `BUILD_TESTS=ON` as the main host job is. Both were run here with exactly those commands and pass (exit 0, about 41 s each).
+- **Not done.** The heap figure does not yet include traffic (§7): the emulator run is start-up plus
+  200 idle loops. No heap run for `tp1-standard` or the Cortex-M0+ (QEMU has no `mps2-an385`
+  equivalent in the set used here; `mps2-an386` is Cortex-M4 and could serve `tp1-standard`).
+
 ## 10. Projection and decision points
 
 Estimated `tp1-small` figures for the 60-object reference device after each stage. Only the

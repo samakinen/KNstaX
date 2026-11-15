@@ -2,7 +2,7 @@
  * H8i8o's GD32F103CB (128 KiB flash, 20 KiB RAM): an over-budget image must
  * still link, so that scripts/ci/knstax_size_budget.py can report by how much
  * it is over instead of the linker refusing with an opaque overflow. The
- * budgets themselves live in size_budget.json. */
+ * budgets themselves live in budgets/*.json. */
 MEMORY
 {
     FLASH (rx)  : ORIGIN = DEFINED(__flash_origin) ? __flash_origin : 0x08000000, LENGTH = 512K

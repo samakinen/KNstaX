@@ -1,0 +1,14 @@
+{
+  "profile": "tp1-standard",
+  "cpu": "cortex-m4",
+  "margin_percent": 2,
+  "flash": {"budget": 121088, "target": 143360},
+  "ram": {"budget": 1792, "target": 32768, "includes_heap": false},
+  "runtime_flash": {"budget": 17408, "target": null},
+  "forbid": [
+    "FilterTable",
+    "TwoPortCoupler",
+    "RoutingTableControl",
+    "CouplerRouting"
+  ]
+}

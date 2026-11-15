@@ -417,9 +417,9 @@ The probe of 15 November (`tools/size-probe` in h8i8o) was optimistic for two re
 
 ### 9.2 Size gate tooling
 
-- `test/baremetal/size_gate/`: the reference device, memory map, start-up code and `size_budget.json`. The memory map is larger than the real part on purpose, so that an over-budget image still links and the script can say by how much.
-- `scripts/ci/knstax_size_gate.py`: reads the linker map and splits the KNstaX share from the C/C++ runtime. libc and libstdc++ members stay attributable under LTO; KNstaX does not, so its share includes a few lines of glue. It checks flash and RAM against the budget. It is a new script because `knstax_size_budget.py` reads ESP-IDF maps and counts one archive; the ESP-IDF gate is unchanged.
-- `run_gate.sh`: builds the LTO image, runs a semihosting variant under QEMU for the heap high-water mark (with an allocation-size profile), and runs the script. It exits 1 when over budget. It is not wired into CI yet.
+- `test/baremetal/size_gate/`: the reference device, memory map, start-up code and one budget file per reference configuration (`budgets/<profile>-<core>.json`: `tp1-small` on Cortex-M3, `tp1-standard` on Cortex-M4, `tp1-small` on Cortex-M0+). Each figure has an enforced `budget` and a design `target`. The memory map is larger than the real part on purpose, so that an over-budget image still links and the script can say by how much.
+- `scripts/ci/knstax_size_gate.py`: reads the linker map and splits the KNstaX share from the C/C++ runtime. libc and libstdc++ members stay attributable under LTO; KNstaX does not, so its share includes a few lines of glue. It checks flash and RAM against the budget, prints the distance to the target and a note when a figure is well below its budget (the ratchet), and can print the change against an earlier run (`--baseline`). It is a new script because `knstax_size_budget.py` reads ESP-IDF maps and counts one archive; the ESP-IDF gate is unchanged.
+- `run_gate.sh <build-dir> [profile [cpu]]`: builds the LTO image for the profile and core, runs a semihosting variant under QEMU for the heap high-water mark (Cortex-M3 only; with an allocation-size profile), prints the resolved `knx.config`, and runs the script against the matching budget file. It exits 1 when over budget. CI runs it as the `size-gate` job, one matrix entry per reference configuration (small-target-profile.md §7, C4 status).
 
 ## 10. K8: `knx/blocks`
 

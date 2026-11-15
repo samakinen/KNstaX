@@ -7,8 +7,8 @@
  *
  * The mix mirrors a small I/O module: DPT 1 (switch, state), DPT 5 (value),
  * DPT 3 (dimming), DPT 17 and 18 (scenes), and no floating-point type. Edit
- * the counts and the gate measures a different device; the budget in
- * `size_budget.json` then needs the same review.
+ * the counts and the gate measures a different device; the budget files in
+ * `budgets/` then need the same review.
  */
 
 #pragma once

@@ -1,17 +1,23 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2025-2026 Sami Mäkinen
 
-# Bare-metal size gate: links the KNstaX share of a TP1 end device for
-# Cortex-M3 and leaves an ELF for scripts/ci/knstax_size_budget.py.
+# Bare-metal size gate: links the KNstaX share of a TP1 end device and leaves
+# an ELF for scripts/ci/knstax_size_gate.py. One reference device per profile
+# and core (small-target-profile.md section 7):
 #
 #   cmake -S test/baremetal/size_gate -B build/size_gate -G Ninja \
 #         -DCMAKE_TOOLCHAIN_FILE=<KNstaX>/cmake/toolchains/arm-none-eabi.cmake \
-#         -DCMAKE_BUILD_TYPE=MinSizeRel
+#         -DCMAKE_BUILD_TYPE=MinSizeRel \
+#         [-DKNX_SIZE_GATE_PROFILE=tp1-standard] [-DKNX_ARM_CPU=cortex-m4]
 #   cmake --build build/size_gate
 #
+# The profile defaults to tp1-small; the core is the toolchain file's
+# KNX_ARM_CPU (cortex-m3 unless set). run_gate.sh does all of this and picks
+# the budget file.
+#
 # This is its own project (not part of the host build) because it needs the
-# cross toolchain. KNstaX is configured with the tp1-small profile (baremetal, TP1
-# only, log level 0 = no log strings) and added as a subdirectory.
+# cross toolchain. KNstaX is configured with the profile (baremetal, TP1 only,
+# log level 0 = no log strings) and added as a subdirectory.
 
 cmake_minimum_required(VERSION 3.21)
 project(KNstaXSizeGate LANGUAGES C CXX)
@@ -23,9 +29,19 @@ endif()
 # Release-grade flags: this is the configuration the budget is defined for.
 option(KNX_SIZE_GATE_LTO "Link with -flto, as a product would" ON)
 
-get_filename_component(KNX_ROOT ${CMAKE_CURRENT_LIST_DIR}/../../.. ABSOLUTE)
+# The KNstaX tree to measure: this one unless told otherwise. CI points it at
+# a checkout of the base of a pull request to get the "before" figures with
+# the same reference device.
+set(KNX_SIZE_GATE_KNSTAX_ROOT "" CACHE PATH "KNstaX source tree to measure (default: this one)")
+if(KNX_SIZE_GATE_KNSTAX_ROOT)
+    get_filename_component(KNX_ROOT ${KNX_SIZE_GATE_KNSTAX_ROOT} ABSOLUTE)
+else()
+    get_filename_component(KNX_ROOT ${CMAKE_CURRENT_LIST_DIR}/../../.. ABSOLUTE)
+endif()
 include(${KNX_ROOT}/cmake/knx_config.cmake)
-knx_configure(PROFILE tp1-small)
+set(KNX_SIZE_GATE_PROFILE "tp1-small" CACHE STRING "KNstaX profile of the reference device")
+knx_configure(PROFILE ${KNX_SIZE_GATE_PROFILE})
+message(STATUS "size gate: profile ${KNX_SIZE_GATE_PROFILE}, cpu ${KNX_ARM_CPU}")
 add_subdirectory(${KNX_ROOT} knstax EXCLUDE_FROM_ALL)
 
 # Emulator variant: -DKNX_SIZE_GATE_SEMIHOST=ON links for an address map with code

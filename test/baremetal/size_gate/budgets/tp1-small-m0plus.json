@@ -1,7 +1,10 @@
 {
-  "flash_bytes": 90112,
-  "ram_bytes": 10240,
-  "runtime_flash_bytes": 8192,
+  "profile": "tp1-small",
+  "cpu": "cortex-m0plus",
+  "margin_percent": 2,
+  "flash": {"budget": 107776, "target": 90112},
+  "ram": {"budget": 1536, "target": 10240, "includes_heap": false},
+  "runtime_flash": {"budget": 8704, "target": 8192},
   "forbid": [
     "FilterTable",
     "TwoPortCoupler",

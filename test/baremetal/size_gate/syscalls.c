@@ -108,12 +108,42 @@ void* _sbrk(ptrdiff_t increment) {
 /* Needed by __cxa_atexit registrations; there is no dynamic unloading here. */
 void* __dso_handle = 0;
 
-int _close(int fd) { (void)fd; return -1; }
-int _fstat(int fd, struct stat* st) { (void)fd; st->st_mode = S_IFCHR; return 0; }
-int _isatty(int fd) { (void)fd; return 1; }
-off_t _lseek(int fd, off_t offset, int whence) { (void)fd; (void)offset; (void)whence; return 0; }
-int _read(int fd, char* buf, int len) { (void)fd; (void)buf; (void)len; return 0; }
-int _write(int fd, const char* buf, int len) { (void)fd; (void)buf; return len; }
-void _exit(int status) { (void)status; for (;;) {} }
-int _kill(int pid, int sig) { (void)pid; (void)sig; errno = EINVAL; return -1; }
-int _getpid(void) { return 1; }
+/* `used`: with LTO a function referenced only from newlib's (non-LTO) objects
+ * is otherwise dropped, and the link fails on _isatty or _fstat once the
+ * configuration pulls in stdio (tp1-standard). */
+#define KNX_GATE_KEEP __attribute__((used))
+KNX_GATE_KEEP int _close(int fd) { (void)fd; return -1; }
+KNX_GATE_KEEP int _fstat(int fd, struct stat* st) { (void)fd; st->st_mode = S_IFCHR; return 0; }
+KNX_GATE_KEEP int _isatty(int fd) { (void)fd; return 1; }
+KNX_GATE_KEEP off_t _lseek(int fd, off_t offset, int whence) { (void)fd; (void)offset; (void)whence; return 0; }
+KNX_GATE_KEEP int _read(int fd, char* buf, int len) { (void)fd; (void)buf; (void)len; return 0; }
+KNX_GATE_KEEP int _write(int fd, const char* buf, int len) { (void)fd; (void)buf; return len; }
+KNX_GATE_KEEP void _exit(int status) { (void)status; for (;;) {} }
+KNX_GATE_KEEP int _kill(int pid, int sig) { (void)pid; (void)sig; errno = EINVAL; return -1; }
+KNX_GATE_KEEP int _getpid(void) { return 1; }
+
+#if defined(__ARM_ARCH_6M__)
+/* Cortex-M0 and M0+ (ARMv6-M) have no LDREX/STREX, so GCC turns every
+ * std::atomic read-modify-write into a libatomic call that newlib does not
+ * provide. KNstaX uses a few (statistics counters and flags of the data link
+ * layer). A product for these cores supplies the same: on a single core,
+ * masking interrupts around the access is atomic. This is gate code only. */
+#define KNX_GATE_ATOMIC_BEGIN \
+    uint32_t primask; \
+    __asm__ volatile("mrs %0, primask\n cpsid i" : "=r"(primask) : : "memory")
+#define KNX_GATE_ATOMIC_END __asm__ volatile("msr primask, %0" : : "r"(primask) : "memory")
+
+#define KNX_GATE_ATOMIC_OPS(N, T) \
+    T __atomic_fetch_add_##N(volatile void* p, T v, int m) { (void)m; KNX_GATE_ATOMIC_BEGIN; T o = *(volatile T*)p; *(volatile T*)p = (T)(o + v); KNX_GATE_ATOMIC_END; return o; } \
+    T __atomic_fetch_sub_##N(volatile void* p, T v, int m) { (void)m; KNX_GATE_ATOMIC_BEGIN; T o = *(volatile T*)p; *(volatile T*)p = (T)(o - v); KNX_GATE_ATOMIC_END; return o; } \
+    T __atomic_fetch_and_##N(volatile void* p, T v, int m) { (void)m; KNX_GATE_ATOMIC_BEGIN; T o = *(volatile T*)p; *(volatile T*)p = (T)(o & v); KNX_GATE_ATOMIC_END; return o; } \
+    T __atomic_fetch_or_##N(volatile void* p, T v, int m) { (void)m; KNX_GATE_ATOMIC_BEGIN; T o = *(volatile T*)p; *(volatile T*)p = (T)(o | v); KNX_GATE_ATOMIC_END; return o; } \
+    T __atomic_exchange_##N(volatile void* p, T v, int m) { (void)m; KNX_GATE_ATOMIC_BEGIN; T o = *(volatile T*)p; *(volatile T*)p = v; KNX_GATE_ATOMIC_END; return o; } \
+    _Bool __atomic_compare_exchange_##N(volatile void* p, void* e, T d, _Bool w, int s, int f) { \
+        (void)w; (void)s; (void)f; KNX_GATE_ATOMIC_BEGIN; T o = *(volatile T*)p; _Bool ok = o == *(T*)e; \
+        if (ok) { *(volatile T*)p = d; } else { *(T*)e = o; } KNX_GATE_ATOMIC_END; return ok; }
+
+KNX_GATE_ATOMIC_OPS(1, uint8_t)
+KNX_GATE_ATOMIC_OPS(2, uint16_t)
+KNX_GATE_ATOMIC_OPS(4, uint32_t)
+#endif

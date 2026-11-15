@@ -2,34 +2,70 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2025-2026 Sami Mäkinen
 #
-# Bare-metal size gate, start to finish:
+# Bare-metal size gate for one reference device, start to finish:
 #   1. link the reference device with LTO and read flash and static RAM from the map;
-#   2. link the emulator variant, run it under QEMU and read the heap high-water mark;
-#   3. check both against size_budget.json (scripts/ci/knstax_size_gate.py).
+#   2. on the Cortex-M3 configuration, link the emulator variant, run it under QEMU
+#      and read the heap high-water mark (the other cores report "heap not measured");
+#   3. check the figures against the budget file of the configuration
+#      (scripts/ci/knstax_size_gate.py), printing the resolved knx.config first.
 #
-# Needs arm-none-eabi-gcc, cmake, ninja and python3. Step 2 also needs
+# The reference devices (small-target-profile.md section 7) and their budgets:
+#
+#   profile       core           budget file                       heap run
+#   tp1-small     cortex-m3      budgets/tp1-small-m3.json         QEMU mps2-an385
+#   tp1-standard  cortex-m4      budgets/tp1-standard-m4.json      no
+#   tp1-small     cortex-m0plus  budgets/tp1-small-m0plus.json     no
+#
+# Needs arm-none-eabi-gcc, cmake, ninja and python3. The heap run also needs
 # qemu-system-arm; without it the gate checks flash and static RAM only and
 # says so. Exit status: 0 within budget, 1 over budget, 2 the gate could not run.
 #
-# Usage: run_gate.sh <build-dir>
+# Usage: run_gate.sh <build-dir> [profile [cpu]]
+#   profile   default $KNX_SIZE_GATE_PROFILE, else tp1-small
+#   cpu       default $KNX_ARM_CPU, else cortex-m3 (the toolchain file's default)
+#   $KNX_SIZE_GATE_BUDGET       a budget file to use instead of the one named from profile and cpu
+#   $KNX_SIZE_GATE_KNSTAX_ROOT  measure another KNstaX tree (CI: the base of a pull request)
+#   $KNX_SIZE_GATE_BASELINE     the gate_report.json of an earlier run; the change is printed
 #
-# Inside the h8i8o toolchain image (add qemu-system-arm to it for the heap step):
+# Writes <build-dir>/gate_report.txt (what is printed) and <build-dir>/gate_report.json,
+# and leaves the map and ELF in <build-dir>/gate/.
+#
+# Inside the toolchain image (needs qemu-system-arm for the heap step):
 #   MSYS_NO_PATHCONV=1 docker run --rm -v <KNstaX>:/src -v <out>:/out <image> \
-#       sh /src/test/baremetal/size_gate/run_gate.sh /out
+#       sh /src/test/baremetal/size_gate/run_gate.sh /out tp1-standard cortex-m4
 
 set -u
 
-BUILD=${1:?usage: run_gate.sh <build-dir>}
+BUILD=${1:?usage: run_gate.sh <build-dir> [profile [cpu]]}
+PROFILE=${2:-${KNX_SIZE_GATE_PROFILE:-tp1-small}}
+CPU=${3:-${KNX_ARM_CPU:-cortex-m3}}
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../../.." && pwd)
 TOOLCHAIN="$ROOT/cmake/toolchains/arm-none-eabi.cmake"
 
-cmake -S "$HERE" -B "$BUILD/gate" -G Ninja -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" >/dev/null \
+case "$CPU" in
+    cortex-m3) CORE=m3 ;;
+    cortex-m4) CORE=m4 ;;
+    cortex-m0plus) CORE=m0plus ;;
+    *) CORE=$CPU ;;
+esac
+BUDGET=${KNX_SIZE_GATE_BUDGET:-$HERE/budgets/$PROFILE-$CORE.json}
+[ -f "$BUDGET" ] || { echo "error: no budget file $BUDGET for $PROFILE on $CPU" >&2; exit 2; }
+
+mkdir -p "$BUILD" || exit 2
+CONFIGURE_ARGS="-DKNX_SIZE_GATE_PROFILE=$PROFILE -DKNX_ARM_CPU=$CPU"
+[ -z "${KNX_SIZE_GATE_KNSTAX_ROOT:-}" ] || CONFIGURE_ARGS="$CONFIGURE_ARGS -DKNX_SIZE_GATE_KNSTAX_ROOT=$KNX_SIZE_GATE_KNSTAX_ROOT"
+
+# shellcheck disable=SC2086
+cmake -S "$HERE" -B "$BUILD/gate" -G Ninja -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" $CONFIGURE_ARGS >/dev/null \
     && cmake --build "$BUILD/gate" || { echo "error: the reference device did not link" >&2; exit 2; }
 
 HEAP_ARG=""
-if command -v qemu-system-arm >/dev/null 2>&1; then
-    cmake -S "$HERE" -B "$BUILD/gate_qemu" -G Ninja -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" \
+if [ "$CPU" != "cortex-m3" ]; then
+    echo "note: heap not measured for $CPU (the emulator run is the Cortex-M3 configuration only)"
+elif command -v qemu-system-arm >/dev/null 2>&1; then
+    # shellcheck disable=SC2086
+    cmake -S "$HERE" -B "$BUILD/gate_qemu" -G Ninja -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" $CONFIGURE_ARGS \
           -DKNX_SIZE_GATE_SEMIHOST=ON >/dev/null \
         && cmake --build "$BUILD/gate_qemu" >/dev/null \
         || { echo "error: the emulator variant did not link" >&2; exit 2; }
@@ -43,6 +79,17 @@ else
     echo "note: qemu-system-arm not found; the heap is not measured and RAM is checked for static data only"
 fi
 
+CONFIG="$BUILD/gate/knx-config/knx.config"
+[ -f "$CONFIG" ] || CONFIG=$(find "$BUILD/gate" -name knx.config 2>/dev/null | head -n 1)
+
+BASELINE_ARG=""
+[ -z "${KNX_SIZE_GATE_BASELINE:-}" ] || BASELINE_ARG="--baseline $KNX_SIZE_GATE_BASELINE"
+
 # shellcheck disable=SC2086
 python3 -I "$ROOT/scripts/ci/knstax_size_gate.py" \
-    --map "$BUILD/gate/size_gate.elf.map" --budget "$HERE/size_budget.json" --elf "$BUILD/gate/size_gate.elf" $HEAP_ARG
+    --map "$BUILD/gate/size_gate.elf.map" --budget "$BUDGET" --elf "$BUILD/gate/size_gate.elf" \
+    --profile "$PROFILE" --cpu "$CPU" --config "$CONFIG" --json "$BUILD/gate_report.json" \
+    $HEAP_ARG $BASELINE_ARG > "$BUILD/gate_report.txt"
+STATUS=$?
+cat "$BUILD/gate_report.txt"
+exit $STATUS
