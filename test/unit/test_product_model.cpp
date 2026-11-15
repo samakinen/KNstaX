@@ -6,6 +6,7 @@
 #include "knx/product/endpoint.hpp"
 
 #include <cmath>
+#include <memory>
 #include <type_traits>
 
 using namespace knx;
@@ -202,9 +203,67 @@ void test_product_bindings_accept_thermostat_value_types_without_object_indices(
     TEST_ASSERT_TRUE(std::fabs(measured.value() - measuredTemperature) < 0.001f);
 }
 
+// A small trivially copyable callable lives inside the binding entry, a mutable
+// one keeps its state between dispatches, and a callable with a non-trivial
+// capture (here a shared_ptr, larger than a pointer) goes to the heap and is
+// destroyed exactly once however often the bindings are moved.
+void test_product_bindings_store_small_callables_inline_and_large_ones_on_the_heap(void)
+{
+    using Bindings = EndpointBindings<decltype(kSwitchDefinition)>;
+    static_assert(!std::is_copy_constructible_v<Bindings> && std::is_move_constructible_v<Bindings>);
+
+    auto tracker = std::make_shared<int>(0);
+    {
+        Bindings bindings;
+        static int sum;
+        sum = 0;
+        bindings.onCommand<SwitchPort::RelayCommand>([counter = 0](bool on) mutable {  // fits in a pointer: stored inline
+            counter += on ? 1 : 0;
+            sum = counter;
+        });
+        TEST_ASSERT_TRUE(bindings.dispatchCommand<SwitchPort::RelayCommand>(true));
+        TEST_ASSERT_TRUE(bindings.dispatchCommand<SwitchPort::RelayCommand>(true));
+        TEST_ASSERT_EQUAL_INT(2, sum);  // the mutable capture's state survived the first call
+
+        bindings.onStateWrite<SwitchPort::RelayCommand>([tracker](bool) { ++*tracker; });
+        TEST_ASSERT_EQUAL_INT(2, static_cast<int>(tracker.use_count()));
+        TEST_ASSERT_TRUE(bindings.dispatchStateWrite<SwitchPort::RelayCommand>(true));
+        TEST_ASSERT_EQUAL_INT(1, *tracker);
+
+        Bindings moved(std::move(bindings));  // ownership of the heap callable moves with the entries
+        TEST_ASSERT_EQUAL_INT(2, static_cast<int>(tracker.use_count()));
+        TEST_ASSERT_TRUE(moved.dispatchStateWrite<SwitchPort::RelayCommand>(true));
+        TEST_ASSERT_EQUAL_INT(2, *tracker);
+        TEST_ASSERT_FALSE(bindings.hasStateWriteBinding<SwitchPort::RelayCommand>());  // NOLINT: moved-from is empty
+
+        moved.onStateWrite<SwitchPort::RelayCommand>([](bool) {});  // rebinding releases the old callable
+        TEST_ASSERT_EQUAL_INT(1, static_cast<int>(tracker.use_count()));
+    }
+    TEST_ASSERT_EQUAL_INT(1, static_cast<int>(tracker.use_count()));
+}
+
+// A port that cannot take a binding reports none; a bounded BindingCapacity
+// accepts callables that fit and never allocates.
+void test_product_bindings_report_none_for_ports_without_entries_and_support_bounded_capacity(void)
+{
+    EndpointBindings<decltype(kSwitchDefinition), 8> bounded;
+    bool seen = false;
+    bool* const flag = &seen;
+    bounded.onCommand<SwitchPort::RelayCommand>([flag](bool on) { *flag = on; });
+    TEST_ASSERT_TRUE(bounded.dispatchCommand<SwitchPort::RelayCommand>(true));
+    TEST_ASSERT_TRUE(seen);
+
+    // The relay state port is read-only: it has no receive entry and no handler to find.
+    TEST_ASSERT_FALSE(bounded.hasCommandBinding<SwitchPort::RelayState>());
+    TEST_ASSERT_FALSE(bounded.dispatchCommand<SwitchPort::RelayState>(true));
+    TEST_ASSERT_FALSE(bounded.readState<SwitchPort::RelayCommand>().has_value());
+}
+
 int main(void)
 {
     UNITY_BEGIN();
+    RUN_TEST(test_product_bindings_store_small_callables_inline_and_large_ones_on_the_heap);
+    RUN_TEST(test_product_bindings_report_none_for_ports_without_entries_and_support_bounded_capacity);
     RUN_TEST(test_product_definition_exposes_stable_compile_time_metadata);
     RUN_TEST(test_product_bindings_dispatch_typed_command_and_state_provider);
     RUN_TEST(test_product_bindings_accept_thermostat_value_types_without_object_indices);

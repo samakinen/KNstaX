@@ -12,9 +12,6 @@
 
 namespace knx::product::endpoint {
 
-template <typename PortSpec, size_t BindingCapacity = knx::product::kDefaultBindingCapacity>
-using PortBindingSlot = knx::product::PortBindingSlot<PortSpec, BindingCapacity>;
-
 using ProgModeCallback = knx::product::ProgModeCallback;
 using FaultInfo = knx::product::FaultInfo;
 using FaultCallback = knx::product::FaultCallback;
