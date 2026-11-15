@@ -194,6 +194,12 @@ public:
     /// being fed to it; the chip acknowledges this address by itself.
     util::Result<void> setOwnAddress(uint16_t addressRaw) override;
 
+    /// Reads the list where it is kept, from the RX interrupt, under the
+    /// owner's generation: a frame that arrives while the list changes is not
+    /// acknowledged (the sender repeats it). Always true.
+    bool setAckGroupAddressView(const util::SharedGroupAddressView& view) override;
+    /// The copy path is not supported: this backend keeps no list of its own.
+    /// Clears the view, so only the broadcast is acknowledged until a view is set.
     void setAckGroupAddresses(std::span<const uint16_t> addresses) override;
     void setAckIndividualAddresses(std::span<const uint16_t> addresses) override;
     void setLocalBusy(bool busy) override { _localBusy.store(busy ? 1u : 0u, std::memory_order_relaxed); }
@@ -234,7 +240,8 @@ private:
     void onIdleOctet(uint8_t octet, uint8_t flags);
     void decideAck(uint16_t destination, bool groupAddressed);
     void finishFrame();
-    bool groupTableContains(uint16_t destination) const;
+    /// stable is cleared when the owner changed the list while it was read.
+    bool groupTableContains(uint16_t destination, bool& stable) const;
     bool individualTableContains(uint16_t destination) const;
     static size_t nextSlot(size_t index) { return (index + 1u) % RX_SLOT_COUNT; }
 
@@ -320,9 +327,10 @@ private:
     IsrCounter _ackWriteFailures;
 
     // --- Main to interrupt: the acknowledge inputs ---------------------------
-    std::atomic<uint32_t> _ackTableSequence{0}; ///< odd while a table is being rewritten
-    std::array<std::atomic<uint16_t>, config::ADDRESS_TABLE_ENTRIES> _ackGroups{};
-    std::atomic<uint16_t> _ackGroupCount{0};
+    std::atomic<uint32_t> _ackTableSequence{0}; ///< odd while the inputs below are being replaced
+    /// The device's group address list where its owner keeps it (no copy);
+    /// read under the owner's generation as well as _ackTableSequence.
+    util::SharedGroupAddressView _ackGroups{};
     std::array<std::atomic<uint16_t>, config::ADDITIONAL_INDIVIDUAL_ADDRESSES> _ackIndividuals{};
     std::atomic<uint8_t> _ackIndividualCount{0};
     std::atomic<uint16_t> _ownAddress{0};

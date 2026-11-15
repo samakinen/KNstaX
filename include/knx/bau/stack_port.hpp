@@ -24,6 +24,7 @@
 #include "knx/config.hpp"
 #include "knx/bau/bau.hpp"
 #include "knx/util/fixed_vector.hpp"
+#include "knx/util/shared_group_address_list.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -228,6 +229,7 @@ private:
     /// The attached address table's entries (empty without one) and whether they are sorted.
     std::span<const GroupAddress> groupAddressView() const;
     bool groupAddressViewSorted() const;
+    util::SharedGroupAddressView groupAddressSharedView() const;
 
     platform::Platform& _platform;
 

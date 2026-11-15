@@ -22,12 +22,15 @@
 #include "knx/application/apci_services.hpp"
 #include "knx/datalink/frame_codec.hpp"
 #include "knx/datalink/tp1_data_link_layer.hpp"
+#include "knx/objects/address_table_object.hpp"
 #include "knx/physical/tp1_mac_physical.hpp"
 #include "knx/physical/tpuart_medium_backend.hpp"
 #include "knx/physical/uart_hal_virtual.hpp"
 #include "knx/platform/cooperative_platform.hpp"
 #include "knx/types.hpp"
 
+#include <array>
+#include <initializer_list>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -175,7 +178,29 @@ knx::platform::CooperativeHooks makeHooks()
     return hooks;
 }
 
+/// A group address list kept the way the address table keeps it: fixed
+/// storage, and every change bracketed for an interrupt-side reader.
+struct SharedList {
+    static constexpr uint16_t CAPACITY = 16;
+    std::array<GroupAddress, CAPACITY> entries{};
+    util::SharedGroupAddressState state;
+
+    void set(std::initializer_list<uint16_t> addresses, bool sorted = true)
+    {
+        state.beginChange();
+        size_t count = 0;
+        for (const uint16_t address : addresses) {
+            entries[count++] = GroupAddress(address);
+        }
+        (void)sorted;  // the reader scans; order does not matter to it
+        state.endChange(count);
+    }
+
+    util::SharedGroupAddressView view() const { return state.view(entries.data(), CAPACITY); }
+};
+
 struct Fixture {
+    SharedList groups;
     UartHalVirtual uart{16};
     ScriptedChip chip{uart};
     knx::platform::CooperativePlatform platform{makeHooks()};
@@ -199,6 +224,13 @@ struct Fixture {
                 }
             },
             nullptr);
+    }
+
+    /// Set the list and hand the backend its view, as the data link layer does.
+    void ackGroups(std::initializer_list<uint16_t> addresses, bool sorted = true)
+    {
+        groups.set(addresses, sorted);
+        TEST_ASSERT_TRUE(backend->setAckGroupAddressView(groups.view()));
     }
 
     util::Result<void> init(uint16_t ownAddress = OWN_ADDRESS)
@@ -517,7 +549,7 @@ void test_extended_frame_is_received(void)
         fcs = static_cast<uint8_t>(fcs ^ b);
     }
     frame.push_back(fcs);
-    f.backend->setAckGroupAddresses(std::vector<uint16_t>{GROUP_IN_TABLE});
+    f.ackGroups({GROUP_IN_TABLE});
     f.deliver(frame);
     f.serviceRound();
 
@@ -531,7 +563,7 @@ void test_frame_longer_than_a_slot_is_neither_acknowledged_nor_delivered(void)
 {
     Fixture f;
     TEST_ASSERT_TRUE(f.init().isOk());
-    f.backend->setAckGroupAddresses(std::vector<uint16_t>{GROUP_IN_TABLE});
+    f.ackGroups({GROUP_IN_TABLE});
     const uint8_t length = static_cast<uint8_t>(TpUartMediumBackend::MAX_FRAME);  // length + 9 > MAX_FRAME
     std::vector<uint8_t> frame{0x3C, 0xE0, 0x11, 0x0B, 0x08, 0x01, length};
     frame.resize(static_cast<size_t>(length) + 8u, 0x00u);
@@ -555,7 +587,7 @@ void test_group_frames_are_acknowledged_from_the_rx_interrupt_when_in_the_table(
     Fixture f;
     TEST_ASSERT_TRUE(f.init().isOk());
     // Unsorted on purpose: the backend sorts for its binary search.
-    f.backend->setAckGroupAddresses(std::vector<uint16_t>{0x0A01, GROUP_IN_TABLE, 0x0805, 0x0001});
+    f.ackGroups({0x0A01, GROUP_IN_TABLE, 0x0805, 0x0001}, false);
 
     f.deliver(encode(groupWrite(PEER_ADDRESS, GROUP_IN_TABLE, 1)));
     TEST_ASSERT_EQUAL_UINT32(1u, f.uart.writesFromRxCallback());  // before service() ran
@@ -576,13 +608,78 @@ void test_acknowledge_follows_a_rewritten_table(void)
 {
     Fixture f;
     TEST_ASSERT_TRUE(f.init().isOk());
-    f.backend->setAckGroupAddresses(std::vector<uint16_t>{GROUP_IN_TABLE});
-    f.backend->setAckGroupAddresses(std::vector<uint16_t>{GROUP_NOT_IN_TABLE});
+    f.ackGroups({GROUP_IN_TABLE});
+    f.groups.set({GROUP_NOT_IN_TABLE});  // changed in place, not handed over again
     f.deliver(encode(groupWrite(PEER_ADDRESS, GROUP_IN_TABLE, 1)));
     f.deliver(encode(groupWrite(PEER_ADDRESS, GROUP_NOT_IN_TABLE, 1)));
     f.chip.pump();
     TEST_ASSERT_EQUAL_UINT32(1u, f.chip.acks.size());
     TEST_ASSERT_EQUAL_UINT32(0u, f.backend->statistics().ackDecisionsDeferred);
+}
+
+void test_sorted_list_is_binary_searched(void)
+{
+    Fixture f;
+    TEST_ASSERT_TRUE(f.init().isOk());
+    f.ackGroups({0x0001, 0x0805, GROUP_IN_TABLE + 0x100u, 0x0A01, 0x0B01, 0x0C01});
+    for (const uint16_t destination : {uint16_t{0x0001}, uint16_t{0x0C01}, uint16_t{0x0A01}, uint16_t{0x0A02}}) {
+        f.serviceRound();
+        f.deliver(encode(groupWrite(PEER_ADDRESS, destination, 1)));
+    }
+    f.chip.pump();
+    TEST_ASSERT_EQUAL_UINT32(3u, f.chip.acks.size());  // 0A02h is not in the list
+}
+
+void test_no_acknowledge_while_the_list_is_being_changed(void)
+{
+    Fixture f;
+    TEST_ASSERT_TRUE(f.init().isOk());
+    f.ackGroups({GROUP_IN_TABLE});
+
+    f.groups.state.beginChange();  // the owner is in the middle of a change
+    f.deliver(encode(groupWrite(PEER_ADDRESS, GROUP_IN_TABLE, 1)));
+    f.chip.pump();
+    TEST_ASSERT_EQUAL_UINT32(0u, f.chip.acks.size());
+    TEST_ASSERT_EQUAL_UINT32(1u, f.backend->statistics().ackDecisionsDeferred);
+
+    f.groups.state.endChange(1u);
+    f.serviceRound();
+    f.deliver(encode(groupWrite(PEER_ADDRESS, GROUP_IN_TABLE, 1)));  // the repetition
+    f.chip.pump();
+    TEST_ASSERT_EQUAL_UINT32(1u, f.chip.acks.size());
+}
+
+void test_acknowledge_reads_the_address_table_itself(void)
+{
+    Fixture f;
+    TEST_ASSERT_TRUE(f.init().isOk());
+    objects::AddressTableObject table;
+    const std::array<GroupAddress, 2> loaded{GroupAddress(uint16_t{0x0801}), GroupAddress(uint16_t{0x0805})};
+    TEST_ASSERT_TRUE(table.loadTable(loaded).isOk());
+    TEST_ASSERT_TRUE(f.backend->setAckGroupAddressView(table.sharedGroupAddressView()));
+
+    f.deliver(encode(groupWrite(PEER_ADDRESS, 0x0805, 1)));
+    f.chip.pump();
+    TEST_ASSERT_EQUAL_UINT32(1u, f.chip.acks.size());
+
+    // An unload empties the table; no new view is handed over.
+    table.clearEntries();
+    f.serviceRound();
+    f.deliver(encode(groupWrite(PEER_ADDRESS, 0x0805, 1)));
+    f.chip.pump();
+    TEST_ASSERT_EQUAL_UINT32(1u, f.chip.acks.size());
+}
+
+void test_copy_path_is_refused_and_clears_the_view(void)
+{
+    Fixture f;
+    TEST_ASSERT_TRUE(f.init().isOk());
+    f.ackGroups({GROUP_IN_TABLE});
+    const std::array<uint16_t, 1> copy{GROUP_IN_TABLE};
+    f.backend->setAckGroupAddresses(copy);
+    f.deliver(encode(groupWrite(PEER_ADDRESS, GROUP_IN_TABLE, 1)));
+    f.chip.pump();
+    TEST_ASSERT_EQUAL_UINT32(0u, f.chip.acks.size());
 }
 
 void test_individual_frames_leave_the_own_address_to_the_chip(void)
@@ -602,7 +699,7 @@ void test_local_busy_answers_addressed_frames_with_busy(void)
 {
     Fixture f;
     TEST_ASSERT_TRUE(f.init().isOk());
-    f.backend->setAckGroupAddresses(std::vector<uint16_t>{GROUP_IN_TABLE});
+    f.ackGroups({GROUP_IN_TABLE});
     f.backend->setLocalBusy(true);
     f.deliver(encode(groupWrite(PEER_ADDRESS, GROUP_IN_TABLE, 1)));
     f.deliver(encode(individualRead(PEER_ADDRESS, OWN_ADDRESS)));
@@ -618,7 +715,7 @@ void test_full_ring_answers_busy_and_drops_nothing_it_acknowledged(void)
 {
     Fixture f;
     TEST_ASSERT_TRUE(f.init().isOk());
-    f.backend->setAckGroupAddresses(std::vector<uint16_t>{GROUP_IN_TABLE});
+    f.ackGroups({GROUP_IN_TABLE});
     // RX_SLOT_COUNT - 1 frames fill the ring while service() does not run.
     for (size_t i = 0; i < TpUartMediumBackend::RX_SLOT_COUNT - 1u; ++i) {
         f.deliver(encode(groupWrite(PEER_ADDRESS, GROUP_IN_TABLE, static_cast<uint8_t>(i))));
@@ -637,7 +734,7 @@ void test_bus_monitor_mode_acknowledges_nothing_and_leaves_through_a_reset(void)
 {
     Fixture f;
     TEST_ASSERT_TRUE(f.init().isOk());
-    f.backend->setAckGroupAddresses(std::vector<uint16_t>{GROUP_IN_TABLE});
+    f.ackGroups({GROUP_IN_TABLE});
     TEST_ASSERT_TRUE(f.backend->setBusMonitorMode(true).isOk());
     f.chip.pump();
     TEST_ASSERT_TRUE(f.chip.busmon);
@@ -810,6 +907,10 @@ int main(void)
     RUN_TEST(test_frame_longer_than_a_slot_is_neither_acknowledged_nor_delivered);
     RUN_TEST(test_group_frames_are_acknowledged_from_the_rx_interrupt_when_in_the_table);
     RUN_TEST(test_acknowledge_follows_a_rewritten_table);
+    RUN_TEST(test_sorted_list_is_binary_searched);
+    RUN_TEST(test_no_acknowledge_while_the_list_is_being_changed);
+    RUN_TEST(test_acknowledge_reads_the_address_table_itself);
+    RUN_TEST(test_copy_path_is_refused_and_clears_the_view);
     RUN_TEST(test_individual_frames_leave_the_own_address_to_the_chip);
     RUN_TEST(test_local_busy_answers_addressed_frames_with_busy);
     RUN_TEST(test_full_ring_answers_busy_and_drops_nothing_it_acknowledged);

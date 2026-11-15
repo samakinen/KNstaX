@@ -16,6 +16,7 @@
 #include "knx/types.hpp"
 #include "knx/util/result.hpp"
 #include "knx/util/fixed_vector.hpp"
+#include "knx/util/shared_group_address_list.hpp"
 #include <span>
 #include <cstdint>
 
@@ -75,12 +76,39 @@ public:
     /// can binary-search. Exposed for tests.
     bool isSorted() const { return _sorted; }
 
+    /// The entries for a reader in another context (an interrupt deciding the
+    /// L2 acknowledge); every mutator brackets its change for it.
+    util::SharedGroupAddressView sharedView() const { return _shared.view(_entries.data(), kMaxEntries); }
+
 private:
-    /// Recompute _sorted. Every mutator calls it, so lookups never have to.
+    /// Brackets one change of the entries: readers discard while it lasts, and
+    /// its end recomputes _sorted and publishes the count. Every mutator holds
+    /// one, so lookups never recompute and no change goes unannounced.
+    class Change {
+    public:
+        explicit Change(AddressTableDomain& domain)
+            : _domain(domain)
+        {
+            _domain._shared.beginChange();
+        }
+        ~Change()
+        {
+            _domain.refreshSorted();
+            _domain._shared.endChange(_domain._entries.size());
+        }
+        Change(const Change&) = delete;
+        Change& operator=(const Change&) = delete;
+
+    private:
+        AddressTableDomain& _domain;
+    };
+
+    /// Recompute _sorted.
     void refreshSorted();
 
     util::FixedVector<GroupAddress, kMaxEntries> _entries;
     bool _sorted{true};
+    util::SharedGroupAddressState _shared;
     uint8_t _loadState{1};  // loadstate::kLoaded — firmware boots with usable tables
 };
 
@@ -185,6 +213,10 @@ public:
 
     /// True when addresses() is in strictly ascending order (a binary search applies).
     bool isSorted() const { return _table.isSorted(); }
+
+    /// The same storage for a reader in an interrupt (the TP-UART backend's
+    /// acknowledge decision), safe against changes made while it reads.
+    util::SharedGroupAddressView sharedGroupAddressView() const { return _table.sharedView(); }
 
     /**
      * @brief Get maximum table capacity

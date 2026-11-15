@@ -116,8 +116,10 @@ util::Result<AddressTableDomain::Index> AddressTableDomain::add(const GroupAddre
         return existing;
     }
 
-    _entries.push_back(address);
-    refreshSorted();
+    {
+        Change change(*this);
+        _entries.push_back(address);
+    }
     return Index{static_cast<uint16_t>(_entries.size() - 1)};
 }
 
@@ -125,8 +127,8 @@ util::Result<void> AddressTableDomain::remove(Index index) {
     if (index.value >= _entries.size()) {
         return util::Result<void>::err(util::ErrorCode::InvalidParameter);
     }
+    Change change(*this);
     _entries.erase(index.value);
-    refreshSorted();
     return util::Result<void>::ok();
 }
 
@@ -134,8 +136,8 @@ util::Result<void> AddressTableDomain::set(Index index, const GroupAddress& addr
     if (index.value >= _entries.size()) {
         return util::Result<void>::err(util::ErrorCode::InvalidParameter);
     }
+    Change change(*this);
     _entries[index.value] = address;
-    refreshSorted();
     return util::Result<void>::ok();
 }
 
@@ -143,11 +145,11 @@ util::Result<void> AddressTableDomain::setExpand(Index index, const GroupAddress
     if (index.value >= kMaxEntries) {
         return util::Result<void>::err(util::ErrorCode::InvalidParameter);
     }
+    Change change(*this);
     if (_entries.size() <= index.value) {
         _entries.resize(index.value + 1, GroupAddress(GroupAddress::invalidValue()));
     }
     _entries[index.value] = address;
-    refreshSorted();
     return util::Result<void>::ok();
 }
 
@@ -190,23 +192,23 @@ util::Result<void> AddressTableDomain::load(std::span<const GroupAddress> addres
     if (addresses.size() > kMaxEntries) {
         return util::Result<void>::err(util::ErrorCode::InvalidParameter);
     }
+    Change change(*this);
     if (!_entries.assign(addresses)) {
         return util::Result<void>::err(util::ErrorCode::InvalidParameter);
     }
-    refreshSorted();
     return util::Result<void>::ok();
 }
 
 void AddressTableDomain::truncate(uint16_t size) {
     if (size < _entries.size()) {
+        Change change(*this);
         _entries.resize(size);
-        refreshSorted();
     }
 }
 
 void AddressTableDomain::clear() {
+    Change change(*this);
     _entries.clear();
-    refreshSorted();
 }
 
 void AddressTableDomain::reserve(uint16_t capacity) {

@@ -220,9 +220,13 @@ Where it differs from §3.1–3.6:
 
 - **Family.** `TpUartFamily` is a runtime value, not a traits type: the differences are three
   request encodings, and one `.cpp` keeps the code out of the headers. Only `TpUart2` exists.
-- **Acknowledge table.** One sorted copy under a sequence counter, not two buffers swapped by
-  pointer. The interrupt does not acknowledge from a table it saw being rewritten; the sender
-  repeats. It needs no interrupt masking and works where the interrupt runs on another core.
+- **Acknowledge table.** No copy at all, not two buffers swapped by pointer. The interrupt scans
+  the address table's own storage (`setAckGroupAddressView`) between two loads of a generation
+  the table bumps around every change (`util::SharedGroupAddressState`). It does not acknowledge
+  from a list it saw change; the sender repeats. It needs no interrupt masking, works where the
+  interrupt runs on another core, and does not rely on the view being republished after a
+  change. The scan is linear: 128 entries take about 10 µs, and one loop is less code in RAM
+  than a binary search plus the scan an unsorted list would still need.
 - **The 2 ms gap** is checked in the interrupt, from the timestamps the UART HAL passes, not from
   `service()`. A partial frame is discarded when the next octet comes, so `service()` needs no
   microsecond clock in the board's time domain.
@@ -258,28 +262,28 @@ To confirm on a real TP-UART2 (with B5 of the H8i8o checklist):
 **Size (tp1-small, Cortex-M3; the gate's measured image now carries the backend over a stub
 UART):**
 
-| | Before K3 | With K3 |
-|---|---:|---:|
-| KNstaX flash | 79,890 B | 83,504 B |
-| KNstaX RAM, static + heap | 13,460 B | 14,192 B |
-| of which code in RAM (`.ramfunc`, the receive path) | – | 714 B |
-| Backend object (heap; reserved apart as "TP-UART buffers", 512 B) | – | 608 B |
-| H8i8o device RAM (sum with reservations) | 20,116 / 20,480 B | **20,848 / 20,480 B** |
-| H8i8o device flash | 111,975 / 131,072 B | 115,589 / 131,072 B |
+| | Before K3 | K3, own copy of the list | K3, reading the table |
+|---|---:|---:|---:|
+| KNstaX flash | 79,890 B | 83,504 B | 84,018 B |
+| KNstaX RAM, static + heap | 13,460 B | 14,192 B | 14,302 B |
+| of which code in RAM (`.ramfunc`, the receive path) | – | 714 B | 780 B |
+| Backend object (heap, outside the KNstaX figure) | – | 608 B | 368 B |
+| H8i8o device RAM, as the gate sums it | 20,116 / 20,480 B | 20,848 / 20,480 B | 20,302 / 20,480 B |
+| H8i8o device flash | 111,975 / 131,072 B | 115,589 / 131,072 B | 116,103 / 131,072 B |
 
 Two corrections to the gate came with this. It did not count code placed in RAM at all (the
 `.ramfunc` input sections were neither flash nor RAM to it), and it now fails if code in RAM
 calls into flash (a veneer at a RAM address). The first run found such a call
 (`std::atomic<bool>::load`, not inlined at `-Os`); the flags are `std::atomic<uint8_t>` now.
 
-**The device RAM check fails by 368 B**, and by 464 B counting the backend object's excess over
-its reservation. The planned 2.5 KiB margin is still inside the sum. The cause is that the
-H8i8o budget (01 §4.2) has no line for code in RAM, although its §6.3 plans to run the receive
-path and the vector table from there. The receive path is about 250 instructions and has nothing
-left to merge; moving the counters and frame validation to `service()` would save perhaps 80 B.
-Which way to close the gap is the owner's decision and is pending.
-`budgets/tp1-small-m3.json` and `tp1-standard-m4.json` are not raised to the new figures until
-then, so the gate fails as it should.
+With its own copy of the list the device RAM check failed by 368 B (464 B counting the backend
+object's excess over the 512 B reserved for it). The H8i8o budget (01 §4.2) had no line for code
+in RAM, although its §6.3 plans to run the receive path and the vector table from there. The
+owner chose (15 November 2026) to drop the copy and read the address table, and to take the
+rest from the 2.5 KiB margin, to be rechecked once the whole application image exists. The
+device check in `budgets/tp1-small-m3.json` now reserves the backend at its measured 368 B and a
+margin of 2,048 B, and passes with 178 B to spare. The KNstaX budgets of all three reference
+configurations were tightened to the new figures.
 
 ## 4. K2: UART HAL
 

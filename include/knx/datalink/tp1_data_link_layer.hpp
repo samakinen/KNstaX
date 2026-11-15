@@ -22,6 +22,7 @@
 #include "knx/util/fixed_vector.hpp"
 #include "knx/util/inplace_function.hpp"
 #include "knx/util/operation_progress.hpp"
+#include "knx/util/shared_group_address_list.hpp"
 #include <algorithm>
 #include <array>
 #include <concepts>
@@ -389,14 +390,19 @@ public:
      * count, taken as one value: the filter never reads past @p addresses,
      * and the storage must stay where it is (the address table's inline
      * buffer does). Entries changed in place between two calls are seen
-     * as they are, a word at a time. The physical layer's own copy of the
-     * acknowledge list is replaced under that layer's lock, as before, so
-     * the interrupt-side matcher never reads this view.
+     * as they are, a word at a time.
+     *
+     * The physical layer's acknowledge matcher gets @p shared when it can
+     * read the storage itself (the TP-UART backend reads it from its receive
+     * interrupt, under the generation the table bumps around every change);
+     * otherwise, or without @p shared, it gets a copy of the list, replaced
+     * under its own lock (the bit-bang core).
      *
      * An empty span clears the filter. Replaces anything added with
      * addGroupAddress().
      */
-    void setGroupAddressView(std::span<const GroupAddress> addresses, bool sorted);
+    void setGroupAddressView(std::span<const GroupAddress> addresses, bool sorted,
+                             const util::SharedGroupAddressView& shared = {});
 
     /**
      * @brief Add group address to filter table
@@ -504,6 +510,8 @@ private:
         util::Result<void> (*setBusMonitorMode)(void*, Toggle){nullptr};
         util::Result<void> (*setOwnAddress)(void*, uint16_t){nullptr};
         void (*setAckGroupAddresses)(void*, std::span<const uint16_t>){nullptr};
+        /// True when the physical reads the list itself (no copy needed).
+        bool (*setAckGroupAddressView)(void*, const util::SharedGroupAddressView&){nullptr};
         void (*setAckIndividualAddresses)(void*, std::span<const uint16_t>){nullptr};
 #if KNX_FEATURE_COUPLER
         void (*setGroupAckFilter)(void*, const physical::GroupAckFilter*){nullptr};
@@ -586,6 +594,15 @@ private:
                     (void)addresses;
                 }
             },
+            .setAckGroupAddressView = [] (void* context, const util::SharedGroupAddressView& view) -> bool {
+                if constexpr (requires(ConcretePhysical* p) { { p->setAckGroupAddressView(view) } -> std::same_as<bool>; }) {
+                    return static_cast<ConcretePhysical*>(context)->setAckGroupAddressView(view);
+                } else {
+                    (void)context;
+                    (void)view;
+                    return false;
+                }
+            },
             .setAckIndividualAddresses = [] (void* context, std::span<const uint16_t> addresses) {
                 if constexpr (requires(ConcretePhysical* p) { p->setAckIndividualAddresses(addresses); }) {
                     static_cast<ConcretePhysical*>(context)->setAckIndividualAddresses(addresses);
@@ -635,6 +652,11 @@ private:
     /// own, _ownedGroupAddresses. One read path either way.
     std::span<const GroupAddress> _groupView{};
     bool _groupViewSorted{false};
+    /// The same list for an interrupt-side reader; invalid when the view's
+    /// owner did not provide one.
+    util::SharedGroupAddressView _groupShared{};
+    /// The owned list's half of that, bracketing addGroupAddress() and friends.
+    util::SharedGroupAddressState _ownedShared;
     /// Made when addGroupAddress() or removeGroupAddress() is first used. A
     /// device that gives the layer a view never allocates it.
     std::unique_ptr<util::FixedVector<GroupAddress, MAX_GROUP_ADDRESSES>> _ownedGroupAddresses;

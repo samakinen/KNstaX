@@ -620,9 +620,11 @@ size_t Tp1DataLinkLayer::processRxAvailable(uint32_t firstReadTimeoutMs) {
     return processRxAvailableInternal(firstReadTimeoutMs);
 }
 
-void Tp1DataLinkLayer::setGroupAddressView(std::span<const GroupAddress> addresses, bool sorted) {
+void Tp1DataLinkLayer::setGroupAddressView(std::span<const GroupAddress> addresses, bool sorted,
+                                           const util::SharedGroupAddressView& shared) {
     _groupView = addresses.size() > MAX_GROUP_ADDRESSES ? addresses.first(MAX_GROUP_ADDRESSES) : addresses;
     _groupViewSorted = sorted;
+    _groupShared = shared;
     _viewIsOwned = false;
     KNX_LOGD(TAG, "Group address filter: %u addresses%s", static_cast<unsigned>(_groupView.size()),
              sorted ? " (sorted)" : "");
@@ -636,7 +638,9 @@ util::FixedVector<GroupAddress, Tp1DataLinkLayer::MAX_GROUP_ADDRESSES>& Tp1DataL
     }
     if (!_viewIsOwned) {
         // Another component's list: this layer's copy starts as what it filters on now.
+        _ownedShared.beginChange();
         (void)_ownedGroupAddresses->assign(_groupView);
+        _ownedShared.endChange(_ownedGroupAddresses->size());
         _viewIsOwned = true;
     }
     return *_ownedGroupAddresses;
@@ -645,6 +649,7 @@ util::FixedVector<GroupAddress, Tp1DataLinkLayer::MAX_GROUP_ADDRESSES>& Tp1DataL
 void Tp1DataLinkLayer::refreshOwnedView() {
     _groupView = std::span<const GroupAddress>(_ownedGroupAddresses->data(), _ownedGroupAddresses->size());
     _groupViewSorted = false;
+    _groupShared = _ownedShared.view(_ownedGroupAddresses->data(), static_cast<uint16_t>(MAX_GROUP_ADDRESSES));
 }
 
 util::Result<void> Tp1DataLinkLayer::addGroupAddress(const GroupAddress& address) {
@@ -655,7 +660,10 @@ util::Result<void> Tp1DataLinkLayer::addGroupAddress(const GroupAddress& address
         return util::Result<void>::ok();  // Already present
     }
 
-    if (!list.push_back(address)) {
+    _ownedShared.beginChange();
+    const bool added = list.push_back(address);
+    _ownedShared.endChange(list.size());
+    if (!added) {
         return util::ErrorCode::BufferTooSmall;
     }
     refreshOwnedView();
@@ -670,7 +678,9 @@ util::Result<void> Tp1DataLinkLayer::removeGroupAddress(const GroupAddress& addr
     auto& list = ownedGroupAddresses();
     auto it = std::find(list.begin(), list.end(), address);
     if (it != list.end()) {
+        _ownedShared.beginChange();
         list.erase(static_cast<size_t>(std::distance(list.begin(), it)));
+        _ownedShared.endChange(list.size());
         refreshOwnedView();
         KNX_LOGD(TAG, "Removed group address: %d/%d/%d",
                  address.main(), address.middle(), address.sub());
@@ -681,23 +691,32 @@ util::Result<void> Tp1DataLinkLayer::removeGroupAddress(const GroupAddress& addr
 }
 
 void Tp1DataLinkLayer::clearGroupAddresses() {
-    ownedGroupAddresses().clear();
+    auto& list = ownedGroupAddresses();
+    _ownedShared.beginChange();
+    list.clear();
+    _ownedShared.endChange(0u);
     refreshOwnedView();
     KNX_LOGD(TAG, "Cleared all group addresses");
     publishAckGroupAddresses();
 }
 
 void Tp1DataLinkLayer::publishAckGroupAddresses() {
+    // A matcher that reads the list where it is (the TP-UART backend) takes
+    // the shared view and keeps no copy.
+    if (_groupShared.isValid() && _physicalPort.setAckGroupAddressView != nullptr &&
+        _physicalPort.setAckGroupAddressView(_physicalPort.context, _groupShared)) {
+        return;
+    }
     if (!_physicalPort.setAckGroupAddresses) {
         return;
     }
 
-    // Snapshot the raw group addresses for the physical layer's ISR-side
-    // L_ACK matcher, which holds the whole table (the bit-bang ISR sizes it to
-    // MAX_GROUP_ADDRESSES and sorts it for a binary search). The snapshot is
-    // transient (on this stack) and the matcher replaces its own copy under its
-    // lock, so the interrupt never reads the view below. An entry of 0 is no
-    // group address (a table slot that was never written) and is not offered.
+    // Otherwise snapshot the raw group addresses for the physical layer's
+    // ISR-side L_ACK matcher, which holds the whole table (the bit-bang ISR
+    // sizes it to MAX_GROUP_ADDRESSES and sorts it for a binary search). The
+    // snapshot is transient (on this stack) and the matcher replaces its own
+    // copy under its lock. An entry of 0 is no group address (a table slot
+    // that was never written) and is not offered.
     std::array<uint16_t, MAX_GROUP_ADDRESSES> raw{};
     size_t count = 0;
     for (const auto& ga : _groupView) {

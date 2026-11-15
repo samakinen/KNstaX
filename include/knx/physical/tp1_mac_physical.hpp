@@ -79,6 +79,12 @@ public:
     /// Forwarded to the backend's timing domain (ISR/hardware), where the
     /// per-telegram ACK decision is made.
     void setAckGroupAddresses(std::span<const uint16_t> addresses);
+    /// Hand the backend the list where it is kept; true when it reads it
+    /// there (see Tp1MediumBackend::setAckGroupAddressView).
+    bool setAckGroupAddressView(const util::SharedGroupAddressView& view)
+    {
+        return _backend->setAckGroupAddressView(view);
+    }
     /// Publish the Individual Addresses the medium should L_ACK besides the
     /// own one (tunnel addresses of a KNXnet/IP interface).
     void setAckIndividualAddresses(std::span<const uint16_t> addresses);

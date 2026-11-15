@@ -71,27 +71,38 @@ TpUartMediumBackend::~TpUartMediumBackend()
 // path lands in the one function KNX_ISR_RAM places; the definitions come
 // first because a body must be visible to be inlined.
 
-[[gnu::always_inline]] inline bool TpUartMediumBackend::groupTableContains(uint16_t destination) const
+[[gnu::always_inline]] inline bool TpUartMediumBackend::groupTableContains(uint16_t destination, bool& stable) const
 {
-    // Sorted by setAckGroupAddresses(): at most 8 comparisons for 256 entries.
-    uint16_t low = 0;
-    uint16_t high = _ackGroupCount.load(std::memory_order_relaxed);
-    if (high > _ackGroups.size()) {
-        return false;  // a count torn by a concurrent rewrite; the sequence check rejects it
+    // The owner's storage, read between two loads of its generation: what was
+    // read counts only if the list did not change meanwhile.
+    const util::SharedGroupAddressView& view = _ackGroups;
+    if (!view.isValid()) {
+        return false;
     }
-    while (low < high) {
-        const uint16_t mid = static_cast<uint16_t>((low + high) / 2u);
-        const uint16_t entry = _ackGroups[mid].load(std::memory_order_relaxed);
-        if (entry == destination) {
-            return true;
-        }
-        if (entry < destination) {
-            low = static_cast<uint16_t>(mid + 1u);
-        } else {
-            high = mid;
+    const uint32_t generation = view.generation->load(std::memory_order_acquire);
+    const uint16_t count = view.count->load(std::memory_order_relaxed);
+    if ((generation & 1u) != 0u || count > view.capacity) {
+        stable = false;
+        return false;
+    }
+
+    // A linear scan, whatever the order: 128 entries take about 10 us at
+    // 48 MHz against a deadline of milliseconds, and one loop is less code in
+    // RAM than a binary search plus the scan an unsorted list still needs.
+    bool found = false;
+    for (uint16_t i = 0; i < count; ++i) {
+        if (view.entries[i].raw == destination) {
+            found = true;
+            break;
         }
     }
-    return false;
+
+    std::atomic_thread_fence(std::memory_order_acquire);
+    if (view.generation->load(std::memory_order_relaxed) != generation) {
+        stable = false;
+        return false;
+    }
+    return found;
 }
 
 [[gnu::always_inline]] inline bool TpUartMediumBackend::individualTableContains(uint16_t destination) const
@@ -122,8 +133,9 @@ TpUartMediumBackend::~TpUartMediumBackend()
     const uint32_t sequenceBefore = _ackTableSequence.load(std::memory_order_acquire);
     bool addressed = false;
     bool own = false;
+    bool stable = true;
     if (groupAddressed) {
-        addressed = destination == GROUP_BROADCAST || groupTableContains(destination);
+        addressed = destination == GROUP_BROADCAST || groupTableContains(destination, stable);
 #if KNX_FEATURE_COUPLER
         if (!addressed) {
             const GroupAckFilter* coupler = _groupAckFilter.load(std::memory_order_acquire);
@@ -136,7 +148,8 @@ TpUartMediumBackend::~TpUartMediumBackend()
         addressed = own || individualTableContains(destination);
     }
     std::atomic_thread_fence(std::memory_order_acquire);
-    if ((sequenceBefore & 1u) != 0u || _ackTableSequence.load(std::memory_order_relaxed) != sequenceBefore) {
+    if (!stable || (sequenceBefore & 1u) != 0u ||
+        _ackTableSequence.load(std::memory_order_relaxed) != sequenceBefore) {
         _ackDecisionsDeferred.increment();
         return;
     }
@@ -711,32 +724,21 @@ util::Result<void> TpUartMediumBackend::setOwnAddress(uint16_t addressRaw)
     return util::Result<void>::ok();
 }
 
-void TpUartMediumBackend::setAckGroupAddresses(std::span<const uint16_t> addresses)
+bool TpUartMediumBackend::setAckGroupAddressView(const util::SharedGroupAddressView& view)
 {
-    // Rewrite under an odd sequence; the interrupt does not acknowledge from
-    // a table it saw change. Sorted by insertion, in place: the table is
-    // rewritten only when ETS changes it, and this keeps a second copy off
-    // the stack.
+    // Replace the view under an odd sequence; the interrupt does not
+    // acknowledge from a view it saw being replaced.
     _ackTableSequence.store(_ackTableSequence.load(std::memory_order_relaxed) + 1u, std::memory_order_relaxed);
     std::atomic_thread_fence(std::memory_order_release);
-
-    uint16_t count = 0;
-    for (const uint16_t address : addresses) {
-        if (count >= _ackGroups.size()) {
-            break;
-        }
-        uint16_t position = count;
-        while (position > 0u && _ackGroups[position - 1u].load(std::memory_order_relaxed) > address) {
-            _ackGroups[position].store(_ackGroups[position - 1u].load(std::memory_order_relaxed),
-                                       std::memory_order_relaxed);
-            --position;
-        }
-        _ackGroups[position].store(address, std::memory_order_relaxed);
-        ++count;
-    }
-    _ackGroupCount.store(count, std::memory_order_relaxed);
-
+    _ackGroups = view;
     _ackTableSequence.store(_ackTableSequence.load(std::memory_order_relaxed) + 1u, std::memory_order_release);
+    return true;
+}
+
+void TpUartMediumBackend::setAckGroupAddresses(std::span<const uint16_t> addresses)
+{
+    (void)addresses;
+    (void)setAckGroupAddressView(util::SharedGroupAddressView{});
 }
 
 void TpUartMediumBackend::setAckIndividualAddresses(std::span<const uint16_t> addresses)

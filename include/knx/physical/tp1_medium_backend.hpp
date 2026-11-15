@@ -13,6 +13,7 @@
 #include "knx/physical/link_state.hpp"
 #include "knx/util/inplace_function.hpp"
 #include "knx/util/result.hpp"
+#include "knx/util/shared_group_address_list.hpp"
 #include <cstdint>
 #include <cstddef>
 #include <span>
@@ -140,6 +141,14 @@ public:
     // configured through its own address services).
     virtual void setAckGroupAddresses(std::span<const uint16_t> addresses) {
         (void)addresses;
+    }
+    /// Read the group address list where its owner keeps it instead of taking
+    /// a copy through setAckGroupAddresses(). Returns true when the backend
+    /// does so (it then needs no copy); false (the default) asks for the copy.
+    /// The view stays valid until the next call; see SharedGroupAddressView.
+    virtual bool setAckGroupAddressView(const util::SharedGroupAddressView& view) {
+        (void)view;
+        return false;
     }
     /// Individual Addresses acknowledged besides the own one (a KNXnet/IP
     /// interface's tunnel addresses, 03_08_04 §2.2.2).

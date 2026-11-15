@@ -122,7 +122,8 @@ public:
 
     util::Result<void> init(const IndividualAddress& ownAddress,
                             std::span<const GroupAddress> groupAddresses,
-                            bool sorted)
+                            bool sorted,
+                            const util::SharedGroupAddressView& shared)
     {
         if (!_dataLink) {
             if (false) {
@@ -162,17 +163,18 @@ public:
             _dataLink->setPromiscuousMode(*_promiscuousMode);
         }
 
-        _dataLink->setGroupAddressView(groupAddresses, sorted);
+        _dataLink->setGroupAddressView(groupAddresses, sorted, shared);
 
         return util::Result<void>::ok();
     }
 
     /// The group addresses to filter on, as the layer reads them (see
     /// Tp1DataLinkLayer::setGroupAddressView). No-op before init().
-    void setGroupAddressView(std::span<const GroupAddress> groupAddresses, bool sorted)
+    void setGroupAddressView(std::span<const GroupAddress> groupAddresses, bool sorted,
+                             const util::SharedGroupAddressView& shared)
     {
         if (_dataLink) {
-            _dataLink->setGroupAddressView(groupAddresses, sorted);
+            _dataLink->setGroupAddressView(groupAddresses, sorted, shared);
         }
     }
 
@@ -351,7 +353,7 @@ util::Result<void> BusAccessStackPort::initCoupler(const IndividualAddress& ownA
     // The secondary port answers to the same individual address and the
     // same group addresses: a coupler is one device with two attachments,
     // not two devices.
-    auto secondaryInit = _secondaryMedium->init(ownAddress, groupAddressView(), groupAddressViewSorted());
+    auto secondaryInit = _secondaryMedium->init(ownAddress, groupAddressView(), groupAddressViewSorted(), groupAddressSharedView());
     if (secondaryInit.isError()) {
         return secondaryInit;
     }
@@ -384,7 +386,7 @@ util::Result<void> BusAccessStackPort::initCoupler(const IndividualAddress& ownA
 
 util::Result<void> BusAccessStackPort::init(const IndividualAddress& ownAddress)
 {
-    auto mediumInit = _medium->init(ownAddress, groupAddressView(), groupAddressViewSorted());
+    auto mediumInit = _medium->init(ownAddress, groupAddressView(), groupAddressViewSorted(), groupAddressSharedView());
     if (mediumInit.isError()) {
         return mediumInit;
     }
@@ -578,6 +580,11 @@ bool BusAccessStackPort::groupAddressViewSorted() const
     return _addressTable != nullptr && _addressTable->isSorted();
 }
 
+util::SharedGroupAddressView BusAccessStackPort::groupAddressSharedView() const
+{
+    return _addressTable != nullptr ? _addressTable->sharedGroupAddressView() : util::SharedGroupAddressView{};
+}
+
 void BusAccessStackPort::publishGroupAddresses()
 {
     if (_addressTable == nullptr || !_initialized) {
@@ -585,12 +592,13 @@ void BusAccessStackPort::publishGroupAddresses()
     }
     // On the cooperative platform the stack, this call and the data link's
     // receive path run in one context: the swap of (pointer, count) is a plain
-    // store at a point where no frame is being filtered. The interrupt-side
-    // matcher of the physical layer has its own copy, replaced under its lock.
-    _medium->setGroupAddressView(groupAddressView(), groupAddressViewSorted());
+    // store at a point where no frame is being filtered. An interrupt-side
+    // matcher either reads the table through the shared view (which the table
+    // guards around every change itself) or keeps a copy, replaced under its lock.
+    _medium->setGroupAddressView(groupAddressView(), groupAddressViewSorted(), groupAddressSharedView());
 #if KNX_FEATURE_COUPLER
     if (_secondaryMedium) {
-        _secondaryMedium->setGroupAddressView(groupAddressView(), groupAddressViewSorted());
+        _secondaryMedium->setGroupAddressView(groupAddressView(), groupAddressViewSorted(), groupAddressSharedView());
     }
 #endif
 }
