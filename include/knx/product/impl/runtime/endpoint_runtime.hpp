@@ -23,6 +23,7 @@
 #include "knx/product/impl/bindings/endpoint_bindings.hpp"
 #include "knx/product/impl/compiler/endpoint_compiler.hpp"
 #include "knx/product/impl/model/port_table.hpp"
+#include "knx/product/impl/runtime/product_port_core.hpp"
 #include "knx/util/log.hpp"
 #include "knx/util/result.hpp"
 
@@ -50,40 +51,25 @@ struct EndpointInstanceConfig {
     bool restoreKnxStateOnBoot{true};
 };
 
-enum class PendingBusActionKind : uint8_t {
-    Publish = 0,
-    ReadResponse = 1,
-};
-
+/// A publish or read response queued before the stack started. The logical id
+/// is carried as its 16-bit value (cast it to the port enum to compare). The
+/// record is the same for every product; see PendingPortAction.
 template <typename PortIdEnum>
-struct PendingBusAction {
-    PendingBusActionKind kind{PendingBusActionKind::Publish};
-    PortIdEnum logicalId{};
-    uint16_t slot{0};
-    application::DptValue value{};
-};
+using PendingBusAction = PendingPortAction;
 
-namespace detail {
-
-template <typename ValueT>
-    requires std::constructible_from<application::DptValue, ValueT>
-constexpr application::DptValue makeRuntimeValue(ValueT value)
-{
-    return application::DptValue(value);
-}
-
-template <typename ValueT>
-util::Result<ValueT> extractRuntimeValue(const application::DptValue& value)
-{
-    if (const auto* stored = value.template tryGet<ValueT>(); stored != nullptr) {
-        return *stored;
-    }
-
-    return util::ErrorCode::DecodeFailed;
-}
-
-} // namespace detail
-
+/**
+ * @brief Runtime mediation for one endpoint definition: a thin shell around ProductPortCore.
+ *
+ * The shell is what depends on the product: it owns the binding entries, the
+ * configured group addresses and the pending-action queue, all sized from the
+ * definition's type, and gives the typed API (`publish<Id>(value)` and friends)
+ * its compile-time port lookup. Every operation on a port is a call into the
+ * core with the port's slot.
+ *
+ * The pending-action queue holds KNX_PENDING_ACTION_CAPACITY entries, or twice
+ * the port count when that symbol is 0 (see Kconfig: Capacities). A request
+ * made while the queue is full fails with QueueFull; nothing is dropped.
+ */
 template <typename DefinitionT, size_t BindingCapacity = kDefaultBindingCapacity>
 class EndpointRuntime {
 public:
@@ -96,15 +82,24 @@ public:
 
     static constexpr size_t kPendingActionCapacity = definition_type::kPortCount * 2u;
 
-    // Bindings by rvalue reference: the table is sized by the port count, so a
-    // by-value sink would cost a full copy of it on the constructing frame's
-    // stack on the way into _bindings.
+    // Bindings by rvalue reference: the entry arrays are sized by the port
+    // count, so a by-value sink would cost a full copy of them on the
+    // constructing frame's stack on the way into _bindings.
     EndpointRuntime(const definition_type& definition,
                     bindings_type&& bindings,
                     EndpointInstanceConfig config)
         : _definition(definition)
         , _bindings(std::move(bindings))
         , _config(config)
+        , _core(portTable().data(),
+                static_cast<uint16_t>(portTable().size()),
+                _configuredGroupAddresses.data(),
+                _pendingActions.data(),
+                static_cast<uint16_t>(_pendingActions.size()),
+                PortBindingTables{_bindings.commandEntries(),
+                                  _bindings.stateWriteEntries(),
+                                  _bindings.stateProviderEntries()},
+                config.defaultIndividualAddress)
     {
     }
 
@@ -140,28 +135,13 @@ public:
     template <auto LogicalId>
     util::Result<void> bindGroupAddress(GroupAddress address)
     {
-        return bindGroupAddress(static_cast<port_id_type>(LogicalId), address);
+        return _core.bindGroupAddress(slotOfId<LogicalId>(), address);
     }
 
     util::Result<void> bindGroupAddress(port_id_type logicalId,
                                         GroupAddress address)
     {
-        if (!address.isValid()) {
-            return util::ErrorCode::InvalidAddress;
-        }
-
-        const auto* descriptor = descriptorFor(logicalId);
-        if (descriptor == nullptr) {
-            return util::ErrorCode::InvalidParameter;
-        }
-
-        _configuredGroupAddresses[slotOf(*descriptor)] = address;
-
-        if (_bau) {
-            return _bau->bindGroupObjectToAddress(GroupObjectIndex(slotOf(*descriptor)), address);
-        }
-
-        return util::Result<void>::ok();
+        return _core.bindGroupAddress(slotOfLogicalId(logicalId), address);
     }
 
     // ── Outbound transmit shaping ────────────────────────────────────────────
@@ -193,14 +173,7 @@ public:
     util::Result<void> setTransmitPolicy(port_id_type logicalId,
                                          const application::GroupObjectTransmitPolicy& policy)
     {
-        const auto* descriptor = descriptorFor(logicalId);
-        if (descriptor == nullptr) {
-            return util::ErrorCode::InvalidParameter;
-        }
-        if (!_bau) {
-            return util::ErrorCode::OperationNotReady;
-        }
-        return _bau->setGroupObjectTransmitPolicy(GroupObjectIndex(slotOf(*descriptor)), policy);
+        return _core.setTransmitPolicy(slotOfLogicalId(logicalId), policy);
     }
 
     /// True when the project (ETS download or applyCommissionedGroupAddress)
@@ -209,31 +182,20 @@ public:
     /// to tell an unused datapoint from a transmitting one.
     bool isPortLinked(port_id_type logicalId) const
     {
-        const auto* descriptor = descriptorFor(logicalId);
-        if (descriptor == nullptr || !_bau) {
-            return false;
-        }
-        return _bau->isGroupObjectLinked(GroupObjectIndex(slotOf(*descriptor)));
+        return _core.isPortLinked(slotOfLogicalId(logicalId));
     }
 
     template <auto LogicalId>
     bool isPortLinked() const
     {
-        return isPortLinked(static_cast<port_id_type>(LogicalId));
+        return _core.isPortLinked(slotOfId<LogicalId>());
     }
 
     /// Read back the transmit policy currently applied to a port's object.
     util::Result<application::GroupObjectTransmitPolicy>
     transmitPolicy(port_id_type logicalId) const
     {
-        const auto* descriptor = descriptorFor(logicalId);
-        if (descriptor == nullptr) {
-            return util::ErrorCode::InvalidParameter;
-        }
-        if (!_bau) {
-            return util::ErrorCode::OperationNotReady;
-        }
-        return _bau->groupObjectTransmitPolicy(GroupObjectIndex(slotOf(*descriptor)));
+        return _core.transmitPolicy(slotOfLogicalId(logicalId));
     }
 
 #if KNX_FEATURE_TP1
@@ -353,7 +315,7 @@ public:
     {
         if (_bau) {
             _bau->close();
-            _bau.reset();
+            dropBau();
         }
 
         _hadImmediateWork = false;
@@ -362,7 +324,7 @@ public:
     void loop()
     {
         if (_bau) {
-            drainPendingActions();
+            _core.drainPendingActions();
             _bau->loop();
             // The runtime reports send results through its own callbacks; the
             // BAU outcome queue has no other consumer, so drain it here to
@@ -382,7 +344,7 @@ public:
     OwnerWorkHint ownerWorkHint() const
     {
         OwnerWorkHint hint = _bau ? _bau->ownerWorkHint() : OwnerWorkHint{};
-        hint.pendingLoopWorkItems += _pendingActionCount;
+        hint.pendingLoopWorkItems += _core.pendingActionCount();
         return hint;
     }
 
@@ -400,7 +362,9 @@ public:
         requires std::same_as<std::remove_cvref_t<ValueT>, port_value_t<definition_type, LogicalId>>
     util::Result<void> publish(ValueT value)
     {
-        return publish(static_cast<port_id_type>(LogicalId), value);
+        // The slot is a compile-time constant: the call site is one load, one
+        // value construction and one call into the core.
+        return publishSlot(slotOfId<LogicalId>(), application::DptValue(value));
     }
 
     template <typename ValueT>
@@ -408,82 +372,24 @@ public:
     util::Result<void> publish(port_id_type logicalId,
                                ValueT value)
     {
-        const auto* descriptor = descriptorFor(logicalId);
-        if (descriptor == nullptr) {
-            return util::ErrorCode::InvalidParameter;
-        }
-        if (!descriptor->transmit()) {
-            return util::ErrorCode::AccessDenied;
-        }
-        if (isInitialIndividualAddress(individualAddress())) {
-            return util::ErrorCode::OperationNotReady;
-        }
-
-        const auto runtimeValue = detail::makeRuntimeValue(value);
-
-        if (_bau) {
-            return publishStarted(GroupObjectIndex(slotOf(*descriptor)), runtimeValue);
-        }
-
-        return enqueue(PendingBusAction<port_id_type>{
-            .kind = PendingBusActionKind::Publish,
-            .logicalId = logicalId,
-            .slot = slotOf(*descriptor),
-            .value = runtimeValue,
-        });
+        return publishSlot(slotOfLogicalId(logicalId), application::DptValue(value));
     }
 
     template <auto LogicalId>
     util::Result<void> requestReadResponse()
     {
-        const auto* descriptor = descriptorFor(static_cast<port_id_type>(LogicalId));
-        if (descriptor == nullptr) {
-            return util::ErrorCode::InvalidParameter;
+        const size_t queued = _core.pendingActionCount();
+        const auto result = _core.respond(slotOfId<LogicalId>());
+        if (_core.pendingActionCount() != queued) {
+            notifyWorkAvailableIfTransitioned();
         }
-        if (!descriptor->readable()) {
-            return util::ErrorCode::AccessDenied;
-        }
-        if (isInitialIndividualAddress(individualAddress())) {
-            return util::ErrorCode::OperationNotReady;
-        }
-
-        const auto state = _bindings.template readState<LogicalId>();
-        if (!state.has_value()) {
-            return util::ErrorCode::OperationNotReady;
-        }
-
-        if (_bau) {
-            return respondStarted(GroupObjectIndex(slotOf(*descriptor)), detail::makeRuntimeValue(state.value()));
-        }
-
-        return enqueue(PendingBusAction<port_id_type>{
-            .kind = PendingBusActionKind::ReadResponse,
-            .logicalId = LogicalId,
-            .slot = slotOf(*descriptor),
-            .value = detail::makeRuntimeValue(state.value()),
-        });
+        return result;
     }
 
     template <auto LogicalId>
     util::Result<void> handleIncomingWrite(port_value_t<definition_type, LogicalId> value)
     {
-        const auto* descriptor = descriptorFor(static_cast<port_id_type>(LogicalId));
-        if (descriptor == nullptr) {
-            return util::ErrorCode::InvalidParameter;
-        }
-        if (!descriptor->acceptsWrites()) {
-            return util::ErrorCode::AccessDenied;
-        }
-
-        bool handled = false;
-        handled = _bindings.template dispatchCommand<LogicalId>(value) || handled;
-        handled = _bindings.template dispatchStateWrite<LogicalId>(value) || handled;
-
-        if (!handled) {
-            return util::ErrorCode::OperationNotReady;
-        }
-
-        return util::Result<void>::ok();
+        return _core.dispatchValue(slotOfId<LogicalId>(), application::DptValue(value));
     }
 
     void toggleProgrammingMode()
@@ -615,21 +521,17 @@ public:
 
     size_t pendingActionCount() const
     {
-        return _pendingActionCount;
+        return _core.pendingActionCount();
     }
 
     const PendingBusAction<port_id_type>* pendingActionAt(size_t index) const
     {
-        if (index >= _pendingActionCount) {
-            return nullptr;
-        }
-
-        return &_pendingActions[index];
+        return _core.pendingActionAt(index);
     }
 
     void clearPendingActions()
     {
-        _pendingActionCount = 0u;
+        _core.clearPendingActions();
         refreshWorkAvailabilityState();
     }
 
@@ -794,61 +696,10 @@ public:
     }
 #endif  // KNX_SECURE_ENABLED
 
-    using write_dispatch_fn = util::Result<void> (EndpointRuntime::*)(GroupObjectIndex);
-    using read_prepare_fn = util::Result<void> (EndpointRuntime::*)(GroupObjectIndex);
-
-    template <size_t... Indices>
-    static constexpr auto makeWriteDispatchTable(std::index_sequence<Indices...>)
-    {
-        return std::array<write_dispatch_fn, sizeof...(Indices)>{
-            &EndpointRuntime::template dispatchWriteForSlotIndex<Indices>...,
-        };
-    }
-
-    template <size_t... Indices>
-    static constexpr auto makeReadPrepareTable(std::index_sequence<Indices...>)
-    {
-        return std::array<read_prepare_fn, sizeof...(Indices)>{
-            &EndpointRuntime::template prepareReadForSlotIndex<Indices>...,
-        };
-    }
-
-    template <size_t Index>
-    util::Result<void> dispatchWriteForSlotIndex(GroupObjectIndex slot)
-    {
-        using port_spec = std::tuple_element_t<Index, typename definition_type::ports_tuple>;
-        const auto value = _bau->groupObjectValue(slot);
-        if (value.isError()) {
-            return value.error();
-        }
-
-        const auto typedValue = detail::extractRuntimeValue<typename port_spec::value_type>(value.value());
-        if (typedValue.isError()) {
-            return typedValue.error();
-        }
-
-        return handleIncomingWrite<port_spec::logicalId>(typedValue.value());
-    }
-
-    template <size_t Index>
-    util::Result<void> prepareReadForSlotIndex(GroupObjectIndex slot)
-    {
-        using port_spec = std::tuple_element_t<Index, typename definition_type::ports_tuple>;
-
-        if constexpr (!port_spec::readable) {
-            return util::Result<void>::ok();
-        } else {
-            const auto state = _bindings.template readState<port_spec::logicalId>();
-            if (!state.has_value()) {
-                return util::ErrorCode::OperationNotReady;
-            }
-
-            return _bau->setGroupObjectValue(slot, detail::makeRuntimeValue(state.value()));
-        }
-    }
-
     util::Result<void> finishStart()
     {
+        _core.attach(_bau.get());
+
         // The product's APDU length is reported to ETS and written to the
         // .knxprod; the buffers behind it are sized by CONFIG_KNX_MAX_APDU_LENGTH.
         // A constexpr definition cannot get here (makeEndpointDefinition()
@@ -857,7 +708,7 @@ public:
             KNX_LOGE("KNX.Product", "Product maxApduLength %u exceeds CONFIG_KNX_MAX_APDU_LENGTH %u",
                      static_cast<unsigned>(_definition.identity.maxApduLength),
                      static_cast<unsigned>(config::MAX_APDU_LENGTH));
-            _bau.reset();
+            dropBau();
             return util::ErrorCode::InvalidParameter;
         }
         applyIdentity();
@@ -870,13 +721,18 @@ public:
         }
         _bau->setTelegramRateLimit(_telegramRateLimit);
 
-        const auto registerObjects = registerGroupObjects();
+        const auto registerObjects = _core.registerGroupObjects();
         if (registerObjects.isError()) {
-            _bau.reset();
+            reportFault({FaultCode::InternalError, "EndpointRuntime slot registration failed"});
+            dropBau();
             return registerObjects.error();
         }
 
-        wireCallbacks();
+        _core.wireCallbacks();
+        _bau->deviceObject().setInternalProgModeCallback([this](Toggle mode) {
+            _programmingModeActive = (mode == Toggle::Enable);
+            _bindings.notifyProgrammingModeChanged(_programmingModeActive);
+        });
 
         if (_workAvailableCallback) {
             _bau->setWorkAvailableCallback([this]() { notifyWorkAvailableIfTransitioned(); });
@@ -887,22 +743,29 @@ public:
                                      _config.persistenceSchemaVersion);
         if (init.isError()) {
             reportFault({FaultCode::StartFailed, "EndpointRuntime start failed"});
-            _bau.reset();
+            dropBau();
             return init.error();
         }
 
-        const auto bindConfigured = applyConfiguredGroupAddresses();
+        const auto bindConfigured = _core.applyConfiguredGroupAddresses();
         if (bindConfigured.isError()) {
-                reportFault({FaultCode::StartFailed, "EndpointRuntime address binding failed"});
+            reportFault({FaultCode::StartFailed, "EndpointRuntime address binding failed"});
             _bau->close();
-            _bau.reset();
+            dropBau();
             return bindConfigured.error();
         }
 
-        seedReadableState();
-        drainPendingActions();
+        _core.seedReadableState();
+        _core.drainPendingActions();
         refreshWorkAvailabilityState();
         return util::Result<void>::ok();
+    }
+
+    /// The BAU goes away: the core must stop pointing at it first.
+    void dropBau()
+    {
+        _core.attach(nullptr);
+        _bau.reset();
     }
 
     void applyIdentity()
@@ -989,161 +852,6 @@ public:
 #endif
     }
 
-    util::Result<void> registerGroupObjects()
-    {
-        for (size_t slot = 0; slot < portTable().size(); ++slot) {
-            const PortDescriptor& descriptor = portTable()[slot];
-            application::GroupObjectConfig config{};
-            config.address = _configuredGroupAddresses[slot];
-            config.dpt = descriptor.dpt;
-            config.flags.communication = true;
-            config.flags.read = descriptor.readable();
-            config.flags.write = descriptor.writable();
-            config.flags.transmit = descriptor.transmit();
-            config.flags.update = descriptor.receivable();
-            config.flags.readOnInit = descriptor.readOnInit();
-            config.flags.priority = descriptor.priority;
-
-            auto object = std::make_unique<application::GroupObject>(config);
-            const GroupObjectIndex index = _bau->groupObjectTable().addGroupObject(std::move(object));
-            if (!index.isValid() || index.value() != slot) {
-                reportFault({FaultCode::InternalError, "EndpointRuntime slot registration failed"});
-                return util::ErrorCode::ResourceUnavailable;
-            }
-        }
-
-        return util::Result<void>::ok();
-    }
-
-    void wireCallbacks()
-    {
-        _bau->setGroupObjectWriteCallback([this](GroupObjectIndex slot, std::span<const uint8_t> /*data*/) {
-            (void)dispatchStartedWrite(slot);
-        });
-
-        _bau->setGroupObjectReadCallback([this](GroupObjectIndex slot) {
-            (void)prepareStartedRead(slot);
-        });
-
-        _bau->deviceObject().setInternalProgModeCallback([this](Toggle mode) {
-            _programmingModeActive = (mode == Toggle::Enable);
-            _bindings.notifyProgrammingModeChanged(_programmingModeActive);
-        });
-    }
-
-    util::Result<void> applyConfiguredGroupAddresses()
-    {
-        for (size_t slot = 0; slot < portTable().size(); ++slot) {
-            const GroupAddress address = _configuredGroupAddresses[slot];
-            if (!address.isValid()) {
-                continue;
-            }
-
-            const auto bind = _bau->bindGroupObjectToAddress(GroupObjectIndex(static_cast<uint16_t>(slot)), address);
-            if (bind.isError()) {
-                return bind.error();
-            }
-        }
-
-        return util::Result<void>::ok();
-    }
-
-    void seedReadableState()
-    {
-        for (size_t slot = 0; slot < portTable().size(); ++slot) {
-            (void)prepareStartedRead(GroupObjectIndex(static_cast<uint16_t>(slot)));
-        }
-    }
-
-    util::Result<void> dispatchStartedWrite(GroupObjectIndex slot)
-    {
-        if (!_bau || slot.value() >= kWriteDispatchers.size()) {
-            return util::ErrorCode::InvalidAddress;
-        }
-
-        return (this->*kWriteDispatchers[slot.value()])(slot);
-    }
-
-    util::Result<void> prepareStartedRead(GroupObjectIndex slot)
-    {
-        if (!_bau || slot.value() >= kReadPreparers.size()) {
-            return util::ErrorCode::InvalidAddress;
-        }
-
-        return (this->*kReadPreparers[slot.value()])(slot);
-    }
-
-    util::Result<void> publishStarted(GroupObjectIndex slot, const application::DptValue& value)
-    {
-        if (isInitialIndividualAddress(individualAddress())) {
-            return util::ErrorCode::OperationNotReady;
-        }
-
-        const auto setValue = _bau->setGroupObjectValue(slot, value);
-        if (setValue.isError()) {
-            return setValue.error();
-        }
-
-        const auto* object = _bau->groupObject(slot);
-        if (object == nullptr) {
-            return util::ErrorCode::InvalidAddress;
-        }
-
-        return _bau->sendGroupValueForObject(slot, object->getRawValue());
-    }
-
-    util::Result<void> respondStarted(GroupObjectIndex slot, const application::DptValue& value)
-    {
-        if (isInitialIndividualAddress(individualAddress())) {
-            return util::ErrorCode::OperationNotReady;
-        }
-
-        const auto setValue = _bau->setGroupObjectValue(slot, value);
-        if (setValue.isError()) {
-            return setValue.error();
-        }
-
-        const auto* object = _bau->groupObject(slot);
-        if (object == nullptr) {
-            return util::ErrorCode::InvalidAddress;
-        }
-
-        return _bau->respondGroupValueForObject(slot, object->getRawValue());
-    }
-
-    void drainPendingActions()
-    {
-        if (!_bau) {
-            return;
-        }
-
-        while (_pendingActionCount > 0u) {
-            const PendingBusAction<port_id_type> action = _pendingActions[0];
-            for (size_t index = 1u; index < _pendingActionCount; ++index) {
-                _pendingActions[index - 1u] = _pendingActions[index];
-            }
-            --_pendingActionCount;
-
-            if (action.kind == PendingBusActionKind::Publish) {
-                (void)publishStarted(GroupObjectIndex(action.slot), action.value);
-            } else {
-                (void)respondStarted(GroupObjectIndex(action.slot), action.value);
-            }
-        }
-    }
-
-    util::Result<void> enqueue(PendingBusAction<port_id_type> action)
-    {
-        if (_pendingActionCount >= _pendingActions.size()) {
-            return util::ErrorCode::QueueFull;
-        }
-
-        _pendingActions[_pendingActionCount] = std::move(action);
-        ++_pendingActionCount;
-        notifyWorkAvailableIfTransitioned();
-        return util::Result<void>::ok();
-    }
-
     void refreshWorkAvailabilityState()
     {
         _hadImmediateWork = ownerWorkHint().hasImmediateWork();
@@ -1158,35 +866,45 @@ public:
         _hadImmediateWork = hasImmediateWork;
     }
 
-    inline static constexpr auto kWriteDispatchers =
-        makeWriteDispatchTable(std::make_index_sequence<definition_type::kPortCount>{});
-    inline static constexpr auto kReadPreparers =
-        makeReadPrepareTable(std::make_index_sequence<definition_type::kPortCount>{});
+    /// Send, or queue before start; wakes the owner when the queue gained an entry.
+    util::Result<void> publishSlot(uint16_t slot, const application::DptValue& value)
+    {
+        const size_t queued = _core.pendingActionCount();
+        const auto result = _core.publish(slot, value);
+        if (_core.pendingActionCount() != queued) {
+            notifyWorkAvailableIfTransitioned();
+        }
+        return result;
+    }
 
     static constexpr const auto& portTable()
     {
         return kPortTable<definition_type>;
     }
 
-    /// The table entry of a port, or nullptr for a logical id this product does not declare.
-    static const PortDescriptor* descriptorFor(port_id_type logicalId)
+    /// The slot of a port known at compile time: its index in the port table.
+    template <auto LogicalId>
+    static consteval uint16_t slotOfId()
     {
-        const auto slot = findPortSlot(portTable().data(), portTable().size(), static_cast<uint16_t>(logicalId));
-        return slot == kNoSlot ? nullptr : &portTable()[slot];
+        return portSlotOf<definition_type, LogicalId>();
     }
 
-    static uint16_t slotOf(const PortDescriptor& descriptor)
+    /// The slot of a port by run-time id (a scan of the table), or kNoSlot,
+    /// which the core answers with InvalidParameter.
+    static uint16_t slotOfLogicalId(port_id_type logicalId)
     {
-        return static_cast<uint16_t>(&descriptor - portTable().data());
+        return findPortSlot(portTable().data(), portTable().size(), static_cast<uint16_t>(logicalId));
     }
 
+    // Storage sized by the product; the core works on it by pointer, so these
+    // are declared before it.
     definition_type _definition;
     bindings_type _bindings;
     EndpointInstanceConfig _config{};
-    bool _programmingModeActive{false};
     std::array<GroupAddress, definition_type::kPortCount> _configuredGroupAddresses{};
     std::array<PendingBusAction<port_id_type>, kPendingActionCapacity> _pendingActions{};
-    size_t _pendingActionCount{0u};
+    ProductPortCore _core;
+    bool _programmingModeActive{false};
     WorkAvailableCallback _workAvailableCallback{};
     bool _hadImmediateWork{false};
     bau::BusAccessUnit::TimeSourceFn _timeSource{};

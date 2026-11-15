@@ -58,6 +58,9 @@ set(KNX_SOURCES_CORE
     "src/bau/group_runtime.cpp"
     "src/bau/device_management.cpp"
 
+    # Product runtime (the non-template half of EndpointRuntime)
+    "src/product/product_port_core.cpp"
+
     # Utilities
     "src/util/log.cpp"
 )
