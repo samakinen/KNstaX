@@ -290,6 +290,11 @@ passive, quiet bus):
 - Right after `U_SetAddress` (`F1`) the chip sent an unrequested `U_State.ind` `47` (receive
   error flag). Whether the address took effect is still to be checked: frames to 1.1.4 must be
   acknowledged by the chip.
+- An individually addressed frame to an absent device (1.1.4 → 1.1.250): the chip sent it four
+  times, 17.3 ms apart, setting the repeat flag itself (CTRL `BC` → `9C`, FCS recomputed), echoed
+  every copy, and confirmed negatively (`0B`) 2.7 ms after the last one. So its default is 3
+  repetitions (the KNX default), and item 4 holds for individual frames. The `U_State.req`
+  after that answered `07`: the receive-error flag seen after `U_SetAddress` does not persist.
 
 **Size (tp1-small, Cortex-M3; the gate's measured image now carries the backend over a stub
 UART):**
