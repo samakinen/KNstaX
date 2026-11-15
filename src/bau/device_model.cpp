@@ -498,6 +498,12 @@ void DeviceModel::afterTableObjectWrite(InterfaceObjectType objectType,
     if (isLoadCompleted) {
         applyLoadedTableSegment(objectType);
     }
+    // Every write to the address table can change what the data link layers
+    // filter on (Unload and StartLoading empty it, a table write changes
+    // it), so the list is published after each, not only at the end of a load.
+    if (objectType == InterfaceObjectType::addressTable()) {
+        resubscribeGroupAddresses();
+    }
     // Persist only when table content can actually have changed:
     // a completed load or a direct table-data write. Intermediate
     // load-control events (unload/start/segment alloc) would
@@ -505,11 +511,7 @@ void DeviceModel::afterTableObjectWrite(InterfaceObjectType objectType,
     // latency in the middle of the ETS download.
     if (!isLoadControlWrite || isLoadCompleted) {
         markPersistenceDirty();
-        // If the address table was updated, subscribe newly added
-        // GAs to the data link layer immediately so they work
-        // this session.
         if (objectType == InterfaceObjectType::addressTable()) {
-            resubscribeGroupAddresses();
             // Group keys are held against the GA_Index, so a new
             // address table re-points every one of them.
 #if KNX_SECURE_ENABLED
@@ -611,15 +613,10 @@ void DeviceModel::applyLoadedTableSegment(InterfaceObjectType objectType)
 
 void DeviceModel::resubscribeGroupAddresses()
 {
-    if (_stackPort == nullptr) {
-        return;
-    }
-    const uint16_t count = _addressTable.entryCount();
-    for (uint16_t i = 1; i <= count; ++i) {
-        const auto addr = _addressTable.getAddress(AddressTableIndex(i));
-        if (addr.raw != 0) {
-            (void)_stackPort->addGroupAddress(addr);
-        }
+    // The data link layers filter on the address table's storage; this is
+    // the publication point after the table changed.
+    if (_stackPort != nullptr) {
+        _stackPort->publishGroupAddresses();
     }
 }
 

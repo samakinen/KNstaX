@@ -97,6 +97,19 @@ public:
     void processBackgroundWork();
     util::Result<void> sendDataLinkFrame(const datalink::LDataFrame& frame);
     void setDataLinkPromiscuousMode(datalink::PromiscuousMode mode);
+    /// Make the device's group address table the list the data link layers
+    /// filter and acknowledge on: they read its storage instead of keeping a
+    /// copy (one copy of the list, not four). The table must outlive the stack
+    /// port and stay where it is; the BAU does both. Without a table the stack
+    /// port is on its own and addGroupAddress() keeps the list in the layers.
+    void attachAddressTable(const objects::AddressTableObject& table);
+    /// Say that the address table changed: the data link layers take its
+    /// entries as they are now (and the physical layer's acknowledge list is
+    /// rebuilt from them). The publication point of the list; see
+    /// Tp1DataLinkLayer::setGroupAddressView. Cheap when nothing changed.
+    void publishGroupAddresses();
+    /// Subscribe to @p address. With an address table attached the address must
+    /// be in it (InvalidAddress otherwise) and this publishes the table.
     util::Result<void> addGroupAddress(const GroupAddress& address);
     util::Result<void> setOwnAddress(const IndividualAddress& ownAddress);
     void setIndividualAddressUpdateCallback(application::ApplicationLayer::IndividualAddressUpdateCallback callback);
@@ -212,6 +225,9 @@ private:
 #if KNX_SECURE_ENABLED
     void configureSecurity();
 #endif
+    /// The attached address table's entries (empty without one) and whether they are sorted.
+    std::span<const GroupAddress> groupAddressView() const;
+    bool groupAddressViewSorted() const;
 
     platform::Platform& _platform;
 
@@ -236,7 +252,7 @@ private:
 
     bool _initialized{false};
     bool _programmingModeEnabled{false};
-    util::FixedVector<GroupAddress, datalink::Tp1DataLinkLayer::MAX_GROUP_ADDRESSES> _groupAddresses;
+    const objects::AddressTableObject* _addressTable{nullptr};
     InboundCallback _inboundCallback;
     WorkAvailableCallback _workAvailableCallback;
     TransmissionOptions _defaultTransmissionOptions{};

@@ -495,6 +495,44 @@ void test_full_ets_commissioning_sequence_with_verify_mode(void) {
     downloadLikeEts(true);
 }
 
+// One copy of the group address list: the data link layer filters on the
+// address table itself, so the table a download leaves is the list it accepts
+// telegrams for, and an Unload takes the old addresses away at once (the layer
+// does not keep a list of its own that outlives the table).
+void test_group_address_filter_follows_the_address_table(void) {
+    gBau->link().setPromiscuousMode(datalink::PromiscuousMode::Disable);  // the fixture runs promiscuous
+    assignAddressLikeEts();
+    downloadLikeEts(false);  // the table now holds 1/2/3 (0x0A03)
+
+    const auto filterDropped = [] { return gBau->link().diagnostics().rxFilterDropped; };
+    const auto groupWrite = [](uint16_t destination) {
+        injectTpdu(kEtsAddress, destination, AddressType::Group,
+                   unnumbered(application::APCIService::GroupValueWrite, 1));
+        (void)pumpAndCollect(30);
+    };
+
+    uint32_t before = filterDropped();
+    groupWrite(0x0A03u);
+    TEST_ASSERT_EQUAL_UINT32(before, filterDropped());      // in the table: passes the filter
+    groupWrite(0x0A04u);
+    TEST_ASSERT_EQUAL_UINT32(before + 1u, filterDropped());  // not in the table: dropped
+
+    // A new session (the restart did not reset the test device) unloads the table.
+    injectTpdu(kEtsAddress, kCommissionedAddress.raw, AddressType::Individual, std::vector<uint8_t>{0x81});
+    (void)pumpAndCollect(30);
+    injectTpdu(kEtsAddress, kCommissionedAddress.raw, AddressType::Individual, std::vector<uint8_t>{0x80});
+    (void)pumpAndCollect(30);
+    const auto sent = connectedRequest(0, application::APCIService::PropertyValueWrite, 0,
+                                       {0x01, 0x05, 0x10, 0x01, 0x04});  // Unload, Group Address Table
+    TEST_ASSERT_NOT_NULL(findResponse(sent, kFullMask,
+        static_cast<uint16_t>(application::APCIService::PropertyValueResponse)));
+    TEST_ASSERT_EQUAL_UINT16(0u, gBau->addressTable().entryCount());
+
+    before = filterDropped();
+    groupWrite(0x0A03u);
+    TEST_ASSERT_EQUAL_UINT32(before + 1u, filterDropped());  // no longer in the table: dropped
+}
+
 // Capacity: the group address table segment is KNX_ADDRESS_TABLE_ENTRIES long.
 // A write that runs past its end is refused with the negative A_Memory_Response
 // (count 0) and changes nothing; a count above the capacity is a failed load
@@ -1177,6 +1215,7 @@ int main(int argc, char** argv) {
     if (all || group == "session") {
         RUN_TEST(test_full_ets_commissioning_sequence_without_verify_mode);
         RUN_TEST(test_full_ets_commissioning_sequence_with_verify_mode);
+        RUN_TEST(test_group_address_filter_follows_the_address_table);
         RUN_TEST(test_management_writes_on_the_wrong_mode_are_ignored);
         RUN_TEST(test_master_reset_factory_reset_restores_ex_factory_state);
         RUN_TEST(test_master_reset_factory_reset_returns_to_the_firmware_factory_defaults);

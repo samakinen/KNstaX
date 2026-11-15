@@ -535,8 +535,72 @@ void test_repeated_frame_delivered_only_once(void) {
     TEST_ASSERT_EQUAL_UINT32(1, stats.duplicatesDropped);
 }
 
+namespace {
+
+/// Whether a group telegram to @p destination gets past the layer's receive filter.
+bool groupTelegramIsAccepted(GroupAddress destination) {
+    datalink::LDataFrame frame;
+    frame.source = IndividualAddress(1, 1, 20);
+    frame.destination = destination;
+    frame.destinationType = AddressType::Group;
+    frame.setTpdu(knx::protocol::TPCI::UnnumberedData, application::APCIService::GroupValueWrite, {0x01});
+    uint8_t raw[23];
+    auto encoded = datalink::FrameCodec::encodeFrame(frame, std::span<uint8_t>(raw));
+    TEST_ASSERT_TRUE(encoded.isOk());
+    const auto before = dlLayer->getStatistics();
+    physicalLayer->injectFrame(std::vector<uint8_t>(raw, raw + encoded.value()));
+    const auto after = dlLayer->getStatistics();
+    return after.rxFrames == before.rxFrames + 1u && after.filterDropped == before.filterDropped;
+}
+
+}  // namespace
+
+// One copy of the list: with a view the layer filters on the other component's
+// storage, as it is when the view is published, and keeps no list of its own.
+void test_group_address_view_is_the_filter(void) {
+    static const std::array<GroupAddress, 3> sorted{GroupAddress(0x0801u), GroupAddress(0x0805u), GroupAddress(0x0900u)};
+    dlLayer->setGroupAddressView(sorted, true);
+    TEST_ASSERT_TRUE(groupTelegramIsAccepted(GroupAddress(0x0801u)));
+    TEST_ASSERT_TRUE(groupTelegramIsAccepted(GroupAddress(0x0805u)));
+    TEST_ASSERT_TRUE(groupTelegramIsAccepted(GroupAddress(0x0900u)));
+    TEST_ASSERT_FALSE(groupTelegramIsAccepted(GroupAddress(0x0802u)));
+    TEST_ASSERT_FALSE(groupTelegramIsAccepted(GroupAddress(0x0901u)));
+
+    // The same storage published with fewer entries: the others are no longer accepted.
+    dlLayer->setGroupAddressView(std::span<const GroupAddress>(sorted).first(1), true);
+    TEST_ASSERT_TRUE(groupTelegramIsAccepted(GroupAddress(0x0801u)));
+    TEST_ASSERT_FALSE(groupTelegramIsAccepted(GroupAddress(0x0805u)));
+
+    // A table built out of order (entries are appended) is searched linearly.
+    static const std::array<GroupAddress, 3> unsorted{GroupAddress(0x0900u), GroupAddress(0x0801u), GroupAddress(0x0805u)};
+    dlLayer->setGroupAddressView(unsorted, false);
+    TEST_ASSERT_TRUE(groupTelegramIsAccepted(GroupAddress(0x0801u)));
+    TEST_ASSERT_TRUE(groupTelegramIsAccepted(GroupAddress(0x0900u)));
+    TEST_ASSERT_FALSE(groupTelegramIsAccepted(GroupAddress(0x0802u)));
+
+    // An empty view filters everything out.
+    dlLayer->setGroupAddressView({}, true);
+    TEST_ASSERT_FALSE(groupTelegramIsAccepted(GroupAddress(0x0801u)));
+}
+
+// A layer given a view that is then asked to add an address takes a copy of the
+// view and adds to it; the view's owner is not changed.
+void test_adding_to_a_view_copies_it(void) {
+    static const std::array<GroupAddress, 2> view{GroupAddress(0x0801u), GroupAddress(0x0805u)};
+    dlLayer->setGroupAddressView(view, true);
+    TEST_ASSERT_TRUE(dlLayer->addGroupAddress(GroupAddress(0x0900u)).isOk());
+    TEST_ASSERT_TRUE(groupTelegramIsAccepted(GroupAddress(0x0801u)));
+    TEST_ASSERT_TRUE(groupTelegramIsAccepted(GroupAddress(0x0805u)));
+    TEST_ASSERT_TRUE(groupTelegramIsAccepted(GroupAddress(0x0900u)));
+    TEST_ASSERT_TRUE(dlLayer->removeGroupAddress(GroupAddress(0x0801u)).isOk());
+    TEST_ASSERT_FALSE(groupTelegramIsAccepted(GroupAddress(0x0801u)));
+    TEST_ASSERT_EQUAL_HEX16(0x0801u, view[0].raw);
+}
+
 int run_all_datalink_edge_case_tests(void) {
     UNITY_BEGIN();
+    RUN_TEST(test_group_address_view_is_the_filter);
+    RUN_TEST(test_adding_to_a_view_copies_it);
     RUN_TEST(test_statistics_initialization);
     RUN_TEST(test_statistics_tx_counter);
     RUN_TEST(test_statistics_filter_dropped);

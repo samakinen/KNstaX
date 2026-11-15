@@ -412,6 +412,7 @@ util::Result<void> DeviceManagement::applyMasterReset(application::EraseCode era
     if (resetLinks) {
         _model.addressTable().clearEntries();
         _model.associationTable().clearEntries();
+        _model.resubscribeGroupAddresses();  // the data link layers stop filtering on the old list
     }
 
     if (resetParameters) {

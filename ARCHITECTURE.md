@@ -111,6 +111,16 @@ Non-responsibilities:
 - direct FreeRTOS API ownership
 - backend diagnostics interpretation
 
+#### Who owns the group address list
+
+There is one copy of a device's group address list: the `AddressTableObject`'s own storage (inline in the object, so its address never changes). A device does not keep further lists in the stack port or the data link layer. `BusAccessUnit` attaches the table to the stack port (`attachAddressTable`); the stack port gives each data link layer a view of it (`Tp1DataLinkLayer::setGroupAddressView`: a span and whether it is sorted), and the layer's receive filter (a binary search when the table is in ascending order, as an ETS download leaves it; a linear scan when firmware appended entries out of order) and its acknowledge list read that storage. A layer used on its own (unit tests, the KNXnet/IP physicals' tests) still has `addGroupAddress()`, which keeps a private list made on first use.
+
+Publication point. The view is published by `BusAccessStackPort::publishGroupAddresses()`, which `DeviceModel::resubscribeGroupAddresses()` and `GroupRuntime` call after every change of the table: each write to the address table object (Unload and StartLoading empty it, the segment is applied at LoadCompleted, a property write changes entries), a master reset that clears links, a group object bound to an address, and the restore at start-up. A view is a pointer and a count that the layer takes as one value, so it never reads past what was published, and an in-place change between two publications is seen as it is, word by word.
+
+ISR safety does not depend on the view. The decision to acknowledge a telegram is made by the physical layer's own matcher (the bit-bang ISR, the TP-UART silicon or its driver) from its own copy of the group addresses. The data link layer builds that copy from the view into a transient array and hands it over through `setAckGroupAddresses`; the backend replaces its copy under its own lock (the bit-bang core takes the ISR lock for the copy), so no interrupt ever reads the table's storage. A backend that decides from a list of its own copies it in `setAckGroupAddresses` in the same way. On the cooperative platform the receive filter, the stack's loop and the publication run in one context, so the swap of pointer and count is a plain store at a point where no frame is being filtered. On a platform with a separate receive task the filter has the relaxed guarantee the earlier list had: a telegram that arrives while a download changes the table is filtered by the old list, the new one or a mixture.
+
+Behaviour change: the layer filters and acknowledges on the table, so an address that is no longer in the table is no longer accepted. The earlier lists only grew: after an ETS Unload, or a download with fewer addresses, the device kept accepting and acknowledging the old ones until the next restart.
+
 ### `Tp1PhysicalLike`
 
 The concept `Tp1DataLinkLayer` requires of a physical layer (`Tp1MacPhysical`, the KNXnet/IP physicals and the test mock). It is intentionally narrow: it exposes frame-oriented send/receive and bus-monitor control upward to the data-link layer. It does not expose backend-family-specific byte-stream policy.

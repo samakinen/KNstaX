@@ -376,15 +376,42 @@ public:
     size_t processRxAvailable(uint32_t firstReadTimeoutMs = 100);
     
     /**
+     * @brief Use another component's list of group addresses as the filter (one copy)
+     *
+     * The layer keeps no list of its own while a view is set: the receive
+     * filter reads @p addresses where they are (a device passes its address
+     * table's storage) and the acknowledge list handed to the physical layer
+     * is built from them. @p sorted says the entries are in strictly
+     * ascending order, which lets the filter binary-search.
+     *
+     * Call this again whenever the list changes (a table download, an entry
+     * added); that is the publication point. The view is a pointer and a
+     * count, taken as one value: the filter never reads past @p addresses,
+     * and the storage must stay where it is (the address table's inline
+     * buffer does). Entries changed in place between two calls are seen
+     * as they are, a word at a time. The physical layer's own copy of the
+     * acknowledge list is replaced under that layer's lock, as before, so
+     * the interrupt-side matcher never reads this view.
+     *
+     * An empty span clears the filter. Replaces anything added with
+     * addGroupAddress().
+     */
+    void setGroupAddressView(std::span<const GroupAddress> addresses, bool sorted);
+
+    /**
      * @brief Add group address to filter table
+     *
+     * For a layer that owns its list (no view set): standalone use and
+     * tests. If a view is set the layer first takes a copy of it, so the
+     * result is the same list plus @p address.
      */
     util::Result<void> addGroupAddress(const GroupAddress& address);
-    
+
     /**
      * @brief Remove group address from filter table
      */
     util::Result<void> removeGroupAddress(const GroupAddress& address);
-    
+
     /**
      * @brief Clear group address filter table
      */
@@ -593,7 +620,19 @@ private:
     PhysicalPort _physicalPort;
     platform::TimingPlatform* _timingPlatform;
     IndividualAddress _ownAddress;
-    util::FixedVector<GroupAddress, MAX_GROUP_ADDRESSES> _groupAddresses;
+    /// The group addresses the receive filter and the acknowledge list read: the
+    /// device's address table (setGroupAddressView) or, for a layer used on its
+    /// own, _ownedGroupAddresses. One read path either way.
+    std::span<const GroupAddress> _groupView{};
+    bool _groupViewSorted{false};
+    /// Made when addGroupAddress() or removeGroupAddress() is first used. A
+    /// device that gives the layer a view never allocates it.
+    std::unique_ptr<util::FixedVector<GroupAddress, MAX_GROUP_ADDRESSES>> _ownedGroupAddresses;
+    bool _viewIsOwned{false};
+
+    /// The layer's own list, made from the current view if the view is another's.
+    util::FixedVector<GroupAddress, MAX_GROUP_ADDRESSES>& ownedGroupAddresses();
+    void refreshOwnedView();
     util::FixedVector<uint16_t, MAX_ADDITIONAL_INDIVIDUAL_ADDRESSES> _additionalAddresses;
     bool _promiscuousMode;
     bool _initialized;

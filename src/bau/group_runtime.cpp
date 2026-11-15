@@ -166,13 +166,13 @@ GroupObjectIndex GroupRuntime::addGroupObject(const GroupAddress& address,
         return GroupObjectIndex::invalid();
     }
 
-    // Subscribe to group address in data link layer
+    // Add to address table
+    _addressTable.addEntry(config.address);
+
+    // Subscribe to group address in data link layer (it filters on the table)
     if (_stackPort != nullptr) {
         (void)_stackPort->addGroupAddress(config.address);
     }
-
-    // Add to address table
-    _addressTable.addEntry(config.address);
 
     // Add to association table so the three-table routing chain resolves this
     // object for code-driven GA assignments as well.

@@ -121,7 +121,8 @@ public:
 #endif
 
     util::Result<void> init(const IndividualAddress& ownAddress,
-                            std::span<const GroupAddress> groupAddresses)
+                            std::span<const GroupAddress> groupAddresses,
+                            bool sorted)
     {
         if (!_dataLink) {
             if (false) {
@@ -161,14 +162,18 @@ public:
             _dataLink->setPromiscuousMode(*_promiscuousMode);
         }
 
-        for (const auto& address : groupAddresses) {
-            auto addResult = _dataLink->addGroupAddress(address);
-            if (addResult.isError()) {
-                return addResult;
-            }
-        }
+        _dataLink->setGroupAddressView(groupAddresses, sorted);
 
         return util::Result<void>::ok();
+    }
+
+    /// The group addresses to filter on, as the layer reads them (see
+    /// Tp1DataLinkLayer::setGroupAddressView). No-op before init().
+    void setGroupAddressView(std::span<const GroupAddress> groupAddresses, bool sorted)
+    {
+        if (_dataLink) {
+            _dataLink->setGroupAddressView(groupAddresses, sorted);
+        }
     }
 
     void close() {
@@ -346,7 +351,7 @@ util::Result<void> BusAccessStackPort::initCoupler(const IndividualAddress& ownA
     // The secondary port answers to the same individual address and the
     // same group addresses: a coupler is one device with two attachments,
     // not two devices.
-    auto secondaryInit = _secondaryMedium->init(ownAddress, _groupAddresses);
+    auto secondaryInit = _secondaryMedium->init(ownAddress, groupAddressView(), groupAddressViewSorted());
     if (secondaryInit.isError()) {
         return secondaryInit;
     }
@@ -379,7 +384,7 @@ util::Result<void> BusAccessStackPort::initCoupler(const IndividualAddress& ownA
 
 util::Result<void> BusAccessStackPort::init(const IndividualAddress& ownAddress)
 {
-    auto mediumInit = _medium->init(ownAddress, _groupAddresses);
+    auto mediumInit = _medium->init(ownAddress, groupAddressView(), groupAddressViewSorted());
     if (mediumInit.isError()) {
         return mediumInit;
     }
@@ -557,17 +562,54 @@ void BusAccessStackPort::setDataLinkPromiscuousMode(datalink::PromiscuousMode mo
     _medium->setDataLinkPromiscuousMode(mode);
 }
 
+void BusAccessStackPort::attachAddressTable(const objects::AddressTableObject& table)
+{
+    _addressTable = &table;
+    publishGroupAddresses();
+}
+
+std::span<const GroupAddress> BusAccessStackPort::groupAddressView() const
+{
+    return _addressTable != nullptr ? _addressTable->addresses() : std::span<const GroupAddress>{};
+}
+
+bool BusAccessStackPort::groupAddressViewSorted() const
+{
+    return _addressTable != nullptr && _addressTable->isSorted();
+}
+
+void BusAccessStackPort::publishGroupAddresses()
+{
+    if (_addressTable == nullptr || !_initialized) {
+        return;  // before init() the layers do not exist; init() publishes the table
+    }
+    // On the cooperative platform the stack, this call and the data link's
+    // receive path run in one context: the swap of (pointer, count) is a plain
+    // store at a point where no frame is being filtered. The interrupt-side
+    // matcher of the physical layer has its own copy, replaced under its lock.
+    _medium->setGroupAddressView(groupAddressView(), groupAddressViewSorted());
+#if KNX_FEATURE_COUPLER
+    if (_secondaryMedium) {
+        _secondaryMedium->setGroupAddressView(groupAddressView(), groupAddressViewSorted());
+    }
+#endif
+}
+
 util::Result<void> BusAccessStackPort::addGroupAddress(const GroupAddress& address)
 {
-    const auto existing = std::find(_groupAddresses.begin(), _groupAddresses.end(), address);
-    if (existing == _groupAddresses.end()) {
-        if (!_groupAddresses.push_back(address)) {
-            return util::ErrorCode::BufferTooSmall;
+    if (_addressTable != nullptr) {
+        // The address table is the list. An address it does not hold cannot be
+        // subscribed to: add the entry first (GroupRuntime does).
+        if (!_addressTable->findIndex(address).isValid()) {
+            return util::ErrorCode::InvalidAddress;
         }
+        publishGroupAddresses();
+        return util::Result<void>::ok();
     }
 
+    // No table: the stack port is on its own and the layers keep the list.
     if (!_initialized) {
-        return util::Result<void>::ok();
+        return util::ErrorCode::NotInitialized;
     }
 
     auto primaryResult = _medium->addGroupAddress(address);

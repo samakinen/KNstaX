@@ -593,16 +593,45 @@ size_t Tp1DataLinkLayer::processRxAvailable(uint32_t firstReadTimeoutMs) {
     return processRxAvailableInternal(firstReadTimeoutMs);
 }
 
+void Tp1DataLinkLayer::setGroupAddressView(std::span<const GroupAddress> addresses, bool sorted) {
+    _groupView = addresses.size() > MAX_GROUP_ADDRESSES ? addresses.first(MAX_GROUP_ADDRESSES) : addresses;
+    _groupViewSorted = sorted;
+    _viewIsOwned = false;
+    KNX_LOGD(TAG, "Group address filter: %u addresses%s", static_cast<unsigned>(_groupView.size()),
+             sorted ? " (sorted)" : "");
+    publishAckGroupAddresses();
+}
+
+util::FixedVector<GroupAddress, Tp1DataLinkLayer::MAX_GROUP_ADDRESSES>& Tp1DataLinkLayer::ownedGroupAddresses() {
+    if (!_ownedGroupAddresses) {
+        _ownedGroupAddresses =
+            std::make_unique<util::FixedVector<GroupAddress, MAX_GROUP_ADDRESSES>>();
+    }
+    if (!_viewIsOwned) {
+        // Another component's list: this layer's copy starts as what it filters on now.
+        (void)_ownedGroupAddresses->assign(_groupView);
+        _viewIsOwned = true;
+    }
+    return *_ownedGroupAddresses;
+}
+
+void Tp1DataLinkLayer::refreshOwnedView() {
+    _groupView = std::span<const GroupAddress>(_ownedGroupAddresses->data(), _ownedGroupAddresses->size());
+    _groupViewSorted = false;
+}
+
 util::Result<void> Tp1DataLinkLayer::addGroupAddress(const GroupAddress& address) {
+    auto& list = ownedGroupAddresses();
     // Check if already in list
-    auto it = std::find(_groupAddresses.begin(), _groupAddresses.end(), address);
-    if (it != _groupAddresses.end()) {
+    auto it = std::find(list.begin(), list.end(), address);
+    if (it != list.end()) {
         return util::Result<void>::ok();  // Already present
     }
 
-    if (!_groupAddresses.push_back(address)) {
+    if (!list.push_back(address)) {
         return util::ErrorCode::BufferTooSmall;
     }
+    refreshOwnedView();
     KNX_LOGD(TAG, "Added group address: %d/%d/%d",
              address.main(), address.middle(), address.sub());
     publishAckGroupAddresses();
@@ -611,9 +640,11 @@ util::Result<void> Tp1DataLinkLayer::addGroupAddress(const GroupAddress& address
 }
 
 util::Result<void> Tp1DataLinkLayer::removeGroupAddress(const GroupAddress& address) {
-    auto it = std::find(_groupAddresses.begin(), _groupAddresses.end(), address);
-    if (it != _groupAddresses.end()) {
-        _groupAddresses.erase(static_cast<size_t>(std::distance(_groupAddresses.begin(), it)));
+    auto& list = ownedGroupAddresses();
+    auto it = std::find(list.begin(), list.end(), address);
+    if (it != list.end()) {
+        list.erase(static_cast<size_t>(std::distance(list.begin(), it)));
+        refreshOwnedView();
         KNX_LOGD(TAG, "Removed group address: %d/%d/%d",
                  address.main(), address.middle(), address.sub());
         publishAckGroupAddresses();
@@ -623,7 +654,8 @@ util::Result<void> Tp1DataLinkLayer::removeGroupAddress(const GroupAddress& addr
 }
 
 void Tp1DataLinkLayer::clearGroupAddresses() {
-    _groupAddresses.clear();
+    ownedGroupAddresses().clear();
+    refreshOwnedView();
     KNX_LOGD(TAG, "Cleared all group addresses");
     publishAckGroupAddresses();
 }
@@ -635,11 +667,16 @@ void Tp1DataLinkLayer::publishAckGroupAddresses() {
 
     // Snapshot the raw group addresses for the physical layer's ISR-side
     // L_ACK matcher, which holds the whole table (the bit-bang ISR sizes it to
-    // MAX_GROUP_ADDRESSES and sorts it for a binary search).
+    // MAX_GROUP_ADDRESSES and sorts it for a binary search). The snapshot is
+    // transient (on this stack) and the matcher replaces its own copy under its
+    // lock, so the interrupt never reads the view below. An entry of 0 is no
+    // group address (a table slot that was never written) and is not offered.
     std::array<uint16_t, MAX_GROUP_ADDRESSES> raw{};
     size_t count = 0;
-    for (const auto& ga : _groupAddresses) {
-        raw[count++] = ga.raw;
+    for (const auto& ga : _groupView) {
+        if (ga.raw != 0u) {
+            raw[count++] = ga.raw;
+        }
     }
     _physicalPort.setAckGroupAddresses(_physicalPort.context,
                                        std::span<const uint16_t>(raw.data(), count));
@@ -734,7 +771,11 @@ bool Tp1DataLinkLayer::isAddressMatch(const GroupAddress& address, AddressType a
 
         // Check group address table
         GroupAddress groupAddr(address.raw);
-        return std::find(_groupAddresses.begin(), _groupAddresses.end(), groupAddr) != _groupAddresses.end();
+        if (_groupViewSorted) {
+            return std::binary_search(_groupView.begin(), _groupView.end(), groupAddr,
+                                      [](const GroupAddress& a, const GroupAddress& b) { return a.raw < b.raw; });
+        }
+        return std::find(_groupView.begin(), _groupView.end(), groupAddr) != _groupView.end();
     } else {
         // Check individual address
         IndividualAddress indAddr(address.raw);

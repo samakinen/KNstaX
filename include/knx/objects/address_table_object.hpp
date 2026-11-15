@@ -172,6 +172,21 @@ public:
     uint16_t entryCount() const { return _table.size(); }
 
     /**
+     * @brief The entries, in table order (entry i is index i + 1), where they are stored
+     *
+     * The one copy of the device's group address list: the data link layers
+     * filter and acknowledge on this storage (BusAccessStackPort::attachAddressTable)
+     * instead of holding lists of their own. The span stays valid for the
+     * object's lifetime; its length is the count now.
+     */
+    std::span<const GroupAddress> addresses() const {
+        return std::span<const GroupAddress>(_table.entries().data(), _table.entries().size());
+    }
+
+    /// True when addresses() is in strictly ascending order (a binary search applies).
+    bool isSorted() const { return _table.isSorted(); }
+
+    /**
      * @brief Get maximum table capacity
      */
     uint16_t maxEntries() const { return AddressTableDomain::kMaxEntries; }

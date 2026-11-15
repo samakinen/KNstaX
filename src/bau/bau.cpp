@@ -64,6 +64,10 @@ BusAccessUnit::BusAccessUnit(platform::Platform& platform,
     , _groups(std::make_unique<GroupRuntime>(_platform, _stackPort.get(), *_model))
     , _management(std::make_unique<DeviceManagement>(_platform, _stackPort.get(), *_model, *_groups))
 {
+    // The data link layers filter on the address table's own storage.
+    if (_stackPort) {
+        _stackPort->attachAddressTable(_addressTable);
+    }
 }
 
 BusAccessUnit::~BusAccessUnit() {
