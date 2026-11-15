@@ -283,9 +283,56 @@ void test_product_runtime_core_owner_work_hint_tracks_pending_actions_and_notifi
     TEST_ASSERT_EQUAL_UINT(2u, workAvailableCount);
 }
 
+// A capacity is a promise: with the queue full a request fails with QueueFull,
+// the entries already queued stay, and a slot freed by clearing is usable again.
+void test_product_runtime_core_pending_queue_refuses_when_full_and_keeps_its_entries(void)
+{
+    EndpointRuntime<decltype(kRuntimeSwitchDefinition)> runtime(
+        kRuntimeSwitchDefinition,
+        EndpointBindings<decltype(kRuntimeSwitchDefinition)>{}
+            .provideState<RuntimeSwitchPort::RelayState>([]() { return true; }),
+        EndpointInstanceConfig{
+            .defaultIndividualAddress = IndividualAddress(1, 1, 10),
+            .persistenceNamespace = "switch_full",
+            .restoreKnxStateOnBoot = true,
+        });
+
+    constexpr size_t kCapacity = decltype(runtime)::kPendingActionCapacity;
+    static_assert(kCapacity >= 1u);
+    TEST_ASSERT_TRUE(kCapacity == knx::config::PENDING_ACTION_CAPACITY
+                     || (knx::config::PENDING_ACTION_CAPACITY == 0u && kCapacity == 2u * 2u));
+
+    for (size_t i = 0; i < kCapacity; ++i) {
+        // Publish through the run-time id overload and the compile-time one alternately.
+        const auto result = (i % 2u == 0u)
+            ? runtime.publish(RuntimeSwitchPort::RelayState, true)
+            : runtime.publish<RuntimeSwitchPort::RelayState>(false);
+        TEST_ASSERT_TRUE(result.isOk());
+    }
+    TEST_ASSERT_EQUAL_UINT(kCapacity, runtime.pendingActionCount());
+
+    const auto full = runtime.publish<RuntimeSwitchPort::RelayState>(true);
+    TEST_ASSERT_TRUE(full.isError());
+    TEST_ASSERT_EQUAL(static_cast<int>(util::ErrorCode::QueueFull), static_cast<int>(full.error()));
+    const auto fullRead = runtime.requestReadResponse<RuntimeSwitchPort::RelayState>();
+    TEST_ASSERT_TRUE(fullRead.isError());
+    TEST_ASSERT_EQUAL(static_cast<int>(util::ErrorCode::QueueFull), static_cast<int>(fullRead.error()));
+    TEST_ASSERT_EQUAL_UINT(kCapacity, runtime.pendingActionCount());
+
+    // The oldest entry is still the first one queued.
+    const auto* first = runtime.pendingActionAt(0u);
+    TEST_ASSERT_NOT_NULL(first);
+    TEST_ASSERT_TRUE(first->value.asBool());
+    TEST_ASSERT_NULL(runtime.pendingActionAt(kCapacity));
+
+    runtime.clearPendingActions();
+    TEST_ASSERT_TRUE(runtime.publish<RuntimeSwitchPort::RelayState>(true).isOk());
+}
+
 int main(void)
 {
     UNITY_BEGIN();
+    RUN_TEST(test_product_runtime_core_pending_queue_refuses_when_full_and_keeps_its_entries);
     RUN_TEST(test_product_runtime_core_mediates_incoming_writes_and_outgoing_updates);
     RUN_TEST(test_product_runtime_core_derives_read_response_and_state_writes_from_bindings);
     RUN_TEST(test_product_runtime_core_reports_missing_state_provider_as_not_ready);

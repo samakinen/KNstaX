@@ -80,7 +80,9 @@ public:
     using OwnerWorkHint = bau::BusAccessUnit::OwnerWorkHint;
     using WorkAvailableCallback = bau::BusAccessUnit::WorkAvailableCallback;
 
-    static constexpr size_t kPendingActionCapacity = definition_type::kPortCount * 2u;
+    static constexpr size_t kPendingActionCapacity =
+        knx::config::PENDING_ACTION_CAPACITY != 0u ? knx::config::PENDING_ACTION_CAPACITY
+                                                   : definition_type::kPortCount * 2u;
 
     // Bindings by rvalue reference: the entry arrays are sized by the port
     // count, so a by-value sink would cost a full copy of them on the

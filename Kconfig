@@ -536,6 +536,19 @@ menu "KNX Stack Configuration"
                 Send outcomes the application layer holds for the application to
                 collect. When it is full the oldest outcome is dropped and
                 counted.
+
+        config KNX_PENDING_ACTION_CAPACITY
+            int "Pending product actions"
+            default 0
+            range 0 256
+            help
+                Publishes and read responses a commissioned product can have
+                queued before the stack has started. 0 means twice the
+                product's port count (one publish and one read response per
+                port), which cannot overflow. A smaller number saves 40 bytes
+                of RAM per entry on a 32-bit target. When the queue is full the
+                request fails with QueueFull; nothing already queued is
+                dropped.
     endmenu
 
     menu "Task Configuration"

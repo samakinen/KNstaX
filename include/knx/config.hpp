@@ -84,6 +84,9 @@ namespace config {
 #ifndef CONFIG_KNX_SEND_PIPELINE_DEPTH
 #   error "CONFIG_KNX_SEND_PIPELINE_DEPTH is not defined: build with the KNstaX configuration (ESP-IDF Kconfig, or knx_configure() in CMake)"
 #endif
+#ifndef CONFIG_KNX_PENDING_ACTION_CAPACITY
+#   error "CONFIG_KNX_PENDING_ACTION_CAPACITY is not defined: build with the KNstaX configuration (ESP-IDF Kconfig, or knx_configure() in CMake)"
+#endif
 
 /// Largest APDU the device accepts, sends and reports in PID_MAX_APDU_LENGTH.
 constexpr size_t MAX_APDU_LENGTH = CONFIG_KNX_MAX_APDU_LENGTH;
@@ -124,6 +127,9 @@ constexpr size_t ADDITIONAL_INDIVIDUAL_ADDRESSES = CONFIG_KNX_ADDITIONAL_INDIVID
 /// Send outcomes the application layer holds for the application to collect.
 constexpr size_t SEND_PIPELINE_DEPTH = CONFIG_KNX_SEND_PIPELINE_DEPTH;
 static_assert(SEND_PIPELINE_DEPTH >= 1, "KNX_SEND_PIPELINE_DEPTH must be at least 1");
+/// Publishes and read responses a commissioned product queues before the stack
+/// has started; 0 means twice the product's port count (cannot overflow).
+constexpr size_t PENDING_ACTION_CAPACITY = CONFIG_KNX_PENDING_ACTION_CAPACITY;
 
 /**
  * @brief Payload capacity reserved per group object, in octets.
