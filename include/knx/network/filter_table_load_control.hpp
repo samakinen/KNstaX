@@ -25,6 +25,7 @@
 
 #pragma once
 
+#include "knx/config.hpp"
 #include "knx/network/filter_table.hpp"
 #include "knx/util/inplace_function.hpp"
 #include "knx/util/result.hpp"
@@ -77,7 +78,7 @@ public:
     static constexpr uint8_t kErrorUndefinedLoadCommand = 14;
 
     /// Called after every state change with whether the table is now Loaded.
-    using StateListener = util::InplaceFunction<void(bool loaded), 32>;
+    using StateListener = util::InplaceFunction<void(bool loaded), ::knx::config::callbackBytes(32)>;
 
     /// Persisted record: header, then the table run-length encoded or raw,
     /// whichever is shorter (see serialize()). Worst case is the raw table.

@@ -21,6 +21,7 @@
 
 #pragma once
 
+#include "knx/config.hpp"
 #if __has_include("knx/autoconf.h")
 #include "knx/autoconf.h"
 #elif __has_include("sdkconfig.h")
@@ -86,6 +87,9 @@ namespace config {
 #endif
 #ifndef CONFIG_KNX_PENDING_ACTION_CAPACITY
 #   error "CONFIG_KNX_PENDING_ACTION_CAPACITY is not defined: build with the KNstaX configuration (ESP-IDF Kconfig, or knx_configure() in CMake)"
+#endif
+#ifndef CONFIG_KNX_CALLBACK_CAPTURE_BYTES
+#   error "CONFIG_KNX_CALLBACK_CAPTURE_BYTES is not defined: build with the KNstaX configuration (ESP-IDF Kconfig, or knx_configure() in CMake)"
 #endif
 
 /// Largest APDU the device accepts, sends and reports in PID_MAX_APDU_LENGTH.
@@ -157,10 +161,13 @@ constexpr size_t MAX_GROUP_OBJECT_PAYLOAD_BYTES = CONFIG_KNX_MAX_GROUP_OBJECT_PA
 static_assert(MAX_GROUP_OBJECT_PAYLOAD_BYTES <= MAX_APDU_LENGTH,
               "A group object payload cannot exceed the maximum APDU");
 
-/// Inline capture bytes of a stack-internal callback whose default is `today`.
+/// Inline capture bytes of a stack callback whose default is `today`: the
+/// configured KNX_CALLBACK_CAPTURE_BYTES when that is set and smaller, else `today`.
 constexpr size_t callbackBytes(size_t today) noexcept
 {
-    return today;
+    return (CONFIG_KNX_CALLBACK_CAPTURE_BYTES != 0 && CONFIG_KNX_CALLBACK_CAPTURE_BYTES < today)
+               ? static_cast<size_t>(CONFIG_KNX_CALLBACK_CAPTURE_BYTES)
+               : today;
 }
 
 /**

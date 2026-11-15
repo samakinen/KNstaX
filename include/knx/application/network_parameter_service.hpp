@@ -20,6 +20,7 @@
 
 #pragma once
 
+#include "knx/config.hpp"
 #include "knx/application/apci_services.hpp"
 #include "knx/application/property.hpp"
 #include "knx/types.hpp"
@@ -70,13 +71,13 @@ struct NetworkParameterRequest {
  * @brief Emits an A_IndividualAddressSerialNumber_Response broadcast.
  */
 using SerialNumberResponseCallback = util::InplaceFunction<
-    void(const KnxSerialNumber& serialNumber, uint16_t domainAddress), 64>;
+    void(const KnxSerialNumber& serialNumber, uint16_t domainAddress), ::knx::config::callbackBytes(64)>;
 
 /**
  * @brief Applies a new individual address addressed by serial number.
  */
 using SerialNumberAddressWriteCallback = util::InplaceFunction<
-    util::Result<void>(const IndividualAddress& newAddress), 64>;
+    util::Result<void>(const IndividualAddress& newAddress), ::knx::config::callbackBytes(64)>;
 
 /**
  * @brief The Domain Address in the encoding its medium uses.
@@ -91,7 +92,7 @@ using DomainAddressBuffer = util::FixedVector<uint8_t, 6>;
  * @brief Emits an A_DomainAddressSerialNumber_Response system broadcast.
  */
 using DomainAddressResponseCallback = util::InplaceFunction<
-    void(const KnxSerialNumber& serialNumber, std::span<const uint8_t> domainAddress), 64>;
+    void(const KnxSerialNumber& serialNumber, std::span<const uint8_t> domainAddress), ::knx::config::callbackBytes(64)>;
 
 /**
  * @brief Applies a Domain Address addressed by serial number.
@@ -102,22 +103,22 @@ using DomainAddressResponseCallback = util::InplaceFunction<
  * restart like any other write of that property.
  */
 using DomainAddressWriteCallback = util::InplaceFunction<
-    util::Result<void>(std::span<const uint8_t> domainAddress), 64>;
+    util::Result<void>(std::span<const uint8_t> domainAddress), ::knx::config::callbackBytes(64)>;
 
 /**
  * @brief Answers A_NetworkParameter_Read.  Returning an error means "this
  * device does not expose that parameter", which per spec means stay silent.
  */
 using NetworkParameterReadHandler = util::InplaceFunction<
-    util::Result<NetworkParameterValueBuffer>(const NetworkParameterRequest& request), 64>;
+    util::Result<NetworkParameterValueBuffer>(const NetworkParameterRequest& request), ::knx::config::callbackBytes(64)>;
 
 using NetworkParameterWriteHandler = util::InplaceFunction<
-    util::Result<void>(const NetworkParameterRequest& request), 64>;
+    util::Result<void>(const NetworkParameterRequest& request), ::knx::config::callbackBytes(64)>;
 
 using NetworkParameterResponseCallback = util::InplaceFunction<
     void(InterfaceObjectType objectType,
          PropertyID propertyId,
-         std::span<const uint8_t> value), 64>;
+         std::span<const uint8_t> value), ::knx::config::callbackBytes(64)>;
 
 /**
  * @brief Handler for the serial-number and network-parameter broadcast services.

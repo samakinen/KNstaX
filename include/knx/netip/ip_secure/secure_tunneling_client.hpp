@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "knx/config.hpp"
 #if KNX_SECURE_ENABLED
 
 #include "knx/netip/device_management_codec.hpp"
@@ -63,7 +64,7 @@ private:
 
 class SecureTunnelingClient {
 public:
-    using ReceiveCallback = util::InplaceFunction<void(std::span<const uint8_t>), 64>;
+    using ReceiveCallback = util::InplaceFunction<void(std::span<const uint8_t>), ::knx::config::callbackBytes(64)>;
 
     enum class SessionOperationType : uint8_t {
         None = 0,

@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "knx/config.hpp"
 #include "knx/netip/control_packet_codec.hpp"
 #include "knx/netip/datagram_scratch.hpp"
 #include "knx/netip/netip_config.hpp"
@@ -65,7 +66,7 @@ public:
         uint32_t lastActivityMs{0};
     };
 
-    using ReceiveCallback = util::InplaceFunction<void(ChannelId channelId, std::span<const uint8_t> cemi), 64>;
+    using ReceiveCallback = util::InplaceFunction<void(ChannelId channelId, std::span<const uint8_t> cemi), ::knx::config::callbackBytes(64)>;
 
     TunnelingServerEndpoint();
     ~TunnelingServerEndpoint();

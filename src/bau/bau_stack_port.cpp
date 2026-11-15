@@ -827,12 +827,15 @@ void BusAccessStackPort::setDeviceMedium(MediumType medium)
 void BusAccessStackPort::installInboundCallback()
 {
     _application->setReceiveCallback(
-        [callback = _inboundCallback](const IndividualAddress& source,
-                                      const GroupAddress& destination,
-                                      application::APCIService service,
-                                      std::span<const uint8_t> data,
-                                      AddressType destinationType) {
-            callback(source, destination, toBauMessageKind(service), data, destinationType);
+        [this](const IndividualAddress& source,
+               const GroupAddress& destination,
+               application::APCIService service,
+               std::span<const uint8_t> data,
+               AddressType destinationType) {
+            // Capture `this` only: the callback is read from the member when it runs.
+            if (_inboundCallback) {
+                _inboundCallback(source, destination, toBauMessageKind(service), data, destinationType);
+            }
         });
 }
 

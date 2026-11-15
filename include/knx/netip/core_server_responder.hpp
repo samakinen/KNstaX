@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "knx/config.hpp"
 #include "knx/netip/core_discovery_codec.hpp"
 #include "knx/netip/datagram_scratch.hpp"
 #include "knx/netip/netip_config.hpp"
@@ -40,7 +41,7 @@ public:
     /// Sampled fresh per request: programming mode and the current IP address
     /// both change while the device is running, and a cached description would
     /// answer ETS with the state at boot.
-    using DescriptionProvider = util::InplaceFunction<CoreDeviceDescription(), 64>;
+    using DescriptionProvider = util::InplaceFunction<CoreDeviceDescription(), ::knx::config::callbackBytes(64)>;
 
     static constexpr size_t kMaxServiceFamilies = 8;
     /// A search response is a control endpoint plus three DIBs; the largest is

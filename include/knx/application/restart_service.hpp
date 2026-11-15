@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "knx/config.hpp"
 #include "knx/application/apci_services.hpp"
 #include "knx/types.hpp"
 #include "knx/util/result.hpp"
@@ -75,20 +76,20 @@ public:
      * @param type Type of restart requested
      * @return true if restart can be performed
      */
-    using RestartCallback = util::InplaceFunction<util::Result<void>(RestartType type), 32>;
+    using RestartCallback = util::InplaceFunction<util::Result<void>(RestartType type), ::knx::config::callbackBytes(32)>;
     
     /**
      * @brief Authorization check callback
      * @param source Source address requesting restart
      * @return true if restart is authorized
      */
-    using AuthorizationCallback = util::InplaceFunction<util::Result<void>(const IndividualAddress& source), 32>;
+    using AuthorizationCallback = util::InplaceFunction<util::Result<void>(const IndividualAddress& source), ::knx::config::callbackBytes(32)>;
     
     /**
      * @brief Pre-restart cleanup callback
      * Called before restart to save state, close connections, etc.
      */
-    using CleanupCallback = util::InplaceFunction<void(), 32>;
+    using CleanupCallback = util::InplaceFunction<void(), ::knx::config::callbackBytes(32)>;
 
     /**
      * @brief Resets the Resources an Erase Code names.
@@ -102,7 +103,7 @@ public:
      * they are answered "Unsupported Erase Code", which is the honest answer
      * for a device that would otherwise report a reset it did not perform.
      */
-    using MasterResetCallback = util::InplaceFunction<util::Result<void>(EraseCode eraseCode), 32>;
+    using MasterResetCallback = util::InplaceFunction<util::Result<void>(EraseCode eraseCode), ::knx::config::callbackBytes(32)>;
 
     /**
      * @brief Initialize restart service

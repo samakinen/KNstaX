@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include "knx/config.hpp"
 #include "knx/types.hpp"
 #include "knx/util/result.hpp"
 
@@ -63,13 +64,13 @@ public:
     static constexpr size_t kSerializedKeyTableSize = kKeyedLevelCount * 4u;
 
     /// Sends A_Authorize_Response(level) to @p destination.
-    using ResponseCallback = util::InplaceFunction<void(const IndividualAddress& destination, AccessLevel level), 32>;
+    using ResponseCallback = util::InplaceFunction<void(const IndividualAddress& destination, AccessLevel level), ::knx::config::callbackBytes(32)>;
 
     /// The key table changed through a management service; persist it.
-    using KeyTableChangedCallback = util::InplaceFunction<void(const KeyTable& keys), 32>;
+    using KeyTableChangedCallback = util::InplaceFunction<void(const KeyTable& keys), ::knx::config::callbackBytes(32)>;
 
     /// Monotonic ticks for the optional authorisation expiry.
-    using TimeSource = util::InplaceFunction<uint32_t(), 32>;
+    using TimeSource = util::InplaceFunction<uint32_t(), ::knx::config::callbackBytes(32)>;
     static constexpr uint32_t NO_TIMEOUT = 0u;
 
     AuthorizationService();

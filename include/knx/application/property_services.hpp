@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "knx/config.hpp"
 #include "knx/application/property.hpp"
 #include "knx/application/apci_services.hpp"
 #include "knx/types.hpp"
@@ -31,7 +32,7 @@ namespace application {
 using PropertyValueResponseCallback = util::InplaceFunction<void(
     const IndividualAddress& destination,
     const PropertyValueResponse& response
-), 32>;
+), ::knx::config::callbackBytes(32)>;
 
 /**
  * @brief Property description response callback
@@ -46,7 +47,7 @@ using PropertyDescriptionResponseCallback = util::InplaceFunction<void(
     uint16_t maxElements,
     uint8_t readLevel,
     uint8_t writeLevel
-), 32>;
+), ::knx::config::callbackBytes(32)>;
 
 /**
  * @brief Backend provider for property reads
@@ -60,7 +61,7 @@ using PropertyReadProvider = util::InplaceFunction<std::optional<util::Result<si
     const IndividualAddress& source,
     const PropertyValueReadRequest& request,
     std::span<uint8_t> out
-), 32>;
+), ::knx::config::callbackBytes(32)>;
 
 /**
  * @brief Backend provider for property writes
@@ -71,7 +72,7 @@ using PropertyReadProvider = util::InplaceFunction<std::optional<util::Result<si
 using PropertyWriteProvider = util::InplaceFunction<util::Result<void>(
     const IndividualAddress& source,
     const PropertyValueWriteRequest& request
-), 32>;
+), ::knx::config::callbackBytes(32)>;
 
 /**
  * @brief Access Policy gate for property access (03/4/1 §6.2)
@@ -88,7 +89,7 @@ using PropertyAccessCheck = util::InplaceFunction<bool(
     InterfaceObjectIndex objectIndex,
     PropertyID propertyId,
     bool write
-), 32>;
+), ::knx::config::callbackBytes(32)>;
 
 /**
  * @brief The current access level of a requester, in wire numbering
@@ -98,7 +99,7 @@ using PropertyAccessCheck = util::InplaceFunction<bool(
  * (03/03/07 §3.5.7: the current access level decides which writes a partner
  * may make). Left unset, no level is enforced.
  */
-using AccessLevelQuery = util::InplaceFunction<uint8_t(const IndividualAddress& source), 32>;
+using AccessLevelQuery = util::InplaceFunction<uint8_t(const IndividualAddress& source), ::knx::config::callbackBytes(32)>;
 
 /**
  * @brief Property description info
@@ -133,7 +134,7 @@ using PropertyDescriptionProvider = util::InplaceFunction<std::optional<Property
     InterfaceObjectIndex objectIndex,
     PropertyID propertyId,
     PropertyIndex propertyIndex
-), 32>;
+), ::knx::config::callbackBytes(32)>;
 
 /**
  * @brief Property Services

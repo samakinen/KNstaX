@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "knx/config.hpp"
 #include "knx/util/inplace_function.hpp"
 
 #include <atomic>
@@ -17,7 +18,7 @@ namespace netip {
 
 class SessionKeepaliveRunner {
 public:
-    using PulseFunction = util::InplaceFunction<void(), 32>;
+    using PulseFunction = util::InplaceFunction<void(), ::knx::config::callbackBytes(32)>;
 
     explicit SessionKeepaliveRunner(PulseFunction pulse = {})
         : pulse_(std::move(pulse))

@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "knx/config.hpp"
 #include "knx/types.hpp"
 #include "knx/datalink/tp1_data_link_layer.hpp"
 #include "knx/util/inplace_function.hpp"
@@ -43,7 +44,7 @@ struct NDataFrame {
 /**
  * @brief Network layer callback
  */
-using NDataCallback = util::InplaceFunction<void(const NDataFrame&), 64>;
+using NDataCallback = util::InplaceFunction<void(const NDataFrame&), ::knx::config::callbackBytes(64)>;
 
 /**
  * @brief Network layer

@@ -230,9 +230,9 @@ constexpr uint8_t groupObjectValueBytes(DptId dpt) noexcept {
  * A_GroupValue_Read for an object's address.
  */
 using GroupObjectCallback =
-    util::InplaceFunction<void(GroupObjectIndex, std::span<const uint8_t>), config::callbackBytes(64)>;
+    util::InplaceFunction<void(GroupObjectIndex, std::span<const uint8_t>), ::knx::config::callbackBytes(64)>;
 using GroupReadRequestCallback =
-    util::InplaceFunction<util::Result<void>(const GroupAddress&), config::callbackBytes(64)>;
+    util::InplaceFunction<util::Result<void>(const GroupAddress&), ::knx::config::callbackBytes(64)>;
 
 struct PolicyState;
 class GroupObjectStore;

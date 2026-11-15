@@ -88,7 +88,7 @@ struct Tp1RxEvent {
     std::span<const uint8_t> frame{};
 };
 
-using Tp1EventCallback = util::InplaceFunction<void(const Tp1RxEvent&, void* context), 64>;
+using Tp1EventCallback = util::InplaceFunction<void(const Tp1RxEvent&, void* context), ::knx::config::callbackBytes(64)>;
 
 class Tp1MediumDiagnostics {
 public:

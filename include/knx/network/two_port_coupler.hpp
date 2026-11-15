@@ -13,6 +13,7 @@
 
 #pragma once
 
+#include "knx/config.hpp"
 #include "knx/datalink/tp1_data_link_layer.hpp"
 #include "knx/network/coupler_routing.hpp"
 #include "knx/network/filter_table.hpp"
@@ -118,10 +119,10 @@ public:
     /// Observability callback signature. Inline-stored, so a capturing lambda
     /// larger than the capacity is a compile error rather than a silent heap
     /// allocation on the receive path.
-    using PortCallback = util::InplaceFunction<void(Port origin), 32>;
+    using PortCallback = util::InplaceFunction<void(Port origin), ::knx::config::callbackBytes(32)>;
     using FrameCallback = util::InplaceFunction<void(Port origin,
-                                                     const datalink::LDataFrame& frame), 32>;
-    using AckCallback = util::InplaceFunction<void(Port origin, AckPolicy policy), 32>;
+                                                     const datalink::LDataFrame& frame), ::knx::config::callbackBytes(32)>;
+    using AckCallback = util::InplaceFunction<void(Port origin, AckPolicy policy), ::knx::config::callbackBytes(32)>;
 
     /// Called each time a frame is forwarded. @p origin is the source port.
     void setFrameForwardedCallback(PortCallback cb) { onFrameForwarded_ = std::move(cb); }

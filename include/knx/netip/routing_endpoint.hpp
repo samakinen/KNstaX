@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "knx/config.hpp"
 #include "knx/netip/datagram_scratch.hpp"
 #include "knx/netip/ip_secure/secure_wrapper.hpp"
 #include "knx/netip/netip_config.hpp"
@@ -72,7 +73,7 @@ public:
     /// itself, handed over with the source they came from so the handler can
     /// answer through `sendDatagram()`.
     using ControlDatagramHandler =
-        util::InplaceFunction<void(std::span<const uint8_t> datagram, IpAddress source, uint16_t sourcePort), 64>;
+        util::InplaceFunction<void(std::span<const uint8_t> datagram, IpAddress source, uint16_t sourcePort), ::knx::config::callbackBytes(64)>;
 
     RoutingEndpoint();
     ~RoutingEndpoint();

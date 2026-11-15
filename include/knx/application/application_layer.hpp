@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include "knx/config.hpp"
 #include "knx/types.hpp"
 #include "knx/application/a_send_pipeline.hpp"
 #include "knx/application/apci_services.hpp"
@@ -41,7 +42,7 @@ namespace application {
 class ApplicationLayer {
 public:
     using SendProgressState = util::OperationProgressState;
-    using WorkAvailableCallback = util::InplaceFunction<void(), 32>;
+    using WorkAvailableCallback = util::InplaceFunction<void(), ::knx::config::callbackBytes(32)>;
 
     /**
      * @brief Callback for application data reception (for group value services)
@@ -58,7 +59,7 @@ public:
         APCIService service,
         std::span<const uint8_t> data,
         AddressType destinationType
-    ), 64>;
+    ), ::knx::config::callbackBytes(64)>;
     using IndividualAddressUpdateCallback = ManagementServer::IndividualAddressUpdateCallback;
 
     /**
@@ -72,7 +73,7 @@ public:
      * Left unset the layer assumes "off", which is what a stack built without
      * KNX Secure is.
      */
-    using SecurityModeProvider = util::InplaceFunction<bool(), 32>;
+    using SecurityModeProvider = util::InplaceFunction<bool(), ::knx::config::callbackBytes(32)>;
 
     using AdcReadProvider = ManagementServer::AdcReadProvider;
     using ManagementServerHooks = ManagementServer::Hooks;

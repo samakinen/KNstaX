@@ -117,7 +117,7 @@ struct TDataFrame {
 /**
  * @brief Transport layer callback
  */
-using TDataCallback = util::InplaceFunction<void(const TDataFrame&), 64>;
+using TDataCallback = util::InplaceFunction<void(const TDataFrame&), ::knx::config::callbackBytes(64)>;
 
 /**
  * @brief Optional in-place frame transform hook
@@ -128,7 +128,7 @@ using TDataCallback = util::InplaceFunction<void(const TDataFrame&), 64>;
  *
  * Return an error Result to drop/abort the frame.
  */
-using TDataTransform = util::InplaceFunction<util::Result<void>(TDataFrame&), 64>;
+using TDataTransform = util::InplaceFunction<util::Result<void>(TDataFrame&), ::knx::config::callbackBytes(64)>;
 
 /**
  * @brief Monotonic millisecond clock for the connection-oriented timers
@@ -138,7 +138,7 @@ using TDataTransform = util::InplaceFunction<util::Result<void>(TDataFrame&), 64
  * taken as a constructor dependency so a unit test can keep driving
  * processRetransmissions() with a synthetic timestamp instead.
  */
-using TClock = util::InplaceFunction<uint32_t(), 32>;
+using TClock = util::InplaceFunction<uint32_t(), ::knx::config::callbackBytes(32)>;
 
 /**
  * @brief Transport layer (connectionless)

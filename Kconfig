@@ -549,6 +549,19 @@ menu "KNX Stack Configuration"
                 of RAM per entry on a 32-bit target. When the queue is full the
                 request fails with QueueFull; nothing already queued is
                 dropped.
+
+        config KNX_CALLBACK_CAPTURE_BYTES
+            int "Callback capture bytes"
+            default 0
+            range 0 64
+            help
+                Inline capture bytes of the callbacks the stack keeps (the
+                util::InplaceFunction aliases that default to 32 or 64). 0 keeps
+                those defaults. A smaller value saves RAM in every callback the
+                stack holds, and makes a callback whose capture does not fit a
+                compile error: stack-internal callbacks capture only a pointer,
+                so 8 is enough on a 32-bit target, but a lambda you pass in must
+                fit as well. It never raises a default.
     endmenu
 
     menu "Task Configuration"

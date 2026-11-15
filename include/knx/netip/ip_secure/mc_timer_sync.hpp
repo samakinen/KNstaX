@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "knx/config.hpp"
 /**
  * @file mc_timer_sync.hpp
  * @brief The Secure Routing multicast timer and its synchronisation state machine.
@@ -44,7 +45,7 @@ public:
     using Tag = std::array<uint8_t, 2>;
     /// Uniform 32-bit draws for random(start, end) (§2.2.2.3.2.6, NOTE 1) and
     /// for the random tag of an own TIMER_NOTIFY (A5).
-    using RandomSource = util::InplaceFunction<uint32_t(), 32>;
+    using RandomSource = util::InplaceFunction<uint32_t(), ::knx::config::callbackBytes(32)>;
 
     static constexpr uint64_t kTimerMask = 0xFFFF'FFFF'FFFFULL;
 

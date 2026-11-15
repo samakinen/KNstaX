@@ -169,7 +169,7 @@ public:
 #endif
 
     /// Fills the bytes of a banked record for a save; empty stores nothing.
-    using BankedRecordSource = util::InplaceFunction<void(std::vector<uint8_t>&), 16>;
+    using BankedRecordSource = util::InplaceFunction<void(std::vector<uint8_t>&), ::knx::config::callbackBytes(16)>;
 
     /// Give the save a source for the banked record @p keyId (one of
     /// bankedRecordKeys()). Without a source a save carries the stored record

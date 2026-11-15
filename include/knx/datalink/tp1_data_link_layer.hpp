@@ -244,7 +244,7 @@ struct LDataFrame {
  *
  * The `frame` reference is only valid for the duration of the callback.
  */
-using LDataCallback = util::InplaceFunction<void(const LDataFrame& frame), 64>;
+using LDataCallback = util::InplaceFunction<void(const LDataFrame& frame), ::knx::config::callbackBytes(64)>;
 
 /**
  * @brief TP1 Data Link Layer Configuration

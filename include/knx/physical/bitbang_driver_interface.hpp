@@ -12,6 +12,7 @@
 
 #pragma once
 
+#include "knx/config.hpp"
 #include "knx/physical/link_state.hpp"
 #include "knx/util/inplace_function.hpp"
 #include "knx/util/result.hpp"
@@ -173,7 +174,7 @@ enum class DriverState : uint8_t {
  * @param frame Frame data buffer valid for the duration of the callback
  * @param context User context pointer
  */
-using RxCallback = util::InplaceFunction<void(std::span<const uint8_t> frame, void* context), 64>;
+using RxCallback = util::InplaceFunction<void(std::span<const uint8_t> frame, void* context), ::knx::config::callbackBytes(64)>;
 using QueueNotifyCallback = void(*)(void* context);
 
 /**

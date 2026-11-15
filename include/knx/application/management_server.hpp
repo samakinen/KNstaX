@@ -80,7 +80,7 @@ struct RequestContext {
 
 class ManagementServer {
 public:
-    using IndividualAddressUpdateCallback = util::InplaceFunction<void(const IndividualAddress&), 32>;
+    using IndividualAddressUpdateCallback = util::InplaceFunction<void(const IndividualAddress&), ::knx::config::callbackBytes(32)>;
 
     /**
      * @brief Reads this device's AD converter (03/03/07 §3.5.2).
@@ -97,7 +97,7 @@ public:
      * connection down.
      */
     using AdcReadProvider =
-        util::InplaceFunction<std::optional<uint16_t>(uint8_t channel, uint8_t readCount), 32>;
+        util::InplaceFunction<std::optional<uint16_t>(uint8_t channel, uint8_t readCount), ::knx::config::callbackBytes(32)>;
 
     /**
      * @brief Device Resources some management services act on but this server

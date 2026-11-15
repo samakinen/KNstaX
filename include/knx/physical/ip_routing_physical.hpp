@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "knx/config.hpp"
 #include "knx/physical/tp1_physical_layer.hpp"
 #include "knx/netip/core_discovery_codec.hpp"
 #include "knx/netip/core_server_responder.hpp"
@@ -116,7 +117,7 @@ public:
         uint8_t syncLatencyFraction{0x1A};
         bool operator==(const LatencySettings&) const = default;
     };
-    using LatencySettingsSource = util::InplaceFunction<LatencySettings(), 32>;
+    using LatencySettingsSource = util::InplaceFunction<LatencySettings(), ::knx::config::callbackBytes(32)>;
 
     /**
      * Ask `source` for the latency settings once a second on the receive path.

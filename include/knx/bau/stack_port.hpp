@@ -21,6 +21,7 @@
 
 #pragma once
 
+#include "knx/config.hpp"
 #include "knx/bau/bau.hpp"
 #include "knx/util/fixed_vector.hpp"
 
@@ -56,7 +57,7 @@ public:
                                                        const GroupAddress&,
                                                        MessageKind,
                                                        std::span<const uint8_t>,
-                                                       AddressType), 32>;
+                                                       AddressType), ::knx::config::callbackBytes(32)>;
     using PropertyReadProvider = application::PropertyReadProvider;
     using PropertyWriteProvider = application::PropertyWriteProvider;
     using PropertyDescriptionProvider = application::PropertyDescriptionProvider;

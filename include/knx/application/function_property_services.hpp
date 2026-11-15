@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include "knx/config.hpp"
 #include "knx/application/apci_services.hpp"
 #include "knx/application/property.hpp"
 #include "knx/types.hpp"
@@ -116,7 +117,7 @@ struct FunctionPropertyResult {
 using FunctionPropertyHandler = util::InplaceFunction<
     util::Result<FunctionPropertyResult>(const IndividualAddress& source,
                                          const FunctionPropertyRequest& request),
-    64>;
+    ::knx::config::callbackBytes(64)>;
 
 /**
  * @brief Emits A_FunctionPropertyState_Response back to the requester.
@@ -131,7 +132,7 @@ using FunctionPropertyResponseCallback = util::InplaceFunction<
          bool hasReturnCode,
          FunctionPropertyReturnCode returnCode,
          std::span<const uint8_t> data),
-    64>;
+    ::knx::config::callbackBytes(64)>;
 
 /**
  * @brief Function Property service handler.

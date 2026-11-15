@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "knx/config.hpp"
 #include "knx/netip/device_management_codec.hpp"
 #include "knx/netip/device_management_connection_source.hpp"
 #include "knx/netip/datagram_scratch.hpp"
@@ -35,7 +36,7 @@ public:
     static constexpr int kConnectionStateRequestTimeoutMs = 10000;
     static constexpr int kHeartbeatRepetitions = 3;
 
-    using ReceiveCallback = util::InplaceFunction<void(std::span<const uint8_t>), 64>;
+    using ReceiveCallback = util::InplaceFunction<void(std::span<const uint8_t>), ::knx::config::callbackBytes(64)>;
 
     enum class SessionOperationType : uint8_t {
         None = 0,

@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "knx/config.hpp"
 #include <cstdint>
 #include <cstddef>
 #include <optional>
@@ -41,7 +42,7 @@ enum class MemoryAccessMode : uint8_t {
  * number = 0 in Verify Mode, nothing otherwise (03/03/07 §3.5.4). Empty
  * means always.
  */
-using MemoryWriteGuard = util::InplaceFunction<bool(), 16>;
+using MemoryWriteGuard = util::InplaceFunction<bool(), ::knx::config::callbackBytes(16)>;
 
 /**
  * @brief Memory region descriptor

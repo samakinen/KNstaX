@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "knx/config.hpp"
 #include "knx/application/device_descriptor.hpp"
 #include "knx/application/apci_services.hpp"
 #include "knx/types.hpp"
@@ -38,7 +39,7 @@ using DescriptorResponseCallback = util::InplaceFunction<void(
     const IndividualAddress& destination,
     uint8_t descriptorType,
     std::span<const uint8_t> data
-), 32>;
+), ::knx::config::callbackBytes(32)>;
 
 struct DescriptorSupportEntry {
     uint8_t descriptorType;

@@ -90,12 +90,12 @@ class ConstLinkAccess;
  * GroupObjectIndex identifies the communication object declared by the
  * firmware; the data is the raw APDU payload.
  */
-using GroupObjectWriteCallback = util::InplaceFunction<void(GroupObjectIndex, std::span<const uint8_t>), 64>;
+using GroupObjectWriteCallback = util::InplaceFunction<void(GroupObjectIndex, std::span<const uint8_t>), ::knx::config::callbackBytes(64)>;
 
 /**
  * @brief Callback for group value read routed to a specific communication object.
  */
-using GroupObjectReadCallback = util::InplaceFunction<void(GroupObjectIndex), 32>;
+using GroupObjectReadCallback = util::InplaceFunction<void(GroupObjectIndex), ::knx::config::callbackBytes(32)>;
 
 /**
  * @brief A snapshot of what the lower stack has seen arrive
@@ -156,7 +156,7 @@ public:
         }
     };
 
-    using WorkAvailableCallback = util::InplaceFunction<void(), 32>;
+    using WorkAvailableCallback = util::InplaceFunction<void(), ::knx::config::callbackBytes(32)>;
 
     using TransmissionProgressState = util::OperationProgressState;
 
@@ -367,7 +367,7 @@ public:
     // Monotonic millisecond time source used to drive per-object cyclic sends,
     // min-interval floors, and the telegram rate limiter. Without it (default),
     // those time-based behaviours are inert and every publish is sent at once.
-    using TimeSourceFn = util::InplaceFunction<uint32_t(), 32>;
+    using TimeSourceFn = util::InplaceFunction<uint32_t(), ::knx::config::callbackBytes(32)>;
     void setTimeSource(TimeSourceFn timeSource);
 
     /// Configure the global outbound-telegram rate limiter. Shapes only the
@@ -645,7 +645,7 @@ public:
      *
      * The key is 16 octets; an all-zero value means secure routing is off.
      */
-    using BackboneKeyCallback = util::InplaceFunction<void(std::span<const uint8_t> key), 64>;
+    using BackboneKeyCallback = util::InplaceFunction<void(std::span<const uint8_t> key), ::knx::config::callbackBytes(64)>;
     void setBackboneKeyCallback(BackboneKeyCallback callback);
 
     /**
@@ -664,7 +664,7 @@ public:
      * Return false to refuse; the client is told with E_ERROR.
      */
     using SecuredServiceFamilyCallback =
-        util::InplaceFunction<bool(uint8_t serviceFamilyId, uint8_t securityVersion), 64>;
+        util::InplaceFunction<bool(uint8_t serviceFamilyId, uint8_t securityVersion), ::knx::config::callbackBytes(64)>;
     void setSecuredServiceFamilyCallback(SecuredServiceFamilyCallback callback);
 
     /// The security version currently configured for a KNXnet/IP service
@@ -703,7 +703,7 @@ public:
      * The new group is not to be joined here (§2.5.17 above): the receiver of
      * this is the multicast timer synchronisation, which E11 restarts (A7).
      */
-    using RoutingMulticastAddressCallback = util::InplaceFunction<void(IpAddress address), 32>;
+    using RoutingMulticastAddressCallback = util::InplaceFunction<void(IpAddress address), ::knx::config::callbackBytes(32)>;
     void setRoutingMulticastAddressCallback(RoutingMulticastAddressCallback callback);
 #endif
 

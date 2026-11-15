@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "knx/config.hpp"
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -37,7 +38,7 @@ enum class IpPhysicalLayerState {
 /**
  * @brief IP physical layer callback
  */
-using IpReceiveCallback = util::InplaceFunction<void(void*), 32>;
+using IpReceiveCallback = util::InplaceFunction<void(void*), ::knx::config::callbackBytes(32)>;
 
 /**
  * @brief IP (KNXnet/IP) physical layer interface

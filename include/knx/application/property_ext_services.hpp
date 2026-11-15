@@ -24,6 +24,7 @@
 
 #pragma once
 
+#include "knx/config.hpp"
 #include "knx/application/apci_services.hpp"
 #include "knx/application/function_property_services.hpp"
 #include "knx/application/property_services.hpp"
@@ -49,15 +50,15 @@ public:
     using ValueResponseCallback = util::InplaceFunction<void(
         const IndividualAddress& destination,
         APCIService service,
-        const PropertyExtValueResponse& response), 32>;
+        const PropertyExtValueResponse& response), ::knx::config::callbackBytes(32)>;
 
     using DescriptionResponseCallback = util::InplaceFunction<void(
         const IndividualAddress& destination,
-        const PropertyExtDescriptionResponse& response), 32>;
+        const PropertyExtDescriptionResponse& response), ::knx::config::callbackBytes(32)>;
 
     using FunctionResponseCallback = util::InplaceFunction<void(
         const IndividualAddress& destination,
-        const FunctionPropertyExtResponse& response), 32>;
+        const FunctionPropertyExtResponse& response), ::knx::config::callbackBytes(32)>;
 
     /**
      * @brief Optional backend for function property invocation
@@ -83,7 +84,7 @@ public:
     using AccessCheck = util::InplaceFunction<bool(
         uint16_t objectType,
         uint16_t propertyId,
-        bool write), 32>;
+        bool write), ::knx::config::callbackBytes(32)>;
 
     /**
      * @brief (object type, object instance) → object index
@@ -94,7 +95,7 @@ public:
      */
     using ObjectResolver = util::InplaceFunction<std::optional<InterfaceObjectIndex>(
         uint16_t objectType,
-        uint16_t objectInstance), 32>;
+        uint16_t objectInstance), ::knx::config::callbackBytes(32)>;
 
     void setValueResponseCallback(ValueResponseCallback callback) {
         _valueResponseCallback = std::move(callback);

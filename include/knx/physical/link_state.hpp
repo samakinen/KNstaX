@@ -25,6 +25,7 @@
 
 #pragma once
 
+#include "knx/config.hpp"
 #include "knx/util/inplace_function.hpp"
 
 #include <cstdint>
@@ -101,7 +102,7 @@ struct LinkStatus {
 /**
  * @brief Task-context link notification callback
  */
-using LinkStateCallback = util::InplaceFunction<void(const LinkStatus&, void*), 32>;
+using LinkStateCallback = util::InplaceFunction<void(const LinkStatus&, void*), ::knx::config::callbackBytes(32)>;
 
 /**
  * @brief Interrupt-context notification of an imminent supply loss

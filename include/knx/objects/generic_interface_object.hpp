@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "knx/config.hpp"
 #include "knx/objects/interface_object.hpp"
 #include "knx/objects/property_kernel.hpp"
 #include "knx/util/fixed_vector.hpp"
@@ -72,7 +73,7 @@ public:
      */
     using WriteObserver = util::InplaceFunction<void(application::PropertyID propertyId,
                                                      std::span<const uint8_t> previous,
-                                                     std::span<const uint8_t> value), 64>;
+                                                     std::span<const uint8_t> value), ::knx::config::callbackBytes(64)>;
     void setWriteObserver(WriteObserver observer);
 
     /**
@@ -84,7 +85,7 @@ public:
      * this object.
      */
     using WriteValidator = util::InplaceFunction<util::Result<void>(application::PropertyID propertyId,
-                                                                    std::span<const uint8_t> value), 32>;
+                                                                    std::span<const uint8_t> value), ::knx::config::callbackBytes(32)>;
     void setWriteValidator(WriteValidator validator);
 
     /**
@@ -100,8 +101,8 @@ public:
      * reachable by the management services.
      */
     struct PropertyBinding {
-        util::InplaceFunction<std::vector<uint8_t>(), 32> read{};
-        util::InplaceFunction<util::Result<void>(std::span<const uint8_t> value), 32> write{};
+        util::InplaceFunction<std::vector<uint8_t>(), ::knx::config::callbackBytes(32)> read{};
+        util::InplaceFunction<util::Result<void>(std::span<const uint8_t> value), ::knx::config::callbackBytes(32)> write{};
     };
     util::Result<void> bindProperty(application::PropertyID propertyId, PropertyBinding binding);
 

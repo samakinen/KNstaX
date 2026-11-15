@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "knx/config.hpp"
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -40,7 +41,7 @@ using TxOutcomeState = util::OperationProgressState;
 /**
  * @brief RX callback signature
  */
-using ReceiveCallback = util::InplaceFunction<void(void*), 32>;
+using ReceiveCallback = util::InplaceFunction<void(void*), ::knx::config::callbackBytes(32)>;
 
 } // namespace physical
 } // namespace knx

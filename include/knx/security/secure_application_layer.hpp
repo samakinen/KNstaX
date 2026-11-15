@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "knx/config.hpp"
 /**
  * @file secure_application_layer.hpp
  * @brief KNX Data Secure application layer (S-AL), 03/03/07 §5.
@@ -105,15 +106,15 @@ public:
 
     /// Emits a ready-made TPDU. The S-AL uses it for the S-A_Sync_Response.
     using FrameSink = util::InplaceFunction<
-        util::Result<void>(const SecureFrameInfo&, std::span<const uint8_t>), 64>;
+        util::Result<void>(const SecureFrameInfo&, std::span<const uint8_t>), ::knx::config::callbackBytes(64)>;
     /// Milliseconds since boot; only used for the sync response rate limit.
-    using Clock = util::InplaceFunction<uint32_t(), 32>;
+    using Clock = util::InplaceFunction<uint32_t(), ::knx::config::callbackBytes(32)>;
     /// Fills the buffer with unpredictable octets (the S-A_Sync_Response Random).
-    using RandomSource = util::InplaceFunction<void(std::span<uint8_t>), 32>;
+    using RandomSource = util::InplaceFunction<void(std::span<uint8_t>), ::knx::config::callbackBytes(32)>;
     /// Answers "which TPCI will this outgoing frame carry?". Needed because the
     /// CCM blocks bind the TPCI, and a response sent on a transport connection
     /// carries *our* sequence number, not the request's.
-    using TpciResolver = util::InplaceFunction<uint8_t(const SecureFrameInfo&), 32>;
+    using TpciResolver = util::InplaceFunction<uint8_t(const SecureFrameInfo&), ::knx::config::callbackBytes(32)>;
 
     static constexpr size_t kChallengeSize = 6;
     static constexpr size_t kSequenceSize = 6;

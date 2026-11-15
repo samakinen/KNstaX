@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "knx/config.hpp"
 #include "knx/netip/routing.hpp"
 #include "knx/util/inplace_function.hpp"
 
@@ -41,7 +42,7 @@ namespace netip {
 /// as an injected function rather than a call into a global RNG so the back-off
 /// can be pinned in tests and so an embedded build decides for itself which
 /// entropy source it can afford on this path.
-using RandomUnitSource = util::InplaceFunction<float(), 32>;
+using RandomUnitSource = util::InplaceFunction<float(), ::knx::config::callbackBytes(32)>;
 
 class RoutingFlowControl {
 public:

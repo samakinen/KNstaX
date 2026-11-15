@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "knx/config.hpp"
 /**
  * @file random_source.hpp
  * @brief Where KNXnet/IP routing gets its randomness from.
@@ -34,7 +35,7 @@ namespace knx {
 namespace netip {
 
 /// Fill the span with unpredictable octets.
-using RandomBytesSource = util::InplaceFunction<void(std::span<uint8_t> out), 32>;
+using RandomBytesSource = util::InplaceFunction<void(std::span<uint8_t> out), ::knx::config::callbackBytes(32)>;
 
 namespace detail {
 
