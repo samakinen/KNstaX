@@ -82,7 +82,8 @@ struct TpUartConfig {
     /// report the link Down.
     uint32_t statePollIntervalMs{1000u};
     /// Wait for U_Reset.ind after each U_Reset.req, and how often to try.
-    uint32_t resetTimeoutMs{10u};
+    /// The H8i8o's TP-UART2 answered after 6.9 ms (15 Nov 2026), so 10 ms was too tight.
+    uint32_t resetTimeoutMs{50u};
     uint8_t resetAttempts{3u};
 };
 

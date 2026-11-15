@@ -183,7 +183,7 @@ enters Transmitting.
 
 | Step | Action |
 |---|---|
-| `init()` | `U_Reset.req`, wait for `U_Reset.ind` (10 ms, 3 attempts), set the address and repetition counts, `U_State.req` |
+| `init()` | `U_Reset.req`, wait for `U_Reset.ind` (50 ms, 3 attempts), set the address and repetition counts, `U_State.req` |
 | Failure | State Error, `LinkState::Down` |
 | `service()` | Polls `U_State` every second while idle, maps its warning bits, and runs the gap timeout |
 | `LinkState` | `U_State` errors, or no response at all, give Down; the `SAVE` pin (K10), when the board provides one, gives Down. |
@@ -257,7 +257,20 @@ To confirm on a real TP-UART2 (with B5 of the H8i8o checklist):
 4. The chip sends `L_Data.con` for every frame, also those to the individual address FFFFh.
 5. `U_AckInformation` with the busy bit for a frame to the own address overrides the chip's own
    acknowledge.
-6. The chip answers `U_State.req` with exactly one `U_State.ind`, and its bits as listed in §3.2.
+6. ~~The chip answers `U_State.req` with exactly one `U_State.ind`.~~ **Confirmed** on the H8i8o
+   (below).
+
+First run on a real chip (H8i8o, `fw/tpuart-probe` in the h8i8o repository, 15 November 2026,
+passive, quiet bus):
+
+- 19200 8E1 on the board's USART1 works: no parity or framing errors outside the reset.
+- After `U_Reset.req` the chip sends one `00` octet with a framing error (its TXD glitches while
+  it resets) about 1.4 ms later, then `U_Reset.ind` (`03`) **6.9 ms** after the request. The
+  backend ignores the damaged octet (an errored octet outside a frame is only counted). The
+  default `resetTimeoutMs` was 10 ms, too tight for that; it is 50 ms now.
+- `U_State.req` is answered by exactly one `U_State.ind` about 1.4 ms later: `07`, no flags,
+  twelve times in a row.
+- `U_ProductID.req` (`20`) is answered with `41`.
 
 **Size (tp1-small, Cortex-M3; the gate's measured image now carries the backend over a stub
 UART):**
