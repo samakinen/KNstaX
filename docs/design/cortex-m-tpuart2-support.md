@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | **Proposal**, 15 November 2026. Nothing here is implemented yet. Per DEVELOPMENT_GUIDELINES, README.md and the conformance status must not claim any of it until it ships with tests. |
+| Status | **Accepted** 15 November 2026, including the compact profile (K7) as KNstaX scope even though it changes core structures such as group object storage. The first target runs bare metal with no RTOS. Nothing here is implemented yet. Per DEVELOPMENT_GUIDELINES, README.md and the conformance status must not claim any of it until it ships with tests. |
 | Motivating product | H8i8o 8DI/8DO module: GD32F103CB (Cortex-M3, 128 KiB flash, 20 KiB RAM) + Siemens TP-UART2. Its design lives in the h8i8o repository, `docs/design/`. |
 | Principle | Everything here is generic. A different board, MCU, I/O count or TP-UART-family chip should be able to use it unchanged. Board facts (pins, clocks, flash geometry) stay in the product repository. |
 
