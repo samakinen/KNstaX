@@ -392,9 +392,8 @@ private:
         }
     }
 
-    // Mirrors BitBangDriverTimerIsrEspIdf: the ISR no longer emits a per-
-    // character Start message, so a receive-frame slot opens on the first
-    // message that belongs to a telegram.
+    // As BitBangDriverTimerIsrEspIdf: the ISR marks only a telegram's end, so
+    // a receive-frame slot opens on the first message that belongs to one.
     void beginActiveFrameIfNeeded() {
         if (_activeFrameStarted) {
             return;

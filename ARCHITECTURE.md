@@ -166,6 +166,12 @@ Design intent:
 - explicit TP1 byte/event interpretation before MAC policy flow
 - observable diagnostics for collision, ACK-window, deadline, and receive-integrity status
 
+The ISR core's state machine, invariants, timing schedule and its event
+contract with the layers above are specified in
+[docs/reference/tp1_bitbang_isr.md](docs/reference/tp1_bitbang_isr.md). Host
+builds check the invariants and the contract at run time, so every TP1 test
+enforces that document.
+
 ### Other TP1 backends
 
 Bit-bang is the only TP1 backend. A transceiver with its own MAC (NCN5120 and similar) would be integrated as another `Tp1MediumBackend`, reusing the same TP1 MAC policy engine instead of defining a parallel TP1 architecture.

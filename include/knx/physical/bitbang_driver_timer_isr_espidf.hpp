@@ -71,10 +71,9 @@ protected:
     const char* getVersion() const override;
 
 private:
-    // A telegram now queues a handful of events (start, state changes, end) —
-    // there is no per-octet event any more — and the receive callback drains
-    // the queue at every telegram end. 32 entries is a quarter of the old 128,
-    // which mostly held per-octet events nothing read.
+    // A telegram queues a handful of events (errors, state changes, end; no
+    // per-octet events), and the receive callback drains the queue at every
+    // telegram end.
     static constexpr size_t TP1_EVENT_QUEUE_CAPACITY = 32;
 
     void setState(DriverState newState);
@@ -90,9 +89,8 @@ private:
     void noteRxPartialError(uint8_t errorFlag, const char* label);
     void flushRxPartialErrorSummary();
     /// Open a receive-frame assembly slot on the first message that belongs to
-    /// a telegram. The ISR no longer emits a per-character Start message — it
-    /// cost a queue slot and a task wakeup for every octet — so the frame
-    /// boundary is derived here from the first byte after the previous End.
+    /// a telegram: the ISR marks only the telegram's end, so its start is the
+    /// first message after the previous End.
     void beginActiveFrameIfNeeded();
     /// Recessive gap (µs) between the previous logged bus event and `startUs`,
     /// or -1 when no previous event is known. Unsigned wrap-around is the

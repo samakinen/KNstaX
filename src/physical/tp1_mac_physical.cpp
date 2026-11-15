@@ -151,17 +151,14 @@ util::Result<uint32_t> Tp1MacPhysical::beginTransmit(std::span<const uint8_t> fr
     }
 
     // On TP1 every L_Data frame is acknowledged, group and broadcast frames
-    // included (03_02_02 §2.4.2), whether or not the sender set the A bit.
-    // Keying the outcome off the A bit, and later off "individually
-    // addressed", made the rest fire-and-forget: the MAC reported Success as
-    // soon as the bits were out, so a frame that was NAK'd, refused with BUSY
-    // or never decoded was never repeated.
+    // included (03_02_02 §2.4.2), whether or not the sender set the A bit, so
+    // the outcome of the ACK window decides success.
     //
     // The one exception must be exactly the ISR's (txFrameExpectsAck): it
-    // opens no window for individual address 0xFFFF, the address every
-    // unconfigured device shares, which therefore never acknowledges. This
-    // used to test isIndividualBroadcastAddress() (0x0000) instead, so a frame
-    // to 0xFFFF waited here for an outcome the ISR never reported.
+    // opens no window for individual address FFFFh, the address every
+    // unconfigured device shares, which therefore never acknowledges. A
+    // mismatch would leave this waiting for an outcome the ISR never reports
+    // (docs/reference/tp1_bitbang_isr.md §6.1).
     const bool toUnconfiguredAddress =
         outgoing.destinationType == AddressType::Individual
         && isInitialIndividualAddress(IndividualAddress(outgoing.destination.raw));
@@ -487,9 +484,8 @@ void Tp1MacPhysical::handleTp1Event(const Tp1RxEvent& event) {
         if (_rxCount >= RX_QUEUE_CAPACITY) {
             // Only reachable when more than RX_BUSY_RESERVE frames were
             // acknowledged before the busy state reached the ISR. The newest
-            // is dropped and the queue stays in arrival order. Dropping the
-            // oldest, as this used to, threw away frames that had been
-            // acknowledged and had waited longest.
+            // is dropped, so the queue stays in arrival order and the frames
+            // that have waited longest are kept.
             ++_rxOverflowDrops;
             if (_rxOverflowDrops == 1u || (_rxOverflowDrops % 64u) == 0u) {
                 KNX_LOGW(TAG, "RX queue full, dropping acknowledged TP1 frame (%zu drops)", _rxOverflowDrops);
@@ -548,9 +544,10 @@ util::Result<void> Tp1MacPhysical::waitForTxOutcome(uint32_t initialSequence) {
         }
 
         if (!_txAckRequested) {
-            // Mirror the pollTransmit fix: spin until the ISR signals TX complete.
-            // Returning early here lets the caller queue the next frame while the
-            // bitbang driver is still physically sending bits → Busy rejection.
+            // No ACK window: the frame is done when the medium leaves
+            // Transmitting. Returning earlier would let the caller stage the
+            // next frame while this one is still on the wire, and the medium
+            // would reject it as busy.
             if (_backend->getState() != Tp1MediumState::Transmitting) {
                 return util::Result<void>::ok();
             }

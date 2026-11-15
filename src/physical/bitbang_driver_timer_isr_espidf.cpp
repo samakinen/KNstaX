@@ -362,15 +362,12 @@ void BitBangDriverTimerIsrEspIdf::process() {
                 (void)enqueueTp1Event(endEvent);
 
 #ifdef CONFIG_KNX_TP1_BITBANG_TIMING_STATS
-                // Bus-monitor trace. Raw timer values (µs, free-running
-                // monotonic domain) carried BY THIS MESSAGE: t0 = start-bit edge
-                // of this telegram, t1 = its telegram-complete instant. Reading
-                // them off live driver fields instead produced traces that could
-                // not be true (t1 before t0, an 11-byte frame "lasting" 1.4 ms)
-                // because the ISR had already moved on to the next event by the
-                // time this handler ran. idle = gap from the previous bus
-                // event's end. A single-byte reception is an L2 acknowledgement
-                // between two other devices.
+                // Bus-monitor trace. The timestamps travel with the message
+                // (raw free-running timer µs): t0 = start-bit edge of this
+                // telegram, t1 = its telegram-complete instant. Live driver
+                // fields would already describe a later event. idle = gap from
+                // the previous bus event's end. A single-octet reception is an
+                // L2 acknowledgement between two other devices.
                 if (_activeFrameStarted && _activeFrameLength >= 1) {
                     const uint32_t rxStart = message.t0;
                     const uint32_t rxEnd = message.t1;
@@ -425,11 +422,8 @@ void BitBangDriverTimerIsrEspIdf::process() {
 
             case BitBangDriverTimerIsr::MessageType::TxFrameEnd: {
 #ifdef CONFIG_KNX_TP1_BITBANG_TIMING_STATS
-                // Bus-monitor TX line, emitted for EVERY transmitted frame —
-                // including the individually addressed ones that go on to wait
-                // for an L2 ACK. Those are the whole of an ETS session, and
-                // publishing this only on the no-ACK path meant a commissioning
-                // trace contained no TX timing at all.
+                // Bus-monitor TX line, emitted for every transmitted frame,
+                // including those followed by an ACK window.
                 //
                 // maxLate is the number that matters: the driver's own bit
                 // sampling tolerates roughly (serialBitTimeUs −
@@ -453,11 +447,10 @@ void BitBangDriverTimerIsrEspIdf::process() {
             }
 
             case BitBangDriverTimerIsr::MessageType::TxComplete: {
-                // Non-ack frame transaction finished; clear Transmitting state so
-                // getState() correctly returns Idle for subsequent TX readiness
-                // checks. Acknowledged frames reach Idle via TxAckResponse
-                // instead — TxFrameEnd above is purely a timing record and must
-                // not release the state while the ACK window is still open.
+                // A frame without an ACK window is done; the MAC sees it as the
+                // state leaving Transmitting. Acknowledged frames reach Idle
+                // via TxAckResponse instead — TxFrameEnd above is only a timing
+                // record and must not release the state while the window is open.
                 setState(DriverState::Idle);
                 break;
             }
@@ -537,10 +530,10 @@ void BitBangDriverTimerIsrEspIdf::process() {
 
             case BitBangDriverTimerIsr::MessageType::DlAckTxStart: {
 #ifdef CONFIG_KNX_TP1_BITBANG_TIMING_STATS
-                // Carries the byte we are about to drive. The DlAckDone that
-                // follows carries the timing and the echo result; the ring
-                // preserves order and the ISR queues nothing between the two,
-                // so pairing them here is exact rather than a live-field read.
+                // Carries the octet about to be driven. The DlAckDone that
+                // follows carries the timing and the echo result; the ISR
+                // queues nothing between the two (tp1_bitbang_isr.md §6), so
+                // pairing them here is exact.
                 _pendingDlAckByte = message.data;
 #endif
                 break;

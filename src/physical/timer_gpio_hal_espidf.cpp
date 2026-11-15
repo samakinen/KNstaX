@@ -10,8 +10,13 @@
 #include "sdkconfig.h"
 #endif
 
+#include "knx/physical/espidf_timer_gpio_hal_context.hpp"
+
 #include "driver/gpio.h"
 #include "driver/gptimer.h"
+#include "esp_intr_alloc.h"
+#include "esp_private/gptimer.h"
+#include "hal/timer_periph.h"
 #include "soc/gpio_struct.h"
 
 #include <new>
@@ -22,32 +27,27 @@ namespace espidf = knx::physical::espidf;
 
 namespace {
 
-// The first three fields must remain in this order and at these offsets.
-// EspIdfIsrHalPolicy::attach() in isr_hal_policy_espidf.hpp casts hal.context
-// to a local shadow struct of these fields to extract them at init time.
-// The static_asserts below enforce this layout contract.
-struct EspIdfTimerGpioHalContext {
-    gptimer_handle_t timer{nullptr};                          // [0]  used every timer ISR
-    uint32_t txPinMask{0};                                    // [4]  precomputed 1u<<txPin
-    int rxPin{-1};                                            // [8]  used every edge ISR
-    int txPin{-1};
-    knx_timer_gpio_hal_timer_alarm_cb_t timerAlarmCb{nullptr};
-    void* timerAlarmContext{nullptr};
-    knx_timer_gpio_hal_gpio_edge_isr_t rxEdgeIsr{nullptr};
-    void* rxEdgeIsrContext{nullptr};
-    // Optional link-health input (STKNX KNX_OK). Appended after the fields the
-    // ISR policy shadows so the offset contract above stays intact.
-    int statusPin{-1};
-    knx_timer_gpio_hal_gpio_edge_isr_t statusEdgeIsr{nullptr};
-    void* statusEdgeIsrContext{nullptr};
-};
+using EspIdfTimerGpioHalContext = espidf::TimerGpioHalContext;
 
-// Field-order contract with bitbang_driver_timer_isr.cpp:
-static_assert(offsetof(EspIdfTimerGpioHalContext, timer)     == 0,  "timer must be first field");
-static_assert(offsetof(EspIdfTimerGpioHalContext, txPinMask) == 4,  "txPinMask must be second field");
-static_assert(offsetof(EspIdfTimerGpioHalContext, rxPin)     == 8,  "rxPin must be third field");
+/// Interrupt priority of both driver interrupts (the TP1 timer alarm and the
+/// GPIO edge), equal so neither preempts the other: the ISR core relies on
+/// that (see CONFIG_KNX_TP1_BITBANG_ISR_SERVICE_FLAGS).
+constexpr int kTimerInterruptLevel = 3;
 
-// Timer alarm shim — context and callback are always valid while timer runs.
+#if KNX_TP1_BITBANG_TIMER_DIRECT
+// The alarm interrupt, allocated by this HAL rather than by the gptimer
+// driver: the driver's handler latches the counter, takes a spinlock and goes
+// through a callback before reaching the ISR core. Clearing the status before
+// the callback matters: the callback rearms, and an alarm that is already due
+// must raise the interrupt again rather than be cleared with the old one.
+void IRAM_ATTR onTimerInterrupt(void* userContext)
+{
+    auto* ctx = static_cast<EspIdfTimerGpioHalContext*>(userContext);
+    timer_ll_clear_intr_status(ctx->timerHw, TIMER_LL_EVENT_ALARM(espidf::kBitBangTimerIndex));
+    ctx->timerAlarmCb(ctx->timerAlarmContext);
+}
+#else
+// gptimer alarm callback — context and callback are valid while the timer runs.
 bool IRAM_ATTR onTimerAlarm(gptimer_handle_t,
                             const gptimer_alarm_event_data_t*,
                             void* userContext)
@@ -56,15 +56,9 @@ bool IRAM_ATTR onTimerAlarm(gptimer_handle_t,
     ctx->timerAlarmCb(ctx->timerAlarmContext);
     return false;
 }
+#endif
 
-// GPIO edge shim — context and handler are always valid while isr is installed.
-void IRAM_ATTR onRxEdge(void* userContext)
-{
-    auto* ctx = static_cast<EspIdfTimerGpioHalContext*>(userContext);
-    ctx->rxEdgeIsr(ctx->rxEdgeIsrContext);
-}
-
-// Status (link-health) edge shim. Same lifetime rules as onRxEdge.
+// Status (link-health) edge shim — context and handler are valid while installed.
 void IRAM_ATTR onStatusEdge(void* userContext)
 {
     auto* ctx = static_cast<EspIdfTimerGpioHalContext*>(userContext);
@@ -159,7 +153,9 @@ bool installRxEdgeIsr(void* opaque, knx_timer_gpio_hal_gpio_edge_isr_t isr, void
         return false;
     }
 
-    return gpio_isr_handler_add(static_cast<gpio_num_t>(context->rxPin), onRxEdge, context) == ESP_OK;
+    // The ISR core's handler is registered directly: no shim between the GPIO
+    // ISR service and onRxEdge(), which timestamps the edge.
+    return gpio_isr_handler_add(static_cast<gpio_num_t>(context->rxPin), isr, isr_context) == ESP_OK;
 }
 
 void removeRxEdgeIsr(void* opaque)
@@ -242,12 +238,35 @@ bool startTimer(void* opaque,
         config.clk_src       = GPTIMER_CLK_SRC_DEFAULT;
         config.direction     = GPTIMER_COUNT_UP;
         config.resolution_hz = 1000000;
-        config.intr_priority = 3;  // level 3 = same as GPIO ISR service (no mutual preemption)
+#if !KNX_TP1_BITBANG_TIMER_DIRECT
+        config.intr_priority = kTimerInterruptLevel;
+#endif
 
         if (gptimer_new_timer(&config, &context->timer) != ESP_OK) {
             return false;
         }
 
+#if KNX_TP1_BITBANG_TIMER_DIRECT
+        int groupId = 0;
+        if (gptimer_get_group_id(context->timer, &groupId) != ESP_OK) {
+            return false;
+        }
+        context->timerHw = TIMER_LL_GET_HW(groupId);
+
+        if (gptimer_enable(context->timer) != ESP_OK) {
+            return false;
+        }
+
+        // IRAM: the alarm must keep firing while the flash cache is off (NVS
+        // commits), like the GPIO edge interrupt.
+        const int intrFlags = ESP_INTR_FLAG_IRAM | (1 << kTimerInterruptLevel);
+        if (esp_intr_alloc(soc_timg_gptimer_signals[groupId][espidf::kBitBangTimerIndex].irq_id,
+                           intrFlags, onTimerInterrupt, context, &context->timerIntr) != ESP_OK) {
+            return false;
+        }
+        timer_ll_clear_intr_status(context->timerHw, TIMER_LL_EVENT_ALARM(espidf::kBitBangTimerIndex));
+        timer_ll_enable_intr(context->timerHw, TIMER_LL_EVENT_ALARM(espidf::kBitBangTimerIndex), true);
+#else
         gptimer_event_callbacks_t callbacks{};
         callbacks.on_alarm = onTimerAlarm;
         if (gptimer_register_event_callbacks(context->timer, &callbacks, context) != ESP_OK) {
@@ -257,6 +276,7 @@ bool startTimer(void* opaque,
         if (gptimer_enable(context->timer) != ESP_OK) {
             return false;
         }
+#endif
     }
 
     return gptimer_start(context->timer) == ESP_OK;
@@ -272,23 +292,33 @@ bool stopTimer(void* opaque)
     return gptimer_stop(context->timer) == ESP_OK;
 }
 
-// Called from ISR context on every timer event — must be in IRAM.
-// Stack-local config on purpose: gptimer_set_alarm_action() copies it, and a
-// shared static would be a torn-write hazard between task and ISR callers.
+// Vtable entries for callers outside the ISR core, which uses
+// EspIdfIsrHalPolicy instead. In IRAM because they may be called from ISRs.
 bool IRAM_ATTR rearmTimerAbsUs(void* opaque, uint64_t alarm_time_us)
 {
+    auto* context = static_cast<EspIdfTimerGpioHalContext*>(opaque);
+#if KNX_TP1_BITBANG_TIMER_DIRECT
+    timer_ll_set_alarm_value(context->timerHw, espidf::kBitBangTimerIndex, alarm_time_us);
+    timer_ll_enable_alarm(context->timerHw, espidf::kBitBangTimerIndex, true);
+    return true;
+#else
     gptimer_alarm_config_t alarm{};
     alarm.alarm_count = alarm_time_us;
-    return gptimer_set_alarm_action(static_cast<EspIdfTimerGpioHalContext*>(opaque)->timer,
-                                    &alarm) == ESP_OK;
+    return gptimer_set_alarm_action(context->timer, &alarm) == ESP_OK;
+#endif
 }
 
-// Called from ISR context — must be in IRAM. Context is always valid here.
 uint64_t IRAM_ATTR timerNowUs(void* opaque)
 {
+    auto* context = static_cast<EspIdfTimerGpioHalContext*>(opaque);
+#if KNX_TP1_BITBANG_TIMER_DIRECT
+    timer_ll_trigger_soft_capture(context->timerHw, espidf::kBitBangTimerIndex);
+    return timer_ll_get_counter_value(context->timerHw, espidf::kBitBangTimerIndex);
+#else
     uint64_t now = 0;
-    (void)gptimer_get_raw_count(static_cast<EspIdfTimerGpioHalContext*>(opaque)->timer, &now);
+    (void)gptimer_get_raw_count(context->timer, &now);
     return now;
+#endif
 }
 
 // Direct GPIO register writes: atomic, no cache miss, no function-call overhead.
@@ -357,6 +387,14 @@ extern "C" bool knx_timer_gpio_hal_destroy_espidf(knx_timer_gpio_hal_t* hal)
 
     auto* context = static_cast<EspIdfTimerGpioHalContext*>(hal->context);
     if (context->timer) {
+#if KNX_TP1_BITBANG_TIMER_DIRECT
+        if (context->timerIntr) {
+            timer_ll_enable_intr(context->timerHw, TIMER_LL_EVENT_ALARM(espidf::kBitBangTimerIndex), false);
+            timer_ll_clear_intr_status(context->timerHw, TIMER_LL_EVENT_ALARM(espidf::kBitBangTimerIndex));
+            (void)esp_intr_free(context->timerIntr);
+            context->timerIntr = nullptr;
+        }
+#endif
         (void)gptimer_stop(context->timer);
         (void)gptimer_disable(context->timer);
         (void)gptimer_del_timer(context->timer);

@@ -248,6 +248,7 @@ void test_rx_path_replays_waveform_into_data_and_end_messages()
 
 void test_collision_when_bus_goes_dominant_during_recessive_one_bit()
 {
+    driver.setSelfCheckEnabled(false);  // writes internal state directly
     // Collision is only meaningful while we expect the bus recessive (sending
     // a logical '1'): a dominant edge there is another transmitter winning
     // bitwise arbitration. During dominant-driven phases the edge is our own.
@@ -269,6 +270,7 @@ void test_collision_when_bus_goes_dominant_during_recessive_one_bit()
 
 void test_rx_edge_during_active_transmit_does_not_start_receive_framing()
 {
+    driver.setSelfCheckEnabled(false);  // writes internal state directly
     driver._txState = BitBangDriverTimerIsr::TX_SENDING_ZERO_ACTIVE;
     driver._rxState = BitBangDriverTimerIsr::RX_IDLE;
     driver._rxAlarmUs = 0;
@@ -424,6 +426,7 @@ void test_late_start_sample_followed_by_first_data_edge_reanchors_when_bit_posit
     config.enablePullup = false;
     config.bitSamplingOffsetUs = 52;
     TEST_ASSERT_TRUE(driver.init(hal, config));
+    driver.setSelfCheckEnabled(false);  // writes internal state directly
 
     driver._rxState = BitBangDriverTimerIsr::RX_RECEIVE;
     driver._lastCharStartUs = 0;
@@ -443,8 +446,8 @@ void test_late_start_sample_followed_by_first_data_edge_reanchors_when_bit_posit
 
     TEST_ASSERT_EQUAL_INT(0, driver._rxBitPosition);
     TEST_ASSERT_EQUAL_UINT64(156u, driver._rxAlarmUs);
-    // position -1 no longer clears _rxZeroDetected; processStartBit() did that.
-    // The flag stays at whatever value it held going in (1, set by manual setup).
+    // The start-bit slot (position -1) leaves _rxZeroDetected alone;
+    // processStartBit() clears it. It keeps the value set up above.
     TEST_ASSERT_EQUAL_UINT8(1u, driver._rxZeroDetected);
 
     driver.onRxEdge();
@@ -466,6 +469,7 @@ void test_late_mid_byte_timer_callback_keeps_rx_sample_grid()
     config.enablePullup = false;
     config.bitSamplingOffsetUs = 52;
     TEST_ASSERT_TRUE(driver.init(hal, config));
+    driver.setSelfCheckEnabled(false);  // writes internal state directly
 
     driver._rxState = BitBangDriverTimerIsr::RX_RECEIVE;
     driver._lastCharStartUs = 0;
@@ -491,8 +495,8 @@ void test_late_mid_byte_timer_callback_keeps_rx_sample_grid()
 
 void test_back_to_back_unaddressed_telegrams_carry_no_ack_state_forward()
 {
-    // No task-side ACK API exists anymore; the ISR alone decides. Verify no
-    // ACK state leaks from one unaddressed telegram to the next.
+    // The ISR alone decides acknowledges. No ACK state may leak from one
+    // unaddressed telegram to the next.
     scheduleByteWaveform(virtualBus, 0x33);
     virtualBus.advanceTimeUs(2200);
 
@@ -519,6 +523,7 @@ void test_back_to_back_unaddressed_telegrams_carry_no_ack_state_forward()
 
 void test_start_bit_late_validation_fire_accepts_real_start_bit()
 {
+    driver.setSelfCheckEnabled(false);  // writes internal state directly
     // Simulate: start bit dominant at t=0 (level→1), equalization starts at t=35
     // (level→0), but the timer ISR fires late at t=40 — past zeroActiveTimeUs.
     // The bus is recessive when processStartBit runs.
@@ -558,6 +563,7 @@ void test_start_bit_late_validation_fire_accepts_real_start_bit()
 
 void test_rx_edge_in_receive_state_does_not_reschedule_timer()
 {
+    driver.setSelfCheckEnabled(false);  // writes internal state directly
     // When in RECEIVE state, a GPIO edge must only set _rxZeroDetected.
     // It must not modify _rxState, _rxBitPosition, _rxAlarmUs, or _lastCharStartUs.
     driver._rxState = BitBangDriverTimerIsr::RX_RECEIVE;
@@ -578,6 +584,7 @@ void test_rx_edge_in_receive_state_does_not_reschedule_timer()
 
 void test_tx_ack_window_clears_stale_rx_loopback_state()
 {
+    driver.setSelfCheckEnabled(false);  // writes internal state directly
     driver._txTelegramLength = 1u;
     driver._txBytePosition = 0u;
     driver._txBitPosition = 9;
@@ -588,10 +595,9 @@ void test_tx_ack_window_clears_stale_rx_loopback_state()
     driver._rxBitPosition = 9;
     driver._rxZeroDetected = 1u;
 
-    const uint64_t nextDelayUs = driver.processEndOfTxBit();
+    const uint64_t nextDelayUs = driver.processEndOfTxBit(virtualBus.nowUs());
 
-    // TX_WAITING_ACK is itself the open-ACK-window state; there is no separate
-    // flag to check any more.
+    // TX_WAITING_ACK is itself the open-ACK-window state.
     TEST_ASSERT_EQUAL_UINT8(BitBangDriverTimerIsr::TX_WAITING_ACK, driver._txState);
     TEST_ASSERT_EQUAL_UINT8(BitBangDriverTimerIsr::RX_IDLE, driver._rxState);
     TEST_ASSERT_EQUAL_UINT8(0u, driver._rxByte);
@@ -884,6 +890,104 @@ void test_repetition_after_busy_waits_150_bit_times()
     TEST_ASSERT_TRUE(firstDominantUs >= busyStartUs + (11 + 150) * kBitUs);
 }
 
+// ── Acknowledge slot and arbitration (docs/reference/tp1_bitbang_isr.md) ─────
+
+// Group telegrams are acknowledged by every addressed device at once, and the
+// acknowledges superimpose. Another device's acknowledge starting a little
+// before this one's must not cancel it: a NAK or BUSY from this device would
+// then never reach the sender.
+void test_armed_ack_survives_an_earlier_acknowledge_of_another_device()
+{
+    const uint16_t groups[] = {0x0A01};
+    driver.setAckGroupAddresses(groups, 1u);
+    const auto frame = makeStandardFrame(kRemoteAddressRaw, 0x0A01u, true);
+
+    const uint64_t startUs = virtualBus.nowUs() + 20;
+    (void)virtualBus.scheduleRxLevelAtUs(startUs - 1, 0);
+    for (size_t i = 0; i < frame.size(); ++i) {
+        scheduleCharacterAt(virtualBus, frame[i], startUs + i * kCharSpacingUs);
+    }
+    const uint64_t frameEndUs = startUs + (frame.size() - 1u) * kCharSpacingUs + 11u * kBitUs;
+    // The other device answers two bit times before t_ack.
+    scheduleCharacterAt(virtualBus, BitBangDriverTimerIsr::ACK_BYTE_ACK, frameEndUs + 13u * kBitUs);
+    virtualBus.advanceTimeUs(frameEndUs + 40u * kBitUs - virtualBus.nowUs());
+
+    TEST_ASSERT_EQUAL_INT(BitBangDriverTimerIsr::ACK_BYTE_ACK, sentAckByte(drainMessages()));
+}
+
+// The acknowledge decision belongs to one telegram and goes with it.
+void test_ack_intent_does_not_outlive_its_telegram()
+{
+    driver.setOwnAddress(kOwnAddressRaw);
+    receiveTelegram(makeStandardFrame(kRemoteAddressRaw, kOwnAddressRaw, false));
+    receiveTelegram(makeStandardFrame(kRemoteAddressRaw, 0x1199u, false));
+
+    int acknowledges = 0;
+    for (const auto& message : drainMessages()) {
+        if (message.type == BitBangDriverTimerIsr::MessageType::DlAckTxStart) {
+            ++acknowledges;
+        }
+    }
+    TEST_ASSERT_EQUAL_INT(1, acknowledges);
+}
+
+// Losing arbitration inside a character hands that character to the receiver:
+// the winner's frame is received whole — the octets this node already sent
+// included — and acknowledged when it is addressed here. Then this node's own
+// frame is sent.
+void test_arbitration_loss_receives_the_winning_frame()
+{
+    driver.setOwnAddress(kOwnAddressRaw);
+    // Same priority; the source addresses first differ in bit 3 of their low
+    // octet, which is 1 here (0x0A) and 0 for the winner (0x02).
+    const auto ownFrame = makeStandardFrame(kOwnAddressRaw, 0x1105u, false);
+    const auto winner = makeStandardFrame(0x1102u, kOwnAddressRaw, false);
+
+    TEST_ASSERT_TRUE(driver.send(ownFrame));
+    virtualBus.clearCapturedTxTransitions();
+    for (int i = 0; i < 20000 && virtualBus.capturedTxTransitions().empty(); ++i) {
+        virtualBus.advanceTimeUs(1);
+    }
+    TEST_ASSERT_FALSE(virtualBus.capturedTxTransitions().empty());
+    const uint64_t ownStartUs = virtualBus.capturedTxTransitions().front().timestampUs;
+
+    // The winner starts within the same microsecond-scale window.
+    for (size_t i = 0; i < winner.size(); ++i) {
+        scheduleCharacterAt(virtualBus, winner[i], ownStartUs + 1u + i * kCharSpacingUs);
+    }
+    virtualBus.advanceTimeUs(40000);
+
+    const auto messages = drainMessages();
+    TEST_ASSERT_TRUE(sawMessage(messages, BitBangDriverTimerIsr::MessageType::Collision));
+    TEST_ASSERT_FALSE(sawMessage(messages, BitBangDriverTimerIsr::MessageType::TxArbitrationLost));
+
+    std::vector<uint8_t> received;
+    bool sawCleanEnd = false;
+    int ownOutcomes = 0;
+    for (const auto& message : messages) {
+        if (message.type == BitBangDriverTimerIsr::MessageType::Data && !sawCleanEnd) {
+            received.push_back(message.data);
+        }
+        if (message.type == BitBangDriverTimerIsr::MessageType::End && !sawCleanEnd) {
+            TEST_ASSERT_EQUAL_UINT8(0u, message.data);
+            sawCleanEnd = true;
+        }
+        if (message.type == BitBangDriverTimerIsr::MessageType::ParityError
+                || message.type == BitBangDriverTimerIsr::MessageType::FramingError) {
+            TEST_FAIL_MESSAGE("the winner's frame must decode without character errors");
+        }
+        if (message.type == BitBangDriverTimerIsr::MessageType::TxAckResponse) {
+            ++ownOutcomes;
+        }
+    }
+    TEST_ASSERT_TRUE(sawCleanEnd);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(winner.size()), static_cast<int>(received.size()));
+    TEST_ASSERT_EQUAL_MEMORY(winner.data(), received.data(), winner.size());
+    TEST_ASSERT_EQUAL_INT(BitBangDriverTimerIsr::ACK_BYTE_ACK, sentAckByte(messages));
+    // The own frame went out afterwards; nobody answers it here.
+    TEST_ASSERT_EQUAL_INT(1, ownOutcomes);
+}
+
 int main()
 {
     UNITY_BEGIN();
@@ -917,5 +1021,8 @@ int main()
     RUN_TEST(test_lost_arbitration_restarts_the_frame_without_busy);
     RUN_TEST(test_frame_is_abandoned_after_ten_arbitration_losses);
     RUN_TEST(test_repetition_after_busy_waits_150_bit_times);
+    RUN_TEST(test_armed_ack_survives_an_earlier_acknowledge_of_another_device);
+    RUN_TEST(test_ack_intent_does_not_outlive_its_telegram);
+    RUN_TEST(test_arbitration_loss_receives_the_winning_frame);
     return UNITY_END();
 }
