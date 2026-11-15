@@ -213,13 +213,14 @@ void InterfaceObjectManager::registerCoreObjects() {
 }
 
 InterfaceObjectManager::InterfaceObjectManager()
-    : _deviceObjectPtr(&_deviceObject)
-    , _addressTablePtr(&_addressTable)
-    , _associationTablePtr(&_associationTable)
-    , _applicationProgramPtr(&_applicationProgram)
-    , _groupObjectTablePtr(&_groupObjectTable)
+    : _owned(std::make_unique<OwnedObjects>())
+    , _deviceObjectPtr(&_owned->device)
+    , _addressTablePtr(&_owned->addressTable)
+    , _associationTablePtr(&_owned->associationTable)
+    , _applicationProgramPtr(&_owned->applicationProgram)
+    , _groupObjectTablePtr(&_owned->groupObjectTable)
 #if KNX_SECURE_ENABLED
-    , _securityObjectPtr(&_securityObject)
+    , _securityObjectPtr(&_owned->securityObject)
 #endif
     , _persistenceEnabled(false)
     , _initialized(false)

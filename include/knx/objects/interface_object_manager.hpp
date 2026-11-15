@@ -411,15 +411,20 @@ private:
     /// when given, else of every object.
     size_t loadPersistedProperties(std::optional<InterfaceObjectType> only);
 
-    // Owned interface objects (default configuration)
-    DeviceObject _deviceObject;
-    AddressTableObject _addressTable;
-    AssociationTableObject _associationTable;
-    ApplicationProgramObject _applicationProgram;
-    GroupObjectTableObject _groupObjectTable;
+    // The objects the default constructor creates. A manager built over the
+    // caller's objects (the BAU's) owns none, so it pays for none: the set is
+    // about 1.7 KB with the default table capacities.
+    struct OwnedObjects {
+        DeviceObject device;
+        AddressTableObject addressTable;
+        AssociationTableObject associationTable;
+        ApplicationProgramObject applicationProgram;
+        GroupObjectTableObject groupObjectTable;
 #if KNX_SECURE_ENABLED
-    SecurityInterfaceObject _securityObject;
+        SecurityInterfaceObject securityObject;
 #endif
+    };
+    std::unique_ptr<OwnedObjects> _owned;
 
     // Active object pointers (may point to external objects)
     DeviceObject* _deviceObjectPtr;
