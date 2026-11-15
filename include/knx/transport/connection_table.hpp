@@ -319,8 +319,9 @@ public:
      * @brief Clear all connections
      */
     void clear() {
-        for (const auto& entry : _connections) {
+        for (auto& entry : _connections) {
             notifyClosed(entry->remoteAddress);
+            recycle(std::move(entry));
         }
         _connections.clear();
     }
@@ -334,7 +335,25 @@ public:
     void setClosedObserver(ClosedObserver observer) { _closedObserver = std::move(observer); }
 
 private:
-    std::vector<std::unique_ptr<ConnectionEntry>> _connections;
+    using Entries = std::vector<std::unique_ptr<ConnectionEntry>>;
+
+    Entries _connections;
+    /// Entries (with their state machines) not in use. init() builds one per
+    /// connection the table may hold, so opening and closing connections while
+    /// the device runs allocates nothing (KNX_HEAP_POLICY=init_only).
+    Entries _spare;
+
+    /// Keeps a closed entry for the next connection. _spare was reserved for
+    /// every entry the table can hold, so this never allocates.
+    void recycle(std::unique_ptr<ConnectionEntry> entry) {
+        if (entry && _spare.size() < _spare.capacity()) {
+            _spare.push_back(std::move(entry));
+        }
+    }
+    Entries::iterator eraseEntry(Entries::iterator it) {
+        recycle(std::move(*it));
+        return _connections.erase(it);
+    }
     ClosedObserver _closedObserver;
 
     void notifyClosed(const IndividualAddress& remote) const {

@@ -25,7 +25,16 @@ util::Result<void> ConnectionTable::init(size_t maxConnections) {
     _maxConnections = maxConnections;
     _nextIndex = 0;
     _connections.clear();
-    
+    _spare.clear();
+    // One entry and state machine per connection the table may hold, built now.
+    _connections.reserve(_maxConnections);
+    _spare.reserve(_maxConnections);
+    for (size_t i = 0; i < _maxConnections; ++i) {
+        auto spare = std::make_unique<ConnectionEntry>();
+        spare->stateMachine = std::make_unique<ConnectionStateMachine>();
+        _spare.push_back(std::move(spare));
+    }
+
     KNX_LOGD(TAG, "ConnectionTable initialized with capacity %zu", maxConnections);
     return util::Result<void>::ok();
 }
@@ -66,8 +75,15 @@ ConnectionIndex ConnectionTable::createConnection(const IndividualAddress& remot
     }
     
     // Create new entry
-    auto entry = std::make_unique<ConnectionEntry>();
-    entry->stateMachine = std::make_unique<ConnectionStateMachine>();
+    std::unique_ptr<ConnectionEntry> entry;
+    if (!_spare.empty()) {
+        entry = std::move(_spare.back());
+        _spare.pop_back();
+        entry->pendingData.clear();
+    } else {
+        entry = std::make_unique<ConnectionEntry>();
+        entry->stateMachine = std::make_unique<ConnectionStateMachine>();
+    }
     entry->index = ConnectionIndex(_nextIndex);
     entry->remoteAddress = remoteAddress;
     entry->sequenceNumber = params.initialSequence & 0x0F;
@@ -94,6 +110,7 @@ ConnectionIndex ConnectionTable::createConnection(const IndividualAddress& remot
     auto smInit = entry->stateMachine->init(adjustedParams);
     if (!smInit) {
         KNX_LOGE(TAG, "Failed to initialize state machine for 0x%04X", remoteAddress.raw);
+        recycle(std::move(entry));
         return ConnectionIndex::invalid();
     }
     
@@ -157,7 +174,7 @@ util::Result<void> ConnectionTable::removeConnection(ConnectionIndex index) {
     
     if (it != _connections.end()) {
         uint16_t addr = (*it)->remoteAddress.raw;
-        _connections.erase(it);
+        eraseEntry(it);
         notifyClosed(IndividualAddress(addr));
         KNX_LOGD(TAG, "Removed connection %d (address 0x%04X)", index.value(), addr);
         return util::Result<void>::ok();
@@ -177,7 +194,7 @@ util::Result<void> ConnectionTable::removeConnectionByAddress(const IndividualAd
         ConnectionIndex index = (*it)->index;
         // A copy: the caller may have passed the entry's own field.
         const IndividualAddress remote = remoteAddress;
-        _connections.erase(it);
+        eraseEntry(it);
         notifyClosed(remote);
         KNX_LOGD(TAG, "Removed connection %d (address 0x%04X)", index.value(), remote.raw);
         return util::Result<void>::ok();
@@ -205,7 +222,7 @@ size_t ConnectionTable::checkTimeouts(uint32_t currentTimeMs, uint32_t timeoutMs
                      entry->index.value(), entry->remoteAddress.raw,
                      static_cast<unsigned long>(elapsed));
             const IndividualAddress remote = entry->remoteAddress;
-            _connections.erase(_connections.begin() + i);
+            eraseEntry(_connections.begin() + i);
             notifyClosed(remote);
             timedOut++;
         }
@@ -312,7 +329,7 @@ util::FixedVector<ConnectionIndex, ConnectionTable::MAX_CONNECTIONS> ConnectionT
             (void)closed->push_back(ClosedConnection{entry->index, entry->remoteAddress, entry->priority});
         }
         const IndividualAddress remote = entry->remoteAddress;
-        it = _connections.erase(it);
+        it = eraseEntry(it);
         notifyClosed(remote);
     }
 
@@ -336,7 +353,7 @@ util::FixedVector<ClosedConnection, ConnectionTable::MAX_CONNECTIONS> Connection
             KNX_LOGW(TAG, "Connection %d timed out after %lums idle",
                      entry->index.value(), static_cast<unsigned long>(idleTime));
             const IndividualAddress remote = entry->remoteAddress;
-            it = _connections.erase(it);
+            it = eraseEntry(it);
             notifyClosed(remote);
         } else {
             ++it;

@@ -295,6 +295,7 @@ util::Result<void> InterfaceObjectManager::init(bool enablePersistence,
         _activeBank = readActivePersistenceBank();
 
         _persistenceManager = std::make_unique<PersistenceManager>(*_persistence);
+        _recordScratch.reserve(kRecordScratchBytes);
         KNX_LOGD(TAG, "Persistence enabled");
     }
     
@@ -574,7 +575,10 @@ util::Result<size_t> InterfaceObjectManager::saveToPersistence() {
     };
 
     auto saveProp = [&](InterfaceObjectType objectType, application::PropertyID propertyId, auto getter) {
-        std::vector<uint8_t> data;
+        // One buffer for every record: allocated when persistence starts, so a save
+        // allocates nothing (KNX_HEAP_POLICY=init_only).
+        auto& data = _recordScratch;
+        data.clear();
         const bool readable = getter(data);
         saveRecord(makePersistenceKeyId(objectType, propertyId), readable, data);
     };

@@ -21,6 +21,7 @@
 #endif
 #include "knx/objects/generic_interface_object.hpp"
 #include "knx/objects/object_persistence.hpp"
+#include "knx/objects/table_segments.hpp"
 #include "knx/objects/reference_object_registry.hpp"
 #include "knx/application/apci_services.hpp"
 #include "knx/application/property.hpp"
@@ -443,6 +444,18 @@ private:
     // Persistence
     std::unique_ptr<ObjectPersistence> _persistence;
     std::unique_ptr<PersistenceManager> _persistenceManager;
+    /// Room for the largest record a save builds: the association table image
+    /// (the group address table is smaller), 256 B for the rest, and with Data
+    /// Secure the key tables. Reserved when persistence starts; a record that
+    /// outgrows it makes the vector allocate.
+    static constexpr size_t kRecordScratchBytes =
+        (tableseg::kAssociationTableSize > 256u ? tableseg::kAssociationTableSize : 256u)
+#if KNX_SECURE_ENABLED
+        + 1024u
+#endif
+        ;
+    /// The largest record a save builds is a table image; see kRecordScratchBytes.
+    std::vector<uint8_t> _recordScratch;
     bool _persistenceEnabled;
     bool _initialized;
     uint8_t _activeBank{0};  ///< See kPersistenceBankMarkerKeyId.

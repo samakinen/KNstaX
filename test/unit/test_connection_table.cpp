@@ -185,11 +185,37 @@ void test_SlotIsReusableAfterRelease(void) {
     TEST_ASSERT_TRUE(table.createConnection(IndividualAddress(1, 1, 2), params).isValid());
 }
 
+// A closed connection's entry is kept for the next one (the table allocates its
+// entries when it is initialised, not while the device runs), so a reused entry
+// must come back in its initial state.
+void test_ReusedEntryStartsClean(void) {
+    TEST_ASSERT_TRUE(table.init(1).isOk());
+    ConnectionParams params;
+    params.timeoutMs = 3000;
+    params.maxRetries = 3;
+    for (int round = 0; round < 5; ++round) {
+        params.remoteAddress = IndividualAddress(1, 1, static_cast<uint8_t>(10 + round));
+        const auto index = table.createConnection(params.remoteAddress, params);
+        TEST_ASSERT_TRUE(index.isValid());
+        ConnectionEntry* entry = table.getConnection(index);
+        TEST_ASSERT_NOT_NULL(entry);
+        TEST_ASSERT_EQUAL_UINT32(0u, static_cast<uint32_t>(entry->pendingData.size()));
+        TEST_ASSERT_EQUAL_UINT8(0, entry->retransmitCount);
+        TEST_ASSERT_FALSE(entry->pendingRetransmission);
+        TEST_ASSERT_EQUAL_HEX16(params.remoteAddress.raw, entry->remoteAddress.raw);
+        TEST_ASSERT_TRUE(entry->pendingData.push_back(0x55));  // leave state behind
+        entry->retransmitCount = 2;
+        entry->pendingRetransmission = true;
+        TEST_ASSERT_TRUE(table.removeConnection(index).isOk());
+    }
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_DefaultsToASingleConnection);
     RUN_TEST(test_CouplersCanRaiseTheBound);
     RUN_TEST(test_SlotIsReusableAfterRelease);
+    RUN_TEST(test_ReusedEntryStartsClean);
     
     RUN_TEST(test_CanCreateConnection);
     RUN_TEST(test_RejectsInvalidAddress);
