@@ -361,14 +361,15 @@ CI job with one reference device per profile:
 | Reference | Profile | Core | Checks |
 |---|---|---|---|
 | `tp1-small` | `tp1-small` | Cortex-M3 (QEMU `mps2-an385`) | Flash and RAM budget, forbidden objects, heap high-water under QEMU |
-| `tp1-standard` | `tp1-standard` + Data Secure | Cortex-M4 | Flash and RAM budget |
+| `tp1-standard` | `tp1-standard` + Data Secure | Cortex-M4 (QEMU `mps2-an386`) | Flash and RAM budget, heap high-water under QEMU with the heap locked |
 | `m0plus-small` | `tp1-small` | Cortex-M0+ | Builds and links (no hardware divide, no unaligned access); flash and static RAM budget |
 
 The gate takes the profile and the core as parameters (`run_gate.sh <build-dir> [profile [cpu]]`,
 or `KNX_SIZE_GATE_PROFILE` and the toolchain's `KNX_ARM_CPU`) and reads the budget file
 `test/baremetal/size_gate/budgets/<profile>-<core>.json` (`tp1-small-m3`, `tp1-standard-m4`,
-`tp1-small-m0plus`). Only the Cortex-M3 device is run under QEMU; the others report "heap not
-measured" and their RAM figure is static data only. The CI job is `size-gate` in
+`tp1-small-m0plus`). The Cortex-M3 device (`mps2-an385`) and the Cortex-M4 device (`mps2-an386`)
+are run under QEMU; the Cortex-M0+ one reports "heap not measured" and its RAM figure is static
+data only. The CI job is `size-gate` in
 `.github/workflows/ci.yml`, one matrix entry per reference device.
 
 - **Size change per pull request.** Every change reports its flash and RAM delta per profile.
@@ -384,6 +385,20 @@ measured" and their RAM figure is static data only. The CI job is `size-gate` in
 - **The heap figure includes traffic.** The emulator variant feeds recorded telegrams through a
   scripted backend, so the measured high-water mark covers receive and send, not only start-up.
   (Done in S3/S4 step 0: `traffic.hpp` in the gate; the run also locks the heap after start-up and reports every allocation after that, see §6.4.)
+- **The traffic includes an ETS download.** The run ends with the session ETS makes (Unload,
+  StartLoading, A_Memory_Write of the three tables, a verification read each, LoadCompleted),
+  group traffic on the downloaded addresses and A_Restart. The gate refuses a heap figure
+  from a run whose download did not take effect (`download_applied=1` in the output).
+- **The whole device is the binding constraint.** A budget file may carry a `device` section: the
+  MCU's flash and RAM, and the reservations of everything that is not KNstaX (the H8i8o budget,
+  `01-system-design.md` §4.2: stack 2560 B, TP-UART buffers 512 B, application state 1024 B and
+  margin 2560 B of RAM; application 12288 B, board support 4096 B and persistence 8192 B of
+  flash). The gate adds the measured KNstaX static data and heap (RAM) and the measured KNstaX
+  and C/C++ runtime flash, prints both sums with the headroom, and fails if either is over. It
+  is in `tp1-small-m3.json`. The per-share budgets and targets above keep ratcheting; a `target`
+  is where a share was meant to be, and for RAM it no longer says whether the device fits (its
+  note in the output says so). The runtime's own static data is not in the RAM sum (it comes out
+  of the margin) and the gate prints it. Without a heap figure the RAM sum is not made.
 - **The resolved `knx.config` is printed** with every result (the `knx-config/knx.config` of the
   gate's build tree).
 

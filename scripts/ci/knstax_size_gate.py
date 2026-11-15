@@ -266,6 +266,8 @@ def main():
         if target is not None:
             side = 'over' if value > target else 'within'
             print(f'      target {target} B: {abs(value - target)} B {side} the target')
+            if entry.get('target_note'):
+                print(f'      ({entry["target_note"]})')
         slack = limit - value
         if slack > limit * margin_percent / 100 + 256:
             print(f'      note: {slack} B below the budget, more than the {margin_percent} % margin; '
@@ -277,6 +279,48 @@ def main():
     check('runtime_flash', 'C/C++ runtime flash', runtime_flash, budget.get('runtime_flash'))
     print()
 
+    # The whole device: the MCU has a fixed flash and RAM, and the stack is one share of
+    # them. The shares of the rest (stack, driver buffers, application, board support,
+    # persistence) are reservations from the device's own budget file section; the
+    # stack's figures are the measured ones. This is the binding constraint: the
+    # per-share budgets above ratchet what was achieved, the targets say where a share
+    # was meant to be, and neither says whether the device fits.
+    device = budget.get('device')
+    if device:
+        def total(reserved):
+            return sum(reserved.values())
+
+        print(f'Device ({device.get("name", "whole device")}): '
+              f'{device["flash_total"]} B flash, {device["ram_total"]} B RAM. This check decides whether it fits.')
+        ram_reserved = device.get('ram_reserved', {})
+        flash_reserved = device.get('flash_reserved', {})
+        if heap is None:
+            print('  RAM    not checked: the heap was not measured, and without it the figure would be too low')
+            results['device_ram'] = None
+        else:
+            ram_total = ram + total(ram_reserved)
+            ram_limit = device['ram_total']
+            ram_ok = ram_total <= ram_limit
+            failed = failed or not ram_ok
+            parts = ' + '.join([f'KNstaX {ram}'] + [f'{k} {v}' for k, v in ram_reserved.items()])
+            print(f'  RAM    {parts} = {ram_total} of {ram_limit} B: '
+                  f'{"headroom" if ram_ok else "OVER by"} {abs(ram_limit - ram_total)} B')
+            results['device_ram'] = {'value': ram_total, 'budget': ram_limit, 'ok': ram_ok,
+                                     'headroom': ram_limit - ram_total}
+            if runtime_ram:
+                print(f'         (the C/C++ runtime\'s own static data, {runtime_ram} B, is not in the sum; '
+                      f'it comes out of the margin)')
+        flash_total = flash + runtime_flash + total(flash_reserved)
+        flash_limit = device['flash_total']
+        flash_ok = flash_total <= flash_limit
+        failed = failed or not flash_ok
+        parts = ' + '.join([f'KNstaX {flash}', f'runtime {runtime_flash}'] +
+                           [f'{k} {v}' for k, v in flash_reserved.items()])
+        print(f'  Flash  {parts} = {flash_total} of {flash_limit} B: '
+              f'{"headroom" if flash_ok else "OVER by"} {abs(flash_limit - flash_total)} B')
+        results['device_flash'] = {'value': flash_total, 'budget': flash_limit, 'ok': flash_ok,
+                                   'headroom': flash_limit - flash_total}
+        print()
     # Features that are off must be absent, not merely small: a pattern in the
     # budget's "forbid" list (or given with --forbid) that matches a symbol of
     # the image means a source that should not have been built got linked.
@@ -360,7 +404,9 @@ def main():
 
     print(f'SIZE GATE {profile}/{cpu}: {"FAIL" if failed else "PASS"}  '
           f'{short("flash", "flash")}  {short("ram", "RAM" + (" static+heap" if heap is not None else " static"))}  '
-          f'{short("runtime_flash", "runtime")}  heap {"not measured" if heap is None else heap}')
+          f'{short("runtime_flash", "runtime")}  heap {"not measured" if heap is None else heap}' +
+          ('' if not device else
+           f'  | device RAM {short("device_ram", "").strip()}  flash {short("device_flash", "").strip()}'))
     return 1 if failed else 0
 
 
