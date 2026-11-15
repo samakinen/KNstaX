@@ -65,11 +65,16 @@ public:
     /// in bau_stack_port.cpp; only the create*StackPort factories make one.
     class Medium;
 
+#if KNX_FEATURE_COUPLER
     /// Build a stack port over @p primary. A non-null @p secondary makes it a
     /// coupler routing between the two. Use the create*StackPort factories.
     BusAccessStackPort(platform::Platform& platform,
                        std::unique_ptr<Medium> primary,
                        std::unique_ptr<Medium> secondary = nullptr);
+#else
+    /// Build a stack port over @p primary. Use the create*StackPort factories.
+    BusAccessStackPort(platform::Platform& platform, std::unique_ptr<Medium> primary);
+#endif
     ~BusAccessStackPort();
 
     // The secure transforms installed on the transport capture `this`.
@@ -94,15 +99,21 @@ public:
     util::Result<void> addGroupAddress(const GroupAddress& address);
     util::Result<void> setOwnAddress(const IndividualAddress& ownAddress);
     void setIndividualAddressUpdateCallback(application::ApplicationLayer::IndividualAddressUpdateCallback callback);
+#if KNX_SECURE_ENABLED
     void configureDataSecure(objects::SecurityInterfaceObject& securityObject);
+#endif
+#if KNX_FEATURE_FUNCTION_PROPERTIES
     /// Install the handler for A_FunctionPropertyCommand / State_Read.
     void setFunctionPropertyHandler(application::FunctionPropertyHandler handler);
+#endif
+#if KNX_FEATURE_PROPERTY_EXT && KNX_FEATURE_FUNCTION_PROPERTIES
     /// Install the handler for A_FunctionPropertyExtCommand / ExtState_Read.
     /// Separate from the classic hook because the extended services address the
     /// object by type + instance rather than by index, and answer in the
     /// unified return-code space of 03/03/07 §3.4.8.3 rather than the small
     /// FunctionPropertyReturnCode set.  ETS drives Data Secure through these.
     void setExtendedFunctionPropertyProvider(application::PropertyExtServices::FunctionProvider provider);
+#endif
     /// Publish this device's 6-octet KNX serial number so it can be addressed
     /// by A_IndividualAddressSerialNumber_Read/_Write without programming mode.
     void setCommissioningSerialNumber(const application::KnxSerialNumber& serialNumber);
@@ -154,6 +165,7 @@ public:
     void setProgrammingModeEnabled(bool enabled);
     bool programmingModeEnabled() const;
 
+#if KNX_FEATURE_COUPLER
     /**
      * @brief The coupler, when this stack port was built as one.
      *
@@ -163,6 +175,7 @@ public:
      * `network::TwoPortCoupler`.
      */
     network::TwoPortCoupler* coupler() { return _coupler.get(); }
+#endif
 
     /**
      * @brief Re-issue the multicast membership of an IP routing port.
@@ -190,8 +203,10 @@ public:
 private:
     util::Result<void> initApplicationStack(datalink::Tp1DataLinkLayer& dataLink,
                                             const IndividualAddress& ownAddress);
+#if KNX_FEATURE_COUPLER
     util::Result<void> initCoupler(const IndividualAddress& ownAddress,
                                    datalink::Tp1DataLinkLayer& primaryDataLink);
+#endif
     void installInboundCallback();
 #if KNX_SECURE_ENABLED
     void configureSecurity();
@@ -202,9 +217,11 @@ private:
     // Declaration order is destruction order in reverse: the application
     // stack goes first, then the coupler, then the media it sits on.
     std::unique_ptr<Medium> _medium;
+#if KNX_FEATURE_COUPLER
     /// Present only for a coupler: the sub-line the coupler routes to.
     std::unique_ptr<Medium> _secondaryMedium;
     std::unique_ptr<network::TwoPortCoupler> _coupler;
+#endif
 
     std::unique_ptr<network::NetworkLayer> _network;
     std::unique_ptr<transport::TransportLayer> _transport;

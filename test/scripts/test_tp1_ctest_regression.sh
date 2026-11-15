@@ -19,19 +19,31 @@ if [[ ! -d "$BUILD_DIR" ]]; then
   echo "Build directory not found for regression test: $BUILD_DIR" >&2
   exit 1
 fi
+# A test that needs a feature this build has configured out is not registered
+# (knx_add_test NEEDS ...), so it is not required either; knx_tests_not_registered.txt
+# in the build tree lists what a profile leaves out.
+REQUIRED_TESTS=(
+  test_tp1_frame_golden
+  test_tp1_datalink_frame_pool
+  test_bitbang_mac_physical
+  test_tp1_mac_physical
+  test_tp1_integration
+  test_tp1_to_ip_routing_coupler
+  test_ip_tp1_routing
+  test_ip_routing_physical
+  test_tp1_ack_diagnostics_adapter_mapping_check_script
+  test_tp1_benchmark_gate_script
+)
+REQUIRE_ARGS=()
+for test_name in "${REQUIRED_TESTS[@]}"; do
+  if [[ -f "$BUILD_DIR/knx_tests_not_registered.txt" ]] \
+     && grep -q "^${test_name} " "$BUILD_DIR/knx_tests_not_registered.txt"; then
+    continue
+  fi
+  REQUIRE_ARGS+=(--require-test "$test_name")
+done
 
-"$SCRIPT" --build-dir "$BUILD_DIR" \
-  --require-test test_tp1_frame_golden \
-  --require-test test_tp1_datalink_frame_pool \
-  --require-test test_bitbang_mac_physical \
-  --require-test test_tp1_mac_physical \
-  --require-test test_tp1_integration \
-  --require-test test_tp1_to_ip_routing_coupler \
-  --require-test test_ip_tp1_routing \
-  --require-test test_ip_routing_physical \
-  --require-test test_tp1_ack_diagnostics_adapter_mapping_check_script \
-  --require-test test_tp1_benchmark_gate_script \
-  --preflight-only
+"$SCRIPT" --build-dir "$BUILD_DIR" "${REQUIRE_ARGS[@]}" --preflight-only
 
 if "$SCRIPT" --build-dir "$BUILD_DIR" --require-test test_tp1_nonexistent_required_gate --preflight-only >/dev/null 2>&1; then
   echo "Expected TP1 required-test gate failure did not occur for nonexistent required test" >&2

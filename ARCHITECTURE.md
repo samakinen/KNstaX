@@ -214,7 +214,7 @@ Host tests are expected to follow the same high-level semantics as embedded buil
 (`sdkconfig.h`). A standalone CMake build (host tests, bare metal) resolves it at configure
 time with the vendored Kconfiglib (`tools/kconfig/knx_genconfig.py`), from a **profile**, a
 defconfig fragment under `configs/profiles/` (`host-test`, `host-small`, `full`, `tp1-small`,
-`tp1-standard`), plus the product's own override fragments. The result is the generated
+`tp1-standard`, `host-minimal`), plus the product's own override fragments. The result is the generated
 `knx/autoconf.h`, which carries the same `CONFIG_KNX_*` macros as `sdkconfig.h`; `config.hpp`
 includes whichever exists. The resolved configuration is also written as `knx.config` in
 `<build>/knx-config/`, and as `knx_config.cmake` for CMake to choose source groups from.
@@ -250,6 +250,16 @@ Bitbang builds also consume board/transceiver traits from Kconfig, including:
 - RX pull-up policy
 - dominant polarity
 - software timing traits for the timer-ISR backend
+
+Optional features are Kconfig symbols as well (menu "Optional Features", plus `KNX_ENABLE_COUPLER` and
+`KNX_ENABLE_SECURITY`): the coupler role, the Security Interface Object, group object diagnostics, function,
+extended property, extended memory and network parameter services, and the DPT families and catalogue.
+`config.hpp` turns each into a `KNX_FEATURE_*` macro. A feature that is off is absent: `knx_optional_sources()`
+(`cmake/knx_sources.cmake`) leaves its sources out of both the ESP-IDF and the standalone build, the headers
+remove its declarations (so using it is a compile error, and a datapoint family that is off stops the build
+with a message naming the symbol), and the size gate checks the linked image for its symbols. `host-minimal`
+is the host profile with the `tp1-small` features; a test that needs an absent feature is not registered
+(`knx_add_test(... NEEDS <feature>)`). See `docs/design/small-target-profile.md` (C3 status).
 
 ## Standards and configuration plane
 

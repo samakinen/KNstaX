@@ -76,7 +76,9 @@ std::span<const InterfaceObjectManager::PersistedProperty> InterfaceObjectManage
     constexpr auto addressTable = InterfaceObjectType::addressTable();
     constexpr auto associationTable = InterfaceObjectType::associationTable();
     constexpr auto applicationProgram = InterfaceObjectType::applicationProgram();
+#if KNX_SECURE_ENABLED
     constexpr auto security = InterfaceObjectType::security();
+#endif
     // The KNXnet/IP Parameter Object is here for its routing multicast
     // address and its Secure Routing settings (backbone key, latency
     // tolerance, sync fraction): without them a device that ETS commissioned
@@ -87,7 +89,9 @@ std::span<const InterfaceObjectManager::PersistedProperty> InterfaceObjectManage
     // downloads and the forwarding path acts on. Without it a coupler came
     // back from every restart on its ex-factory routing configuration. The
     // filter table itself is a banked record (kRouterFilterTableKeyId).
+#if KNX_FEATURE_COUPLER
     constexpr auto router = InterfaceObjectType::router();
+#endif
 
     // PID_PROG_MODE is deliberately absent: KNX devices leave programming mode
     // on power-up, and persisting it left the device stuck in the
@@ -115,6 +119,7 @@ std::span<const InterfaceObjectManager::PersistedProperty> InterfaceObjectManage
         {applicationProgram, static_cast<PID>(AppProgramProperty::ProgramData)},
         {applicationProgram, static_cast<PID>(AppProgramProperty::ProgramName)},
         {applicationProgram, static_cast<PID>(AppProgramProperty::ProgramDescription)},
+#if KNX_SECURE_ENABLED
         // The key tables must survive a restart. 03/05/01 §6.3.6-6.3.8
         // "Master Reset": erase code 01h (ConfirmedRestart) leaves all three
         // "not influenced: no change", and §6.3.8 additionally requires the
@@ -133,6 +138,7 @@ std::span<const InterfaceObjectManager::PersistedProperty> InterfaceObjectManage
         // it is downloaded alongside the key tables and is just as useless if
         // it does not survive the restart that immediately follows.
         {security, static_cast<PID>(SecurityProperty::GoSecurityFlags)},
+#endif
         // PID_ROUTING_MULTICAST_ADDRESS: 03_08_03 §2.5.17 lets it be set at
         // run time and makes the new value active "after a reset", so a value
         // that did not survive that reset would never become active at all.
@@ -143,11 +149,13 @@ std::span<const InterfaceObjectManager::PersistedProperty> InterfaceObjectManage
         // 03/05/01 §4.5.5, §4.5.6, §4.5.13. PID_HOP_COUNT, PID_L2_COUPLER_TYPE
         // and PID_COUPL_SERV_CONTROL are not here: the forwarding path does
         // not act on them, and the first two are the product's declaration.
+#if KNX_FEATURE_COUPLER
         {router, static_cast<PID>(52)},    // PID_MAIN_LCCONFIG
         {router, static_cast<PID>(53)},    // PID_SUB_LCCONFIG
         {router, static_cast<PID>(54)},    // PID_MAIN_LCGRPCONFIG
         {router, static_cast<PID>(55)},    // PID_SUB_LCGRPCONFIG
         {router, static_cast<PID>(67)},    // PID_FILTER_TABLE_USE
+#endif
     };
     return kPersisted;
 }
@@ -199,7 +207,9 @@ void InterfaceObjectManager::registerCoreObjects() {
     (void)_kernelObjects.push_back(_associationTablePtr);
     (void)_kernelObjects.push_back(_applicationProgramPtr);
     (void)_kernelObjects.push_back(_groupObjectTablePtr);
+#if KNX_SECURE_ENABLED
     (void)_kernelObjects.push_back(_securityObjectPtr);
+#endif
 }
 
 InterfaceObjectManager::InterfaceObjectManager()
@@ -208,7 +218,9 @@ InterfaceObjectManager::InterfaceObjectManager()
     , _associationTablePtr(&_associationTable)
     , _applicationProgramPtr(&_applicationProgram)
     , _groupObjectTablePtr(&_groupObjectTable)
+#if KNX_SECURE_ENABLED
     , _securityObjectPtr(&_securityObject)
+#endif
     , _persistenceEnabled(false)
     , _initialized(false)
 {
@@ -220,14 +232,19 @@ InterfaceObjectManager::InterfaceObjectManager(
     AddressTableObject& addressTable,
     AssociationTableObject& associationTable,
     ApplicationProgramObject& applicationProgram,
-    GroupObjectTableObject& groupObjectTable,
-    SecurityInterfaceObject& security)
+    GroupObjectTableObject& groupObjectTable
+#if KNX_SECURE_ENABLED
+    , SecurityInterfaceObject& security
+#endif
+    )
     : _deviceObjectPtr(&device)
     , _addressTablePtr(&addressTable)
     , _associationTablePtr(&associationTable)
     , _applicationProgramPtr(&applicationProgram)
     , _groupObjectTablePtr(&groupObjectTable)
+#if KNX_SECURE_ENABLED
     , _securityObjectPtr(&security)
+#endif
     , _persistenceEnabled(false)
     , _initialized(false)
 {
@@ -409,9 +426,13 @@ size_t InterfaceObjectManager::loadPersistedProperties(std::optional<InterfaceOb
 }
 
 std::span<const uint16_t> InterfaceObjectManager::bankedRecordKeys() {
-    static constexpr uint16_t kKeys[] = {kRouterFilterTableKeyId};
-    static_assert(std::size(kKeys) == std::tuple_size_v<decltype(_bankedRecordSources)>);
-    return kKeys;
+#if KNX_FEATURE_COUPLER
+    static constexpr std::array<uint16_t, 1> kKeys{kRouterFilterTableKeyId};
+#else
+    static constexpr std::array<uint16_t, 0> kKeys{};
+#endif
+    static_assert(kKeys.size() == kBankedRecordCount);
+    return std::span<const uint16_t>(kKeys.data(), kKeys.size());
 }
 
 void InterfaceObjectManager::setBankedRecordSource(uint16_t keyId, BankedRecordSource source) {
@@ -487,6 +508,7 @@ util::Result<size_t> InterfaceObjectManager::saveToPersistence() {
     size_t saved = 0;
     const InterfaceObjectInstance instance(1);
 
+#if KNX_SECURE_ENABLED
     // Blob-backed array properties of the Security Interface Object, i.e. the
     // ones whose whole value has to be persisted rather than element 1 of it.
     auto securityBlobProperty =
@@ -505,6 +527,7 @@ util::Result<size_t> InterfaceObjectManager::saveToPersistence() {
         }
         return std::nullopt;
     };
+#endif
 
     // The whole state goes into the inactive bank; the marker switch at the
     // end makes it current in one write (see kPersistenceBankMarkerKeyId).
@@ -601,6 +624,7 @@ util::Result<size_t> InterfaceObjectManager::saveToPersistence() {
     forEachPersistedProperty([&](InterfaceObjectType objectType, application::PropertyID propertyId) {
         {
 
+#if KNX_SECURE_ENABLED
             // The Security Interface Object's key tables are variable-length
             // arrays held as one blob. savePropViaManager reads a *single*
             // element, which would store only the first 18-octet entry of an
@@ -621,6 +645,7 @@ util::Result<size_t> InterfaceObjectManager::saveToPersistence() {
                     return;
                 }
             }
+#endif
 
             if (objectType == InterfaceObjectType::addressTable() &&
                 propertyId == static_cast<application::PropertyID>(AddressTableProperty::TableData)) {
@@ -691,6 +716,7 @@ util::Result<size_t> InterfaceObjectManager::saveToPersistence() {
     return saved;
 }
 
+#if KNX_SECURE_ENABLED
 size_t InterfaceObjectManager::saveSecuritySequenceState() {
     if (!_persistenceEnabled || !_persistenceManager || _securityObjectPtr == nullptr) {
         return 0;
@@ -765,6 +791,7 @@ bool InterfaceObjectManager::loadSecuritySequenceState() {
     _securityObjectPtr->clearSequenceStateDirty();
     return true;
 }
+#endif  // KNX_SECURE_ENABLED
 
 util::Result<void> InterfaceObjectManager::saveAuthorizationKeyTable(std::span<const uint8_t> record) {
     if (!_persistenceEnabled || !_persistenceManager) {

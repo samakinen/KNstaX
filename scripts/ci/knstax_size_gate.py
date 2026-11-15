@@ -21,8 +21,17 @@ the RAM share.
 Usage:
   knstax_size_gate.py --map size_gate.elf.map --budget size_budget.json
                       [--heap-high-water BYTES] [--top N] [--json FILE]
+                      [--elf size_gate.elf [--nm arm-none-eabi-nm]] [--forbid PATTERN]...
 
-Exit status: 0 within budget, 1 over budget, 2 the map could not be read.
+Forbidden features: the budget file may carry a "forbid" list of substrings
+(also --forbid, repeatable). With --elf each is looked up in the demangled
+symbol names of the image (`nm -C`) and the map's member names; any match fails
+the gate. This is how the gate proves that a feature switched off in Kconfig is
+absent from the image rather than merely small, which the map alone cannot say
+under LTO.
+
+Exit status: 0 within budget and nothing forbidden linked, 1 over budget or a
+forbidden pattern found, 2 the map or the ELF could not be read.
 
 Why a new script rather than knstax_size_budget.py: that one reads ESP-IDF
 maps and counts one archive. This one reads a Cortex-M map, has two budgets
@@ -31,6 +40,7 @@ maps and counts one archive. This one reads a Cortex-M map, has two budgets
 import argparse
 import json
 import re
+import subprocess
 import sys
 
 MAP_BODY_MARKER = 'Linker script and memory map'
@@ -107,12 +117,37 @@ def share(totals, owner):
     return flash, ram_static
 
 
+def forbidden_symbols(elf, nm, patterns, totals):
+    """Return {pattern: [name, ...]} for every pattern that reached the link.
+
+    A pattern is a plain substring, matched against the demangled names of the
+    defined symbols of the ELF (`nm -C`) and against the archive-member names of
+    the map. The symbols are what survives an LTO link, where the members are
+    anonymous partitions and say nothing about which sources were built; a
+    feature that was compiled out has no symbol, a feature that merely got
+    small still has one.
+    """
+    names = sorted({member for (_, member) in totals})
+    if elf:
+        proc = subprocess.run([nm, '-C', '--defined-only', elf], capture_output=True, text=True, check=False)
+        if proc.returncode != 0:
+            raise RuntimeError(f'{nm} failed on {elf}: {proc.stderr.strip()}')
+        for line in proc.stdout.splitlines():
+            parts = line.split(None, 2)
+            if len(parts) == 3:
+                names.append(parts[2])
+    return {pattern: sorted({n for n in names if pattern in n})[:6] for pattern in patterns}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--map', required=True)
     parser.add_argument('--budget', required=True, help='JSON file with flash_bytes and ram_bytes')
     parser.add_argument('--heap-high-water', type=int, default=None,
                         help='peak heap use in bytes, measured by running the image')
+    parser.add_argument('--elf', help='the linked ELF; with it, the "forbid" patterns of the budget are checked against its symbols')
+    parser.add_argument('--nm', default='arm-none-eabi-nm', help='nm of the target toolchain (default %(default)s)')
+    parser.add_argument('--forbid', action='append', default=[], help='one more forbidden pattern (repeatable)')
     parser.add_argument('--top', type=int, default=12)
     parser.add_argument('--json', help='write the figures to this file')
     args = parser.parse_args()
@@ -162,6 +197,28 @@ def main():
     check('KNstaX RAM' + (' (static + heap)' if heap is not None else ' (static only)'),
           ram, budget.get('ram_bytes'))
     check('C/C++ runtime flash', runtime_flash, budget.get('runtime_flash_bytes'))
+
+    # Features that are off must be absent, not merely small: a pattern in the
+    # budget's "forbid" list (or given with --forbid) that matches a symbol of
+    # the image means a source that should not have been built got linked.
+    patterns = list(budget.get('forbid', [])) + list(args.forbid)
+    if patterns:
+        if not args.elf:
+            print('error: forbid patterns given but no --elf to read symbols from', file=sys.stderr)
+            return 2
+        try:
+            found = forbidden_symbols(args.elf, args.nm, patterns, totals)
+        except (OSError, RuntimeError) as error:
+            print(f'error: cannot read the symbols: {error}', file=sys.stderr)
+            return 2
+        print('Forbidden (gated-out) features:')
+        for pattern in patterns:
+            if found[pattern]:
+                failed = True
+                print(f'FAIL: "{pattern}" reached the link: {", ".join(found[pattern][:3])}')
+            else:
+                print(f'  ok: "{pattern}" absent')
+        print()
 
     if args.json:
         with open(args.json, 'w', encoding='utf-8') as handle:

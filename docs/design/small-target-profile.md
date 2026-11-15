@@ -110,14 +110,14 @@ gate decides the final `tp1-small` values.
 |---|---|:-:|:-:|:-:|
 | `KNX_MEDIUM_TP1`, `KNX_MEDIUM_IP` | Media (exists) | TP1 | TP1 | both |
 | `KNX_TP1_BITBANG`, `KNX_TP1_TPUART` | TP1 backend (choice; TP-UART is K3) | TP-UART | TP-UART | bit-bang |
-| `KNX_ENABLE_COUPLER` | Router object, filter and routing tables, coupler routing, two-port coupler. Today it gates only the acknowledge hook. | n | n | y |
-| `KNX_ENABLE_SECURITY` | Data Secure, Security Interface Object (exists, widened) | n | y | y |
-| `KNX_ENABLE_GO_DIAGNOSTICS` | Group object diagnostics function property | n | y | y |
+| `KNX_ENABLE_COUPLER` | The whole router role: Router object, filter and routing tables, coupler routing, two-port coupler, `CouplerOptions`, the layer-2 group acknowledge hook. Depends on function properties. | n | n | y |
+| `KNX_ENABLE_SECURITY` | Data Secure and the Security Interface Object (object 17, absent when off). Selects `KNX_ENABLE_PROPERTY_EXT` and `KNX_ENABLE_FUNCTION_PROPERTIES`. | n | y once K6 provides AES on bare metal; n until then | y |
+| `KNX_ENABLE_GO_DIAGNOSTICS` | Group object diagnostics function property (PID 66 of the group object table; not advertised when off). Depends on function properties. | n | y | y |
 | `KNX_ENABLE_MEMORY_EXT` | `A_MemoryExtended_*` services | n | y | y |
 | `KNX_ENABLE_PROPERTY_EXT` | `A_PropertyExt*` services (needed with Secure) | n | y | y |
 | `KNX_ENABLE_NETWORK_PARAMETER` | `A_NetworkParameter_*` | n | y | y |
 | `KNX_ENABLE_FUNCTION_PROPERTIES` | Function property services; GO diagnostics and the router need them | y | y | y |
-| `KNX_DPT_FLOAT`, `KNX_DPT_TIME`, `KNX_DPT_STRING`, `KNX_DPT_COLOUR`, `KNX_DPT_ACCESS` | DPT codec families. Integer and boolean types are always in. | n (or from the product, §5) | y | y |
+| `KNX_DPT_FLOAT`, `KNX_DPT_TIME`, `KNX_DPT_STRING`, `KNX_DPT_COLOUR`, `KNX_DPT_ACCESS` | DPT codec families: float (9, 14), time and date (10, 11, 19), character and string (4, 16), colour (232, 242-244), access (15). Integer, boolean, scene, dimming and HVAC mode types are always in. A port that uses a family that is off fails to compile and names the symbol. | n (or from the product, §5) | y | y |
 | `KNX_ENABLE_DPT_CATALOGUE` | The runtime catalogue of every known DPT. The exporter has its own copy. | n | n | y |
 | `KNX_ENABLE_ETS_TOOLING`, `KNX_ENABLE_VIRTUAL_BUS`, `KNX_ENABLE_TEST_HOOKS` | Host-only groups (exist as CMake options) | n | n | host only |
 | `KNX_LOG_LEVEL` | Compile-time logging (exists) | 0 | 1 | 3 |
@@ -295,7 +295,7 @@ CI job with one reference device per profile:
 |---|---|---|---|
 | C1 | Kconfig for standalone builds: vendored Kconfiglib, `autoconf.h`, `knx_configure()`, profiles, `config.hpp` without defaults | — | Host suite unchanged; `full` profile builds identical to today |
 | C2 | Capacities as options (§4.2), including `KNX_MAX_APDU_LENGTH`, with a full-capacity test per table | K7.5 | **Measure `tp1-small`** |
-| C3 | Feature gates (§4.1): coupler, Security Interface Object, GO diagnostics, optional management services, DPT families | K7.1–K7.3 | **Measure** |
+| C3 | Feature gates (§4.1): coupler, Security Interface Object, GO diagnostics, optional management services, DPT families | K7.1–K7.3 | **Done: tp1-small flash 134995 to 99907 B, see C3 status** |
 | C4 | Size gate in CI, per profile, with ratcheting budgets | K7.7 | — |
 | S1 | Table-driven product runtime | — | **Measure: decision point** (§10) |
 | S2 | Compact group objects | K7.4 | Measure |
@@ -417,7 +417,7 @@ Deviations and notes:
   addresses; they run on ESP32 and in host simulation, not on the small parts. `static_assert`s check that
   they hold the configured sizes, and the MAC drops longer frames before the upper layers.
 - The oversized responses of the extended services (`A_PropertyExt*`, function property) that do not fit
-  the APDU are still logged and dropped in `management_server.cpp`; they belong to C3, which gates those
+  the APDU were still logged and dropped in `management_server.cpp`; C3 fixed that (see C3 status) and gates those
   services out of `tp1-small`.
 - Every `host-small` failure was a test that assumed the full capacity; none was a defect in the stack.
   Three expectations (device object default, address table size, memory read limit) are now written
@@ -457,6 +457,78 @@ largest remaining items are the group objects at 15 128 B and the product runtim
 S1 and S2). The saving is 24.2 KB of RAM and 0.6 KB of flash. The flash figure barely moves because the
 capacities size storage, not code.
 
+### C3 status
+
+Done. Every feature in §4.1 except the TP-UART choice is a Kconfig symbol, and a feature that is off is
+absent: its sources are not compiled (`cmake/knx_sources.cmake`, `knx_optional_sources()`, used by the
+ESP-IDF and the standalone branch alike), its declarations are removed, and the size gate's forbid list
+checks the linked image. `include/knx/config.hpp` derives `KNX_FEATURE_*` from the `CONFIG_KNX_*` symbols
+(`KNX_FEATURE_COUPLER` and `KNX_SECURE_ENABLED` as before). ESP-IDF defaults are the old behaviour
+(every new symbol `y`; coupler and Secure stay `n`); the ESP-IDF branch could not be built here, only
+reasoned about.
+
+| Symbol | Gates |
+|---|---|
+| `KNX_ENABLE_COUPLER` | `filter_table*`, `routing_table_control`, `coupler_routing`, `two_port_coupler` (group `KNX_SOURCES_COUPLER`); `configureRouterRole` and the router PIDs in `DeviceManagement`, `LinkAccess::coupler()`, the coupler stack-port path, `CommissionedProductRuntime::start(CouplerOptions)`, `createTp1CouplerStackPort`, `CouplerOptions`, `CommissionedTransportPath::Tp1Coupler`, the Router Object entry of the reference registry (12 reference types instead of 13), the filter-table banked record |
+| `KNX_ENABLE_SECURITY` | `security_interface_object.cpp`; the object as a member of `BusAccessUnit`, `InterfaceObjectManager` (five core objects instead of six) and `DeviceModel`; secure persistence, factory security defaults, `configureDataSecure`, the product runtime's secure wrappers and `SecureCommissioningOptions` |
+| `KNX_ENABLE_GO_DIAGNOSTICS` | `go_diagnostics.cpp`, `DeviceManagement::handleGroupObjectDiagnostics`, the PID 66 `FunctionProperty` of the group object table |
+| `KNX_ENABLE_FUNCTION_PROPERTIES`, `KNX_ENABLE_PROPERTY_EXT` | `function_property_services.cpp`, `property_ext_services.cpp` and their members, handlers, callbacks and dispatch cases in `ManagementServer`; the stack port setters |
+| `KNX_ENABLE_MEMORY_EXT`, `KNX_ENABLE_NETWORK_PARAMETER` | The `A_MemoryExtended_*` and `A_NetworkParameter_*` handlers, response callbacks and dispatch cases. Their classes stay compiled: `memory_service.cpp` also holds `A_Memory_*`, and `network_parameter_service.cpp` also holds the serial number and domain address services that ETS needs. |
+| `KNX_DPT_*`, `KNX_ENABLE_DPT_CATALOGUE` | The codecs of each family, their `DptTraits`, the dispatch cases, the catalogue table and its strings. Character DPT 4 is in `KNX_DPT_STRING`: nothing but its own catalogue entry uses it. |
+
+Dependencies: Secure selects property-ext and function properties; the coupler and GO diagnostics depend
+on function properties. A profile that asks for the impossible fails in `knx_genconfig.py`.
+
+**What ETS sees when a feature is off.** No Router Object (type 6) without the coupler; no Security
+Interface Object (type 17) without Secure. The old non-secure build did expose object 17: it was a core
+object whatever `KNX_SECURE_ENABLED` said, so a non-secure device advertised an object nothing used. That
+is gone. PID 66 of the group object table is not described without GO diagnostics. A request for a
+service that is off gets no answer, as an unknown APCI does: no negative response is defined for an
+unsupported extended or network parameter service, so silence is the answer. A service that is present
+but whose result does not fit the APDU now answers with the error KNX defines instead of dropping the
+request: `A_MemoryExtended_*_Response` with E_EXCEED_MAX_APDU_LENGTH and no data;
+`A_PropertyExtValue_Response` with element count 0 and that code as the one data octet (03/03/07
+§3.4.5.1); `A_FunctionPropertyExtState_Response` with that code and no data; the classic
+`A_FunctionPropertyState_Response` with E_ERROR.
+
+**Profiles.** `tp1-small`: function properties only. `tp1-standard`: everything except the coupler and
+the catalogue (its Secure changes from `n` to `y`, as §4.1 says; the bare-metal build then needs mbedTLS,
+which the size gate does not link). `full`, `host-test`, `host-small`: everything. New `host-minimal`:
+the host platform with the virtual bus and test hooks, with the `tp1-small` features and capacities;
+KNXnet/IP, the ETS tooling and zlib stay on as in `host-small` (they are media and host tools, and the
+suite's IP and ETS tests need them). A test that needs an absent feature is not registered
+(`knx_add_test(... NEEDS <feature>)`); `knx_tests_not_registered.txt` in the build tree lists them.
+
+**Measured (size gate, `tp1-small`, reference device, LTO).**
+
+| | Flash | Static RAM | Heap | Runtime flash |
+|---|---:|---:|---:|---:|
+| After C2 | 134995 B | 1772 B | 42500 B | 11831 B |
+| After coupler, Secure object, GO diagnostics | 117210 B | 1379 B | 41892 B | 11831 B |
+| After C3 | 99907 B | 1379 B | 40980 B | 7551 B |
+
+C3 takes 35088 B out of the KNstaX flash (the §9.1 upper bounds of 5.5, 3.2 and 8.5 KiB add up to 17 KiB,
+so the gated code carried more with it than those bounds said) and 4280 B out of the C and C++ runtime,
+which is now within its 8192 B budget. Flash is still 9795 B over the 90112 B budget. The heap and static
+RAM moved only by the objects that went; S2 and S3 own the rest. The forbid list (`size_budget.json`,
+checked against the ELF's symbols with `nm -C`) passes: no `FilterTable`, `TwoPortCoupler`,
+`RoutingTableControl`, `CouplerRouting`, `SecurityInterfaceObject`, group object diagnostics, DPT 9, 14,
+10, 16 or 232 codec, or `PropertyExtServices` in the image.
+
+**Deviations and limits.**
+
+- The change threshold is a `double` in `GroupObjectTransmitPolicy`. Without `KNX_DPT_FLOAT` it is a
+  `uint32_t` in units of the integer value and compares integers (`dptValueAsInteger`); with it,
+  behaviour is as before. `DptValue` still holds a `float` and a `std::string` in its variant; removing
+  them belongs to the group object redesign (S2).
+- Without the catalogue the dynamic encode and decode take the value type from `dptValueTypeFor()` (one
+  definition, shared with the product compiler) instead of from the table. The two agree for every
+  catalogue entry and differ only for an id the catalogue does not list (an unknown DPT 21 or 22 sub-type).
+- `memory_service.cpp` and `network_parameter_service.cpp` are not removed (see the table).
+- `host-minimal` runs 101 tests (the 13 that carry `needs-full-capacity` are left out, as for `host-small`)
+  and does not register 36 that need an absent feature (by the first one missing): 9 coupler, 9 Secure, 1 property-ext, 12 float, 5 other DPT
+  families or the catalogue. Tests that need only part of a feature (a temperature port in
+  a product test) are excluded whole; a port-level split would let them run.
 ## 10. Projection and decision points
 
 Estimated `tp1-small` figures for the 60-object reference device after each stage. Only the

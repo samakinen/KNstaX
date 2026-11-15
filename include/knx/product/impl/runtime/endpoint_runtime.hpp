@@ -484,6 +484,7 @@ public:
         _bindings.notifyProgrammingModeChanged(_programmingModeActive);
     }
 
+#if KNX_FEATURE_COUPLER
     /**
      * @brief Publish the Router Object and bind it to the coupler.
      *
@@ -513,6 +514,7 @@ public:
         }
         return _bau->management().syncRouterRoutingConfig();
     }
+#endif  // KNX_FEATURE_COUPLER
 
 #if KNX_FEATURE_NETIP
     /**
@@ -566,11 +568,13 @@ public:
     }
 #endif
 
+#if KNX_FEATURE_COUPLER
     /// The coupler, or nullptr when this is an ordinary single-port device.
     network::TwoPortCoupler* coupler()
     {
         return _bau ? _bau->link().coupler() : nullptr;
     }
+#endif
 
     bool isProgrammingModeActive() const
     {
@@ -684,6 +688,7 @@ public:
         _bau->applicationProgram().setProgramData(data);
     }
 
+#if KNX_SECURE_ENABLED
     // -----------------------------------------------------------------------
     // Security passthrough helpers
     //
@@ -773,6 +778,7 @@ public:
     {
         return _bau && _bau->securityObject().isSecurityEnabled();
     }
+#endif  // KNX_SECURE_ENABLED
 
     using write_dispatch_fn = util::Result<void> (EndpointRuntime::*)(GroupObjectIndex);
     using read_prepare_fn = util::Result<void> (EndpointRuntime::*)(GroupObjectIndex);
@@ -945,12 +951,14 @@ public:
     // restore takes precedence over.
     void applyPreStartConfiguration()
     {
+#if KNX_SECURE_ENABLED
         if (_factorySecurityModeEnabled) {
             _bau->securityObject().setSecurityMode(objects::SecurityMode::Enabled);
         }
         if (_factoryToolKey.has_value()) {
             _bau->securityObject().setToolKey(*_factoryToolKey);
         }
+#endif
         if (_programmingModeActive) {
             (void)_bau->management().setCommissioningMode(true);
         }
@@ -1151,8 +1159,10 @@ public:
     bool _hadImmediateWork{false};
     bau::BusAccessUnit::TimeSourceFn _timeSource{};
     application::TelegramRateLimitConfig _telegramRateLimit{};
+#if KNX_SECURE_ENABLED
     bool _factorySecurityModeEnabled{false};
     std::optional<std::array<uint8_t, 16>> _factoryToolKey{};
+#endif
 #if KNX_FEATURE_NETIP
     bau::ManagementControl::BackboneKeyCallback _pendingBackboneKeyCallback{};
     bau::ManagementControl::RoutingMulticastAddressCallback _pendingRoutingMulticastAddressCallback{};

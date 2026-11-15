@@ -1,0 +1,42 @@
+# The host test build with the tp1-small feature set and capacities: the host
+# platform, the virtual bus and the test hooks (so the suite can run), but no
+# coupler, no Secure, none of the optional services and none of the datapoint
+# families that can be left out. Running the suite against it proves that a
+# feature that is off is really gone and that nothing else needs it. A test
+# that needs a feature that is off is not registered (CMakeLists.txt); the
+# fixtures that cannot work at these capacities carry the label
+# needs-full-capacity, as in host-small.
+#
+# KNXnet/IP, the ETS tooling and zlib stay on, as in host-small: they are
+# media and host tools, not the features this profile is about, and the
+# suite's IP and ETS tests need them.
+CONFIG_KNX_STANDALONE_PLATFORM_AUTO=y
+CONFIG_KNX_BUILD_TP1=y
+CONFIG_KNX_BUILD_NETIP=y
+CONFIG_KNX_ENABLE_TUNNELING=y
+CONFIG_KNX_ENABLE_COUPLER=n
+CONFIG_KNX_ENABLE_SECURITY=n
+CONFIG_KNX_BUILD_VIRTUAL_BUS=y
+CONFIG_KNX_BUILD_ETS_TOOLING=y
+CONFIG_KNX_BUILD_TEST_HOOKS=y
+CONFIG_KNX_BUILD_ZLIB=y
+CONFIG_KNX_LOG_LEVEL=5
+CONFIG_KNX_MAX_APDU_LENGTH=15
+CONFIG_KNX_TP1_RX_QUEUE_FRAMES=4
+CONFIG_KNX_TRANSPORT_RX_QUEUE=2
+CONFIG_KNX_ADDRESS_TABLE_ENTRIES=128
+CONFIG_KNX_ASSOCIATION_TABLE_ENTRIES=160
+CONFIG_KNX_ADDITIONAL_INDIVIDUAL_ADDRESSES=0
+CONFIG_KNX_MAX_GROUP_OBJECT_PAYLOAD_BYTES=14
+CONFIG_KNX_SEND_PIPELINE_DEPTH=2
+CONFIG_KNX_ENABLE_FUNCTION_PROPERTIES=y
+CONFIG_KNX_ENABLE_PROPERTY_EXT=n
+CONFIG_KNX_ENABLE_MEMORY_EXT=n
+CONFIG_KNX_ENABLE_NETWORK_PARAMETER=n
+CONFIG_KNX_ENABLE_GO_DIAGNOSTICS=n
+CONFIG_KNX_DPT_FLOAT=n
+CONFIG_KNX_DPT_TIME=n
+CONFIG_KNX_DPT_STRING=n
+CONFIG_KNX_DPT_COLOUR=n
+CONFIG_KNX_DPT_ACCESS=n
+CONFIG_KNX_ENABLE_DPT_CATALOGUE=n

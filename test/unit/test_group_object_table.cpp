@@ -6,6 +6,7 @@
  * @brief Group Object Table Object tests
  */
 
+#include "knx/config.hpp"
 #include "unity.h"
 #include "knx/objects/group_object_table_object.hpp"
 #include "knx/objects/property_kernel.hpp"
@@ -531,6 +532,7 @@ void test_GroupObjectTable_PropertyAccess_MisalignedWriteRejected() {
 // described with type = PDT_FUNCTION and max_nr_of_elem = 1. The function
 // itself is invoked through the Function Property services (implemented in the
 // BAU), so the property must be describable without being value-readable.
+#if KNX_FEATURE_GO_DIAGNOSTICS
 void test_GroupObjectTable_PropertyAccess_GoDiagnosticsIsDescribedAsFunction() {
     GroupObjectTableObject table;
     const auto binding = table.kernelBinding();
@@ -565,6 +567,7 @@ void test_GroupObjectTable_PropertyAccess_GoDiagnosticsIsDescribedAsFunction() {
                                              value)
                           .isOk());
 }
+#endif
 
 // === Runtime State Tests ===
 
@@ -778,7 +781,9 @@ int main(int argc, char **argv) {
     RUN_TEST(test_GroupObjectTable_PropertyAccess_TableDataWriteAppliesFlags);
     RUN_TEST(test_GroupObjectTable_PropertyAccess_UnsupportedRead);
     RUN_TEST(test_GroupObjectTable_PropertyAccess_MisalignedWriteRejected);
+#if KNX_FEATURE_GO_DIAGNOSTICS
     RUN_TEST(test_GroupObjectTable_PropertyAccess_GoDiagnosticsIsDescribedAsFunction);
+#endif
     
     // Runtime state
     RUN_TEST(test_GroupObjectTable_GetAllAddresses);

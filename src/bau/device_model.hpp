@@ -44,7 +44,9 @@ public:
                 objects::AssociationTableObject& associationTable,
                 objects::ApplicationProgramObject& applicationProgram,
                 objects::GroupObjectTableObject& groupObjectTable,
+#if KNX_SECURE_ENABLED
                 objects::SecurityInterfaceObject& securityObject,
+#endif
                 BusAccessStackPort* stackPort);
 
     // Hands `this` to the stack port's property providers.
@@ -62,8 +64,10 @@ public:
     objects::ApplicationProgramObject& applicationProgram() { return _applicationProgram; }
     objects::GroupObjectTableObject& groupObjectTable() { return _groupObjectTable; }
     const objects::GroupObjectTableObject& groupObjectTable() const { return _groupObjectTable; }
+#if KNX_SECURE_ENABLED
     objects::SecurityInterfaceObject& securityObject() { return _securityObject; }
     const objects::SecurityInterfaceObject& securityObject() const { return _securityObject; }
+#endif
 
     // --- Start-up ------------------------------------------------------------
 
@@ -156,6 +160,7 @@ public:
     /// Empty when none is stored (or before init()), nullopt when unreadable.
     std::optional<std::vector<uint8_t>> loadBankedRecord(uint16_t keyId);
 
+#if KNX_SECURE_ENABLED
     // --- Data Secure state ----------------------------------------------------
     //
     // Last Valid SeqNr values (03/05/01 §6.3.8.4) and the Sequence Number for
@@ -172,12 +177,14 @@ public:
     /// The window that an unexpected power loss can reopen is bounded by that
     /// interval; a planned restart flushes through flushPersistenceIfDirty().
     void pumpSecuritySequenceCheckpoint(uint32_t nowMs);
+#endif
 
     /// Store the A_Key_Write key table now; a failure is logged.
     void saveAuthorizationKeyTable(const application::AuthorizationService::KeyTable& keys);
     /// The stored key table, or nullopt when none (or a malformed one) is stored.
     std::optional<application::AuthorizationService::KeyTable> loadAuthorizationKeyTable();
 
+#if KNX_SECURE_ENABLED
     /// Rebuild the live Data Secure key maps from the array properties ETS
     /// downloads (PID_GRP_KEY_TABLE, PID_P2P_KEY_TABLE, and the Security
     /// Individual Address Table they index into).  Those properties are stored
@@ -186,10 +193,12 @@ public:
     /// Idempotent — safe to call after every write that can change either the
     /// key tables or the group address table they resolve against.
     void applySecurityKeyTables();
+#endif
 
     /// Subscribe every group address of the address table at the data link.
     void resubscribeGroupAddresses();
 
+#if KNX_SECURE_ENABLED
     // --- Factory defaults vs restored state (BusAccessUnit::init) ------------
     //
     // What firmware sets on the Security Interface Object before init() is its
@@ -208,13 +217,18 @@ public:
     /// Key and Security Mode back in force, firmware group and device keys in
     /// force again. Sequence Number Sending is not touched (03/03/07 §5).
     void restoreFactorySecurityDefaults();
+#endif
 
 private:
     void instantiateReferenceObjects();
+#if KNX_SECURE_ENABLED
     void checkpointSecuritySequenceState();
+#endif
     util::Result<void> writeProperty(const application::PropertyValueWriteRequest& request);
     void afterReferenceObjectWrite(InterfaceObjectType objectType, application::PropertyID propertyId);
+#if KNX_SECURE_ENABLED
     void afterSecurityObjectWrite();
+#endif
     void afterTableObjectWrite(InterfaceObjectType objectType,
                                const application::PropertyValueWriteRequest& request);
     void applyLoadedTableSegment(InterfaceObjectType objectType);
@@ -224,7 +238,9 @@ private:
     objects::AssociationTableObject& _associationTable;
     objects::ApplicationProgramObject& _applicationProgram;
     objects::GroupObjectTableObject& _groupObjectTable;
+#if KNX_SECURE_ENABLED
     objects::SecurityInterfaceObject& _securityObject;
+#endif
     BusAccessStackPort* const _stackPort;
 
     std::unique_ptr<objects::InterfaceObjectManager> _interfaceObjectManager;
@@ -233,6 +249,7 @@ private:
     std::vector<InterfaceObjectType> _indexToTypeMap;
     bool _restoring{false};
 
+#if KNX_SECURE_ENABLED
     struct FactorySecurityDefaults {
         std::array<uint8_t, 16> toolKey{};
         objects::SecurityMode securityMode{objects::SecurityMode::Disabled};
@@ -240,6 +257,7 @@ private:
     };
     FactorySecurityDefaults _factorySecurity{};
     bool _factorySecurityCaptured{false};
+#endif
 
     // Deferred-persistence bookkeeping. Quiet window is short enough that the
     // flush still lands well inside the gap between ETS download steps. A
@@ -261,8 +279,10 @@ private:
     // Data Secure replay-state checkpoint interval. Long on purpose: it trades
     // a bounded window of replayable history after an *unexpected* power loss
     // against flash wear, and every orderly restart flushes anyway.
+#if KNX_SECURE_ENABLED
     static constexpr uint32_t kSequenceCheckpointMs = 60000;
     uint32_t _sequenceCheckpointDueMs{kSequenceCheckpointMs};
+#endif
 
     // Backing storage for the memory-mapped table load segments (registered
     // with the application layer's memory service in bind()).

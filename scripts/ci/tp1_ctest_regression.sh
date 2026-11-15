@@ -54,6 +54,19 @@ if [[ ! -d "$build_dir" ]]; then
   exit 2
 fi
 
+# A test that needs a feature this build has configured out is not registered
+# (knx_add_test NEEDS ...) and is listed in knx_tests_not_registered.txt; it
+# cannot be required of this build.
+if [[ -f "$build_dir/knx_tests_not_registered.txt" ]]; then
+  kept_tests=()
+  for required_test in "${required_tests[@]}"; do
+    if ! grep -q "^${required_test} " "$build_dir/knx_tests_not_registered.txt"; then
+      kept_tests+=("$required_test")
+    fi
+  done
+  required_tests=("${kept_tests[@]}")
+fi
+
 listed_tests=$(ctest --test-dir "$build_dir" -N -L tp1 2>/dev/null || true)
 for required_test in "${required_tests[@]}"; do
   if ! grep -q "$required_test" <<< "$listed_tests"; then

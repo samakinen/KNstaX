@@ -45,4 +45,4 @@ fi
 
 # shellcheck disable=SC2086
 python3 -I "$ROOT/scripts/ci/knstax_size_gate.py" \
-    --map "$BUILD/gate/size_gate.elf.map" --budget "$HERE/size_budget.json" $HEAP_ARG
+    --map "$BUILD/gate/size_gate.elf.map" --budget "$HERE/size_budget.json" --elf "$BUILD/gate/size_gate.elf" $HEAP_ARG

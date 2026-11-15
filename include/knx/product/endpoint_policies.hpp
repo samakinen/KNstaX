@@ -288,7 +288,11 @@ public:
     }
 
     void setOnChangeEnabled(bool enabled) { policy_.onChangeEnabled = enabled; applyNow(); }
+#if KNX_FEATURE_DPT_FLOAT
     void setChangeThreshold(double threshold) {
+#else
+    void setChangeThreshold(uint32_t threshold) {
+#endif
         policy_.changeThreshold = threshold;
         policy_.onChangeEnabled = true;  // a threshold is only meaningful with on-change
         applyNow();

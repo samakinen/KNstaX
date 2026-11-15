@@ -1,5 +1,21 @@
 {
   "flash_bytes": 90112,
   "ram_bytes": 10240,
-  "runtime_flash_bytes": 8192
+  "runtime_flash_bytes": 8192,
+  "forbid": [
+    "FilterTable",
+    "TwoPortCoupler",
+    "RoutingTableControl",
+    "CouplerRouting",
+    "SecurityInterfaceObject",
+    "SecureApplicationLayer",
+    "handleGroupObjectDiagnostics",
+    "PropertyExtServices",
+    "Dpt9::",
+    "Dpt14::",
+    "Dpt10::",
+    "Dpt16::",
+    "Dpt232::",
+    "dptValueAsScalar"
+  ]
 }

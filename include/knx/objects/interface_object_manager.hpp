@@ -15,7 +15,10 @@
 #include "knx/objects/association_table_object.hpp"
 #include "knx/objects/application_program_object.hpp"
 #include "knx/objects/group_object_table_object.hpp"
+#include "knx/config.hpp"
+#if KNX_SECURE_ENABLED
 #include "knx/objects/security_interface_object.hpp"
+#endif
 #include "knx/objects/generic_interface_object.hpp"
 #include "knx/objects/object_persistence.hpp"
 #include "knx/objects/reference_object_registry.hpp"
@@ -60,8 +63,11 @@ public:
         AddressTableObject& addressTable,
         AssociationTableObject& associationTable,
         ApplicationProgramObject& applicationProgram,
-        GroupObjectTableObject& groupObjectTable,
-        SecurityInterfaceObject& security);
+        GroupObjectTableObject& groupObjectTable
+#if KNX_SECURE_ENABLED
+        , SecurityInterfaceObject& security
+#endif
+        );
     ~InterfaceObjectManager() = default;
     
     // Neither copyable nor movable: the object pointers and the object list
@@ -72,8 +78,9 @@ public:
     InterfaceObjectManager(InterfaceObjectManager&&) = delete;
     InterfaceObjectManager& operator=(InterfaceObjectManager&&) = delete;
 
-    /// The six core objects every device has.
-    static constexpr size_t kCoreObjectCount = 6;
+    /// The core objects every device has: six, or five without KNX Secure (the
+    /// Security Interface Object is not part of a build that has it off).
+    static constexpr size_t kCoreObjectCount = KNX_SECURE_ENABLED ? 6 : 5;
 
     /// Upper bound on the objects the manager routes to: the core objects
     /// plus one of each reference object type. registerReferenceObject()
@@ -153,7 +160,13 @@ public:
     /// other persisted property and becomes current with the same marker
     /// switch, so a reset during a save keeps the previous table, load state
     /// and download together.
+#if KNX_FEATURE_COUPLER
     static constexpr uint16_t kRouterFilterTableKeyId = 0x06F0u;
+    static constexpr size_t kBankedRecordCount = 1;
+#else
+    /// No coupler role, no Filter Table: there is no banked record.
+    static constexpr size_t kBankedRecordCount = 0;
+#endif
 
     /// Fills the bytes of a banked record for a save; empty stores nothing.
     using BankedRecordSource = util::InplaceFunction<void(std::vector<uint8_t>&), 16>;
@@ -217,6 +230,7 @@ public:
      */
     util::Result<size_t> saveToPersistence();
 
+#if KNX_SECURE_ENABLED
     /**
      * @brief Checkpoint the Data Secure replay state, and nothing else.
      *
@@ -236,6 +250,7 @@ public:
     /// PID_SECURITY_INDIVIDUAL_ADDRESS_TABLE and need no separate step.
     /// @return true when a stored value was found and adopted.
     bool loadSecuritySequenceState();
+#endif
 
     /// Store the authorisation key table, as serialised by the application
     /// layer. An empty @p record erases it (no key on any level, the
@@ -278,11 +293,13 @@ public:
     GroupObjectTableObject& groupObjectTable() { return *_groupObjectTablePtr; }
     const GroupObjectTableObject& groupObjectTable() const { return *_groupObjectTablePtr; }
     
+#if KNX_SECURE_ENABLED
     /**
      * @brief Get security interface object
      */
     SecurityInterfaceObject& securityObject() { return *_securityObjectPtr; }
     const SecurityInterfaceObject& securityObject() const { return *_securityObjectPtr; }
+#endif
 
     /**
      * @brief Register a reference interface object for routing and descriptors.
@@ -400,7 +417,9 @@ private:
     AssociationTableObject _associationTable;
     ApplicationProgramObject _applicationProgram;
     GroupObjectTableObject _groupObjectTable;
+#if KNX_SECURE_ENABLED
     SecurityInterfaceObject _securityObject;
+#endif
 
     // Active object pointers (may point to external objects)
     DeviceObject* _deviceObjectPtr;
@@ -408,7 +427,9 @@ private:
     AssociationTableObject* _associationTablePtr;
     ApplicationProgramObject* _applicationProgramPtr;
     GroupObjectTableObject* _groupObjectTablePtr;
+#if KNX_SECURE_ENABLED
     SecurityInterfaceObject* _securityObjectPtr;
+#endif
 
     // Kernel-backed objects (built-ins + registered reference objects), at
     // most one per type, searched linearly.
@@ -421,7 +442,7 @@ private:
     bool _initialized;
     uint8_t _activeBank{0};  ///< See kPersistenceBankMarkerKeyId.
     /// Indexed like bankedRecordKeys().
-    std::array<BankedRecordSource, 1> _bankedRecordSources{};
+    std::array<BankedRecordSource, kBankedRecordCount> _bankedRecordSources{};
 
     InterfaceObject* findKernelObject(InterfaceObjectType objectType);
     const InterfaceObject* findKernelObject(InterfaceObjectType objectType) const;

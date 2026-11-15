@@ -61,8 +61,13 @@ def test_tp1_small_is_tp1_only_baremetal_without_logs():
     assert '#define CONFIG_KNX_LOG_LEVEL 0' in text
     for absent in ('CONFIG_KNX_BUILD_NETIP', 'CONFIG_KNX_ENABLE_TUNNELING', 'CONFIG_KNX_ENABLE_COUPLER',
                    'CONFIG_KNX_ENABLE_SECURITY', 'CONFIG_KNX_BUILD_VIRTUAL_BUS',
-                   'CONFIG_KNX_BUILD_ETS_TOOLING', 'CONFIG_KNX_BUILD_TEST_HOOKS', 'CONFIG_KNX_BUILD_ZLIB'):
+                   'CONFIG_KNX_BUILD_ETS_TOOLING', 'CONFIG_KNX_BUILD_TEST_HOOKS', 'CONFIG_KNX_BUILD_ZLIB',
+                   'CONFIG_KNX_ENABLE_PROPERTY_EXT', 'CONFIG_KNX_ENABLE_MEMORY_EXT',
+                   'CONFIG_KNX_ENABLE_NETWORK_PARAMETER', 'CONFIG_KNX_ENABLE_GO_DIAGNOSTICS', 'CONFIG_KNX_DPT_FLOAT',
+                   'CONFIG_KNX_DPT_TIME', 'CONFIG_KNX_DPT_STRING', 'CONFIG_KNX_DPT_COLOUR', 'CONFIG_KNX_DPT_ACCESS',
+                   'CONFIG_KNX_ENABLE_DPT_CATALOGUE'):
         assert absent not in text, f'{absent} must be absent when n'
+    assert '#define CONFIG_KNX_ENABLE_FUNCTION_PROPERTIES 1' in text
 
 
 CAPACITY_SYMBOLS = ('MAX_APDU_LENGTH', 'TP1_RX_QUEUE_FRAMES', 'TRANSPORT_RX_QUEUE', 'ADDRESS_TABLE_ENTRIES',
@@ -88,9 +93,66 @@ def _without_capacities(profile):
             if not any(line.startswith(f'#define CONFIG_KNX_{s} ') for s in CAPACITY_SYMBOLS)}
 
 
-def test_tp1_standard_differs_from_small_only_in_log_level_and_capacities():
+OPTIONAL_FEATURES = ('KNX_ENABLE_FUNCTION_PROPERTIES', 'KNX_ENABLE_PROPERTY_EXT', 'KNX_ENABLE_MEMORY_EXT',
+                     'KNX_ENABLE_NETWORK_PARAMETER', 'KNX_ENABLE_GO_DIAGNOSTICS', 'KNX_DPT_FLOAT', 'KNX_DPT_TIME',
+                     'KNX_DPT_STRING', 'KNX_DPT_COLOUR', 'KNX_DPT_ACCESS', 'KNX_ENABLE_DPT_CATALOGUE')
+
+
+def _features(profile):
+    """The optional-feature macros (and the coupler and Secure) a profile turns on."""
+    _, _, out = _run([PROFILES / f'{profile}.defconfig'])
+    wanted = OPTIONAL_FEATURES + ('KNX_ENABLE_COUPLER', 'KNX_ENABLE_SECURITY')
+    return {s for s in wanted if f'#define CONFIG_{s} 1' in _header(out)}
+
+
+def test_tp1_standard_differs_from_small_only_in_log_level_features_and_capacities():
     diff = _without_capacities('tp1-small') ^ _without_capacities('tp1-standard')
-    assert diff == {'#define CONFIG_KNX_LOG_LEVEL 0', '#define CONFIG_KNX_LOG_LEVEL 1'}, diff
+    # Secure joins tp1-standard with the portable AES backend (K6).
+    features = {f'#define CONFIG_{s} 1' for s in OPTIONAL_FEATURES
+                if s not in ('KNX_ENABLE_FUNCTION_PROPERTIES', 'KNX_ENABLE_DPT_CATALOGUE')}
+    assert diff == {'#define CONFIG_KNX_LOG_LEVEL 0', '#define CONFIG_KNX_LOG_LEVEL 1'} | features, diff
+
+
+def test_optional_features_per_profile():
+    everything = set(OPTIONAL_FEATURES) | {'KNX_ENABLE_COUPLER', 'KNX_ENABLE_SECURITY'}
+    for profile in ('full', 'host-test', 'host-small'):
+        assert _features(profile) == everything, profile
+    # Only the function property services stay on in a small end device.
+    assert _features('tp1-small') == {'KNX_ENABLE_FUNCTION_PROPERTIES'}
+    assert _features('host-minimal') == {'KNX_ENABLE_FUNCTION_PROPERTIES'}
+    # The standard end device: the services, no coupler, no run-time catalogue
+    # (and no Secure until K6 gives bare metal an AES backend).
+    assert _features('tp1-standard') == set(OPTIONAL_FEATURES) - {'KNX_ENABLE_DPT_CATALOGUE'}
+
+
+def test_optional_features_default_to_on_when_unset():
+    # A product that sets none of them (the ESP-IDF default case) keeps today's behaviour.
+    rc, err, out = _run([_fragment('CONFIG_KNX_BUILD_TP1=y\n')])
+    assert rc == 0, err
+    lines = _header(out)
+    for symbol in OPTIONAL_FEATURES:
+        assert f'#define CONFIG_{symbol} 1' in lines, symbol
+    assert '#define CONFIG_KNX_ENABLE_COUPLER 1' not in lines
+
+
+def test_secure_needs_extended_property_services():
+    # Kconfig `select` raises KNX_ENABLE_PROPERTY_EXT with Secure; turning it off as well is refused.
+    rc, err, out = _run([PROFILES / 'tp1-small.defconfig', _fragment('CONFIG_KNX_ENABLE_SECURITY=y\n')])
+    assert rc != 0 or '#define CONFIG_KNX_ENABLE_PROPERTY_EXT 1' in _header(out), err
+    if rc != 0:
+        assert 'KNX_ENABLE_PROPERTY_EXT' in err or 'KNX_ENABLE_SECURITY' in err, err
+
+
+def test_group_object_diagnostics_need_function_properties():
+    bad = _fragment('CONFIG_KNX_ENABLE_SECURITY=n\nCONFIG_KNX_ENABLE_FUNCTION_PROPERTIES=n\nCONFIG_KNX_ENABLE_GO_DIAGNOSTICS=y\n')
+    rc, err, _ = _run([PROFILES / 'host-test.defconfig', bad])
+    assert rc != 0 and 'KNX_ENABLE_GO_DIAGNOSTICS' in err, err
+
+
+def test_coupler_needs_function_properties():
+    bad = _fragment('CONFIG_KNX_ENABLE_SECURITY=n\nCONFIG_KNX_ENABLE_FUNCTION_PROPERTIES=n\nCONFIG_KNX_ENABLE_COUPLER=y\n')
+    rc, err, _ = _run([PROFILES / 'host-test.defconfig', bad])
+    assert rc != 0 and 'KNX_ENABLE_COUPLER' in err, err
 
 
 def test_capacities_per_profile():

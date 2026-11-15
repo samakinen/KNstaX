@@ -8,6 +8,7 @@
  */
 
 #include "knx/application/management_server.hpp"
+#include "knx/config.hpp"
 #include "knx/application/security_access_policy.hpp"
 #include "knx/util/log.hpp"
 #include <algorithm>
@@ -70,6 +71,7 @@ void ManagementServer::init() {
     // Initialize service handlers
     _deviceDescriptorService = std::make_unique<DeviceDescriptorService>(*_deviceDescriptor);
     _propertyServices = std::make_unique<PropertyServices>();
+#if KNX_FEATURE_PROPERTY_EXT
     _propertyExtServices = std::make_unique<PropertyExtServices>();
     // 03/05/01 §4.18.5.2.5: "The Object Instance shall for each Object Type
     // start with 1 and shall ascend with the local Interface Object index in
@@ -94,10 +96,13 @@ void ManagementServer::init() {
             }
             return found;
         });
+#endif
     _memoryService = std::make_unique<MemoryService>(*_addressSpace);
     _authorizationService = std::make_unique<AuthorizationService>();
     _restartService = std::make_unique<RestartService>();
+#if KNX_FEATURE_FUNCTION_PROPERTIES
     _functionPropertyServices = std::make_unique<FunctionPropertyServices>();
+#endif
     _networkParameterService = std::make_unique<NetworkParameterService>();
 
     // Wire service handler response callbacks to the send pipeline
@@ -212,9 +217,11 @@ void ManagementServer::setPropertyReadProvider(PropertyReadProvider provider)
     // and A_PropertyExtValue_* address the same interface objects, and ETS
     // chooses between them per device profile — a Data Secure device is driven
     // through the extended ones.
+#if KNX_FEATURE_PROPERTY_EXT
     if (_propertyExtServices) {
         _propertyExtServices->setReadProvider(provider);
     }
+#endif
     if (_propertyServices) {
         _propertyServices->setReadProvider(std::move(provider));
     }
@@ -222,9 +229,11 @@ void ManagementServer::setPropertyReadProvider(PropertyReadProvider provider)
 
 void ManagementServer::setPropertyWriteProvider(PropertyWriteProvider provider)
 {
+#if KNX_FEATURE_PROPERTY_EXT
     if (_propertyExtServices) {
         _propertyExtServices->setWriteProvider(provider);
     }
+#endif
     if (_propertyServices) {
         _propertyServices->setWriteProvider(std::move(provider));
     }
@@ -235,9 +244,11 @@ void ManagementServer::setPropertyDescriptionProvider(PropertyDescriptionProvide
     // One description for both families, so A_PropertyDescription_Read and
     // A_PropertyExtDescription_Read report the same PID at the same index, and
     // both value services check the same access and levels.
+#if KNX_FEATURE_PROPERTY_EXT
     if (_propertyExtServices) {
         _propertyExtServices->setDescriptionProvider(provider);
     }
+#endif
     if (_propertyServices) {
         _propertyServices->setDescriptionProvider(std::move(provider));
     }
@@ -277,6 +288,7 @@ void ManagementServer::wireServiceCallbacks() {
             sendServiceResponse(destination, APCIService::MemoryResponse, payload);
         });
 
+#if KNX_FEATURE_MEMORY_EXT
     _memoryService->setExtendedResponseCallback(
         [this](const IndividualAddress& destination, const MemoryExtendedResponse& response) {
             // Layout differs from A_Memory_Response: return code first, then a
@@ -287,15 +299,26 @@ void ManagementServer::wireServiceCallbacks() {
                 || !appendPayloadByte(payload, static_cast<uint8_t>((response.address.raw >> 8) & 0xFF))
                 || !appendPayloadByte(payload, static_cast<uint8_t>(response.address.raw & 0xFF))
                 || !appendPayloadBytes(payload, response.data.span())) {
+                // The value does not fit the APDU. Dropping it leaves the client
+                // to time out, so answer with the error KNX defines for it:
+                // E_EXCEED_MAX_APDU_LENGTH, with the return code and the
+                // address and no data (03/03/07 §3.5.26, the same code the
+                // service itself returns when it knows the length up front).
                 logOversizedServiceResponse("MemoryExtended", 4u + response.data.size());
-                return;
+                payload.clear();
+                (void)appendPayloadByte(payload, static_cast<uint8_t>(KnxReturnCode::ExceedsMaxApduLength));
+                (void)appendPayloadByte(payload, static_cast<uint8_t>((response.address.raw >> 16) & 0xFF));
+                (void)appendPayloadByte(payload, static_cast<uint8_t>((response.address.raw >> 8) & 0xFF));
+                (void)appendPayloadByte(payload, static_cast<uint8_t>(response.address.raw & 0xFF));
             }
             const auto service = response.kind == MemoryExtendedResponseKind::Read
                                      ? APCIService::MemoryExtendedReadResponse
                                      : APCIService::MemoryExtendedWriteResponse;
             sendServiceResponse(destination, service, payload);
         });
+#endif
 
+#if KNX_FEATURE_PROPERTY_EXT
     _propertyExtServices->setValueResponseCallback(
         [this](const IndividualAddress& destination,
                APCIService service,
@@ -317,11 +340,22 @@ void ManagementServer::wireServiceCallbacks() {
             if (!ok) {
                 logOversizedServiceResponse("PropertyExtValue",
                                             PropertyExtHeader::kEncodedLength + 3u + response.data.size());
-                return;
+                // Only a response that carries data can be too long. The
+                // negative answer of §3.4.5.1 sets nr_of_elem to zero, echoes
+                // start_index and carries E_EXCEED_MAX_APDU_LENGTH as the one
+                // octet of data; the client would otherwise time out.
+                payload.clear();
+                (void)appendPayloadBytes(payload, header);
+                (void)appendPayloadByte(payload, 0u);
+                (void)appendPayloadByte(payload, static_cast<uint8_t>((response.startIndex >> 8) & 0xFF));
+                (void)appendPayloadByte(payload, static_cast<uint8_t>(response.startIndex & 0xFF));
+                (void)appendPayloadByte(payload, static_cast<uint8_t>(KnxReturnCode::ExceedsMaxApduLength));
             }
             sendServiceResponse(destination, service, payload);
         });
+#endif
 
+#if KNX_FEATURE_PROPERTY_EXT
     _propertyExtServices->setDescriptionResponseCallback(
         [this](const IndividualAddress& destination, const PropertyExtDescriptionResponse& response) {
             ResponsePayload payload;
@@ -349,7 +383,9 @@ void ManagementServer::wireServiceCallbacks() {
             }
             sendServiceResponse(destination, APCIService::PropertyExtDescriptionResponse, payload);
         });
+#endif
 
+#if KNX_FEATURE_PROPERTY_EXT && KNX_FEATURE_FUNCTION_PROPERTIES
     _propertyExtServices->setFunctionResponseCallback(
         [this](const IndividualAddress& destination, const FunctionPropertyExtResponse& response) {
             ResponsePayload payload;
@@ -362,11 +398,17 @@ void ManagementServer::wireServiceCallbacks() {
                 || !appendPayloadBytes(payload, response.data.span())) {
                 logOversizedServiceResponse("FunctionPropertyExt",
                                             PropertyExtHeader::kEncodedLength + 1u + response.data.size());
-                return;
+                // Header and return code only: E_EXCEED_MAX_APDU_LENGTH
+                // (03/03/07 §3.4.8.3) tells the client why there is no data.
+                payload.clear();
+                (void)appendPayloadBytes(payload, header);
+                (void)appendPayloadByte(payload, static_cast<uint8_t>(KnxReturnCode::ExceedsMaxApduLength));
             }
             sendServiceResponse(destination, APCIService::FunctionPropertyExtStateResponse, payload);
         });
+#endif
 
+#if KNX_FEATURE_FUNCTION_PROPERTIES
     _functionPropertyServices->setResponseCallback(
         [this](const IndividualAddress& destination,
                InterfaceObjectIndex objectIndex,
@@ -386,11 +428,17 @@ void ManagementServer::wireServiceCallbacks() {
                 if (!appendPayloadByte(payload, static_cast<uint8_t>(returnCode))
                     || !appendPayloadBytes(payload, data)) {
                     logOversizedServiceResponse("FunctionProperty", 3u + data.size());
-                    return;
+                    // The result does not fit: say so with E_ERROR and no data
+                    // rather than leave the client waiting (03/03/07 §3.4.5.3).
+                    payload.clear();
+                    (void)appendPayloadByte(payload, static_cast<uint8_t>(objectIndex.value()));
+                    (void)appendPayloadByte(payload, static_cast<uint8_t>(propertyId));
+                    (void)appendPayloadByte(payload, static_cast<uint8_t>(FunctionPropertyReturnCode::Error));
                 }
             }
             sendServiceResponse(destination, APCIService::FunctionPropertyStateResponse, payload);
         });
+#endif
 
     _networkParameterService->setSerialNumberResponseCallback(
         [this](const KnxSerialNumber& serialNumber, uint16_t domainAddress) {
@@ -424,6 +472,7 @@ void ManagementServer::wireServiceCallbacks() {
             broadcastServiceResponse(APCIService::DomainAddressSerialNumberResponse, payload);
         });
 
+#if KNX_FEATURE_NETWORK_PARAMETER
     _networkParameterService->setNetworkParameterResponseCallback(
         [this](InterfaceObjectType objectType,
                PropertyID propertyId,
@@ -439,6 +488,7 @@ void ManagementServer::wireServiceCallbacks() {
             broadcastServiceResponse(APCIService::NetworkParameterResponse, payload);
         });
 
+#endif
     _networkParameterService->setAddressWriteCallback(
         [this](const IndividualAddress& newAddress) -> util::Result<void> {
             // Same effect as A_IndividualAddress_Write, but reached without
@@ -524,10 +574,12 @@ void ManagementServer::wireAccessPolicy() {
                                              requestSecurity());
         });
 
+#if KNX_FEATURE_PROPERTY_EXT
     _propertyExtServices->setAccessCheck(
         [this](uint16_t objectType, uint16_t propertyId, bool write) {
             return isPropertyAccessPermitted(objectType, propertyId, write, requestSecurity());
         });
+#endif
 
     // A_Authorize levels (03/03/07 §3.5.7). The authorisation service holds
     // the current level of each partner; the services compare it with what
@@ -536,9 +588,11 @@ void ManagementServer::wireAccessPolicy() {
     _propertyServices->setAccessLevelQuery([this](const IndividualAddress& source) {
         return _authorizationService->currentAccessLevel(source);
     });
+#if KNX_FEATURE_PROPERTY_EXT
     _propertyExtServices->setAccessLevelQuery([this](const IndividualAddress& source) {
         return _authorizationService->currentAccessLevel(source);
     });
+#endif
     _memoryService->setWritePermission([this](const IndividualAddress& source) {
         return _authorizationService->currentAccessLevel(source) <= _memoryWriteAccessLevel;
     });
@@ -565,6 +619,7 @@ void ManagementServer::broadcastServiceResponse(APCIService service, std::span<c
     warnIfResponseNotSent(service, sendBroadcast(service, data));
 }
 
+#if KNX_FEATURE_FUNCTION_PROPERTIES
 void ManagementServer::handleFunctionProperty(const ADataFrame& frame) {
     // object_index + property_id, then the function's input data.
     if (frame.data.size() < FunctionPropertyServices::kRequestHeaderBytes) {
@@ -589,6 +644,7 @@ void ManagementServer::handleFunctionProperty(const ADataFrame& frame) {
 
     (void)_functionPropertyServices->handleRequest(frame.source, request);
 }
+#endif
 
 void ManagementServer::handleIndividualAddressSerialNumberRead(const ADataFrame& frame) {
     if (frame.data.size() < kKnxSerialNumberBytes) {
@@ -637,6 +693,7 @@ void ManagementServer::handleDomainAddressSerialNumberWrite(const ADataFrame& fr
     (void)_networkParameterService->handleDomainAddressSerialNumberWrite(serial, domainAddress);
 }
 
+#if KNX_FEATURE_NETWORK_PARAMETER
 namespace {
 
 /// Shared decoder for the two network-parameter request services.
@@ -674,6 +731,7 @@ void ManagementServer::handleNetworkParameterWrite(const ADataFrame& frame) {
     }
     (void)_networkParameterService->handleNetworkParameterWrite(request);
 }
+#endif
 
 void ManagementServer::handleDeviceDescriptorRead(const ADataFrame& frame) {
     if (frame.data.size() < 1) {
@@ -739,6 +797,7 @@ void ManagementServer::handleMemoryWrite(const ADataFrame& frame) {
     (void)_memoryService->handleWriteRequest(frame.source, count, address, writeData);
 }
 
+#if KNX_FEATURE_MEMORY_EXT
 void ManagementServer::handleMemoryExtendedRead(const ADataFrame& frame) {
     // count(1) + address(3); no data6 — the whole request is in the payload.
     if (frame.data.size() < 4) {
@@ -765,6 +824,8 @@ void ManagementServer::handleMemoryExtendedWrite(const ADataFrame& frame) {
     (void)_memoryService->handleExtendedWriteRequest(frame.source, count, address, writeData);
 }
 
+#endif
+#if KNX_FEATURE_PROPERTY_EXT
 namespace {
 /// Decode the 5-octet addressing header shared by every extended property
 /// service, plus a bounds check so a truncated APDU cannot index past the end.
@@ -814,6 +875,8 @@ void ManagementServer::handlePropertyExtDescriptionRead(const ADataFrame& frame)
     (void)_propertyExtServices->handleDescriptionRead(frame.source, request);
 }
 
+#endif
+#if KNX_FEATURE_PROPERTY_EXT && KNX_FEATURE_FUNCTION_PROPERTIES
 void ManagementServer::handleFunctionPropertyExt(const ADataFrame& frame,
                                                  FunctionPropertyInvocation invocation) {
     FunctionPropertyExtRequest request;
@@ -826,6 +889,7 @@ void ManagementServer::handleFunctionPropertyExt(const ADataFrame& frame,
     request.security = frame.security;
     (void)_propertyExtServices->handleFunctionProperty(frame.source, request, invocation);
 }
+#endif
 
 void ManagementServer::handleAuthorizeRequest(const ADataFrame& frame) {
     // 03/03/07 §3.5.7 Figure 86: one reserved octet ("must be 0"), then the
@@ -1135,12 +1199,20 @@ bool ManagementServer::isPropertyAccessPermitted(uint16_t objectType,
                                                  uint16_t propertyId,
                                                  bool write,
                                                  const RequestSecurity& security) {
+#if KNX_SECURE_ENABLED
     if (objectType == kSecurityInterfaceObjectType) {
         // Independent of the Security Mode: 03/05/01 §6.3.5 binds the write
         // side of PID_SECURITY_MODE to secure communication "regardless of its
         // value", and key material is never readable in plain either.
         return securityObjectAccessPermitted(propertyId, write, security);
     }
+#else
+    // No Security Interface Object in this build: there is nothing to protect.
+    (void)objectType;
+    (void)propertyId;
+    (void)write;
+    (void)security;
+#endif
     return true;
 }
 
@@ -1162,6 +1234,7 @@ bool ManagementServer::dispatch(const ADataFrame& aFrame) {
             handlePropertyDescriptionRead(aFrame);
             return true;
 
+#if KNX_FEATURE_PROPERTY_EXT
         case APCIService::PropertyExtValueRead:
             handlePropertyExtValueRead(aFrame);
             return true;
@@ -1177,7 +1250,9 @@ bool ManagementServer::dispatch(const ADataFrame& aFrame) {
         case APCIService::PropertyExtDescriptionRead:
             handlePropertyExtDescriptionRead(aFrame);
             return true;
+#endif
 
+#if KNX_FEATURE_PROPERTY_EXT && KNX_FEATURE_FUNCTION_PROPERTIES
         case APCIService::FunctionPropertyExtCommand:
             handleFunctionPropertyExt(aFrame, FunctionPropertyInvocation::Command);
             return true;
@@ -1185,7 +1260,9 @@ bool ManagementServer::dispatch(const ADataFrame& aFrame) {
         case APCIService::FunctionPropertyExtStateRead:
             handleFunctionPropertyExt(aFrame, FunctionPropertyInvocation::StateRead);
             return true;
+#endif
 
+#if KNX_FEATURE_MEMORY_EXT
         case APCIService::MemoryExtendedRead:
             handleMemoryExtendedRead(aFrame);
             return true;
@@ -1193,6 +1270,7 @@ bool ManagementServer::dispatch(const ADataFrame& aFrame) {
         case APCIService::MemoryExtendedWrite:
             handleMemoryExtendedWrite(aFrame);
             return true;
+#endif
 
         case APCIService::MemoryRead:
             handleMemoryRead(aFrame);
@@ -1231,10 +1309,12 @@ bool ManagementServer::dispatch(const ADataFrame& aFrame) {
             handleIndividualAddressWrite(aFrame);
             return true;
 
+#if KNX_FEATURE_FUNCTION_PROPERTIES
         case APCIService::FunctionPropertyCommand:
         case APCIService::FunctionPropertyStateRead:
             handleFunctionProperty(aFrame);
             return true;
+#endif
 
         case APCIService::IndividualAddressSerialNumberRead:
             handleIndividualAddressSerialNumberRead(aFrame);
@@ -1252,6 +1332,7 @@ bool ManagementServer::dispatch(const ADataFrame& aFrame) {
             handleIndividualAddressSerialNumberWrite(aFrame);
             return true;
 
+#if KNX_FEATURE_NETWORK_PARAMETER
         case APCIService::NetworkParameterRead:
             handleNetworkParameterRead(aFrame);
             return true;
@@ -1259,6 +1340,7 @@ bool ManagementServer::dispatch(const ADataFrame& aFrame) {
         case APCIService::NetworkParameterWrite:
             handleNetworkParameterWrite(aFrame);
             return true;
+#endif
 
         default:
             return false;

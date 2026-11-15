@@ -1,3 +1,52 @@
+/*
+ * The datapoint type catalogue, as an X-macro list. A consumer defines
+ * KNX_DPT_CATALOG_ENTRY(symbol, mainType, subType, valueType, cppType,
+ * codecType, shortName, description) and includes this file.
+ *
+ * Five families can be configured out of a build (Kconfig KNX_DPT_FLOAT, _TIME,
+ * _STRING, _COLOUR, _ACCESS; the integer, boolean, scene, dimming and HVAC mode
+ * families are always on). An entry of a family that is off is not passed to
+ * KNX_DPT_CATALOG_ENTRY: it goes to KNX_DPT_CATALOG_OFF(family, symbol, ...) if the
+ * consumer defined one (dpt.hpp does, to keep the tag so that a use of it
+ * fails with a message naming the symbol), and to nothing otherwise.
+ *
+ * Family of an entry is the macro it is written with:
+ * KNX_DPT_CATALOG_ENTRY_FLOAT  DPT 9, 14           KNX_DPT_FLOAT
+ * KNX_DPT_CATALOG_ENTRY_TIME   DPT 10, 11, 19      KNX_DPT_TIME
+ * KNX_DPT_CATALOG_ENTRY_STRING DPT 4, 16           KNX_DPT_STRING
+ * KNX_DPT_CATALOG_ENTRY_COLOUR DPT 232, 242-244    KNX_DPT_COLOUR
+ * KNX_DPT_CATALOG_ENTRY_ACCESS DPT 15              KNX_DPT_ACCESS
+ */
+#ifndef KNX_DPT_CATALOG_OFF
+#  define KNX_DPT_CATALOG_OFF(family, ...)
+#  define KNX_DPT_CATALOG_OFF_IS_DEFAULT_
+#endif
+#if KNX_FEATURE_DPT_FLOAT
+#  define KNX_DPT_CATALOG_ENTRY_FLOAT KNX_DPT_CATALOG_ENTRY
+#else
+#  define KNX_DPT_CATALOG_ENTRY_FLOAT(symbol, ...) KNX_DPT_CATALOG_OFF(Float, symbol, __VA_ARGS__)
+#endif
+#if KNX_FEATURE_DPT_TIME
+#  define KNX_DPT_CATALOG_ENTRY_TIME KNX_DPT_CATALOG_ENTRY
+#else
+#  define KNX_DPT_CATALOG_ENTRY_TIME(symbol, ...) KNX_DPT_CATALOG_OFF(Time, symbol, __VA_ARGS__)
+#endif
+#if KNX_FEATURE_DPT_STRING
+#  define KNX_DPT_CATALOG_ENTRY_STRING KNX_DPT_CATALOG_ENTRY
+#else
+#  define KNX_DPT_CATALOG_ENTRY_STRING(symbol, ...) KNX_DPT_CATALOG_OFF(String, symbol, __VA_ARGS__)
+#endif
+#if KNX_FEATURE_DPT_COLOUR
+#  define KNX_DPT_CATALOG_ENTRY_COLOUR KNX_DPT_CATALOG_ENTRY
+#else
+#  define KNX_DPT_CATALOG_ENTRY_COLOUR(symbol, ...) KNX_DPT_CATALOG_OFF(Colour, symbol, __VA_ARGS__)
+#endif
+#if KNX_FEATURE_DPT_ACCESS
+#  define KNX_DPT_CATALOG_ENTRY_ACCESS KNX_DPT_CATALOG_ENTRY
+#else
+#  define KNX_DPT_CATALOG_ENTRY_ACCESS(symbol, ...) KNX_DPT_CATALOG_OFF(Access, symbol, __VA_ARGS__)
+#endif
+
 KNX_DPT_CATALOG_ENTRY(Bool, Boolean, 0, Boolean, bool, Dpt1, "DPT-1", "1-bit value")
 KNX_DPT_CATALOG_ENTRY(Switch, Boolean, 1, Boolean, bool, Dpt1, "DPT-1.001", "Switch")
 KNX_DPT_CATALOG_ENTRY(Enable, Boolean, 3, Boolean, bool, Dpt1, "DPT-1.003", "Enable")
@@ -19,46 +68,46 @@ KNX_DPT_CATALOG_ENTRY(Reset, Boolean, 15, Boolean, bool, Dpt1, "DPT-1.015", "Res
 KNX_DPT_CATALOG_ENTRY(Controlled1Bit, Controlled1Bit, 0, Controlled1Bit, Dpt2Value, Dpt2, "DPT-2", "1-bit controlled value")
 KNX_DPT_CATALOG_ENTRY(Controlled3Bit, Controlled3Bit, 0, Controlled3Bit, Dpt3Value, Dpt3, "DPT-3", "3-bit controlled value")
 KNX_DPT_CATALOG_ENTRY(Dimming, Controlled3Bit, 7, Controlled3Bit, Dpt3Value, Dpt3, "DPT-3.007", "Dimming control (up/down + step code)")
-KNX_DPT_CATALOG_ENTRY(Character, Character, 0, Character, char, Dpt4, "DPT-4", "8-bit character")
+KNX_DPT_CATALOG_ENTRY_STRING(Character, Character, 0, Character, char, Dpt4, "DPT-4", "8-bit character")
 KNX_DPT_CATALOG_ENTRY(Unsigned8, Unsigned8, 0, Unsigned8, uint8_t, Dpt5, "DPT-5", "8-bit unsigned value")
 KNX_DPT_CATALOG_ENTRY(Signed8, Signed8, 0, Signed8, int8_t, Dpt6, "DPT-6", "8-bit signed value")
 KNX_DPT_CATALOG_ENTRY(CounterPulsesSigned, Signed8, 10, Signed8, int8_t, Dpt6, "DPT-6.010", "Signed counter pulses (setpoint shift steps)")
 KNX_DPT_CATALOG_ENTRY(Unsigned16, Unsigned16, 0, Unsigned16, uint16_t, Dpt7, "DPT-7", "16-bit unsigned value")
 KNX_DPT_CATALOG_ENTRY(Signed16, Signed16, 0, Signed16, int16_t, Dpt8, "DPT-8", "16-bit signed value")
-KNX_DPT_CATALOG_ENTRY(Float2Byte, Float2Byte, 0, Float2Byte, float, Dpt9, "DPT-9", "2-byte floating point value")
-KNX_DPT_CATALOG_ENTRY(TimeOfDay, TimeOfDay, 0, TimeOfDay, Dpt10Value, Dpt10, "DPT-10", "time of day")
-KNX_DPT_CATALOG_ENTRY(Date, Date, 0, Date, Dpt11Value, Dpt11, "DPT-11", "date")
+KNX_DPT_CATALOG_ENTRY_FLOAT(Float2Byte, Float2Byte, 0, Float2Byte, float, Dpt9, "DPT-9", "2-byte floating point value")
+KNX_DPT_CATALOG_ENTRY_TIME(TimeOfDay, TimeOfDay, 0, TimeOfDay, Dpt10Value, Dpt10, "DPT-10", "time of day")
+KNX_DPT_CATALOG_ENTRY_TIME(Date, Date, 0, Date, Dpt11Value, Dpt11, "DPT-11", "date")
 KNX_DPT_CATALOG_ENTRY(Unsigned32, Unsigned32, 0, Unsigned32, uint32_t, Dpt12, "DPT-12", "32-bit unsigned value")
 KNX_DPT_CATALOG_ENTRY(Signed32, Signed32, 0, Signed32, int32_t, Dpt13, "DPT-13", "32-bit signed value")
-KNX_DPT_CATALOG_ENTRY(Float4Byte, Float4Byte, 0, Float4Byte, float, Dpt14, "DPT-14", "4-byte floating point value")
-KNX_DPT_CATALOG_ENTRY(AccessControl, AccessControl, 0, AccessControl, Dpt15Value, Dpt15, "DPT-15", "access control")
-KNX_DPT_CATALOG_ENTRY(String, String, 0, String, std::string, Dpt16, "DPT-16", "string")
+KNX_DPT_CATALOG_ENTRY_FLOAT(Float4Byte, Float4Byte, 0, Float4Byte, float, Dpt14, "DPT-14", "4-byte floating point value")
+KNX_DPT_CATALOG_ENTRY_ACCESS(AccessControl, AccessControl, 0, AccessControl, Dpt15Value, Dpt15, "DPT-15", "access control")
+KNX_DPT_CATALOG_ENTRY_STRING(String, String, 0, String, std::string, Dpt16, "DPT-16", "string")
 KNX_DPT_CATALOG_ENTRY(SceneNumber, SceneNumber, 0, SceneNumber, Dpt17Value, Dpt17, "DPT-17", "scene number")
 KNX_DPT_CATALOG_ENTRY(SceneControl, SceneControl, 0, SceneControl, Dpt18Value, Dpt18, "DPT-18", "scene control")
-KNX_DPT_CATALOG_ENTRY(DateTime, DateTime, 0, DateTime, Dpt19Value, Dpt19, "DPT-19", "date and time")
+KNX_DPT_CATALOG_ENTRY_TIME(DateTime, DateTime, 0, DateTime, Dpt19Value, Dpt19, "DPT-19", "date and time")
 KNX_DPT_CATALOG_ENTRY(HvacMode, HvacMode, 0, HvacMode, Dpt20Mode, Dpt20, "DPT-20", "HVAC mode")
-KNX_DPT_CATALOG_ENTRY(RgbColor, RgbColor, 0, RgbColor, Dpt232Value, Dpt232, "DPT-232", "RGB color")
-KNX_DPT_CATALOG_ENTRY(XyYColor, XyYColor, 0, XyYColor, Dpt242Value, Dpt242, "DPT-242", "xyY color")
-KNX_DPT_CATALOG_ENTRY(ColourTransitionXyY, ColourTransitionXyY, 0, ColourTransitionXyY, Dpt243Value, Dpt243, "DPT-243", "colour transition xyY")
-KNX_DPT_CATALOG_ENTRY(ConverterStatus, ConverterStatus, 0, ConverterStatus, Dpt244Value, Dpt244, "DPT-244", "converter status")
+KNX_DPT_CATALOG_ENTRY_COLOUR(RgbColor, RgbColor, 0, RgbColor, Dpt232Value, Dpt232, "DPT-232", "RGB color")
+KNX_DPT_CATALOG_ENTRY_COLOUR(XyYColor, XyYColor, 0, XyYColor, Dpt242Value, Dpt242, "DPT-242", "xyY color")
+KNX_DPT_CATALOG_ENTRY_COLOUR(ColourTransitionXyY, ColourTransitionXyY, 0, ColourTransitionXyY, Dpt243Value, Dpt243, "DPT-243", "colour transition xyY")
+KNX_DPT_CATALOG_ENTRY_COLOUR(ConverterStatus, ConverterStatus, 0, ConverterStatus, Dpt244Value, Dpt244, "DPT-244", "converter status")
 
 /* Common Float (2-byte) subtypes */
-KNX_DPT_CATALOG_ENTRY(Temperature, Float2Byte, 1, Float2Byte, float, Dpt9, "DPT-9.001", "Temperature (°C)")
-KNX_DPT_CATALOG_ENTRY(Humidity, Float2Byte, 7, Float2Byte, float, Dpt9, "DPT-9.007", "Relative humidity (%%)")
-KNX_DPT_CATALOG_ENTRY(Illuminance, Float2Byte, 4, Float2Byte, float, Dpt9, "DPT-9.004", "Illuminance (lux)")
-KNX_DPT_CATALOG_ENTRY(Power, Float2Byte, 24, Float2Byte, float, Dpt9, "DPT-9.024", "Active power (kW)")
-KNX_DPT_CATALOG_ENTRY(Current, Float2Byte, 21, Float2Byte, float, Dpt9, "DPT-9.021", "Current (mA)")
-KNX_DPT_CATALOG_ENTRY(Pressure, Float2Byte, 6, Float2Byte, float, Dpt9, "DPT-9.006", "Pressure (Pa)")
-KNX_DPT_CATALOG_ENTRY(VolumeFlow, Float2Byte, 25, Float2Byte, float, Dpt9, "DPT-9.025", "Volume flow (l/h)")
-KNX_DPT_CATALOG_ENTRY(Voltage, Float2Byte, 20, Float2Byte, float, Dpt9, "DPT-9.020", "Voltage (mV)")
-KNX_DPT_CATALOG_ENTRY(TemperatureDelta, Float2Byte, 2, Float2Byte, float, Dpt9, "DPT-9.002", "Temperature difference (K)")
-KNX_DPT_CATALOG_ENTRY(CO2, Float2Byte, 8, Float2Byte, float, Dpt9, "DPT-9.008", "CO2 / air quality (ppm)")
-KNX_DPT_CATALOG_ENTRY(WindSpeed, Float2Byte, 5, Float2Byte, float, Dpt9, "DPT-9.005", "Wind speed (m/s)")
-KNX_DPT_CATALOG_ENTRY(TimeSeconds, Float2Byte, 10, Float2Byte, float, Dpt9, "DPT-9.010", "Time (s)")
+KNX_DPT_CATALOG_ENTRY_FLOAT(Temperature, Float2Byte, 1, Float2Byte, float, Dpt9, "DPT-9.001", "Temperature (°C)")
+KNX_DPT_CATALOG_ENTRY_FLOAT(Humidity, Float2Byte, 7, Float2Byte, float, Dpt9, "DPT-9.007", "Relative humidity (%%)")
+KNX_DPT_CATALOG_ENTRY_FLOAT(Illuminance, Float2Byte, 4, Float2Byte, float, Dpt9, "DPT-9.004", "Illuminance (lux)")
+KNX_DPT_CATALOG_ENTRY_FLOAT(Power, Float2Byte, 24, Float2Byte, float, Dpt9, "DPT-9.024", "Active power (kW)")
+KNX_DPT_CATALOG_ENTRY_FLOAT(Current, Float2Byte, 21, Float2Byte, float, Dpt9, "DPT-9.021", "Current (mA)")
+KNX_DPT_CATALOG_ENTRY_FLOAT(Pressure, Float2Byte, 6, Float2Byte, float, Dpt9, "DPT-9.006", "Pressure (Pa)")
+KNX_DPT_CATALOG_ENTRY_FLOAT(VolumeFlow, Float2Byte, 25, Float2Byte, float, Dpt9, "DPT-9.025", "Volume flow (l/h)")
+KNX_DPT_CATALOG_ENTRY_FLOAT(Voltage, Float2Byte, 20, Float2Byte, float, Dpt9, "DPT-9.020", "Voltage (mV)")
+KNX_DPT_CATALOG_ENTRY_FLOAT(TemperatureDelta, Float2Byte, 2, Float2Byte, float, Dpt9, "DPT-9.002", "Temperature difference (K)")
+KNX_DPT_CATALOG_ENTRY_FLOAT(CO2, Float2Byte, 8, Float2Byte, float, Dpt9, "DPT-9.008", "CO2 / air quality (ppm)")
+KNX_DPT_CATALOG_ENTRY_FLOAT(WindSpeed, Float2Byte, 5, Float2Byte, float, Dpt9, "DPT-9.005", "Wind speed (m/s)")
+KNX_DPT_CATALOG_ENTRY_FLOAT(TimeSeconds, Float2Byte, 10, Float2Byte, float, Dpt9, "DPT-9.010", "Time (s)")
 /* Water vapour mass per unit volume. The correct subtype for a *calculated*
  * absolute humidity; DPT-9.007 is relative humidity and carries a different
  * quantity, so the two must not share a subtype. */
-KNX_DPT_CATALOG_ENTRY(AbsoluteHumidity, Float2Byte, 29, Float2Byte, float, Dpt9, "DPT-9.029", "Absolute humidity (g/m³)")
+KNX_DPT_CATALOG_ENTRY_FLOAT(AbsoluteHumidity, Float2Byte, 29, Float2Byte, float, Dpt9, "DPT-9.029", "Absolute humidity (g/m³)")
 
 /* Common Unsigned8 (1-byte) subtypes */
 KNX_DPT_CATALOG_ENTRY(Percent, Unsigned8, 1, Unsigned8, uint8_t, Dpt5, "DPT-5.001", "Percentage (0..100)")
@@ -81,13 +130,13 @@ KNX_DPT_CATALOG_ENTRY(Delta16, Signed16, 1, Signed16, int16_t, Dpt8, "DPT-8.001"
 KNX_DPT_CATALOG_ENTRY(Energy, Signed32, 10, Signed32, int32_t, Dpt13, "DPT-13.010", "Active electrical energy (Wh)")
 
 /* Common Float4Byte (4-byte float) subtypes */
-KNX_DPT_CATALOG_ENTRY(Float4_Temperature, Float4Byte, 68, Float4Byte, float, Dpt14, "DPT-14.068", "High-precision temperature (°C)")
+KNX_DPT_CATALOG_ENTRY_FLOAT(Float4_Temperature, Float4Byte, 68, Float4Byte, float, Dpt14, "DPT-14.068", "High-precision temperature (°C)")
 /* Gas resistance value (M-ohm range) overflows the DPT-9 2-byte float, so a
  * 4-byte float is required; DPT-14.060 (Value_Resistance) is the correctly
  * identified KNX subtype for it (full float range, no overflow concern). */
-KNX_DPT_CATALOG_ENTRY(Resistance, Float4Byte, 60, Float4Byte, float, Dpt14, "DPT-14.060", "Resistance (Ω)")
-KNX_DPT_CATALOG_ENTRY(Frequency, Float4Byte, 33, Float4Byte, float, Dpt14, "DPT-14.033", "Frequency (Hz)")
-KNX_DPT_CATALOG_ENTRY(PowerFactor, Float4Byte, 57, Float4Byte, float, Dpt14, "DPT-14.057", "Power factor (cos φ)")
+KNX_DPT_CATALOG_ENTRY_FLOAT(Resistance, Float4Byte, 60, Float4Byte, float, Dpt14, "DPT-14.060", "Resistance (Ω)")
+KNX_DPT_CATALOG_ENTRY_FLOAT(Frequency, Float4Byte, 33, Float4Byte, float, Dpt14, "DPT-14.033", "Frequency (Hz)")
+KNX_DPT_CATALOG_ENTRY_FLOAT(PowerFactor, Float4Byte, 57, Float4Byte, float, Dpt14, "DPT-14.057", "Power factor (cos φ)")
 
 /* HVAC control enumerations — DPT 20 (N8, 1-byte enum). Values below are the
  * authoritative KNX enumerations from KNX Spec v2.1, Vol 3/7.2 "Datapoint
@@ -121,4 +170,13 @@ KNX_DPT_CATALOG_ENTRY(StatusRHC, Bitfield8, 102, Unsigned8, uint8_t, Dpt5, "DPT-
 KNX_DPT_CATALOG_ENTRY(StatusRHCC, Bitfield16, 101, Unsigned16, uint16_t, Dpt7, "DPT-22.101", "Room H/C controller status (b0=Fault b1=StatusEcoH b2=TempFlowLimit b3=TempReturnLimit b4=StatusMorningBoostH b5=StatusStartOptim b6=StatusStopOptim b7=HeatingDisabled b8=HeatCoolMode(1=heat) b9=StatusEcoC b10=StatusPreCool b11=CoolingDisabled b13=FrostAlarm b14=OverheatAlarm)")
 
 /* Common String subtypes */
-KNX_DPT_CATALOG_ENTRY(Label, String, 1, String, std::string, Dpt16, "DPT-16.001", "Short label / name")
+KNX_DPT_CATALOG_ENTRY_STRING(Label, String, 1, String, std::string, Dpt16, "DPT-16.001", "Short label / name")
+#undef KNX_DPT_CATALOG_ENTRY_FLOAT
+#undef KNX_DPT_CATALOG_ENTRY_TIME
+#undef KNX_DPT_CATALOG_ENTRY_STRING
+#undef KNX_DPT_CATALOG_ENTRY_COLOUR
+#undef KNX_DPT_CATALOG_ENTRY_ACCESS
+#ifdef KNX_DPT_CATALOG_OFF_IS_DEFAULT_
+#  undef KNX_DPT_CATALOG_OFF
+#  undef KNX_DPT_CATALOG_OFF_IS_DEFAULT_
+#endif

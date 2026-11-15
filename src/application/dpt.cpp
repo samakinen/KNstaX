@@ -92,6 +92,11 @@ util::Result<size_t> writeDword(uint32_t value, std::span<uint8_t> out)
 // pays for all seventy-six.  Encode/decode instead dispatch on DptValue::Type
 // (see codecFor* below), which maps one-to-one onto the codecs and collapses
 // ~150 template instantiations into 24 shared ones.
+//
+// The table is the run-time catalogue (KNX_ENABLE_DPT_CATALOGUE): names for
+// lookupDptInfo() and the host tools. The codecs do not need it: with it off the
+// dynamic paths take the value type from dptValueTypeFor().
+#if KNX_FEATURE_DPT_CATALOGUE
 #define KNX_DPT_CATALOG_ENTRY(symbol, mainType, subType, valueType, cppType, codecType, shortName, description) \
     {dptids::symbol, KNX_DPT_NAME(shortName), KNX_DPT_TEXT(description), \
      DptTraits<dpttags::symbol>::kValueType, true},
@@ -99,6 +104,7 @@ const DptInfo kKnownDpts[] = {
 #include "knx/application/dpt_catalog.inc"
 };
 #undef KNX_DPT_CATALOG_ENTRY
+#endif
 
 /**
  * @brief Dispatch dynamic encode/decode on the value type.
@@ -107,31 +113,68 @@ const DptInfo kKnownDpts[] = {
  * across the whole catalog), so one representative tag per value type covers
  * all of them.  X-macro so encode and decode cannot drift apart.
  */
-#define KNX_DPT_CODEC_DISPATCH(X)                       \
+#define KNX_DPT_CODEC_DISPATCH_ALWAYS(X)                \
     X(Boolean,         Bool)                            \
     X(Controlled1Bit,  Controlled1Bit)                  \
     X(Controlled3Bit,  Controlled3Bit)                  \
-    X(Character,       Character)                       \
     X(Unsigned8,       Unsigned8)                       \
     X(Signed8,         Signed8)                         \
     X(Unsigned16,      Unsigned16)                      \
     X(Signed16,        Signed16)                        \
-    X(Float2Byte,      Float2Byte)                      \
-    X(TimeOfDay,       TimeOfDay)                       \
-    X(Date,            Date)                            \
     X(Unsigned32,      Unsigned32)                      \
     X(Signed32,        Signed32)                        \
-    X(Float4Byte,      Float4Byte)                      \
-    X(AccessControl,   AccessControl)                   \
-    X(String,          String)                          \
     X(SceneNumber,     SceneNumber)                     \
     X(SceneControl,    SceneControl)                    \
-    X(DateTime,        DateTime)                        \
-    X(HvacMode,        HvacMode)                        \
+    X(HvacMode,        HvacMode)
+
+// The families a build can configure out (Kconfig KNX_DPT_*): a value type of
+// an absent family has no case, so its codec is neither compiled nor linked and
+// the request is answered OperationNotSupported like any unknown type.
+#if KNX_FEATURE_DPT_FLOAT
+#  define KNX_DPT_CODEC_DISPATCH_FLOAT(X)               \
+    X(Float2Byte,      Float2Byte)                      \
+    X(Float4Byte,      Float4Byte)
+#else
+#  define KNX_DPT_CODEC_DISPATCH_FLOAT(X)
+#endif
+#if KNX_FEATURE_DPT_TIME
+#  define KNX_DPT_CODEC_DISPATCH_TIME(X)                \
+    X(TimeOfDay,       TimeOfDay)                       \
+    X(Date,            Date)                            \
+    X(DateTime,        DateTime)
+#else
+#  define KNX_DPT_CODEC_DISPATCH_TIME(X)
+#endif
+#if KNX_FEATURE_DPT_STRING
+#  define KNX_DPT_CODEC_DISPATCH_STRING(X)              \
+    X(Character,       Character)                       \
+    X(String,          String)
+#else
+#  define KNX_DPT_CODEC_DISPATCH_STRING(X)
+#endif
+#if KNX_FEATURE_DPT_COLOUR
+#  define KNX_DPT_CODEC_DISPATCH_COLOUR(X)              \
     X(RgbColor,        RgbColor)                        \
     X(XyYColor,        XyYColor)                        \
-    X(ColourTransitionXyY, ColourTransitionXyY)          \
+    X(ColourTransitionXyY, ColourTransitionXyY)         \
     X(ConverterStatus, ConverterStatus)
+#else
+#  define KNX_DPT_CODEC_DISPATCH_COLOUR(X)
+#endif
+#if KNX_FEATURE_DPT_ACCESS
+#  define KNX_DPT_CODEC_DISPATCH_ACCESS(X)              \
+    X(AccessControl,   AccessControl)
+#else
+#  define KNX_DPT_CODEC_DISPATCH_ACCESS(X)
+#endif
+
+#define KNX_DPT_CODEC_DISPATCH(X)                       \
+    KNX_DPT_CODEC_DISPATCH_ALWAYS(X)                    \
+    KNX_DPT_CODEC_DISPATCH_FLOAT(X)                     \
+    KNX_DPT_CODEC_DISPATCH_TIME(X)                      \
+    KNX_DPT_CODEC_DISPATCH_STRING(X)                    \
+    KNX_DPT_CODEC_DISPATCH_COLOUR(X)                    \
+    KNX_DPT_CODEC_DISPATCH_ACCESS(X)
 
 util::Result<size_t> encodeForValueType(DptValue::Type type,
                                         const DptValue& value,
@@ -144,6 +187,7 @@ util::Result<size_t> encodeForValueType(DptValue::Type type,
         KNX_DPT_CODEC_DISPATCH(KNX_DPT_ENCODE_CASE)
 #undef KNX_DPT_ENCODE_CASE
         case DptValue::Type::Unsupported:
+        default:  // a value type whose family is configured out has no case
             break;
     }
     return util::ErrorCode::OperationNotSupported;
@@ -158,6 +202,7 @@ util::Result<DptValue> decodeForValueType(DptValue::Type type, std::span<const u
         KNX_DPT_CODEC_DISPATCH(KNX_DPT_DECODE_CASE)
 #undef KNX_DPT_DECODE_CASE
         case DptValue::Type::Unsupported:
+        default:  // a value type whose family is configured out has no case
             break;
     }
     return util::ErrorCode::OperationNotSupported;
@@ -165,6 +210,7 @@ util::Result<DptValue> decodeForValueType(DptValue::Type type, std::span<const u
 
 } // namespace
 
+#if KNX_FEATURE_DPT_CATALOGUE
 const DptInfo* dptRegistryEntries()
 {
     return kKnownDpts;
@@ -194,53 +240,95 @@ const DptInfo* lookupDptInfo(DptId id)
 
     return nullptr;
 }
+#endif  // KNX_FEATURE_DPT_CATALOGUE
+
+namespace {
+
+/**
+ * @brief The runtime value type @p id is carried as, or Unsupported.
+ *
+ * With the run-time catalogue this is the catalogue's answer, as it always was
+ * (an exact entry, else the main type's own entry, none for an unknown type).
+ * Without it the catalogue's table is not built and the id alone decides
+ * (dptValueTypeFor()), restricted to the families this build has. The two agree
+ * for every catalogue entry (test_dpt checks it); they can differ only for an
+ * id the catalogue does not list.
+ */
+DptValue::Type resolveValueType(DptId id)
+{
+#if KNX_FEATURE_DPT_CATALOGUE
+    const auto* info = lookupDptInfo(id);
+    return (info != nullptr && info->runtimeSupported) ? info->valueType : DptValue::Type::Unsupported;
+#else
+    return dptFamilyEnabled(id) ? dptValueTypeFor(id) : DptValue::Type::Unsupported;
+#endif
+}
+
+} // namespace
 
 bool supportsDpt(DptId id)
 {
-    const auto* info = lookupDptInfo(id);
-    return info && info->runtimeSupported;
+    return resolveValueType(id) != DptValue::Type::Unsupported;
 }
 
 bool dptValueMatches(DptId id, const DptValue& value)
 {
-    const auto* info = lookupDptInfo(id);
-    return info && info->valueType == value.type();
+    const auto type = resolveValueType(id);
+    return type != DptValue::Type::Unsupported && type == value.type();
 }
 
 util::Result<size_t> encodeDptValue(DptId id, const DptValue& value, std::span<uint8_t> data) {
-    const auto* info = lookupDptInfo(id);
-    if (!info || !info->runtimeSupported) {
+    const auto type = resolveValueType(id);
+    if (type == DptValue::Type::Unsupported || type != value.type()) {
         return util::ErrorCode::OperationNotSupported;
     }
 
-    if (info->valueType != value.type()) {
-        return util::ErrorCode::OperationNotSupported;
-    }
-
-    return encodeForValueType(info->valueType, value, data);
+    return encodeForValueType(type, value, data);
 }
 
 util::Result<DptValue> decodeDptValue(DptId id, std::span<const uint8_t> data) {
-    const auto* info = lookupDptInfo(id);
-    if (!info || !info->runtimeSupported) {
+    const auto type = resolveValueType(id);
+    if (type == DptValue::Type::Unsupported) {
         return util::ErrorCode::OperationNotSupported;
     }
 
-    return decodeForValueType(info->valueType, data);
+    return decodeForValueType(type, data);
 }
 
+#if KNX_FEATURE_DPT_FLOAT
 bool dptValueAsScalar(const DptValue& value, double& out) {
     switch (value.type()) {
         case DptValue::Type::Boolean:     out = value.asBool() ? 1.0 : 0.0;             return true;
+#if KNX_FEATURE_DPT_STRING
         case DptValue::Type::Character:   out = static_cast<double>(value.asChar());    return true;
+#endif
         case DptValue::Type::Unsigned8:   out = static_cast<double>(value.asUInt8());   return true;
         case DptValue::Type::Signed8:     out = static_cast<double>(value.asInt8());    return true;
         case DptValue::Type::Unsigned16:  out = static_cast<double>(value.asUInt16());  return true;
         case DptValue::Type::Signed16:    out = static_cast<double>(value.asInt16());   return true;
+#if KNX_FEATURE_DPT_FLOAT
         case DptValue::Type::Float2Byte:  out = static_cast<double>(value.asFloat());   return true;
+#endif
         case DptValue::Type::Unsigned32:  out = static_cast<double>(value.asUInt32());  return true;
         case DptValue::Type::Signed32:    out = static_cast<double>(value.asInt32());   return true;
+#if KNX_FEATURE_DPT_FLOAT
         case DptValue::Type::Float4Byte:  out = static_cast<double>(value.asFloat());   return true;
+#endif
+        default:
+            return false;
+    }
+}
+#endif  // KNX_FEATURE_DPT_FLOAT
+
+bool dptValueAsInteger(const DptValue& value, int64_t& out) {
+    switch (value.type()) {
+        case DptValue::Type::Boolean:     out = value.asBool() ? 1 : 0;           return true;
+        case DptValue::Type::Unsigned8:   out = value.asUInt8();                  return true;
+        case DptValue::Type::Signed8:     out = value.asInt8();                   return true;
+        case DptValue::Type::Unsigned16:  out = value.asUInt16();                 return true;
+        case DptValue::Type::Signed16:    out = value.asInt16();                  return true;
+        case DptValue::Type::Unsigned32:  out = value.asUInt32();                 return true;
+        case DptValue::Type::Signed32:    out = value.asInt32();                  return true;
         default:
             return false;
     }
@@ -309,6 +397,7 @@ util::Result<void> Dpt5::decode(std::span<const uint8_t> data, uint8_t& value) {
     return util::Result<void>::ok();
 }
 
+#if KNX_FEATURE_DPT_FLOAT
 // DPT 9 - Float (2 bytes)
 // Format: SEEE EMMM MMMM MMMM
 // S = sign bit (bit 15), E = exponent (bits 14-11), M = signed 11-bit mantissa (bits 10-0)
@@ -366,6 +455,7 @@ util::Result<void> Dpt9::decode(std::span<const uint8_t> data, float& value) {
     return util::Result<void>::ok();
 }
 
+#endif  // KNX_FEATURE_DPT_FLOAT
 // DPT 2 - 1-bit controlled (2 bits: control + value)
 util::Result<size_t> Dpt2::encode(bool control, bool value, std::span<uint8_t> data) {
     uint8_t byte = static_cast<uint8_t>(((control ? 1 : 0) << 1) | (value ? 1 : 0));
@@ -407,6 +497,7 @@ util::Result<void> Dpt3::decode(std::span<const uint8_t> data, Value& value) {
     return util::Result<void>::ok();
 }
 
+#if KNX_FEATURE_DPT_STRING
 // DPT 4 - Character (ASCII 8-bit)
 util::Result<size_t> Dpt4::encode(char value, std::span<uint8_t> data) {
     return writeArray(std::array<uint8_t, 1>{static_cast<uint8_t>(value)}, data);
@@ -420,6 +511,7 @@ util::Result<void> Dpt4::decode(std::span<const uint8_t> data, char& value) {
     return util::Result<void>::ok();
 }
 
+#endif  // KNX_FEATURE_DPT_STRING
 // DPT 6 - 8-bit signed (-128 to 127)
 util::Result<size_t> Dpt6::encode(int8_t value, std::span<uint8_t> data) {
     return writeArray(std::array<uint8_t, 1>{static_cast<uint8_t>(value)}, data);
@@ -460,6 +552,7 @@ util::Result<void> Dpt8::decode(std::span<const uint8_t> data, int16_t& value) {
     return util::Result<void>::ok();
 }
 
+#if KNX_FEATURE_DPT_TIME
 // DPT 10 - Time of Day
 util::Result<size_t> Dpt10::encode(const Value& time, std::span<uint8_t> data) {
     return encode(time.dayOfWeek, time.hour, time.minute, time.second, data);
@@ -663,6 +756,7 @@ util::Result<void> Dpt19::decode(std::span<const uint8_t> data, Value& datetime)
     return util::Result<void>::ok();
 }
 
+#endif  // KNX_FEATURE_DPT_TIME
 // DPT 12 - 32-bit Unsigned (big-endian)
 util::Result<size_t> Dpt12::encode(uint32_t value, std::span<uint8_t> data) {
     return writeDword(value, data);
@@ -690,6 +784,7 @@ util::Result<void> Dpt13::decode(std::span<const uint8_t> data, int32_t& value) 
     return util::Result<void>::ok();
 }
 
+#if KNX_FEATURE_DPT_FLOAT
 // DPT 14 - 32-bit Float (IEEE 754 single precision, 03_07_02 §3.15)
 util::Result<size_t> Dpt14::encode(float value, std::span<uint8_t> data) {
     if (std::isnan(value) || std::isinf(value)) {
@@ -707,6 +802,8 @@ util::Result<void> Dpt14::decode(std::span<const uint8_t> data, float& value) {
     return util::Result<void>::ok();
 }
 
+#endif  // KNX_FEATURE_DPT_FLOAT
+#if KNX_FEATURE_DPT_STRING
 // DPT 16 - String, 14 octets (03_07_02 §3.17): "The length is fixed to 14
 // octets ... If the string to be transmitted is smaller then 14 octets, unused
 // trailing octets in the character string shall be set to NULL (00h)."
@@ -750,6 +847,7 @@ util::Result<void> Dpt16::decode(std::span<const uint8_t> data, std::string& val
     return util::Result<void>::ok();
 }
 
+#endif  // KNX_FEATURE_DPT_STRING
 // DPT 17.001 - Scene Number, r2U6 (03_07_02 §3.18)
 util::Result<size_t> Dpt17::encode(uint8_t sceneNumber, std::span<uint8_t> data) {
     if (sceneNumber > 63) {
@@ -771,6 +869,7 @@ util::Result<void> Dpt17::decode(std::span<const uint8_t> data, Value& scene) {
     return util::Result<void>::ok();
 }
 
+#if KNX_FEATURE_DPT_ACCESS
 // DPT 15.000 - DPT_Access_Data, U4U4U4U4U4U4B4N4 (03_07_02 §3.16)
 // [D6 D5] [D4 D3] [D2 D1] [E P D C | Index]
 namespace {
@@ -832,6 +931,7 @@ util::Result<void> Dpt15::decode(std::span<const uint8_t> data, Value& access) {
     return util::Result<void>::ok();
 }
 
+#endif  // KNX_FEATURE_DPT_ACCESS
 // DPT 18 - Scene Control (1 byte)
 util::Result<size_t> Dpt18::encode(const Value& scene, std::span<uint8_t> data) {
     return encode(scene.sceneNumber, scene.learn, data);
@@ -885,6 +985,7 @@ util::Result<void> Dpt20::decode(std::span<const uint8_t> data, Mode& mode) {
     return util::Result<void>::ok();
 }
 
+#if KNX_FEATURE_DPT_COLOUR
 // DPT 232 - RGB Color (3 bytes)
 util::Result<size_t> Dpt232::encode(const Value& color, std::span<uint8_t> data) {
     return encode(color.red, color.green, color.blue, data);
@@ -1025,6 +1126,7 @@ util::Result<void> Dpt244::decode(std::span<const uint8_t> data, Value& status) 
     status = decoded;
     return util::Result<void>::ok();
 }
+#endif  // KNX_FEATURE_DPT_COLOUR
 
 } // namespace application
 } // namespace knx

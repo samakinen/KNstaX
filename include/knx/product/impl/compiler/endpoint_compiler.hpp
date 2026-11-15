@@ -110,72 +110,11 @@ struct CompiledEndpointDefinition {
 
 namespace detail {
 
+/// The runtime value type a port of datapoint type @p dpt carries (see
+/// application::dptValueTypeFor, the one definition of it).
 constexpr application::DptValue::Type valueTypeForDpt(application::DptId dpt) noexcept
 {
-    switch (dpt.main) {
-        case application::DptMainType::Boolean:
-            return application::DptValue::Type::Boolean;
-        case application::DptMainType::Controlled1Bit:
-            return application::DptValue::Type::Controlled1Bit;
-        case application::DptMainType::Controlled3Bit:
-            return application::DptValue::Type::Controlled3Bit;
-        case application::DptMainType::Character:
-            return application::DptValue::Type::Character;
-        case application::DptMainType::Unsigned8:
-            return application::DptValue::Type::Unsigned8;
-        case application::DptMainType::Signed8:
-            return application::DptValue::Type::Signed8;
-        case application::DptMainType::Unsigned16:
-            return application::DptValue::Type::Unsigned16;
-        case application::DptMainType::Signed16:
-            return application::DptValue::Type::Signed16;
-        case application::DptMainType::Float2Byte:
-            return application::DptValue::Type::Float2Byte;
-        case application::DptMainType::TimeOfDay:
-            return application::DptValue::Type::TimeOfDay;
-        case application::DptMainType::Date:
-            return application::DptValue::Type::Date;
-        case application::DptMainType::Unsigned32:
-            return application::DptValue::Type::Unsigned32;
-        case application::DptMainType::Signed32:
-            return application::DptValue::Type::Signed32;
-        case application::DptMainType::Float4Byte:
-            return application::DptValue::Type::Float4Byte;
-        case application::DptMainType::AccessControl:
-            return application::DptValue::Type::AccessControl;
-        case application::DptMainType::String:
-            return application::DptValue::Type::String;
-        case application::DptMainType::SceneNumber:
-            return application::DptValue::Type::SceneNumber;
-        case application::DptMainType::SceneControl:
-            return application::DptValue::Type::SceneControl;
-        case application::DptMainType::DateTime:
-            return application::DptValue::Type::DateTime;
-        case application::DptMainType::HvacMode:
-            // Only DPT-20.102 (and the bare main type) carry the typed
-            // Dpt20Mode enum; every other DPT-20 sub-type is transported as a
-            // raw byte (see dpt_catalog.inc), so its runtime value type is
-            // Unsigned8 to match the port's uint8_t storage.
-            return (dpt.sub == 0 || dpt.sub == 102)
-                       ? application::DptValue::Type::HvacMode
-                       : application::DptValue::Type::Unsigned8;
-        case application::DptMainType::Bitfield8:
-            return application::DptValue::Type::Unsigned8;
-        case application::DptMainType::Bitfield16:
-            return application::DptValue::Type::Unsigned16;
-        case application::DptMainType::RgbColor:
-            return application::DptValue::Type::RgbColor;
-        case application::DptMainType::XyYColor:
-            return application::DptValue::Type::XyYColor;
-        case application::DptMainType::ColourTransitionXyY:
-            return application::DptValue::Type::ColourTransitionXyY;
-        case application::DptMainType::ConverterStatus:
-            return application::DptValue::Type::ConverterStatus;
-        case application::DptMainType::Unsupported:
-            break;
-    }
-
-    return application::DptValue::Type::Unsupported;
+    return application::dptValueTypeFor(dpt);
 }
 
 template <typename PortIdEnum, typename PortSpec>

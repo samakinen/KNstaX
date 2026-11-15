@@ -17,11 +17,6 @@ set(KNX_SOURCES_CORE
 
     # Network Layer
     "src/network/network_layer.cpp"
-    "src/network/filter_table.cpp"
-    "src/network/filter_table_load_control.cpp"
-    "src/network/routing_table_control.cpp"
-    "src/network/coupler_routing.cpp"
-    "src/network/two_port_coupler.cpp"
 
     # Transport Layer
     "src/transport/transport_layer.cpp"
@@ -35,8 +30,6 @@ set(KNX_SOURCES_CORE
     "src/application/group_object.cpp"
     "src/application/device_descriptor_service.cpp"
     "src/application/property_services.cpp"
-    "src/application/property_ext_services.cpp"
-    "src/application/function_property_services.cpp"
     "src/application/address_space.cpp"
     "src/application/memory_service.cpp"
     "src/application/authorization_service.cpp"
@@ -53,7 +46,6 @@ set(KNX_SOURCES_CORE
     "src/objects/group_object_table_object.cpp"
     "src/objects/application_program_object.cpp"
     "src/objects/association_table_object.cpp"
-    "src/objects/security_interface_object.cpp"
     "src/objects/generic_interface_object.cpp"
     "src/objects/reference_object_registry.cpp"
     "src/objects/object_persistence.cpp"
@@ -65,7 +57,6 @@ set(KNX_SOURCES_CORE
     "src/bau/device_model.cpp"
     "src/bau/group_runtime.cpp"
     "src/bau/device_management.cpp"
-    "src/bau/go_diagnostics.cpp"
 
     # Utilities
     "src/util/log.cpp"
@@ -212,3 +203,61 @@ set(KNX_SOURCES_PLATFORM_COOPERATIVE
     "src/platform/cooperative_platform.cpp"
 )
 
+
+# --- Optional features (Kconfig menu "Optional Features" and friends) ----
+# A feature that is off is absent: its sources are not in the build, which the
+# size gate checks with its forbid list (docs/design/small-target-profile.md
+# 3.3, rule 4). knx_optional_sources() adds the groups for the features the
+# configuration enables; both build modes call it, so they cannot disagree.
+
+# The router role of a line or backbone coupler (CONFIG_KNX_ENABLE_COUPLER).
+set(KNX_SOURCES_COUPLER
+    "src/network/filter_table.cpp"
+    "src/network/filter_table_load_control.cpp"
+    "src/network/routing_table_control.cpp"
+    "src/network/coupler_routing.cpp"
+    "src/network/two_port_coupler.cpp"
+)
+
+# The Security Interface Object (CONFIG_KNX_ENABLE_SECURITY).
+set(KNX_SOURCES_SECURITY_OBJECT
+    "src/objects/security_interface_object.cpp"
+)
+
+# Extended property services (CONFIG_KNX_ENABLE_PROPERTY_EXT) and the function
+# property services (CONFIG_KNX_ENABLE_FUNCTION_PROPERTIES). The memory and
+# network parameter services live in files that also hold the basic services,
+# so those two switches gate the dispatch and the handlers, not a file.
+set(KNX_SOURCES_PROPERTY_EXT
+    "src/application/property_ext_services.cpp"
+)
+set(KNX_SOURCES_FUNCTION_PROPERTIES
+    "src/application/function_property_services.cpp"
+)
+
+# Group object diagnostics (CONFIG_KNX_ENABLE_GO_DIAGNOSTICS).
+set(KNX_SOURCES_GO_DIAGNOSTICS
+    "src/bau/go_diagnostics.cpp"
+)
+
+# Appends to the variable named by `out` the sources of every optional feature
+# the CONFIG_KNX_* variables enable.
+function(knx_optional_sources out)
+    set(_list ${${out}})
+    if(CONFIG_KNX_ENABLE_COUPLER)
+        list(APPEND _list ${KNX_SOURCES_COUPLER})
+    endif()
+    if(CONFIG_KNX_ENABLE_SECURITY)
+        list(APPEND _list ${KNX_SOURCES_SECURITY_OBJECT})
+    endif()
+    if(CONFIG_KNX_ENABLE_PROPERTY_EXT)
+        list(APPEND _list ${KNX_SOURCES_PROPERTY_EXT})
+    endif()
+    if(CONFIG_KNX_ENABLE_FUNCTION_PROPERTIES)
+        list(APPEND _list ${KNX_SOURCES_FUNCTION_PROPERTIES})
+    endif()
+    if(CONFIG_KNX_ENABLE_GO_DIAGNOSTICS)
+        list(APPEND _list ${KNX_SOURCES_GO_DIAGNOSTICS})
+    endif()
+    set(${out} ${_list} PARENT_SCOPE)
+endfunction()

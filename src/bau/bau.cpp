@@ -57,7 +57,9 @@ BusAccessUnit::BusAccessUnit(platform::Platform& platform,
                                            _associationTable,
                                            _applicationProgram,
                                            _groupObjectTable,
+#if KNX_SECURE_ENABLED
                                            _securityObject,
+#endif
                                            _stackPort.get()))
     , _groups(std::make_unique<GroupRuntime>(_platform, _stackPort.get(), *_model))
     , _management(std::make_unique<DeviceManagement>(_platform, _stackPort.get(), *_model, *_groups))
@@ -138,9 +140,13 @@ util::Result<void> BusAccessUnit::init(const IndividualAddress& ownAddress,
         // before init() is the factory default: recorded first, so that the
         // restore can take precedence over it and a Factory Reset can return
         // to it (see the rule on BusAccessUnit::init()).
+#if KNX_SECURE_ENABLED
         _model->captureFactorySecurityDefaults();
+#endif
         const size_t loaded = _model->restore();
+#if KNX_SECURE_ENABLED
         _model->settleRestoredSecurityState();
+#endif
         KNX_LOGI(TAG, "Restored %zu properties from persistence", loaded);
 
         const auto restoredAddress = _deviceObject.readIndividualAddress();
@@ -155,6 +161,7 @@ util::Result<void> BusAccessUnit::init(const IndividualAddress& ownAddress,
         // the data link layer accepts incoming telegrams on those addresses.
         _model->resubscribeGroupAddresses();
 
+#if KNX_SECURE_ENABLED
         // The key tables are restored as opaque blobs like every other
         // property, so the derived key maps have to be rebuilt from them —
         // after the address table is back, since group keys resolve through
@@ -167,6 +174,7 @@ util::Result<void> BusAccessUnit::init(const IndividualAddress& ownAddress,
         // just adopted; the Sequence Number for Tool Access is not a
         // property and is restored from its own record (03/05/01 §6.2).
         (void)_model->loadSecuritySequenceState();
+#endif
 
         // The A_Key_Write key table (03/03/07 §3.5.8) is application
         // layer state; without it a device keyed by ETS would be open
@@ -239,7 +247,9 @@ void BusAccessUnit::loop() {
     // the restart handler.
     const uint32_t now = _groups->nowMs();
     _model->pumpPersistence(now);
+#if KNX_SECURE_ENABLED
     _model->pumpSecuritySequenceCheckpoint(now);
+#endif
 
     // Service deferred lower-layer work outside callback context.
     if (_stackPort) {
@@ -421,9 +431,11 @@ void LinkAccess::setPromiscuousMode(datalink::PromiscuousMode mode) {
     }
 }
 
+#if KNX_FEATURE_COUPLER
 network::TwoPortCoupler* LinkAccess::coupler() {
     return _stackPort != nullptr ? _stackPort->coupler() : nullptr;
 }
+#endif
 
 util::Result<void> LinkAccess::refreshMulticastMembership() {
     return _stackPort != nullptr ? _stackPort->refreshMulticastMembership()

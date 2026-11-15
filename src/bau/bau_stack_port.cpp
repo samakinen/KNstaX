@@ -25,7 +25,9 @@
 #include "knx/network/network_layer.hpp"
 #include "knx/security/data_secure.hpp"
 #include "knx/security/secure_application_layer.hpp"
+#if KNX_FEATURE_COUPLER
 #include "knx/network/two_port_coupler.hpp"
+#endif
 
 #include <algorithm>
 #include <optional>
@@ -263,6 +265,7 @@ private:
 // Construction and lifecycle
 // ---------------------------------------------------------------------------
 
+#if KNX_FEATURE_COUPLER
 BusAccessStackPort::BusAccessStackPort(platform::Platform& platform,
                                        std::unique_ptr<Medium> primary,
                                        std::unique_ptr<Medium> secondary)
@@ -273,6 +276,13 @@ BusAccessStackPort::BusAccessStackPort(platform::Platform& platform,
     , _secondaryMedium(std::move(secondary))
 {
 }
+#else
+BusAccessStackPort::BusAccessStackPort(platform::Platform& platform, std::unique_ptr<Medium> primary)
+    : _platform(platform)
+    , _medium(std::move(primary))
+{
+}
+#endif
 
 BusAccessStackPort::~BusAccessStackPort() = default;
 
@@ -315,6 +325,7 @@ util::Result<void> BusAccessStackPort::initApplicationStack(datalink::Tp1DataLin
     return _application->init(ownAddress);
 }
 
+#if KNX_FEATURE_COUPLER
 /**
  * Bring up the second port and the routing engine, for a stack port built
  * as a coupler. No-op otherwise.
@@ -364,6 +375,7 @@ util::Result<void> BusAccessStackPort::initCoupler(const IndividualAddress& ownA
     }
     return _coupler->init();
 }
+#endif  // KNX_FEATURE_COUPLER
 
 util::Result<void> BusAccessStackPort::init(const IndividualAddress& ownAddress)
 {
@@ -392,10 +404,12 @@ util::Result<void> BusAccessStackPort::init(const IndividualAddress& ownAddress)
         _application->setReceiveWorkAvailableCallback(_workAvailableCallback);
     }
 
+#if KNX_FEATURE_COUPLER
     auto couplerInit = initCoupler(ownAddress, *dataLink);
     if (couplerInit.isError()) {
         return couplerInit;
     }
+#endif
 
     _initialized = true;
     return util::Result<void>::ok();
@@ -404,9 +418,11 @@ util::Result<void> BusAccessStackPort::init(const IndividualAddress& ownAddress)
 void BusAccessStackPort::close()
 {
     _initialized = false;
+#if KNX_FEATURE_COUPLER
     if (_coupler) {
         _coupler->close();
     }
+#endif
     if (_application) {
         _application->close();
     }
@@ -416,9 +432,11 @@ void BusAccessStackPort::close()
     if (_network) {
         _network->close();
     }
+#if KNX_FEATURE_COUPLER
     if (_secondaryMedium) {
         _secondaryMedium->close();
     }
+#endif
     _medium->close();
 }
 
@@ -470,6 +488,7 @@ util::Result<void> BusAccessStackPort::setOwnAddress(const IndividualAddress& ow
     // derived from its own address, so an ETS address assignment has to
     // reach the routing policy too — otherwise the device would answer to
     // its new address while still routing for the old one.
+#if KNX_FEATURE_COUPLER
     if (_secondaryMedium) {
         if (auto* secondary = _secondaryMedium->dataLinkLayer()) {
             secondary->setOwnAddress(ownAddress);
@@ -481,6 +500,7 @@ util::Result<void> BusAccessStackPort::setOwnAddress(const IndividualAddress& ow
             }
         }
     }
+#endif
     return util::Result<void>::ok();
 }
 
@@ -502,9 +522,11 @@ void BusAccessStackPort::processBackgroundWork()
     // The second port needs pumping on the same cadence, or traffic
     // arriving on it would only be seen when something else happened to
     // wake the stack.
+#if KNX_FEATURE_COUPLER
     if (_secondaryMedium) {
         _secondaryMedium->processBackgroundWork();
     }
+#endif
     if (_application) {
         _application->processBackgroundWork();
     }
@@ -519,12 +541,14 @@ util::Result<void> BusAccessStackPort::sendDataLinkFrame(const datalink::LDataFr
     // device on the sub line could address the coupler but never get an
     // answer. This is the coupler's own traffic only — forwarded frames go
     // out through TwoPortCoupler, which picks the correct single port.
+#if KNX_FEATURE_COUPLER
     if (_secondaryMedium) {
         auto secondaryResult = _secondaryMedium->sendDataLinkFrame(frame);
         if (primaryResult.isError()) {
             return secondaryResult;
         }
     }
+#endif
     return primaryResult;
 }
 
@@ -553,9 +577,11 @@ util::Result<void> BusAccessStackPort::addGroupAddress(const GroupAddress& addre
 
     // Both ports must acknowledge this device's group addresses; a coupler
     // subscribes as one device however many attachments it has.
+#if KNX_FEATURE_COUPLER
     if (_secondaryMedium) {
         return _secondaryMedium->addGroupAddress(address);
     }
+#endif
     return primaryResult;
 }
 
@@ -715,23 +741,24 @@ void BusAccessStackPort::configureSecurity()
 }
 #endif
 
+#if KNX_SECURE_ENABLED
 void BusAccessStackPort::configureDataSecure(objects::SecurityInterfaceObject& securityObject)
 {
-#if KNX_SECURE_ENABLED
     _securityObject = &securityObject;
     configureSecurity();
-#else
-    (void)securityObject;
-#endif
 }
+#endif
 
+#if KNX_FEATURE_FUNCTION_PROPERTIES
 void BusAccessStackPort::setFunctionPropertyHandler(application::FunctionPropertyHandler handler)
 {
     if (_application) {
         _application->functionPropertyServices().setHandler(std::move(handler));
     }
 }
+#endif
 
+#if KNX_FEATURE_PROPERTY_EXT && KNX_FEATURE_FUNCTION_PROPERTIES
 void BusAccessStackPort::setExtendedFunctionPropertyProvider(
     application::PropertyExtServices::FunctionProvider provider)
 {
@@ -739,6 +766,7 @@ void BusAccessStackPort::setExtendedFunctionPropertyProvider(
         _application->propertyExtServices().setFunctionProvider(std::move(provider));
     }
 }
+#endif
 
 void BusAccessStackPort::setCommissioningSerialNumber(const application::KnxSerialNumber& serialNumber)
 {
@@ -992,6 +1020,7 @@ std::unique_ptr<BusAccessStackPort> createTp1StackPort(platform::Platform& platf
     return makeStackPort(platform, std::move(physicalLayer));
 }
 
+#if KNX_FEATURE_COUPLER
 std::unique_ptr<BusAccessStackPort> createTp1CouplerStackPort(
     platform::Platform& platform,
     std::unique_ptr<physical::Tp1MacPhysical> primaryPhysical,
@@ -1002,6 +1031,7 @@ std::unique_ptr<BusAccessStackPort> createTp1CouplerStackPort(
         std::make_unique<BusAccessStackPort::Medium>(platform, std::move(primaryPhysical)),
         std::make_unique<BusAccessStackPort::Medium>(platform, std::move(secondaryPhysical)));
 }
+#endif
 
 std::unique_ptr<BusAccessStackPort> createTp1StackPort(platform::Platform& platform,
                                                        std::unique_ptr<physical::Tp1MediumBackend> mediumBackend)

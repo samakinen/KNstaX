@@ -36,8 +36,16 @@ namespace application {
  */
 struct GroupObjectTransmitPolicy {
     bool     onChangeEnabled{false}; ///< true: suppress sub-threshold updates.
+#if KNX_FEATURE_DPT_FLOAT
     double   changeThreshold{0.0};   ///< Engineering-unit delta counted as a change
                                      ///< (<= 0 with onChangeEnabled means any change).
+#else
+    /// Delta, in units of the integer datapoint value, counted as a change (0
+    /// with onChangeEnabled means any change). An integer: a build without the
+    /// floating point datapoint family (KNX_DPT_FLOAT) links no double
+    /// arithmetic, and has no float-valued object to give a fraction to.
+    uint32_t changeThreshold{0};
+#endif
     uint32_t cyclicIntervalMs{0};    ///< Heartbeat period; 0 = no cyclic send.
     uint32_t minIntervalMs{0};       ///< Minimum spacing between sends; 0 = none.
 };

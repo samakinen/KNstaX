@@ -51,6 +51,9 @@ if(DEFINED IDF_PATH OR COMMAND idf_component_register)
     endif()
 
     set(KNX_COMPONENT_SOURCES ${KNX_SOURCES_CORE} ${KNX_SOURCES_PLATFORM_ESPIDF})
+    # The optional features the configuration enables (coupler, Security
+    # Interface Object, group object diagnostics, ...).
+    knx_optional_sources(KNX_COMPONENT_SOURCES)
 
     if(KNX_FEATURE_TP1)
         list(APPEND KNX_COMPONENT_SOURCES ${KNX_SOURCES_TP1})
@@ -202,7 +205,7 @@ else()
         else()
             # -DKNX_HOST_PROFILE=host-small runs the host suite with the
             # tp1-small capacities (configs/profiles/host-small.defconfig).
-            set(KNX_HOST_PROFILE "host-test" CACHE STRING "Profile of a host build (host-test, host-small)")
+            set(KNX_HOST_PROFILE "host-test" CACHE STRING "Profile of a host build (host-test, host-small, host-minimal)")
             knx_configure(PROFILE ${KNX_HOST_PROFILE})
         endif()
     endif()
@@ -328,6 +331,7 @@ else()
     # ------------------------------------------------------------------
 
     set(COMMON_SOURCES ${KNX_SOURCES_CORE})
+    knx_optional_sources(COMMON_SOURCES)
 
     if(KNX_FEATURE_TP1)
         if(KNX_PLATFORM STREQUAL "baremetal")
@@ -525,6 +529,7 @@ else()
     # Everything from here to the examples is test-only: test executables,
     # the exporter and interop peers they drive. BUILD_TESTS=OFF skips it all.
     if(BUILD_TESTS)
+        file(WRITE "${CMAKE_BINARY_DIR}/knx_tests_not_registered.txt" "")
         include(${CMAKE_CURRENT_LIST_DIR}/cmake/knx_testing.cmake)
 
         # The exporter and interop tests are Python scripts.
@@ -543,16 +548,16 @@ else()
         # Tests without a label run only in the full suite.
 
         knx_add_test(test_types SOURCES test/unit/test_types.cpp LABELS unit)
-        knx_add_test(test_dpt SOURCES test/unit/test_dpt.cpp LABELS unit)
+        knx_add_test(test_dpt NEEDS DPT_CATALOGUE DPT_FLOAT DPT_TIME DPT_STRING DPT_COLOUR DPT_ACCESS SOURCES test/unit/test_dpt.cpp LABELS unit)
         knx_add_test(test_telegram_rate_limiter SOURCES test/unit/test_telegram_rate_limiter.cpp)
-        knx_add_test(test_group_object_transmit_policy SOURCES test/unit/test_group_object_transmit_policy.cpp)
+        knx_add_test(test_group_object_transmit_policy NEEDS DPT_FLOAT SOURCES test/unit/test_group_object_transmit_policy.cpp)
         knx_add_test(test_group_object_flags SOURCES test/unit/test_group_object_flags.cpp LABELS unit)
         knx_add_test(test_function_property_services SOURCES test/unit/test_function_property_services.cpp LABELS unit)
         knx_add_test(test_network_parameter_service SOURCES test/unit/test_network_parameter_service.cpp LABELS unit)
-        knx_add_test(test_endpoint_semantics SOURCES test/unit/test_endpoint_semantics.cpp LABELS unit)
-        knx_add_test(test_routing_table_control SOURCES test/unit/test_routing_table_control.cpp LABELS unit)
-        knx_add_test(test_coupler_routing SOURCES test/unit/test_coupler_routing.cpp LABELS unit)
-        knx_add_test(test_bau_router_role SOURCES test/integration/test_bau_router_role.cpp LABELS integration)
+        knx_add_test(test_endpoint_semantics NEEDS DPT_FLOAT SOURCES test/unit/test_endpoint_semantics.cpp LABELS unit)
+        knx_add_test(test_routing_table_control NEEDS COUPLER SOURCES test/unit/test_routing_table_control.cpp LABELS unit)
+        knx_add_test(test_coupler_routing NEEDS COUPLER SOURCES test/unit/test_coupler_routing.cpp LABELS unit)
+        knx_add_test(test_bau_router_role NEEDS COUPLER SOURCES test/integration/test_bau_router_role.cpp LABELS integration)
         knx_add_test(test_cooperative_platform SOURCES test/unit/test_cooperative_platform.cpp LABELS unit)
         knx_add_test(test_persistence_factory SOURCES test/unit/test_persistence_factory.cpp LABELS unit)
         knx_add_test(test_persistence_schema_version SOURCES test/integration/test_persistence_schema_version.cpp
@@ -618,16 +623,16 @@ else()
         # Product model: definition/bindings, compiler, export bridge, the
         # public endpoint surface and its semantics and policies, the
         # commissioned-product wrapper and the runtime core.
-        knx_add_test(test_product_model SOURCES test/unit/test_product_model.cpp LABELS unit)
-        knx_add_test(test_product_compiler SOURCES test/unit/test_product_compiler.cpp LABELS unit)
-        knx_add_test(test_product_export SOURCES test/unit/test_product_export.cpp LABELS unit)
+        knx_add_test(test_product_model NEEDS DPT_FLOAT SOURCES test/unit/test_product_model.cpp LABELS unit)
+        knx_add_test(test_product_compiler NEEDS DPT_FLOAT SOURCES test/unit/test_product_compiler.cpp LABELS unit)
+        knx_add_test(test_product_export NEEDS DPT_FLOAT SOURCES test/unit/test_product_export.cpp LABELS unit)
         knx_add_test(test_product_endpoint_public_surface SOURCES test/unit/test_product_endpoint_public_surface.cpp
             LABELS sdk-public-surface unit)
-        knx_add_test(test_product_endpoint_semantics SOURCES test/unit/test_product_endpoint_semantics.cpp LABELS unit)
-        knx_add_test(test_product_endpoint_policies SOURCES test/unit/test_product_endpoint_policies.cpp LABELS unit)
-        knx_add_test(test_product_commissioned_surface SOURCES test/unit/test_product_commissioned_surface.cpp
+        knx_add_test(test_product_endpoint_semantics NEEDS DPT_FLOAT SOURCES test/unit/test_product_endpoint_semantics.cpp LABELS unit)
+        knx_add_test(test_product_endpoint_policies NEEDS DPT_FLOAT SOURCES test/unit/test_product_endpoint_policies.cpp LABELS unit)
+        knx_add_test(test_product_commissioned_surface NEEDS SECURITY SOURCES test/unit/test_product_commissioned_surface.cpp
             LABELS sdk-public-surface unit)
-        knx_add_test(test_product_runtime_core SOURCES test/unit/test_product_runtime_core.cpp LABELS unit)
+        knx_add_test(test_product_runtime_core NEEDS DPT_FLOAT SOURCES test/unit/test_product_runtime_core.cpp LABELS unit)
 
         knx_add_test(test_logging SOURCES test/unit/test_logging.cpp LABELS unit)
         knx_add_test(test_datalink_edge_cases SOURCES test/unit/test_datalink_edge_cases.cpp LABELS unit)
@@ -752,10 +757,10 @@ else()
         # Tp1DataLinkLayer over the KNXnet/IP routing physical adapter
         knx_add_test(test_ip_routing_physical SOURCES test/integration/test_ip_routing_physical.cpp LABELS tp1 integration)
         # TP1 -> IP routing forwarding via coupler
-        knx_add_test(test_tp1_to_ip_routing_coupler SOURCES test/integration/test_tp1_to_ip_routing_coupler.cpp
+        knx_add_test(test_tp1_to_ip_routing_coupler NEEDS COUPLER SOURCES test/integration/test_tp1_to_ip_routing_coupler.cpp
             LABELS tp1 integration)
-        knx_add_test(test_coupler_stack_port SOURCES test/integration/test_coupler_stack_port.cpp LABELS tp1 integration)
-        knx_add_test(test_two_port_coupler SOURCES test/integration/test_two_port_coupler.cpp LABELS tp1 integration)
+        knx_add_test(test_coupler_stack_port NEEDS COUPLER SOURCES test/integration/test_coupler_stack_port.cpp LABELS tp1 integration)
+        knx_add_test(test_two_port_coupler NEEDS COUPLER SOURCES test/integration/test_two_port_coupler.cpp LABELS tp1 integration)
 
         # The KNXnet/IP client role (tunnelling, gateway discovery, device
         # management, IP Secure sessions) exists only with tunnelling on.
@@ -866,8 +871,8 @@ else()
         knx_add_test(test_transport_retransmission SOURCES test/unit/test_transport_retransmission.cpp)
         knx_add_test(test_device_descriptor SOURCES test/unit/test_device_descriptor.cpp)
         knx_add_test(test_property_services SOURCES test/unit/test_property_services.cpp)
-        knx_add_test(test_property_ext_services SOURCES test/unit/test_property_ext_services.cpp)
-        knx_add_test(test_interface_object_manager SOURCES test/unit/test_interface_object_manager.cpp)
+        knx_add_test(test_property_ext_services NEEDS PROPERTY_EXT SOURCES test/unit/test_property_ext_services.cpp)
+        knx_add_test(test_interface_object_manager NEEDS SECURITY SOURCES test/unit/test_interface_object_manager.cpp)
         knx_add_test(test_interface_object_manager_instances SOURCES test/unit/test_interface_object_manager_instances.cpp)
         knx_add_test(test_memory_service SOURCES test/unit/test_memory_service.cpp)
         knx_add_test(test_authorization_service SOURCES test/unit/test_authorization_service.cpp)
@@ -882,31 +887,31 @@ else()
         knx_add_test(test_application_program_object SOURCES test/unit/test_application_program_object.cpp)
         knx_add_test(test_address_association_tables SOURCES test/unit/test_address_association_tables.cpp)
         knx_add_test(test_group_object_table SOURCES test/unit/test_group_object_table.cpp)
-        knx_add_test(test_security_interface_object SOURCES test/unit/test_security_interface_object.cpp)
-        knx_add_test(test_filter_table SOURCES test/unit/test_filter_table.cpp)
-        knx_add_test(test_filter_table_load_control SOURCES test/unit/test_filter_table_load_control.cpp LABELS unit)
+        knx_add_test(test_security_interface_object NEEDS SECURITY SOURCES test/unit/test_security_interface_object.cpp)
+        knx_add_test(test_filter_table NEEDS COUPLER SOURCES test/unit/test_filter_table.cpp)
+        knx_add_test(test_filter_table_load_control NEEDS COUPLER SOURCES test/unit/test_filter_table_load_control.cpp LABELS unit)
 
         # Datapoint types
-        knx_add_test(test_dpt2_3_4 SOURCES test/unit/test_dpt2_3_4.cpp)
+        knx_add_test(test_dpt2_3_4 NEEDS DPT_STRING SOURCES test/unit/test_dpt2_3_4.cpp)
         knx_add_test(test_dpt6_7_8 SOURCES test/unit/test_dpt6_7_8.cpp)
-        knx_add_test(test_dpt10_11_19 SOURCES test/unit/test_dpt10_11_19.cpp)
-        knx_add_test(test_dpt12_13_14 SOURCES test/unit/test_dpt12_13_14.cpp)
-        knx_add_test(test_dpt16_17 SOURCES test/unit/test_dpt16_17.cpp)
-        knx_add_test(test_dpt_extended SOURCES test/unit/test_dpt_extended.cpp)
+        knx_add_test(test_dpt10_11_19 NEEDS DPT_TIME SOURCES test/unit/test_dpt10_11_19.cpp)
+        knx_add_test(test_dpt12_13_14 NEEDS DPT_FLOAT SOURCES test/unit/test_dpt12_13_14.cpp)
+        knx_add_test(test_dpt16_17 NEEDS DPT_STRING SOURCES test/unit/test_dpt16_17.cpp)
+        knx_add_test(test_dpt_extended NEEDS DPT_ACCESS DPT_COLOUR SOURCES test/unit/test_dpt_extended.cpp)
 
-        knx_add_test(test_error_injection SOURCES test/unit/test_error_injection.cpp)
+        knx_add_test(test_error_injection NEEDS DPT_FLOAT SOURCES test/unit/test_error_injection.cpp)
         knx_add_test(test_protocol_conformance SOURCES test/integration/test_protocol_conformance.cpp)
         knx_add_test(test_netip_secured_service_families SOURCES test/unit/test_netip_secured_service_families.cpp
             LABELS unit TIMEOUT 20)
         # Event-driven receive plumbing
         knx_add_test(test_netip_socket_wait SOURCES test/unit/test_netip_socket_wait.cpp LABELS unit TIMEOUT 20)
         # BAU on-wire golden tests
-        knx_add_test(test_bau_onwire SOURCES test/integration/test_bau_onwire.cpp LABELS integration)
+        knx_add_test(test_bau_onwire NEEDS SECURITY SOURCES test/integration/test_bau_onwire.cpp LABELS integration)
         # Configuration set before BusAccessUnit::init(): factory default vs restored state
-        knx_add_test(test_bau_preinit_configuration SOURCES test/integration/test_bau_preinit_configuration.cpp
+        knx_add_test(test_bau_preinit_configuration NEEDS SECURITY SOURCES test/integration/test_bau_preinit_configuration.cpp
             LABELS integration)
         # Filter Table Realisation Type 3 download through the Router Object
-        knx_add_test(test_filter_table_type3_download SOURCES test/integration/test_filter_table_type3_download.cpp
+        knx_add_test(test_filter_table_type3_download NEEDS COUPLER SOURCES test/integration/test_filter_table_type3_download.cpp
             LABELS integration)
         if(KNX_SECURE_ENABLED)
             # Data Secure end to end on the TP1 path: a whole device on the
@@ -916,20 +921,20 @@ else()
                 LABELS tp1 virtual integration secure TIMEOUT 30)
         endif()
         # Connection-oriented ETS session
-        knx_add_test(test_ets_connected_session SOURCES test/integration/test_ets_connected_session.cpp
+        knx_add_test(test_ets_connected_session NEEDS SECURITY SOURCES test/integration/test_ets_connected_session.cpp
             ARGS session TIMEOUT 30 LABELS integration)
         # The same binary, A_Key_Write / A_Authorize group
-        knx_add_test(test_ets_connected_session_keys COMMAND $<TARGET_FILE:test_ets_connected_session>
+        knx_add_test(test_ets_connected_session_keys NEEDS SECURITY COMMAND $<TARGET_FILE:test_ets_connected_session>
             ARGS keys TIMEOUT 30 LABELS integration)
         if(KNX_FEATURE_NETIP)
             # The same binary, PID_ROUTING_MULTICAST_ADDRESS group
-            knx_add_test(test_ets_connected_session_routing COMMAND $<TARGET_FILE:test_ets_connected_session>
+            knx_add_test(test_ets_connected_session_routing NEEDS SECURITY COMMAND $<TARGET_FILE:test_ets_connected_session>
                 ARGS routing TIMEOUT 30 LABELS integration)
         endif()
         # Started product runtime
-        knx_add_test(test_product_runtime SOURCES test/integration/test_product_runtime.cpp LABELS integration)
+        knx_add_test(test_product_runtime NEEDS DPT_FLOAT SOURCES test/integration/test_product_runtime.cpp LABELS integration)
         # The same binary, the table-segment capacity group (runs at every capacity)
-        knx_add_test(test_ets_connected_session_capacity COMMAND $<TARGET_FILE:test_ets_connected_session>
+        knx_add_test(test_ets_connected_session_capacity NEEDS SECURITY COMMAND $<TARGET_FILE:test_ets_connected_session>
             ARGS capacity TIMEOUT 30 LABELS integration)
         # Tests that need more than the tp1-small capacities (a 15-octet APDU, 4 receive
         # frames, no additional individual addresses) carry needs-full-capacity;
@@ -950,7 +955,7 @@ else()
             SOURCES test/conformance/test_conformance_evidence_commissioned.cpp
             LABELS conformance sdk-public-surface)
         # ETS parameters -> transmit policy
-        knx_add_test(test_transmit_policy_ets_parameters SOURCES test/integration/test_transmit_policy_ets_parameters.cpp
+        knx_add_test(test_transmit_policy_ets_parameters NEEDS DPT_FLOAT SOURCES test/integration/test_transmit_policy_ets_parameters.cpp
             LABELS integration)
 
         if(KNX_PLATFORM STREQUAL "linux")

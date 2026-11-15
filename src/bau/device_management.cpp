@@ -17,9 +17,11 @@
 
 #include "knx/application/function_property_services.hpp"
 #include "knx/application/network_parameter_service.hpp"
+#if KNX_FEATURE_COUPLER
 #include "knx/network/coupler_routing.hpp"
 #include "knx/network/two_port_coupler.hpp"
 #include "knx/network/routing_table_control.hpp"
+#endif
 #include "knx/application/address_space.hpp"
 #include "knx/objects/generic_interface_object.hpp"
 #include "knx/objects/security_interface_object.hpp"
@@ -81,6 +83,7 @@ application::KnxReturnCode translateFunctionPropertyReturnCode(FunctionPropertyR
     return static_cast<application::KnxReturnCode>(static_cast<uint8_t>(code));
 }
 
+#if KNX_SECURE_ENABLED
 util::Result<FunctionPropertyResult> handleSecurityFunctionProperty(
     objects::SecurityInterfaceObject& securityObject,
     const IndividualAddress& source,
@@ -192,6 +195,7 @@ util::Result<FunctionPropertyResult> handleSecurityFunctionProperty(
     (void)result.data.push_back(kServiceIdSecurityMode);
     return result;
 }
+#endif  // KNX_SECURE_ENABLED
 
 // KNX 03/05/01 property IDs of the two medium-specific interface objects this
 // stack can publish.  They are declared here rather than pulled from the
@@ -214,6 +218,7 @@ enum : uint8_t {
     kPidKnxNetIpBackboneKey = 91,
     kPidKnxNetIpSecuredServiceFamilies = 94,
 
+#if KNX_FEATURE_COUPLER
     kPidRouterLoadStateControl = 5,
     kPidRouterTableReference = 7,
     kPidRouterMcbTable = 27,
@@ -229,8 +234,10 @@ enum : uint8_t {
     kPidRouterHopCount = 61,
     kPidRouterMedium = 63,
     kPidRouterFilterTableUse = 67,
+#endif
 };
 
+#if KNX_FEATURE_COUPLER
 /// The Router Object's coupler configuration: what ETS downloads into a line
 /// or backbone coupler and the forwarding path acts on (03/05/01 §4.5.5,
 /// §4.5.6, §4.5.13). Persisted (InterfaceObjectManager::persistedProperties),
@@ -238,6 +245,7 @@ enum : uint8_t {
 constexpr std::array<uint8_t, 5> kRouterConfigPids{
     kPidRouterMainLcConfig, kPidRouterSubLcConfig, kPidRouterMainLcGrpConfig,
     kPidRouterSubLcGrpConfig, kPidRouterFilterTableUse};
+#endif
 
 /// Big-endian helpers: KNX properties are always network byte order.
 std::array<uint8_t, 2> beU16(uint16_t value)
@@ -422,7 +430,9 @@ util::Result<void> DeviceManagement::applyMasterReset(application::EraseCode era
         // installFactoryToolKey). The key tables are dropped whole, which
         // §3.7.1.2.3.2.2 requires so that the FDSK cannot be used to read back
         // what a previous owner downloaded.
+#if KNX_SECURE_ENABLED
         _model.restoreFactorySecurityDefaults();
+#endif
 #if KNX_FEATURE_NETIP
         // Table 6 resets the IP Resources with Erase Code 02h and keeps them
         // with 07h; the backbone key is the KNX IP Secure credential and goes
@@ -447,6 +457,7 @@ util::Result<void> DeviceManagement::applyMasterReset(application::EraseCode era
 #endif
     }
 
+#if KNX_FEATURE_COUPLER
     // A coupler's Filter Table is not "link information for Group Objects"
     // (ResetLinks, 06h, names the Group Address and Association Tables only),
     // so only the ex-factory resets touch it: back to the new-device state
@@ -460,6 +471,7 @@ util::Result<void> DeviceManagement::applyMasterReset(application::EraseCode era
     if (factoryReset) {
         restoreRouterFactoryConfig();
     }
+#endif
 
     if (resetAddress) {
         // The response has already gone out from the old address (03/05/02
@@ -602,9 +614,12 @@ void DeviceManagement::publishMediumInterfaceObjects()
     }
 #endif
 
+#if KNX_FEATURE_COUPLER
     publishRouterObject();
+#endif
 }
 
+#if KNX_FEATURE_COUPLER
 util::Result<void> DeviceManagement::configureRouterRole(const RouterRoleConfig& config)
 {
     _routerRole = config;
@@ -911,6 +926,7 @@ util::Result<void> DeviceManagement::syncRouterRoutingConfig()
     KNX_LOGI(TAG, "Router routing configuration synced from Router Object");
     return util::Result<void>::ok();
 }
+#endif  // KNX_FEATURE_COUPLER
 
 #if KNX_FEATURE_NETIP
 
@@ -1033,6 +1049,7 @@ void DeviceManagement::setSecuredServiceFamilyVersion(uint8_t serviceFamilyId, u
 
 #endif  // KNX_FEATURE_NETIP
 
+#if KNX_FEATURE_COUPLER
 util::Result<application::FunctionPropertyResult> DeviceManagement::handleRouterFunctionProperty(
     const application::FunctionPropertyRequest& request)
 {
@@ -1055,6 +1072,7 @@ util::Result<application::FunctionPropertyResult> DeviceManagement::handleRouter
     }
     return control.invoke(request.invocation, request.data.span());
 }
+#endif  // KNX_FEATURE_COUPLER
 
 void DeviceManagement::wireManagementServices()
 {
@@ -1064,6 +1082,7 @@ void DeviceManagement::wireManagementServices()
         return;
     }
 
+#if KNX_FEATURE_FUNCTION_PROPERTIES
     // --- Function Properties ----------------------------------------------
     _stackPort->setFunctionPropertyHandler(
         [this](const IndividualAddress& source,
@@ -1078,17 +1097,23 @@ void DeviceManagement::wireManagementServices()
                 return handleKnxNetIpFunctionProperty(source, request);
             }
 #endif
+#if KNX_SECURE_ENABLED
             if (*objectType == InterfaceObjectType::security()) {
                 return handleSecurityFunctionProperty(_model.securityObject(), source, request);
             }
+#endif
 
+#if KNX_FEATURE_COUPLER
             if (*objectType == InterfaceObjectType::router()) {
                 return handleRouterFunctionProperty(request);
             }
+#endif
 
+#if KNX_FEATURE_GO_DIAGNOSTICS
             if (*objectType == InterfaceObjectType::groupObjectTable()) {
                 return handleGroupObjectDiagnostics(request);
             }
+#endif
 
             // Any other object: return an error so the caller produces the
             // §3.4.5.3 response telling the management client the property is
@@ -1096,7 +1121,9 @@ void DeviceManagement::wireManagementServices()
             // placeholder.
             return util::ErrorCode::OperationNotSupported;
         });
+#endif
 
+#if KNX_FEATURE_PROPERTY_EXT && KNX_FEATURE_FUNCTION_PROPERTIES
     // Same functions reached through the *extended* services, which is how ETS
     // drives Data Secure: Profiles §9.1.2.3 makes A_FunctionPropertyExt* part
     // of the KNX Data Security profile, and ETS reads PID_SECURITY_MODE of the
@@ -1128,16 +1155,28 @@ void DeviceManagement::wireManagementServices()
 
             const InterfaceObjectType objectType{static_cast<uint16_t>(header.objectType)};
             util::Result<FunctionPropertyResult> result = util::ErrorCode::OperationNotSupported;
+            // Each object type answers its own function properties; a build
+            // without the feature has no branch for the type, which then
+            // falls through to "not a function property of this object".
+            if (false) {
+            }
 #if KNX_FEATURE_NETIP
-            if (objectType == InterfaceObjectType::knxNetIpParameter()) {
+            else if (objectType == InterfaceObjectType::knxNetIpParameter()) {
                 result = handleKnxNetIpFunctionProperty(source, request);
-            } else
+            }
 #endif
-            if (objectType == InterfaceObjectType::security()) {
+#if KNX_SECURE_ENABLED
+            else if (objectType == InterfaceObjectType::security()) {
                 result = handleSecurityFunctionProperty(_model.securityObject(), source, request);
-            } else if (objectType == InterfaceObjectType::router()) {
+            }
+#endif
+#if KNX_FEATURE_COUPLER
+            else if (objectType == InterfaceObjectType::router()) {
                 result = handleRouterFunctionProperty(request);
-            } else if (objectType == InterfaceObjectType::groupObjectTable()) {
+            }
+#endif
+#if KNX_FEATURE_GO_DIAGNOSTICS
+            else if (objectType == InterfaceObjectType::groupObjectTable()) {
                 // ETS reads and writes a *secured* group address through the
                 // device rather than sending the telegram itself, and that is
                 // PID_GO_DIAGNOSTICS on this object.  Answering it with
@@ -1145,6 +1184,7 @@ void DeviceManagement::wireManagementServices()
                 // … to send group message on behalf of ETS failed".
                 result = handleGroupObjectDiagnostics(request);
             }
+#endif
 
             if (result.isError()) {
                 // "Not a function property of this object" — nullopt lets the
@@ -1184,6 +1224,7 @@ void DeviceManagement::wireManagementServices()
             }
             return code;
         });
+#endif
 
     // --- Restart ----------------------------------------------------------
     // A_Restart is how a management client ends the individual-address
@@ -1442,6 +1483,7 @@ util::Result<void> DeviceManagement::applyKnxNetIpConfiguration(const netip::Knx
 void ManagementControl::setDeviceMedium(MediumType medium) { _management.setDeviceMedium(medium); }
 util::Result<void> ManagementControl::setCommissioningMode(bool enabled) { return _management.setCommissioningMode(enabled); }
 bool ManagementControl::commissioningModeEnabled() const { return _management.commissioningModeEnabled(); }
+#if KNX_FEATURE_COUPLER
 util::Result<void> ManagementControl::configureRouterRole(const RouterRoleConfig& config) { return _management.configureRouterRole(config); }
 util::Result<void> ManagementControl::syncRouterRoutingConfig() { return _management.syncRouterRoutingConfig(); }
 bool ManagementControl::hasRouterRole() const { return _management.hasRouterRole(); }
@@ -1450,6 +1492,7 @@ network::FilterTableLoadControl* ManagementControl::filterTableLoadControl()
 {
     return _management.filterTableLoadControl();
 }
+#endif
 
 util::Result<void> ManagementControl::setReferenceObjectProperty(InterfaceObjectType objectType,
                                                                  application::PropertyID propertyId,
@@ -1503,7 +1546,9 @@ void ManagementControl::setRoutingMulticastAddressCallback(RoutingMulticastAddre
 #endif
 
 bool ConstManagementControl::commissioningModeEnabled() const { return _management.commissioningModeEnabled(); }
+#if KNX_FEATURE_COUPLER
 bool ConstManagementControl::hasRouterRole() const { return _management.hasRouterRole(); }
+#endif
 const std::vector<InterfaceObjectType>& ConstManagementControl::referenceInterfaceObjectTypes() const
 {
     return _management.model().referenceObjectTypes();

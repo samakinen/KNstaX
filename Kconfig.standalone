@@ -90,8 +90,8 @@ menu "Standalone build (not seen by ESP-IDF)"
     # Second definitions of two symbols from `Kconfig`: same type, visible in a
     # standalone build whatever KNX_MEDIUM says.
     config KNX_ENABLE_COUPLER
-        bool "Coupler group acknowledge"
-        depends on KNX_BUILD_TP1
+        bool "Coupler (line / backbone router role)"
+        depends on KNX_BUILD_TP1 && KNX_ENABLE_FUNCTION_PROPERTIES
 
     config KNX_ENABLE_TUNNELING
         bool "Enable Tunneling"

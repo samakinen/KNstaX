@@ -77,6 +77,7 @@ uint8_t GroupObject::asUint8() const {
     return _rawValue[0];
 }
 
+#if KNX_FEATURE_DPT_FLOAT
 float GroupObject::asFloat() const {
     if (!_valid || _rawValue.size() < 2) return 0.0f;
     float result = 0.0f;
@@ -85,6 +86,7 @@ float GroupObject::asFloat() const {
     }
     return result;
 }
+#endif
 
 util::Result<void> GroupObject::setValue(bool value) {
     return setValue(DptValue(value));
@@ -194,6 +196,7 @@ bool GroupObject::changedSignificantly() const {
         return false;
     }
 
+#if KNX_FEATURE_DPT_FLOAT
     const double threshold = _config.transmitPolicy.changeThreshold;
     if (threshold <= 0.0) {
         return true;  // any change counts
@@ -214,6 +217,28 @@ bool GroupObject::changedSignificantly() const {
     }
     const double delta = (cur >= prev) ? (cur - prev) : (prev - cur);
     return delta >= threshold;
+#else
+    const uint32_t threshold = _config.transmitPolicy.changeThreshold;
+    if (threshold == 0u) {
+        return true;  // any change counts
+    }
+
+    // Integer DPTs: compare the decoded values against the integer threshold.
+    // Anything else (or a decode failure) counts as changed, since the raw
+    // bytes already differ.
+    auto current = decodeDptValue(_config.dpt, _rawValue.span());
+    auto previous = decodeDptValue(_config.dpt, _lastSentRaw.span());
+    if (current.isError() || previous.isError()) {
+        return true;
+    }
+    int64_t cur = 0;
+    int64_t prev = 0;
+    if (!dptValueAsInteger(current.value(), cur) || !dptValueAsInteger(previous.value(), prev)) {
+        return true;
+    }
+    const uint64_t delta = static_cast<uint64_t>(cur >= prev ? cur - prev : prev - cur);
+    return delta >= threshold;
+#endif
 }
 
 PublishDecision GroupObject::decidePublish(uint32_t nowMs) const {

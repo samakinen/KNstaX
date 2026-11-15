@@ -17,8 +17,10 @@
 #include "knx/objects/application_program_object.hpp"
 #include "knx/objects/generic_interface_object.hpp"
 #include "knx/objects/group_object_table_object.hpp"
-#include "knx/objects/security_interface_object.hpp"
 #include "knx/config.hpp"
+#if KNX_SECURE_ENABLED
+#include "knx/objects/security_interface_object.hpp"
+#endif
 #if KNX_FEATURE_NETIP
 #include "knx/netip/netip_parameter_object.hpp"
 #include "knx/physical/ip_routing_physical.hpp"
@@ -286,9 +288,11 @@ public:
     objects::DeviceObject& deviceObject() { return _deviceObject; }
     const objects::DeviceObject& deviceObject() const { return _deviceObject; }
 
+#if KNX_SECURE_ENABLED
     // Security interface object access (for provisioning/tests)
     objects::SecurityInterfaceObject& securityObject() { return _securityObject; }
     const objects::SecurityInterfaceObject& securityObject() const { return _securityObject; }
+#endif
 
     // Application program object access
     objects::ApplicationProgramObject& applicationProgram() { return _applicationProgram; }
@@ -416,6 +420,7 @@ public:
     LinkAccess link();
     ConstLinkAccess link() const;
 
+#if KNX_FEATURE_COUPLER
     /**
      * @brief Declares this device a line/backbone coupler and publishes the
      *        Router Object (Interface Object Type 6).
@@ -467,18 +472,22 @@ public:
          */
         network::CouplerRoutingPolicy* routingPolicy{nullptr};
     };
+#endif  // KNX_FEATURE_COUPLER
 
 private:
     platform::Platform& _platform;
 
-    // The six system interface objects. Owned here so the accessors above can
+    // The system interface objects (six with KNX Secure, five without: the
+    // Security Interface Object is absent when it is off). Owned here so the accessors above can
     // hand them out; the components hold references.
     objects::DeviceObject _deviceObject;
     objects::AddressTableObject _addressTable;
     objects::AssociationTableObject _associationTable;
     objects::ApplicationProgramObject _applicationProgram;
     objects::GroupObjectTableObject _groupObjectTable;
+#if KNX_SECURE_ENABLED
     objects::SecurityInterfaceObject _securityObject;
+#endif
 
     std::unique_ptr<BusAccessStackPort> _stackPort;
     // Constructed in this order, each from the ones before it; never null.
@@ -569,7 +578,9 @@ private:
  */
 class ManagementControl {
 public:
+#if KNX_FEATURE_COUPLER
     using RouterRoleConfig = BusAccessUnit::RouterRoleConfig;
+#endif
 
     explicit ManagementControl(DeviceManagement& management) : _management(management) {}
 
@@ -585,6 +596,7 @@ public:
     util::Result<void> setCommissioningMode(bool enabled);
     bool commissioningModeEnabled() const;
 
+#if KNX_FEATURE_COUPLER
     /// Declare this device a coupler and publish the Router Object. Opt-in:
     /// see BusAccessUnit::RouterRoleConfig for why it is not automatic.
     util::Result<void> configureRouterRole(const RouterRoleConfig& config);
@@ -607,6 +619,7 @@ public:
      * Null until the Router Object is published.
      */
     network::FilterTableLoadControl* filterTableLoadControl();
+#endif  // KNX_FEATURE_COUPLER
 
 #if KNX_FEATURE_NETIP
     /**
@@ -719,7 +732,9 @@ public:
     explicit ConstManagementControl(const DeviceManagement& management) : _management(management) {}
 
     bool commissioningModeEnabled() const;
+#if KNX_FEATURE_COUPLER
     bool hasRouterRole() const;
+#endif
     const std::vector<InterfaceObjectType>& referenceInterfaceObjectTypes() const;
 #if KNX_FEATURE_NETIP
     [[nodiscard]] IpAddress routingMulticastAddress() const;
@@ -746,9 +761,11 @@ public:
     util::Result<void> sendFrame(const datalink::LDataFrame& frame);
     void setPromiscuousMode(datalink::PromiscuousMode mode);
 
+#if KNX_FEATURE_COUPLER
     /// The coupler, when this device's stack port was built as one; nullptr
     /// otherwise. Gives access to the filter table and the routing policy.
     network::TwoPortCoupler* coupler();
+#endif
 
     /// Re-issue the routing group membership, for a stack port that has one.
     /// OperationNotSupported on any other medium.
@@ -778,6 +795,7 @@ private:
 std::unique_ptr<BusAccessStackPort> createTp1StackPort(platform::Platform& platform,
                                                        std::unique_ptr<physical::Tp1MacPhysical> physicalLayer);
 
+#if KNX_FEATURE_COUPLER
 /**
  * @brief A stack port that is also a KNX coupler.
  *
@@ -799,6 +817,7 @@ std::unique_ptr<BusAccessStackPort> createTp1CouplerStackPort(
     platform::Platform& platform,
     std::unique_ptr<physical::Tp1MacPhysical> primaryPhysical,
     std::unique_ptr<physical::Tp1MacPhysical> secondaryPhysical);
+#endif  // KNX_FEATURE_COUPLER
 #endif  // KNX_FEATURE_TP1
 
 #if KNX_FEATURE_NETIP

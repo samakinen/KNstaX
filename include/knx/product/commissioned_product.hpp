@@ -24,7 +24,9 @@
 #include "knx/product/endpoint.hpp"
 #include "knx/util/inplace_function.hpp"
 #include "knx/util/log.hpp"
+#if KNX_FEATURE_COUPLER
 #include "knx/network/two_port_coupler.hpp"
+#endif
 #include "knx/util/result.hpp"
 
 #include <algorithm>
@@ -446,11 +448,18 @@ inline ValueT fromBigEndianBytes(std::span<const uint8_t> bytes) noexcept
     } else if constexpr (std::is_same_v<ValueT, Dpt9Float>) {
         // KNX DPT9 2-byte half-float — the format ETS writes into parameter
         // memory for TypeFloat Encoding="DPT 9". Decoded by the shared codec.
+        static_assert(KNX_FEATURE_DPT_FLOAT || sizeof(ValueT) == 0,
+                      "a DPT 9 float parameter needs KNX_DPT_FLOAT (CONFIG_KNX_DPT_FLOAT=y)");
+#if KNX_FEATURE_DPT_FLOAT
         float value = 0.0f;
         if (application::Dpt9::decode(bytes.first(2), value).isError()) {
             return Dpt9Float{0.0f};
         }
         return Dpt9Float{value};
+#else
+        (void)bytes;
+        return Dpt9Float{0.0f};
+#endif
     } else if constexpr (std::is_enum_v<ValueT>) {
         using U = std::underlying_type_t<ValueT>;
         if constexpr (sizeof(U) == 1u) {
@@ -486,9 +495,16 @@ inline void toBigEndianBytes(ValueT value, std::span<uint8_t> out) noexcept
         out[2] = static_cast<uint8_t>((raw >>  8u) & 0xFFu);
         out[3] = static_cast<uint8_t>( raw          & 0xFFu);
     } else if constexpr (std::is_same_v<ValueT, Dpt9Float>) {
+        static_assert(KNX_FEATURE_DPT_FLOAT || sizeof(ValueT) == 0,
+                      "a DPT 9 float parameter needs KNX_DPT_FLOAT (CONFIG_KNX_DPT_FLOAT=y)");
+#if KNX_FEATURE_DPT_FLOAT
         out[0] = 0u;
         out[1] = 0u;
         (void)application::Dpt9::encode(value.value, out.first(2));
+#else
+        (void)value;
+        (void)out;
+#endif
     } else if constexpr (std::is_enum_v<ValueT>) {
         using U = std::underlying_type_t<ValueT>;
         toBigEndianBytes(static_cast<U>(value), out);
@@ -732,6 +748,7 @@ constexpr auto makeCommissionedProduct(EndpointDefinitionT endpointDefinition,
     };
 }
 
+#if KNX_SECURE_ENABLED
 /// The KNX Data Secure state this device has ex-factory.
 ///
 /// Both fields are factory defaults (the rule on bau::BusAccessUnit::init and
@@ -755,6 +772,7 @@ struct SecureCommissioningOptions {
     /// it false for an ETS-commissioned product: the mode belongs to ETS.
     bool securityModeAtFactoryReset{false};
 };
+#endif  // KNX_SECURE_ENABLED
 
 struct CommissionedProductOptions {
     KnxPersistenceIdentity persistence{};
@@ -765,9 +783,11 @@ struct CommissionedProductOptions {
     std::unique_ptr<physical::Tp1MediumBackend> mediumBackend;
     bool restoreKnxStateOnBoot{true};
     bool startInProgrammingMode{false};
+#if KNX_SECURE_ENABLED
     /// Secure commissioning options.  Defaults are behavior-safe: security
     /// disabled, no keys applied.  Non-secure products require no change here.
     SecureCommissioningOptions secure{};
+#endif
 };
 
 enum class CommissionedTransportPath : uint8_t {
@@ -778,7 +798,9 @@ enum class CommissionedTransportPath : uint8_t {
     IpRouting,           ///< IP routing — raw physical pointer (advanced manual)
     IpTunnelingManaged,  ///< IP tunneling via IpTunnelingOptions (functional, stack-managed)
     IpRoutingManaged,    ///< IP routing via IpRoutingOptions (functional, stack-managed)
+#if KNX_FEATURE_COUPLER
     Tp1Coupler,          ///< Two TP1 ports with spec routing between them (product-grade)
+#endif
 };
 
 /// Support tier classification for the active transport path.
@@ -792,7 +814,9 @@ constexpr CommissionedSupportTier supportTierForTransportPath(CommissionedTransp
 {
     switch (path) {
         case CommissionedTransportPath::Tp1MediumBackend:
+#if KNX_FEATURE_COUPLER
         case CommissionedTransportPath::Tp1Coupler:
+#endif
             return CommissionedSupportTier::ProductGrade;
         case CommissionedTransportPath::IpTunnelingManaged:
         case CommissionedTransportPath::IpRoutingManaged:
@@ -819,9 +843,11 @@ struct IpTunnelingOptions {
     IpAddress host{};
     /// KNXnet/IP gateway port (default 3671).
     NetIpPort port{NetIpPort(3671)};
+#if KNX_SECURE_ENABLED
     /// Device-level KNX Data Secure options (same as for TP1).  Default is
     /// behavior-safe (security disabled, no keys).
     SecureCommissioningOptions secure{};
+#endif
 };
 #endif  // KNX_IP_TUNNELING
 
@@ -910,11 +936,14 @@ struct IpRoutingOptions {
 
     /// Optional KNX/IP Secure Routing settings (network-level, not device-level).
     IpRoutingSecureOptions secureRouting{};
+#if KNX_SECURE_ENABLED
     /// Device-level KNX Data Secure options.  Default is behavior-safe.
     SecureCommissioningOptions secure{};
+#endif
 };
 #endif  // KNX_FEATURE_NETIP
 
+#if KNX_FEATURE_COUPLER
 /**
  * @brief Options for starting a commissioned product as a KNX coupler.
  *
@@ -949,9 +978,12 @@ struct CouplerOptions {
     /// PID_MEDIUM for the secondary side. 0 = TP1, 1 = PL110, 2 = RF, 5 = IP.
     uint8_t subMedium{0};
 
+#if KNX_SECURE_ENABLED
     /// Device-level KNX Data Secure options.
     SecureCommissioningOptions secure{};
+#endif
 };
+#endif  // KNX_FEATURE_COUPLER
 
 template <typename ProductDefinitionT, size_t BindingCapacity>
 class CommissionedBindingsBuilder {
@@ -1109,6 +1141,7 @@ private:
                                          CommissionedProductOptions options)
         -> util::Result<CommissionedProductHandle<DefinitionT, Cap>>;
 
+#if KNX_SECURE_ENABLED
     template <typename DefinitionT, size_t Cap>
     friend auto startCommissionedProduct(platform::Platform& platform,
                                          const DefinitionT& definition,
@@ -1116,13 +1149,23 @@ private:
                                          std::unique_ptr<physical::Tp1MacPhysical> physical,
                                          SecureCommissioningOptions secure)
         -> util::Result<CommissionedProductHandle<DefinitionT, Cap>>;
+#else
+    template <typename DefinitionT, size_t Cap>
+    friend auto startCommissionedProduct(platform::Platform& platform,
+                                         const DefinitionT& definition,
+                                         CommissionedBindingsBuilder<DefinitionT, Cap>&& bindings,
+                                         std::unique_ptr<physical::Tp1MacPhysical> physical)
+        -> util::Result<CommissionedProductHandle<DefinitionT, Cap>>;
+#endif
 
+#if KNX_FEATURE_COUPLER
     template <typename DefinitionT, size_t Cap>
     friend auto startCommissionedProduct(platform::Platform& platform,
                                          const DefinitionT& definition,
                                          CommissionedBindingsBuilder<DefinitionT, Cap>&& bindings,
                                          CouplerOptions options)
         -> util::Result<CommissionedProductHandle<DefinitionT, Cap>>;
+#endif
 
 #if KNX_IP_TUNNELING
     template <typename DefinitionT, size_t Cap>
@@ -1231,7 +1274,9 @@ public:
                   .restoreKnxStateOnBoot = options.restoreKnxStateOnBoot,
               })
         , _startInProgrammingMode(options.startInProgrammingMode)
+#if KNX_SECURE_ENABLED
         , _secureOptions(options.secure)
+#endif
     {
     }
 
@@ -1270,6 +1315,7 @@ public:
         return util::Result<void>::ok();
     }
 
+#if KNX_FEATURE_COUPLER
     /**
      * @brief Start as a KNX coupler over two TP1 ports.
      *
@@ -1277,7 +1323,6 @@ public:
      * parameters, persistence, ETS commissioning — and forwarding between the
      * two ports is added on top.
      */
-#if KNX_FEATURE_TP1
     auto start(platform::Platform& platform, CouplerOptions options) -> util::Result<void>
     {
         if (!options.primary || !options.secondary) {
@@ -1289,7 +1334,9 @@ public:
             std::make_unique<physical::Tp1MacPhysical>(std::move(options.primary)),
             std::make_unique<physical::Tp1MacPhysical>(std::move(options.secondary)));
 
+#if KNX_SECURE_ENABLED
         _secureOptions = options.secure;
+#endif
         applySecureOptions();  // factory defaults: before init(), restore wins
         auto startResult = _runtime.start(platform, std::move(stackPort));
         if (startResult.isError()) {
@@ -1320,6 +1367,8 @@ public:
 
         return util::Result<void>::ok();
     }
+#endif  // KNX_FEATURE_COUPLER
+#if KNX_FEATURE_TP1
 
     auto start(platform::Platform& platform,
                std::unique_ptr<physical::Tp1MacPhysical> physical) -> util::Result<void>
@@ -1428,7 +1477,9 @@ public:
         physical->setNetworkInterface(network);
         physical->setGateway(options.host, options.port);
 
+#if KNX_SECURE_ENABLED
         _secureOptions = options.secure;
+#endif
         applySecureOptions();  // factory defaults: before init(), restore wins
         auto startResult = _runtime.start(platform, std::move(physical));
         if (startResult.isError()) {
@@ -1538,7 +1589,9 @@ public:
         // reach it after start().
         auto* routing = physical.get();
 
+#if KNX_SECURE_ENABLED
         _secureOptions = options.secure;
+#endif
         applySecureOptions();  // factory defaults: before init(), restore wins
         auto startResult = _runtime.start(platform, std::move(physical));
         if (startResult.isError()) {
@@ -1710,6 +1763,7 @@ public:
         return _runtime.linkDiagnostics();
     }
 
+#if KNX_FEATURE_COUPLER
     /**
      * @brief The coupler, when the product was started with `CouplerOptions`.
      *
@@ -1727,6 +1781,7 @@ public:
      * `PID_ROUTETABLE_CONTROL`. Call this after a download completes.
      */
     util::Result<void> syncRouterRoutingConfig() { return _runtime.syncRouterRoutingConfig(); }
+#endif  // KNX_FEATURE_COUPLER
 
     /**
      * Progress the runtime and deliver queued firmware callbacks.
@@ -1951,6 +2006,7 @@ public:
     {
         return supportTier() == CommissionedSupportTier::ProductGrade;
     }
+#if KNX_SECURE_ENABLED
 
     // -----------------------------------------------------------------------
     // KNX Data Secure helpers (Phase C key provisioning API)
@@ -2041,6 +2097,7 @@ public:
     {
         return _runtime.toolKeyMatches(key);
     }
+#endif  // KNX_SECURE_ENABLED
 
     const auto& knxPersistenceIdentity() const
     {
@@ -2126,7 +2183,9 @@ private:
     endpoint_runtime_type _runtime;
     bool _startInProgrammingMode{false};
     CommissionedTransportPath _transportPath{CommissionedTransportPath::NotStarted};
+#if KNX_SECURE_ENABLED
     SecureCommissioningOptions _secureOptions{};
+#endif
 #if KNX_FEATURE_NETIP && KNX_SECURE_ENABLED
     /// Held by pointer in the routing physical, hence on the heap.
     std::unique_ptr<detail::PersistentMcTimerStore> _mcTimerStore;
@@ -2186,8 +2245,10 @@ private:
     // device back on its factory Tool Key behind ETS's back at every boot.
     void applySecureOptions()
     {
+#if KNX_SECURE_ENABLED
         (void)_runtime.setFactorySecurityDefaults(_secureOptions.securityModeAtFactoryReset,
                                                   _secureOptions.factoryToolKey);
+#endif
     }
 };
 
@@ -2212,7 +2273,9 @@ auto startCommissionedProduct(platform::Platform& platform,
             .mediumBackend = nullptr,
             .restoreKnxStateOnBoot = options.restoreKnxStateOnBoot,
             .startInProgrammingMode = options.startInProgrammingMode,
+#if KNX_SECURE_ENABLED
             .secure = options.secure,
+#endif
         });
 
     auto startResult = runtime->start(platform, std::move(options.mediumBackend));
@@ -2239,6 +2302,7 @@ auto startCommissionedProduct(platform::Platform& platform,
         });
 }
 
+#if KNX_FEATURE_COUPLER
 /**
  * @brief Overload: start the product as a KNX coupler over two TP1 ports.
  *
@@ -2273,7 +2337,9 @@ auto startCommissionedProduct(platform::Platform& platform,
         std::move(bindings)._lifecycleCallback,
         CommissionedProductOptions{
             .mediumBackend = nullptr,
+#if KNX_SECURE_ENABLED
             .secure = options.secure,
+#endif
         });
 
     auto startResult = runtime->start(platform, std::move(options));
@@ -2283,7 +2349,9 @@ auto startCommissionedProduct(platform::Platform& platform,
 
     return runtime;
 }
+#endif  // KNX_FEATURE_COUPLER
 
+#if KNX_SECURE_ENABLED
 /// Overload: assemble with a TP1 MAC physical layer (the bit-bang backend),
 /// with the device's ex-factory Data Secure state.
 template <typename ProductDefinitionT, size_t BindingCapacity>
@@ -2313,6 +2381,7 @@ auto startCommissionedProduct(platform::Platform& platform,
 
     return runtime;
 }
+#endif  // KNX_SECURE_ENABLED
 
 /// Overload: assemble with a TP1 MAC physical layer, no Data Secure defaults.
 template <typename ProductDefinitionT, size_t BindingCapacity>
@@ -2322,8 +2391,25 @@ auto startCommissionedProduct(platform::Platform& platform,
                               std::unique_ptr<physical::Tp1MacPhysical> physical)
     -> util::Result<CommissionedProductHandle<ProductDefinitionT, BindingCapacity>>
 {
+#if KNX_SECURE_ENABLED
     return startCommissionedProduct(platform, definition, std::move(bindings), std::move(physical),
                                     SecureCommissioningOptions{});
+#else
+    CommissionedProductOptions options{};
+    auto runtime = std::make_unique<CommissionedProductRuntime<ProductDefinitionT, BindingCapacity>>(
+        definition,
+        std::move(bindings)._endpointBindings,
+        std::move(bindings)._parameterCallbacks,
+        std::move(bindings)._lifecycleCallback,
+        std::move(options));
+
+    auto startResult = runtime->start(platform, std::move(physical));
+    if (startResult.isError()) {
+        return startResult.error();
+    }
+
+    return runtime;
+#endif
 }
 
 #if KNX_IP_TUNNELING

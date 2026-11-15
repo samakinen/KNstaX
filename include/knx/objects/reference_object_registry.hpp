@@ -9,6 +9,7 @@
 #pragma once
 
 #include "knx/application/property.hpp"
+#include "knx/config.hpp"
 #include "knx/types.hpp"
 
 #include <cstddef>
@@ -35,7 +36,9 @@ struct PropertyDeclaration {
 /// How many interface object types isReferenceObjectType() accepts. Sizes the
 /// InterfaceObjectManager's object list; a static_assert beside the list of
 /// types keeps the two in step.
-inline constexpr size_t kReferenceObjectTypeCount = 13;
+/// The Router Object (type 6) is one of them only in a build with the coupler
+/// role (KNX_FEATURE_COUPLER); without it the type is unknown here.
+inline constexpr size_t kReferenceObjectTypeCount = KNX_FEATURE_COUPLER ? 13 : 12;
 
 bool isReferenceObjectType(InterfaceObjectType type);
 std::span<const PropertyDeclaration> referenceObjectProperties(InterfaceObjectType type);

@@ -25,6 +25,17 @@ at the end is not proof that an area is complete.
 
 ### Implemented
 
+**Configuration.** The claims below are for a build with every feature on (`host-test`, `full`). A build
+can leave out, by Kconfig symbol: the extended memory services (`KNX_ENABLE_MEMORY_EXT`), the extended property
+and extended function property services (`KNX_ENABLE_PROPERTY_EXT`), the function property services
+(`KNX_ENABLE_FUNCTION_PROPERTIES`), the network parameter services (`KNX_ENABLE_NETWORK_PARAMETER`), group
+object diagnostics (`KNX_ENABLE_GO_DIAGNOSTICS`), the Router Object and routing (`KNX_ENABLE_COUPLER`) and the
+Security Interface Object and Data Secure (`KNX_ENABLE_SECURITY`). A service that is off is ignored like an
+unknown APCI; an object that is off is not present, not described and not counted. Data Secure needs the
+extended property and the function property services, so it selects them. Where the result of a service does not fit the APDU, the service answers
+with the error KNX defines instead of dropping the request: the extended memory, extended property value and
+function property services use E_EXCEED_MAX_APDU_LENGTH, the classic function property E_ERROR.
+
 | Service | APCI | Notes |
 |---|---|---|
 | A_GroupValue_Read / _Response / _Write | 0x000 / 0x040 / 0x080 | Gated by the object's R/W/U/C flags |

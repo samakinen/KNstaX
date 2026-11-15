@@ -234,11 +234,14 @@ constexpr uint16_t RESTART_PROCESS_TIME_S = CONFIG_KNX_RESTART_PROCESS_TIME_S;
 #  endif
 #endif
 
-// KNX_FEATURE_COUPLER gates the coupler's layer-2 group acknowledge in the TP1
-// receive path (physical::GroupAckFilter): the hook in the receive ISR and the
-// plumbing to it. An end device never needs it, and the ISR is IRAM. Set by
-// the build system (CONFIG_KNX_ENABLE_COUPLER on ESP-IDF, the
-// KNX_FEATURE_COUPLER variable derived from CONFIG_KNX_ENABLE_COUPLER on a standalone build); the fallback follows the
+// KNX_FEATURE_COUPLER gates the whole router role of a line or backbone
+// coupler: the Filter Table, the Router Object, the two-port coupler and its
+// routing policy, the product API that declares them, and the layer-2 group
+// acknowledge in the TP1 receive path (physical::GroupAckFilter: the hook in
+// the receive ISR and the plumbing to it). An end device never needs any of it,
+// and the ISR is IRAM. Set by the build system (CONFIG_KNX_ENABLE_COUPLER on
+// ESP-IDF, the KNX_FEATURE_COUPLER variable derived from
+// CONFIG_KNX_ENABLE_COUPLER on a standalone build); the fallback follows the
 // same rule as the media flags.
 #ifndef KNX_FEATURE_COUPLER
 #  if defined(CONFIG_KNX_ENABLE_COUPLER)
@@ -248,6 +251,70 @@ constexpr uint16_t RESTART_PROCESS_TIME_S = CONFIG_KNX_RESTART_PROCESS_TIME_S;
 #  else
 #    define KNX_FEATURE_COUPLER 1
 #  endif
+#endif
+
+// Optional features (Kconfig menu "Optional Features"). Each KNX_FEATURE_*
+// below is 1 when its CONFIG_KNX_* symbol is y and 0 otherwise: Kconfig defines
+// a bool that is y and leaves one that is n out, and this file stops with
+// #error above when no configuration is present at all, so there is no
+// fallback to get wrong. A feature that is 0 is absent: its translation units
+// are not compiled and the declarations that need them are removed, so using
+// one is a compile error rather than a link error. KNX_FEATURE_COUPLER (above)
+// and KNX_SECURE_ENABLED (below) are the same kind of switch.
+#if defined(CONFIG_KNX_ENABLE_FUNCTION_PROPERTIES)
+#  define KNX_FEATURE_FUNCTION_PROPERTIES 1
+#else
+#  define KNX_FEATURE_FUNCTION_PROPERTIES 0
+#endif
+#if defined(CONFIG_KNX_ENABLE_PROPERTY_EXT)
+#  define KNX_FEATURE_PROPERTY_EXT 1
+#else
+#  define KNX_FEATURE_PROPERTY_EXT 0
+#endif
+#if defined(CONFIG_KNX_ENABLE_MEMORY_EXT)
+#  define KNX_FEATURE_MEMORY_EXT 1
+#else
+#  define KNX_FEATURE_MEMORY_EXT 0
+#endif
+#if defined(CONFIG_KNX_ENABLE_NETWORK_PARAMETER)
+#  define KNX_FEATURE_NETWORK_PARAMETER 1
+#else
+#  define KNX_FEATURE_NETWORK_PARAMETER 0
+#endif
+#if defined(CONFIG_KNX_ENABLE_GO_DIAGNOSTICS)
+#  define KNX_FEATURE_GO_DIAGNOSTICS 1
+#else
+#  define KNX_FEATURE_GO_DIAGNOSTICS 0
+#endif
+#if defined(CONFIG_KNX_DPT_FLOAT)
+#  define KNX_FEATURE_DPT_FLOAT 1
+#else
+#  define KNX_FEATURE_DPT_FLOAT 0
+#endif
+#if defined(CONFIG_KNX_DPT_TIME)
+#  define KNX_FEATURE_DPT_TIME 1
+#else
+#  define KNX_FEATURE_DPT_TIME 0
+#endif
+#if defined(CONFIG_KNX_DPT_STRING)
+#  define KNX_FEATURE_DPT_STRING 1
+#else
+#  define KNX_FEATURE_DPT_STRING 0
+#endif
+#if defined(CONFIG_KNX_DPT_COLOUR)
+#  define KNX_FEATURE_DPT_COLOUR 1
+#else
+#  define KNX_FEATURE_DPT_COLOUR 0
+#endif
+#if defined(CONFIG_KNX_DPT_ACCESS)
+#  define KNX_FEATURE_DPT_ACCESS 1
+#else
+#  define KNX_FEATURE_DPT_ACCESS 0
+#endif
+#if defined(CONFIG_KNX_ENABLE_DPT_CATALOGUE)
+#  define KNX_FEATURE_DPT_CATALOGUE 1
+#else
+#  define KNX_FEATURE_DPT_CATALOGUE 0
 #endif
 
 // KNX_SECURE_ENABLED gates the whole KNX Secure surface (Data Secure, IP

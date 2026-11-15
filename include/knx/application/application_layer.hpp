@@ -179,13 +179,17 @@ public:
 
     DeviceDescriptorService& deviceDescriptorService() { return _management.deviceDescriptorService(); }
     PropertyServices& propertyServices() { return _management.propertyServices(); }
+#if KNX_FEATURE_PROPERTY_EXT
     PropertyExtServices& propertyExtServices() { return _management.propertyExtServices(); }
+#endif
     MemoryService& memoryService() { return _management.memoryService(); }
     AuthorizationService& authorizationService() { return _management.authorizationService(); }
     RestartService& restartService() { return _management.restartService(); }
     /// PDT_FUNCTION properties install their handler here; it is the path ETS
     /// uses to switch KNX Data Secure on.
+#if KNX_FEATURE_FUNCTION_PROPERTIES
     FunctionPropertyServices& functionPropertyServices() { return _management.functionPropertyServices(); }
+#endif
     NetworkParameterService& networkParameterService() { return _management.networkParameterService(); }
     /// Exposed so higher layers and integration tests can configure memory
     /// regions for Memory Services.

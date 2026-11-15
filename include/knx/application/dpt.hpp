@@ -26,6 +26,7 @@
 #include <string>
 #include <type_traits>
 #include <variant>
+#include "knx/config.hpp"
 #include "knx/util/result.hpp"
 
 namespace knx {
@@ -220,19 +221,42 @@ struct Dpt244Value {
 
 namespace dptids {
 
+// The identifier of a type exists whether or not its family is configured in:
+// it is a constant, and keeping it is what lets a port that uses a type of an
+// absent family fail with a message naming the Kconfig symbol (endpoint
+// definition, PortSpec) rather than with an unknown name.
 #define KNX_DPT_CATALOG_ENTRY(symbol, mainType, subType, valueType, cppType, codecType, shortName, description) \
+inline constexpr DptId symbol{DptMainType::mainType, subType};
+#define KNX_DPT_CATALOG_OFF(family, symbol, mainType, subType, valueType, cppType, codecType, shortName, description) \
 inline constexpr DptId symbol{DptMainType::mainType, subType};
 #include "knx/application/dpt_catalog.inc"
 #undef KNX_DPT_CATALOG_ENTRY
+#undef KNX_DPT_CATALOG_OFF
 
 } // namespace dptids
+
+namespace detail {
+
+/// Base of the tag of every catalogue type whose family is configured out; one
+/// derived marker per family, so DptTraits can name the symbol to enable.
+struct DptFamilyOff {};
+struct DptFamilyOffFloat : DptFamilyOff {};
+struct DptFamilyOffTime : DptFamilyOff {};
+struct DptFamilyOffString : DptFamilyOff {};
+struct DptFamilyOffColour : DptFamilyOff {};
+struct DptFamilyOffAccess : DptFamilyOff {};
+
+} // namespace detail
 
 namespace dpttags {
 
 #define KNX_DPT_CATALOG_ENTRY(symbol, mainType, subType, valueType, cppType, codecType, shortName, description) \
 struct symbol {};
+#define KNX_DPT_CATALOG_OFF(family, symbol, mainType, subType, valueType, cppType, codecType, shortName, description) \
+struct symbol : detail::DptFamilyOff##family {};
 #include "knx/application/dpt_catalog.inc"
 #undef KNX_DPT_CATALOG_ENTRY
+#undef KNX_DPT_CATALOG_OFF
 
 } // namespace dpttags
 
@@ -477,6 +501,7 @@ private:
 using DptEncodeDynamicFn = util::Result<size_t> (*)(const DptValue&, std::span<uint8_t>);
 using DptDecodeDynamicFn = util::Result<DptValue> (*)(std::span<const uint8_t>);
 
+#if KNX_FEATURE_DPT_CATALOGUE
 /**
  * @brief Catalog strings (`DptInfo::name` / `DptInfo::text`).
  *
@@ -512,6 +537,7 @@ struct DptInfo {
     DptValue::Type valueType{DptValue::Type::Unsupported};
     bool runtimeSupported{false};
 };
+#endif  // KNX_FEATURE_DPT_CATALOGUE
 
 /**
  * @brief Canonical on-the-wire payload width of a datapoint type, in bits.
@@ -581,9 +607,126 @@ consteval uint16_t maxCatalogPayloadOctets()
     return widest;
 }
 
+/**
+ * @brief The families of datapoint type a build can configure out.
+ *
+ * Integer, boolean, scene, dimming (DPT 3) and HVAC mode types are always
+ * built. The rest follow Kconfig: KNX_DPT_FLOAT (DPT 9, 14), KNX_DPT_TIME
+ * (10, 11, 19), KNX_DPT_STRING (4, 16), KNX_DPT_COLOUR (232, 242-244) and
+ * KNX_DPT_ACCESS (15).
+ */
+constexpr bool dptIsFloatFamily(DptId id) noexcept
+{
+    return id.main == DptMainType::Float2Byte || id.main == DptMainType::Float4Byte;
+}
+constexpr bool dptIsTimeFamily(DptId id) noexcept
+{
+    return id.main == DptMainType::TimeOfDay || id.main == DptMainType::Date || id.main == DptMainType::DateTime;
+}
+constexpr bool dptIsStringFamily(DptId id) noexcept
+{
+    return id.main == DptMainType::Character || id.main == DptMainType::String;
+}
+constexpr bool dptIsColourFamily(DptId id) noexcept
+{
+    return id.main == DptMainType::RgbColor || id.main == DptMainType::XyYColor
+        || id.main == DptMainType::ColourTransitionXyY || id.main == DptMainType::ConverterStatus;
+}
+constexpr bool dptIsAccessFamily(DptId id) noexcept
+{
+    return id.main == DptMainType::AccessControl;
+}
+
+/// True when the codec of @p id's family is part of this build.
+constexpr bool dptFamilyEnabled(DptId id) noexcept
+{
+    return (KNX_FEATURE_DPT_FLOAT || !dptIsFloatFamily(id))
+        && (KNX_FEATURE_DPT_TIME || !dptIsTimeFamily(id))
+        && (KNX_FEATURE_DPT_STRING || !dptIsStringFamily(id))
+        && (KNX_FEATURE_DPT_COLOUR || !dptIsColourFamily(id))
+        && (KNX_FEATURE_DPT_ACCESS || !dptIsAccessFamily(id));
+}
+
+/**
+ * @brief The runtime value type a datapoint type is carried as, from the id alone.
+ *
+ * Every catalogue entry sharing a DptValue::Type shares its codec, so the type
+ * follows from the main type, with the few sub-type exceptions below. This is
+ * what the product layer compiles into its descriptors, and what the dynamic
+ * encode/decode paths use when the run-time catalogue (KNX_ENABLE_DPT_CATALOGUE)
+ * is not built. Returns Unsupported for a main type this stack has no codec
+ * for. It does not look at the build's families: see dptFamilyEnabled().
+ */
+constexpr DptValue::Type dptValueTypeFor(DptId dpt) noexcept
+{
+    switch (dpt.main) {
+        case DptMainType::Boolean:
+            return DptValue::Type::Boolean;
+        case DptMainType::Controlled1Bit:
+            return DptValue::Type::Controlled1Bit;
+        case DptMainType::Controlled3Bit:
+            return DptValue::Type::Controlled3Bit;
+        case DptMainType::Character:
+            return DptValue::Type::Character;
+        case DptMainType::Unsigned8:
+            return DptValue::Type::Unsigned8;
+        case DptMainType::Signed8:
+            return DptValue::Type::Signed8;
+        case DptMainType::Unsigned16:
+            return DptValue::Type::Unsigned16;
+        case DptMainType::Signed16:
+            return DptValue::Type::Signed16;
+        case DptMainType::Float2Byte:
+            return DptValue::Type::Float2Byte;
+        case DptMainType::TimeOfDay:
+            return DptValue::Type::TimeOfDay;
+        case DptMainType::Date:
+            return DptValue::Type::Date;
+        case DptMainType::Unsigned32:
+            return DptValue::Type::Unsigned32;
+        case DptMainType::Signed32:
+            return DptValue::Type::Signed32;
+        case DptMainType::Float4Byte:
+            return DptValue::Type::Float4Byte;
+        case DptMainType::AccessControl:
+            return DptValue::Type::AccessControl;
+        case DptMainType::String:
+            return DptValue::Type::String;
+        case DptMainType::SceneNumber:
+            return DptValue::Type::SceneNumber;
+        case DptMainType::SceneControl:
+            return DptValue::Type::SceneControl;
+        case DptMainType::DateTime:
+            return DptValue::Type::DateTime;
+        case DptMainType::HvacMode:
+            // Only DPT-20.102 (and the bare main type) carry the typed
+            // Dpt20Mode enum; every other DPT-20 sub-type is transported as a
+            // raw byte (see dpt_catalog.inc), so its runtime value type is
+            // Unsigned8 to match the port's uint8_t storage.
+            return (dpt.sub == 0 || dpt.sub == 102) ? DptValue::Type::HvacMode : DptValue::Type::Unsigned8;
+        case DptMainType::Bitfield8:
+            return DptValue::Type::Unsigned8;
+        case DptMainType::Bitfield16:
+            return DptValue::Type::Unsigned16;
+        case DptMainType::RgbColor:
+            return DptValue::Type::RgbColor;
+        case DptMainType::XyYColor:
+            return DptValue::Type::XyYColor;
+        case DptMainType::ColourTransitionXyY:
+            return DptValue::Type::ColourTransitionXyY;
+        case DptMainType::ConverterStatus:
+            return DptValue::Type::ConverterStatus;
+        case DptMainType::Unsupported:
+            break;
+    }
+    return DptValue::Type::Unsupported;
+}
+
+#if KNX_FEATURE_DPT_CATALOGUE
 const DptInfo* lookupDptInfo(DptId id);
 const DptInfo* dptRegistryEntries();
 size_t dptRegistrySize();
+#endif
 bool supportsDpt(DptId id);
 bool dptValueMatches(DptId id, const DptValue& value);
 util::Result<size_t> encodeDptValue(DptId id, const DptValue& value, std::span<uint8_t> data);
@@ -594,13 +737,45 @@ util::Result<DptValue> decodeDptValue(DptId id, std::span<const uint8_t> data);
 /// (bool, (un)signed 8/16/32, 2- and 4-byte float, character, scene number);
 /// returns false for non-scalar types (strings, colours, date/time, …), which
 /// callers treat as "any byte change counts as a change".
+#if KNX_FEATURE_DPT_FLOAT
 bool dptValueAsScalar(const DptValue& value, double& out);
+#endif
 
-template <typename>
-struct DptTraits;
+/// Integer magnitude of a boolean or (un)signed 8/16/32-bit value, for the
+/// integer change threshold of a build without KNX_DPT_FLOAT (no double
+/// arithmetic). False for every other type.
+bool dptValueAsInteger(const DptValue& value, int64_t& out);
 
 template <typename>
 struct DependentFalse : std::false_type {};
+
+/**
+ * @brief Codec traits of one catalogue type, specialised per catalogue entry.
+ *
+ * The primary template is what a tag without a specialisation gets: the tag of
+ * a type whose family is configured out of the build, or not a catalogue tag
+ * at all. Using it is a compile error that names the Kconfig symbol to enable.
+ */
+template <typename Tag>
+struct DptTraits {
+    static_assert(!std::is_base_of_v<detail::DptFamilyOffFloat, Tag>,
+                  "DPT 9 and 14 (floating point) are not part of this build: enable KNX_DPT_FLOAT (CONFIG_KNX_DPT_FLOAT=y)");
+    static_assert(!std::is_base_of_v<detail::DptFamilyOffTime, Tag>,
+                  "DPT 10, 11 and 19 (time and date) are not part of this build: enable KNX_DPT_TIME (CONFIG_KNX_DPT_TIME=y)");
+    static_assert(!std::is_base_of_v<detail::DptFamilyOffString, Tag>,
+                  "DPT 4 and 16 (character and string) are not part of this build: enable KNX_DPT_STRING (CONFIG_KNX_DPT_STRING=y)");
+    static_assert(!std::is_base_of_v<detail::DptFamilyOffColour, Tag>,
+                  "DPT 232 and 242-244 (colour) are not part of this build: enable KNX_DPT_COLOUR (CONFIG_KNX_DPT_COLOUR=y)");
+    static_assert(!std::is_base_of_v<detail::DptFamilyOffAccess, Tag>,
+                  "DPT 15 (access identification) is not part of this build: enable KNX_DPT_ACCESS (CONFIG_KNX_DPT_ACCESS=y)");
+    static_assert(std::is_base_of_v<detail::DptFamilyOff, Tag>,
+                  "DptTraits needs a tag from knx::application::dpttags");
+
+    // Placeholders so that the one static_assert above is the only diagnostic.
+    using value_type = int;
+    static inline constexpr DptId kId{};
+    static inline constexpr DptValue::Type kValueType = DptValue::Type::Unsupported;
+};
 
 #define KNX_DPT_CATALOG_ENTRY(symbol, mainType, subType, valueType, cppType, codecType, shortName, description) \
 template <> \
@@ -682,6 +857,7 @@ struct DptMainTypeTraits<DptMainType::Unsigned8> {
     }
 };
 
+#if KNX_FEATURE_DPT_FLOAT
 template <>
 struct DptMainTypeTraits<DptMainType::Float2Byte> {
     using value_type = float;
@@ -698,6 +874,7 @@ struct DptMainTypeTraits<DptMainType::Float2Byte> {
         return DptTraits<dpttags::Float2Byte>::decode(data);
     }
 };
+#endif
 
 /**
  * @brief DPT 1 - Boolean

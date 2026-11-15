@@ -249,15 +249,23 @@ menu "KNX Stack Configuration"
                 Do NOT leave this enabled in production builds.
 
         config KNX_ENABLE_COUPLER
-            bool "Coupler group acknowledge"
+            bool "Coupler (line / backbone router role)"
+            depends on KNX_ENABLE_FUNCTION_PROPERTIES
             default n
             help
-                Build the hook that lets a TP1 line or backbone coupler
-                acknowledge the group frames it routes (PID_*_LCCONFIG
-                GROUP_IACK_ROUT, 03/05/01 4.5.5) from the receive interrupt,
-                using its Filter Table. An end device acknowledges only its
-                own group addresses and does not need this; leave it off
-                unless the image is a coupler.
+                Build the router role of a TP1 line or backbone coupler
+                (03/05/01): the Filter Table and its load control, the Router
+                Object with its PID_*_LCCONFIG properties, load state and the
+                route table control function property, the two-port coupler and
+                its routing policy (CouplerOptions, createTp1CouplerStackPort,
+                configureRouterRole), and the layer-2 group acknowledge a
+                coupler gives from the receive interrupt (GROUP_IACK_ROUT,
+                03/05/01 4.5.5).
+
+                An end device is not a router and does not need any of it. With
+                this off the sources are not compiled and the API does not
+                exist, so ETS sees no Router Object and the device cannot be
+                given a router role. Needs the function property services.
     endmenu
 
     menu "IP Configuration"
@@ -325,8 +333,113 @@ menu "KNX Stack Configuration"
         config KNX_ENABLE_SECURITY
             bool "Enable KNX Secure"
             default n
+            select KNX_ENABLE_PROPERTY_EXT
+            select KNX_ENABLE_FUNCTION_PROPERTIES
             help
-                Enable KNX Data Security and/or System-B Secure
+                Enable KNX Data Security and/or System-B Secure: the Security
+                Interface Object (object type 17), the secure application layer
+                and the crypto they use. Data Secure is configured with the
+                extended property services and function properties (ETS sets the
+                Security Mode with them), so this selects KNX_ENABLE_PROPERTY_EXT
+                and KNX_ENABLE_FUNCTION_PROPERTIES.
+
+                With it off the Security Interface Object is not compiled, not
+                registered and not exposed: ETS finds no object 17.
+    endmenu
+
+    menu "Optional Features"
+
+        # Every symbol here defaults to y, the behaviour before they were
+        # switches. A feature that is off is absent: its sources are not
+        # compiled and the API that needs it does not exist.
+
+        config KNX_ENABLE_FUNCTION_PROPERTIES
+            bool "Function property services"
+            default y
+            help
+                A_FunctionPropertyCommand, A_FunctionPropertyStateRead and the
+                A_FunctionPropertyStateResponse they answer with
+                (03/03/07 3.5). The router role (route table control), the group
+                object diagnostics and the KNXnet/IP Parameter Object commands
+                use them, so those features depend on this one. A request for
+                the service when it is off is ignored, as an unknown APCI is.
+
+        config KNX_ENABLE_PROPERTY_EXT
+            bool "Extended property services"
+            default y
+            help
+                The A_PropertyExt* services (03/03/07 3.5), which address
+                objects by an extended object index and properties above 255.
+                KNX Secure needs them, so enabling that selects this. A request
+                for the service when it is off is ignored, as an unknown APCI is.
+
+        config KNX_ENABLE_MEMORY_EXT
+            bool "Extended memory services"
+            default y
+            help
+                A_MemoryExtendedRead and A_MemoryExtendedWrite (03/03/07 3.5):
+                24-bit addressing for memory above 64 KiB. A request when off is
+                ignored, as an unknown APCI is.
+
+        config KNX_ENABLE_NETWORK_PARAMETER
+            bool "Network parameter services"
+            default y
+            help
+                A_NetworkParameterRead, A_NetworkParameterResponse and
+                A_NetworkParameterWrite (03/03/07 3.5). A request when off is
+                ignored, as an unknown APCI is.
+
+        config KNX_ENABLE_GO_DIAGNOSTICS
+            bool "Group object diagnostics"
+            depends on KNX_ENABLE_FUNCTION_PROPERTIES
+            default y
+            help
+                The group object diagnostic commands ETS sends to the group
+                object table (property 66, as function properties). When off the
+                property is not advertised. Needs the function property services.
+
+        config KNX_DPT_FLOAT
+            bool "Floating point datapoint types (DPT 9, 14)"
+            default y
+            help
+                DPT 9 (2-octet float) and DPT 14 (4-octet float), their codecs
+                and the semantic types built on them (temperature, illuminance,
+                power and so on). A product port that uses one does not compile
+                when this is off. Off also keeps floating point arithmetic out
+                of the image where the group object code allows it.
+
+        config KNX_DPT_TIME
+            bool "Time and date datapoint types (DPT 10, 11, 19)"
+            default y
+            help
+                DPT 10 (time of day), DPT 11 (date) and DPT 19 (date and time).
+
+        config KNX_DPT_STRING
+            bool "String datapoint types (DPT 4, 16)"
+            default y
+            help
+                DPT 4 (character) and DPT 16 (14-octet string).
+
+        config KNX_DPT_COLOUR
+            bool "Colour datapoint types (DPT 232, 242, 249, 251)"
+            default y
+            help
+                RGB, xyY, tunable white and RGBW colour datapoint types.
+
+        config KNX_DPT_ACCESS
+            bool "Access identification datapoint type (DPT 15)"
+            default y
+            help
+                DPT 15, the access identification code.
+
+        config KNX_ENABLE_DPT_CATALOGUE
+            bool "Datapoint type catalogue (names and lookup table)"
+            default y
+            help
+                The run-time table of known datapoint types with their names
+                and descriptions (lookupDptInfo and the name lookups). A device
+                does not need it to run: its group objects use the codecs
+                directly. Off saves the table and the strings.
     endmenu
 
     menu "Object Limits"

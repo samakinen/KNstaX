@@ -188,7 +188,9 @@ namespace {
 constexpr InterfaceObjectType kReferenceObjectTypes[] = {
     InterfaceObjectType::interfaceProgram(),
     InterfaceObjectType::eibObjectAssociation(),
+#if KNX_FEATURE_COUPLER
     InterfaceObjectType::router(),
+#endif
     InterfaceObjectType::lteFsm(),
     InterfaceObjectType::cemiServer(),
     InterfaceObjectType::pollingMaster(),
@@ -232,6 +234,7 @@ std::span<const PropertyDeclaration> referenceObjectProperties(InterfaceObjectTy
         return regs;
     }
 
+#if KNX_FEATURE_COUPLER
     if (type == InterfaceObjectType::router()) {
         static const PropertyDeclaration regs[] = {
             objectTypeEntry(),
@@ -261,6 +264,7 @@ std::span<const PropertyDeclaration> referenceObjectProperties(InterfaceObjectTy
         };
         return regs;
     }
+#endif
 
     if (type == InterfaceObjectType::lteFsm()) {
         static const PropertyDeclaration regs[] = {

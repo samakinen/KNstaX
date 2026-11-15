@@ -12,7 +12,9 @@
 #include "knx/application/apci_services.hpp"
 #include "knx/objects/interface_object.hpp"
 #include "knx/objects/reference_object_registry.hpp"
+#if KNX_SECURE_ENABLED
 #include "knx/objects/security_interface_object.hpp"
+#endif
 #include "knx/util/log.hpp"
 
 #include <algorithm>
@@ -41,14 +43,18 @@ DeviceModel::DeviceModel(objects::DeviceObject& deviceObject,
                          objects::AssociationTableObject& associationTable,
                          objects::ApplicationProgramObject& applicationProgram,
                          objects::GroupObjectTableObject& groupObjectTable,
+#if KNX_SECURE_ENABLED
                          objects::SecurityInterfaceObject& securityObject,
+#endif
                          BusAccessStackPort* stackPort)
     : _deviceObject(deviceObject)
     , _addressTable(addressTable)
     , _associationTable(associationTable)
     , _applicationProgram(applicationProgram)
     , _groupObjectTable(groupObjectTable)
+#if KNX_SECURE_ENABLED
     , _securityObject(securityObject)
+#endif
     , _stackPort(stackPort)
 {
 }
@@ -63,8 +69,11 @@ util::Result<void> DeviceModel::init(std::string_view persistenceNamespace, uint
             _addressTable,
             _associationTable,
             _applicationProgram,
-            _groupObjectTable,
-            _securityObject);
+            _groupObjectTable
+#if KNX_SECURE_ENABLED
+            , _securityObject
+#endif
+            );
         const auto initRes = _interfaceObjectManager->init(true, persistenceNamespace, schemaVersion);
         if (initRes.isError()) {
             return initRes;
@@ -114,8 +123,10 @@ void DeviceModel::bind()
         &_addressTable,
         &_associationTable,
         &_groupObjectTable,
-        &_applicationProgram,
-        &_securityObject
+        &_applicationProgram
+#if KNX_SECURE_ENABLED
+        , &_securityObject
+#endif
     };
     interfaceObjects.reserve(interfaceObjects.size() + _referenceObjects.size());
     for (const auto& ref : _referenceObjects) {
@@ -387,10 +398,12 @@ util::Result<void> DeviceModel::writeProperty(InterfaceObjectType objectType,
     // conversation depends on, and losing it across a restart leaves the
     // device answering with the wrong key. The local API is now the only
     // way to install one — the wire path refuses unsecured writes.
+#if KNX_SECURE_ENABLED
     if (objectType == InterfaceObjectType::security()) {
         markPersistenceDirty();
         applySecurityKeyTables();
     }
+#endif
     if (objects::isReferenceObjectType(objectType)) {
         afterReferenceObjectWrite(objectType, propertyId);
     }
@@ -420,9 +433,11 @@ util::Result<void> DeviceModel::writeProperty(const application::PropertyValueWr
     if (res.isError()) {
         return res;
     }
+#if KNX_SECURE_ENABLED
     if (*objectType == InterfaceObjectType::security()) {
         afterSecurityObjectWrite();
     }
+#endif
     if (isTableObject(*objectType)) {
         afterTableObjectWrite(*objectType, request);
     }
@@ -444,6 +459,7 @@ void DeviceModel::afterReferenceObjectWrite(InterfaceObjectType objectType, appl
     }
 }
 
+#if KNX_SECURE_ENABLED
 // The Security Interface Object holds the credentials for every
 // later conversation: ETS installs its own Tool Key and the
 // Sequence Number Sending here and then immediately restarts the
@@ -464,6 +480,7 @@ void DeviceModel::afterSecurityObjectWrite()
     applySecurityKeyTables();
 }
 
+#endif
 // Persist table objects after every successful ETS write so
 // the KNX tables survive reboot without explicit user action.
 void DeviceModel::afterTableObjectWrite(InterfaceObjectType objectType,
@@ -495,7 +512,9 @@ void DeviceModel::afterTableObjectWrite(InterfaceObjectType objectType,
             resubscribeGroupAddresses();
             // Group keys are held against the GA_Index, so a new
             // address table re-points every one of them.
+#if KNX_SECURE_ENABLED
             applySecurityKeyTables();
+#endif
         }
     }
 }
@@ -677,7 +696,9 @@ void DeviceModel::flushPersistenceIfDirty()
     if (_persistenceDirty) {
         (void)saveToPersistence();  // a failure is logged and left dirty there
     }
+#if KNX_SECURE_ENABLED
     checkpointSecuritySequenceState();
+#endif
 }
 
 void DeviceModel::setBankedRecordSource(uint16_t keyId, objects::InterfaceObjectManager::BankedRecordSource source)
@@ -695,6 +716,7 @@ std::optional<std::vector<uint8_t>> DeviceModel::loadBankedRecord(uint16_t keyId
     return _interfaceObjectManager->loadBankedRecord(keyId);
 }
 
+#if KNX_SECURE_ENABLED
 // ─── Data Secure state ───────────────────────────────────────────────────────
 
 bool DeviceModel::loadSecuritySequenceState()
@@ -724,6 +746,7 @@ void DeviceModel::pumpSecuritySequenceCheckpoint(uint32_t nowMs)
     _sequenceCheckpointDueMs = nowMs + kSequenceCheckpointMs;
 }
 
+#endif
 void DeviceModel::saveAuthorizationKeyTable(const application::AuthorizationService::KeyTable& keys)
 {
     if (!_interfaceObjectManager) {
@@ -759,6 +782,7 @@ std::optional<application::AuthorizationService::KeyTable> DeviceModel::loadAuth
             record.data(), record.size()));
 }
 
+#if KNX_SECURE_ENABLED
 void DeviceModel::captureFactorySecurityDefaults()
 {
     // Once: a BAU closed and initialised again must not take what the first
@@ -911,6 +935,7 @@ void DeviceModel::applySecurityKeyTables()
                  "ETS has not downloaded PID_GRP_KEY_TABLE / PID_P2P_KEY_TABLE");
     }
 }
+#endif  // KNX_SECURE_ENABLED
 
 } // namespace bau
 } // namespace knx

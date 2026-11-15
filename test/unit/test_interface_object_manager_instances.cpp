@@ -111,7 +111,9 @@ void test_InterfaceObjectManager_ReferenceObjectsOnePerTypeAndAllFit(void) {
     TEST_ASSERT_EQUAL_UINT32(InterfaceObjectManager::kMaxInterfaceObjects,
                              InterfaceObjectManager::kCoreObjectCount + kReferenceObjectTypeCount);
     TEST_ASSERT_TRUE(mgr.hasObjectType(InterfaceObjectType::device()));
+#if KNX_SECURE_ENABLED
     TEST_ASSERT_TRUE(mgr.hasObjectType(InterfaceObjectType::security()));
+#endif
 }
 
 int main(int argc, char** argv) {

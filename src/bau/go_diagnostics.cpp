@@ -22,7 +22,10 @@
 #include "group_runtime.hpp"
 
 #include "knx/application/function_property_services.hpp"
+#include "knx/config.hpp"
+#if KNX_SECURE_ENABLED
 #include "knx/objects/security_interface_object.hpp"
+#endif
 #include "knx/util/log.hpp"
 
 #include <array>
@@ -175,6 +178,7 @@ util::Result<FunctionPropertyResult> DeviceManagement::handleGroupObjectDiagnost
                 const uint16_t goNumber = readU16(serviceInfo);
                 uint16_t config = static_cast<uint16_t>(object->descriptor() >> 8);
 
+#if KNX_SECURE_ENABLED
                 const auto* goFlags = _model.securityObject().findExtraProperty(
                     objects::SecurityProperty::GoSecurityFlags);
                 if (goFlags != nullptr && goNumber < goFlags->size()) {
@@ -182,6 +186,7 @@ util::Result<FunctionPropertyResult> DeviceManagement::handleGroupObjectDiagnost
                     if ((security & kFlagAuthentication) != 0u) config |= 0x0100u;
                     if ((security & kFlagConfidentiality) != 0u) config |= 0x0200u;
                 }
+#endif
                 if (_groups.isGroupObjectLinked(GroupObjectIndex(goNumber))) {
                     config |= 0x0400u;
                 }
@@ -347,10 +352,16 @@ FunctionPropertyReturnCode DeviceManagement::validateGroupDiagnosticsFlags(
         return FunctionPropertyReturnCode::DataVoid;
     }
     if ((flags & kFlagSecurityMask) != 0u) {
+#if KNX_SECURE_ENABLED
         std::array<uint8_t, 16> key{};
         if (_model.securityObject().getGroupKey(destination, key).isError()) {
             return FunctionPropertyReturnCode::DataVoid;
         }
+#else
+        // No Security Interface Object in this build, so no group address has
+        // a key: the same answer as for an address without one.
+        return FunctionPropertyReturnCode::DataVoid;
+#endif
     }
     return FunctionPropertyReturnCode::Success;
 }

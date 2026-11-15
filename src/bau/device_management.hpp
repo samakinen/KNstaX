@@ -22,7 +22,9 @@
 #include "knx/bau/bau.hpp"
 #include "knx/application/function_property_services.hpp"
 
+#if KNX_FEATURE_COUPLER
 #include "knx/network/filter_table_load_control.hpp"
+#endif
 
 #include <array>
 #include <memory>
@@ -38,7 +40,9 @@ class GroupRuntime;
 
 class DeviceManagement final {
 public:
+#if KNX_FEATURE_COUPLER
     using RouterRoleConfig = BusAccessUnit::RouterRoleConfig;
+#endif
 
     DeviceManagement(platform::Platform& platform,
                      BusAccessStackPort* stackPort,
@@ -79,10 +83,12 @@ public:
     void setDeviceMedium(MediumType medium);
     util::Result<void> setCommissioningMode(bool enabled);
     bool commissioningModeEnabled() const;
+#if KNX_FEATURE_COUPLER
     util::Result<void> configureRouterRole(const RouterRoleConfig& config);
     util::Result<void> syncRouterRoutingConfig();
     bool hasRouterRole() const { return _routerRole.filterTable != nullptr; }
     network::FilterTableLoadControl* filterTableLoadControl() { return _filterTableLoad.get(); }
+#endif
 
 #if KNX_FEATURE_NETIP
     util::Result<void> applyKnxNetIpConfiguration(const netip::KnxNetIpConfiguration& config);
@@ -99,6 +105,7 @@ private:
     /// restart that follows boots into it.
     util::Result<void> applyMasterReset(application::EraseCode eraseCode);
 
+#if KNX_FEATURE_COUPLER
     /// Register and seed the Router Object; called from
     /// publishMediumInterfaceObjects() when a coupler role is declared.
     void publishRouterObject();
@@ -118,7 +125,9 @@ private:
 
     util::Result<application::FunctionPropertyResult> handleRouterFunctionProperty(
         const application::FunctionPropertyRequest& request);
+#endif  // KNX_FEATURE_COUPLER
 
+#if KNX_FEATURE_GO_DIAGNOSTICS
     /// PID_GO_DIAGNOSTICS on the Group Object Table Object (03/05/01 §4.8.1) —
     /// the service ETS uses to read or write a group address through the
     /// device, which is the only way it can touch a Data Secure group address
@@ -131,6 +140,7 @@ private:
     /// Returns Success, or the E_DATA_VOID the spec prescribes.
     application::FunctionPropertyReturnCode validateGroupDiagnosticsFlags(
         uint8_t flags, const GroupAddress& destination, bool allowSelector) const;
+#endif  // KNX_FEATURE_GO_DIAGNOSTICS
 
     void setDomainAddress(std::span<const uint8_t> domainAddress);
 
@@ -155,6 +165,7 @@ private:
     IndividualAddress _defaultIndividualAddress{0xFFFFu};
     /// Remembered so a stack port initialised after the declaration still gets it.
     MediumType _deviceMedium{MediumType::TP1};
+#if KNX_FEATURE_COUPLER
     /// Coupler role, if declared.  A null filterTable means "end device".
     RouterRoleConfig _routerRole{};
     /// The Router Object's coupler configuration (PID_MAIN_LCCONFIG,
@@ -165,6 +176,7 @@ private:
     std::array<uint8_t, 5> _routerFactoryConfig{};
     /// Realisation Type 3 loading of _routerRole.filterTable; couplers only.
     std::unique_ptr<network::FilterTableLoadControl> _filterTableLoad{};
+#endif
 
 #if KNX_FEATURE_NETIP
     ManagementControl::BackboneKeyCallback _backboneKeyCallback{};

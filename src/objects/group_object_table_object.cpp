@@ -6,6 +6,7 @@
  * @brief Group object table implementation (Property Kernel)
  */
 
+#include "knx/config.hpp"
 #include "knx/objects/group_object_table_object.hpp"
 #include "knx/objects/table_segments.hpp"
 #include "knx/objects/property_kernel.hpp"
@@ -199,7 +200,9 @@ static const PropertyHandler kGroupObjectTableHandlers[] = {
         nullptr,
         &tableLength,
         &acceptTableLength
-    },
+    }
+#if KNX_FEATURE_GO_DIAGNOSTICS
+    ,
 
     // PID_GO_DIAGNOSTICS (03/05/01 §4.8.1): the Group Object Diagnostics
     // function itself lives in the BAU (src/bau/go_diagnostics.cpp) and is reached
@@ -208,6 +211,7 @@ static const PropertyHandler kGroupObjectTableHandlers[] = {
     // decides the device supports Group Object Diagnostics.
     FunctionProperty::make(
         static_cast<application::PropertyID>(GroupObjectTableProperty::GoDiagnostics))
+#endif
 };
 
 constexpr size_t kGroupObjectTableHandlerCount = sizeof(kGroupObjectTableHandlers) / sizeof(kGroupObjectTableHandlers[0]);

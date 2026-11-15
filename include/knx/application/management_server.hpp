@@ -160,11 +160,15 @@ public:
 
     DeviceDescriptorService& deviceDescriptorService() { return *_deviceDescriptorService; }
     PropertyServices& propertyServices() { return *_propertyServices; }
+#if KNX_FEATURE_PROPERTY_EXT
     PropertyExtServices& propertyExtServices() { return *_propertyExtServices; }
+#endif
     MemoryService& memoryService() { return *_memoryService; }
     AuthorizationService& authorizationService() { return *_authorizationService; }
     RestartService& restartService() { return *_restartService; }
+#if KNX_FEATURE_FUNCTION_PROPERTIES
     FunctionPropertyServices& functionPropertyServices() { return *_functionPropertyServices; }
+#endif
     NetworkParameterService& networkParameterService() { return *_networkParameterService; }
     AddressSpace& addressSpace() { return *_addressSpace; }
 
@@ -204,21 +208,31 @@ private:
     void handlePropertyValueRead(const ADataFrame& frame);
     void handlePropertyValueWrite(const ADataFrame& frame);
     void handlePropertyDescriptionRead(const ADataFrame& frame);
+#if KNX_FEATURE_FUNCTION_PROPERTIES
     void handleFunctionProperty(const ADataFrame& frame);
+#endif
     void handleIndividualAddressSerialNumberRead(const ADataFrame& frame);
     void handleIndividualAddressSerialNumberWrite(const ADataFrame& frame);
     void handleDomainAddressSerialNumberRead(const ADataFrame& frame);
     void handleDomainAddressSerialNumberWrite(const ADataFrame& frame);
+#if KNX_FEATURE_NETWORK_PARAMETER
     void handleNetworkParameterRead(const ADataFrame& frame);
     void handleNetworkParameterWrite(const ADataFrame& frame);
+#endif
     void handleMemoryRead(const ADataFrame& frame);
     void handleMemoryWrite(const ADataFrame& frame);
+#if KNX_FEATURE_MEMORY_EXT
     void handleMemoryExtendedRead(const ADataFrame& frame);
     void handleMemoryExtendedWrite(const ADataFrame& frame);
+#endif
+#if KNX_FEATURE_PROPERTY_EXT
     void handlePropertyExtValueRead(const ADataFrame& frame);
     void handlePropertyExtValueWrite(const ADataFrame& frame, bool confirmed);
     void handlePropertyExtDescriptionRead(const ADataFrame& frame);
+#endif
+#if KNX_FEATURE_PROPERTY_EXT && KNX_FEATURE_FUNCTION_PROPERTIES
     void handleFunctionPropertyExt(const ADataFrame& frame, FunctionPropertyInvocation invocation);
+#endif
     void handleAuthorizeRequest(const ADataFrame& frame);
     void handleKeyWrite(const ADataFrame& frame);
     void handleRestart(const ADataFrame& frame);
@@ -259,11 +273,15 @@ private:
     // Service handlers (created in init())
     std::unique_ptr<DeviceDescriptorService> _deviceDescriptorService;
     std::unique_ptr<PropertyServices> _propertyServices;
+#if KNX_FEATURE_PROPERTY_EXT
     std::unique_ptr<PropertyExtServices> _propertyExtServices;
+#endif
     std::unique_ptr<MemoryService> _memoryService;
     std::unique_ptr<AuthorizationService> _authorizationService;
     std::unique_ptr<RestartService> _restartService;
+#if KNX_FEATURE_FUNCTION_PROPERTIES
     std::unique_ptr<FunctionPropertyServices> _functionPropertyServices;
+#endif
     std::unique_ptr<NetworkParameterService> _networkParameterService;
 
     /// The current access level of whoever requested the pending Master

@@ -12,7 +12,9 @@ import zipfile
 KNX_NS = 'http://knx.org/xml/project/23'
 NS = {'knx': KNX_NS}
 CATALOG_ENTRY_RE = re.compile(
-    r'^KNX_DPT_CATALOG_ENTRY\('
+    # KNX_DPT_CATALOG_ENTRY_<FAMILY> is an entry of a family that a build can
+    # configure out (dpt_catalog.inc); the catalogue is the same either way.
+    r'^KNX_DPT_CATALOG_ENTRY(?:_[A-Z]+)?\('
     r'(?P<symbol>[^,]+),\s*'
     r'(?P<main_type>[^,]+),\s*'
     r'(?P<sub_type>[^,]+),\s*'

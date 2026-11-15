@@ -316,13 +316,21 @@ knx_configure(PROFILE tp1-small
 add_subdirectory(${KNSTAX_DIR} knstax)
 ```
 
-Profiles are `host-test`, `full`, `tp1-small` and `tp1-standard`; `PROFILE` also takes the path
+Profiles are `host-test`, `host-small`, `host-minimal`, `full`, `tp1-small` and `tp1-standard`; `PROFILE` also takes the path
 of a fragment. A fragment is `CONFIG_KNX_X=value` lines; an unknown symbol or a value Kconfig
 rejects stops the configure step. The resolved configuration is written to
 `<build>/knx-config/knx.config`, and `cmake --build <build> --target knx_menuconfig` edits it.
 The older options (`-DKNX_FEATURE_NETIP=OFF`, `-DKNX_SECURE_ENABLED=OFF`, and the like) still work
 as overrides over the profile, but are deprecated. `BUILD_TESTS` and `KNX_BUILD_EXAMPLES` stay
 plain CMake options. Python 3 is needed at configure time.
+
+The code features are switches too: `KNX_ENABLE_COUPLER` (the whole router role), `KNX_ENABLE_SECURITY`
+(Data Secure and the Security Interface Object), `KNX_ENABLE_GO_DIAGNOSTICS`, `KNX_ENABLE_FUNCTION_PROPERTIES`,
+`KNX_ENABLE_PROPERTY_EXT`, `KNX_ENABLE_MEMORY_EXT`, `KNX_ENABLE_NETWORK_PARAMETER`, the datapoint families
+`KNX_DPT_FLOAT`, `_TIME`, `_STRING`, `_COLOUR`, `_ACCESS` and `KNX_ENABLE_DPT_CATALOGUE`. Each defaults to on (the
+coupler and Secure to off, as before); a feature that is off is not compiled, not exposed to ETS, and a
+product that uses it fails to build. `-DKNX_HOST_PROFILE=host-minimal` builds and runs the host suite with
+the `tp1-small` feature set; tests that need an absent feature are not registered.
 
 ### Requirements
 

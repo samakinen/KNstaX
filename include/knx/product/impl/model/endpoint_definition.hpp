@@ -153,6 +153,25 @@ template <auto LogicalId,
           bool ReadOnInit = false,
           Priority TxPriority = Priority::Low>
 struct PortSpec {
+    // A port's datapoint type must have its codec in this build. The families a
+    // build can drop are Kconfig symbols (see small-target-profile.md 4.1); a
+    // port that uses one of them stops the build here and names the symbol.
+    static_assert(KNX_FEATURE_DPT_FLOAT || !application::dptIsFloatFamily(Dpt),
+                  "this port uses DPT 9 or 14 (floating point), which is configured out of this build: "
+                  "enable KNX_DPT_FLOAT (CONFIG_KNX_DPT_FLOAT=y) or use an integer datapoint type");
+    static_assert(KNX_FEATURE_DPT_TIME || !application::dptIsTimeFamily(Dpt),
+                  "this port uses DPT 10, 11 or 19 (time and date), which is configured out of this build: "
+                  "enable KNX_DPT_TIME (CONFIG_KNX_DPT_TIME=y)");
+    static_assert(KNX_FEATURE_DPT_STRING || !application::dptIsStringFamily(Dpt),
+                  "this port uses DPT 4 or 16 (character or string), which is configured out of this build: "
+                  "enable KNX_DPT_STRING (CONFIG_KNX_DPT_STRING=y)");
+    static_assert(KNX_FEATURE_DPT_COLOUR || !application::dptIsColourFamily(Dpt),
+                  "this port uses DPT 232 or 242-244 (colour), which is configured out of this build: "
+                  "enable KNX_DPT_COLOUR (CONFIG_KNX_DPT_COLOUR=y)");
+    static_assert(KNX_FEATURE_DPT_ACCESS || !application::dptIsAccessFamily(Dpt),
+                  "this port uses DPT 15 (access identification), which is configured out of this build: "
+                  "enable KNX_DPT_ACCESS (CONFIG_KNX_DPT_ACCESS=y)");
+
     using logical_id_type = std::remove_cv_t<decltype(LogicalId)>;
     using value_type = ValueT;
 
