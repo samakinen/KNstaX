@@ -136,7 +136,7 @@ The last one forces a data-link change:
 |---|---|---|
 | Own individual address | Chip | `U_SetAddress`, called from `setOwnAddress()` |
 | Group address in our table, or tunnel address | Host | `U_AckInformation` with the addressed bit, sent from the RX interrupt as soon as the destination octets (indication octets 3–4) and the address-type bit (octet 5) are in. The manual's deadline is 1.7 ms after the address-type octet (§3.9, item 2). |
-| Not ours | Host | Nothing sent; the chip does not acknowledge |
+| Not ours | Host | Nothing sent. Once it has an address, the TP-UART2 still acknowledges every group frame by its own address evaluation (§3.9 item 1); accepted for the H8i8o (its decision D10) |
 | Local receive queue nearly full | Host | `U_AckInformation` with the busy bit (0x13), from `setLocalBusy()` state |
 
 - **Lookup.** The group address lookup uses the table published through the existing
@@ -349,6 +349,8 @@ Two statements in this note disagree with the manual. Neither is acted on yet:
    `U_AckInformation`. Whether 0x10 (addressed bit clear) withdraws the acknowledgement is not
    said; it needs a test with a second device. Until then the device acknowledges telegrams it
    does not listen to, which can hide from a sender that the real receivers are missing.
+   **Accepted** by the H8i8o owner (16 November 2026, H8i8o decision D10): many KNX devices do
+   the same, and the backend does not try to withdraw the acknowledgement.
 2. **The acknowledge deadline is 1.7 ms**, counted from the address-type octet (§3.2.3.1.8),
    not the end of the frame. The interrupt decides at that octet, but its `U_AckInformation`
    waits behind whatever the transmit path has queued: `txQueueLimitOctets` (4, about 2.3 ms)
