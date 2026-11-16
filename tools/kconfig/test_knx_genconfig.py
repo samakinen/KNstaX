@@ -107,12 +107,15 @@ def _features(profile):
     return {s for s in wanted if f'#define CONFIG_{s} 1' in _header(out)}
 
 
-def test_tp1_standard_differs_from_small_only_in_log_level_features_and_capacities():
+def test_tp1_standard_differs_from_small_only_in_log_level_features_capacities_and_placement():
     diff = _without_capacities('tp1-small') ^ _without_capacities('tp1-standard')
     # Secure joins tp1-standard with the portable AES backend (K6).
     features = {f'#define CONFIG_{s} 1' for s in OPTIONAL_FEATURES
                 if s not in ('KNX_ENABLE_FUNCTION_PROPERTIES', 'KNX_ENABLE_DPT_CATALOGUE')}
-    assert diff == {'#define CONFIG_KNX_LOG_LEVEL 0', '#define CONFIG_KNX_LOG_LEVEL 1'} | features, diff
+    # tp1-small leaves the receive path in flash and erases with the chip in
+    # busy mode; tp1-standard keeps it in RAM.
+    placement = {'#define CONFIG_KNX_ISR_IN_RAM 1'}
+    assert diff == {'#define CONFIG_KNX_LOG_LEVEL 0', '#define CONFIG_KNX_LOG_LEVEL 1'} | features | placement, diff
 
 
 def test_optional_features_per_profile():

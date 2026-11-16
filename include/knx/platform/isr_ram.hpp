@@ -19,14 +19,22 @@
  * flash, or the placement buys nothing: callees are always_inline, or reached
  * through a pointer the board also placed in RAM (the UART HAL's write()).
  * The board must also keep the vector table and its own handler in RAM.
+ *
+ * A bare-metal build can opt out (Kconfig KNX_ISR_IN_RAM=n): the code stays
+ * in flash, the board masks interrupts during an erase, and the medium makes
+ * the bus repeat what it misses (platform::FlashEraseGuard).
  */
 
 #pragma once
 
+#if __has_include("knx/autoconf.h")
+#include "knx/autoconf.h"
+#endif
+
 #if defined(ESP_PLATFORM)
 #include "esp_attr.h"
 #define KNX_ISR_RAM IRAM_ATTR
-#elif defined(KNX_PLATFORM_BAREMETAL) && defined(__arm__)
+#elif defined(KNX_PLATFORM_BAREMETAL) && defined(__arm__) && defined(CONFIG_KNX_ISR_IN_RAM)
 #define KNX_ISR_RAM __attribute__((section(".ramfunc"), noinline))
 #else
 #define KNX_ISR_RAM

@@ -30,6 +30,17 @@
  * needs no interrupt masking, and it is also correct where the interrupt runs
  * on another core.
  *
+ * Flash erases (platform::FlashEraseGuard)
+ * -----------------------------------------
+ * A product that masks interrupts while its flash erases (instead of keeping
+ * the receive path in RAM) passes the backend to FlashLog::setEraseGuard().
+ * Before each erase the backend sends U_ActivateBusyMode: the chip answers
+ * every frame addressed to the device BUSY, so its sender repeats it. Octets
+ * that arrive late, after the erase, are discarded until the host link has
+ * been silent for FRAME_GAP_US (it then knows where a frame starts again);
+ * only then does service() send U_ResetBusyMode. The chip also leaves busy
+ * mode by itself after 700 ms. TP-UART2 manual §3.2.3.1.5 and §3.2.3.1.6.
+ *
  * Protocol values: Siemens TP-UART2 technical manual, cross-checked against
  * thelsing/knx (tpuart_data_link_layer.cpp). The table in the design note
  * lists them. Items still to confirm on a real chip are in §3.8 there.
@@ -40,6 +51,7 @@
 #include "knx/config.hpp"
 #include "knx/physical/tp1_medium_backend.hpp"
 #include "knx/physical/uart_hal.h"
+#include "knx/platform/flash_erase_guard.hpp"
 #include "knx/platform/platform.hpp"
 
 #include <algorithm>
@@ -102,6 +114,9 @@ struct TpUartStatistics {
     uint32_t ackDecisionsDeferred{0}; ///< no acknowledge: the table was being rewritten
     uint32_t echoesDropped{0};        ///< our own frames the chip passed back while sending them
     uint32_t ackWriteFailures{0};     ///< the UART refused the acknowledge octet
+    uint32_t erasesGuarded{0};        ///< flash erases taken with the chip in busy mode
+    uint32_t erasesDeclined{0};       ///< erases asked to wait (a frame of ours or a reply outstanding)
+    uint32_t resyncDiscards{0};       ///< octets dropped after an erase, before the link was silent
     uint32_t confirmsPositive{0};
     uint32_t confirmsNegative{0};
     uint32_t confirmTimeouts{0};
@@ -112,7 +127,7 @@ struct TpUartStatistics {
     uint8_t lastStateBits{0};         ///< last U_State.ind
 };
 
-class TpUartMediumBackend final : public Tp1MediumBackend {
+class TpUartMediumBackend final : public Tp1MediumBackend, public platform::FlashEraseGuard {
 public:
     /// Ring slots: one is always the frame being assembled, so the ring holds
     /// RX_SLOT_COUNT - 1 complete frames for service() to drain.
@@ -131,6 +146,17 @@ public:
     static constexpr uint8_t U_ACK_ADDRESSED = 0x01u;
     static constexpr uint8_t U_ACK_BUSY = 0x02u;
     static constexpr uint8_t U_MXRSTCNT_REQ = 0x24u;
+    /// Busy mode: the chip answers addressed frames BUSY for 700 ms, or until
+    /// U_ResetBusyMode or a U_AckInformation (manual §3.2.3.1.5).
+    static constexpr uint8_t U_ACTIVATE_BUSY_MODE = 0x21u;
+    static constexpr uint8_t U_RESET_BUSY_MODE = 0x22u;
+    /// Longest wait for U_ActivateBusyMode to leave the UART before an erase.
+    static constexpr uint32_t BUSY_MODE_DRAIN_MS = 10u;
+    /// Longest wait for our frame to finish feeding when an erase cannot wait.
+    static constexpr uint32_t FORCED_ERASE_FEED_MS = 100u;
+    /// Silence after an erase that puts the receive path back in step: the
+    /// 2 ms frame gap plus a millisecond for the platform clock's resolution.
+    static constexpr uint32_t RESYNC_SILENCE_MS = 3u;
     static constexpr uint8_t U_L_DATA_START_CONTINUE = 0x80u;
     static constexpr uint8_t U_L_DATA_END = 0x40u;
     /// 28h on the TP-UART2 (confirmed on the H8i8o: frames to the address are
@@ -215,10 +241,30 @@ public:
     }
 #endif
 
+    /**
+     * @brief FlashEraseGuard: put the chip into busy mode before an erase
+     *
+     * Declines (returns false) while a frame of ours is with the chip, a
+     * frame is being received or a U_State.req waits for its answer, unless
+     * mustProceed: then it first finishes feeding our frame (at most
+     * FORCED_ERASE_FEED_MS). Sends U_ActivateBusyMode and waits until it has
+     * left the UART. From then on received octets are discarded until the
+     * host link is silent after endFlashErase(). Not initialised: true, and
+     * nothing to do.
+     */
+    bool beginFlashErase(bool mustProceed) override;
+    /// Lets the receive path find the next frame start; service() then sends
+    /// U_ResetBusyMode. sendFrame() returns Busy until it has.
+    void endFlashErase() override;
+
     TpUartStatistics statistics() const;
 
 private:
     enum class RxPhase : uint8_t { Idle, InFrame };
+    /// Receive path state around a flash erase. Lost: octets are dropped (the
+    /// interrupt may run late, with octets missing). Armed: the erase is over;
+    /// the first octet after more than FRAME_GAP_US of silence starts afresh.
+    enum class RxSync : uint8_t { InSync, Lost, Armed };
     enum class TxPhase : uint8_t { None, Feeding, AwaitConfirm };
 
     struct RxSlot {
@@ -261,6 +307,7 @@ private:
     void handleTxTimeout();
     void pollState();
     void updateLinkState();
+    void leaveBusyMode();
     void emit(const Tp1RxEvent& event);
     void emitTxOutcome(Tp1RxEventType type, Tp1AckClass ackClass);
     size_t txQueued() const;
@@ -303,6 +350,13 @@ private:
     uint32_t _missedStatePolls{0};
     uint8_t _lastStateBits{0};
 
+    // --- Flash erase (main context) ------------------------------------------
+    bool _busyModeActive{false};   ///< U_ActivateBusyMode sent, U_ResetBusyMode not yet
+    uint32_t _resyncDiscardsSeen{0};
+    uint32_t _resyncQuietSinceMs{0};
+    uint32_t _erasesGuarded{0};
+    uint32_t _erasesDeclined{0};
+
     // --- Receive (interrupt context only, except the ring indices) ----------
     std::array<RxSlot, RX_SLOT_COUNT> _rxSlots{};
     std::atomic<uint8_t> _rxHead{0};   ///< next slot service() reads; main writes
@@ -314,6 +368,7 @@ private:
     bool _rxBad{false};
     bool _rxEcho{false};  ///< the frame being assembled is our own, echoed by the chip
     uint32_t _rxLastUs{0};
+    std::atomic<RxSync> _rxSync{RxSync::InSync};
 
     // --- Interrupt to main ----------------------------------------------------
     std::atomic<uint8_t> _confirmCount{0};
@@ -333,6 +388,7 @@ private:
     IsrCounter _ackDecisionsDeferred;
     IsrCounter _echoesDropped;
     IsrCounter _ackWriteFailures;
+    IsrCounter _resyncDiscards;
 
     // --- Main to interrupt: the acknowledge inputs ---------------------------
     std::atomic<uint32_t> _ackTableSequence{0}; ///< odd while the inputs below are being replaced

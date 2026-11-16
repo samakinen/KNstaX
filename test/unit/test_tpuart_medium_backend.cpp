@@ -71,6 +71,8 @@ public:
     int resets{0};
     int stateRequests{0};
     bool busmon{false};
+    int busyModeOn{0};   // U_ActivateBusyMode
+    int busyModeOff{0};  // U_ResetBusyMode
 
     /// Take up to maxOctets off the host link and act on them.
     void pump(size_t maxOctets = SIZE_MAX)
@@ -135,6 +137,10 @@ private:
             busmon = true;
         } else if ((octet & 0xF8u) == 0x10u) {
             acks.push_back(octet);
+        } else if (octet == 0x21u) {
+            ++busyModeOn;
+        } else if (octet == 0x22u) {
+            ++busyModeOff;
         } else if (octet == 0x24u) {
             _argsPending = 1u;
         } else if (octet == 0x28u) {
@@ -767,6 +773,130 @@ void test_full_ring_answers_busy_and_drops_nothing_it_acknowledged(void)
     TEST_ASSERT_EQUAL_UINT32(1u, f.backend->statistics().rxOverflowDrops);  // the one refused with BUSY
 }
 
+// --- Flash erase guard (busy mode) -------------------------------------------
+
+void test_erase_guard_sends_busy_mode_before_the_erase(void)
+{
+    Fixture f;
+    TEST_ASSERT_TRUE(f.init().isOk());
+    f.serviceRound();  // the start-up U_State.req is answered: nothing outstanding
+    TEST_ASSERT_TRUE(f.backend->beginFlashErase(false));
+    // Out on the UART before begin returns: the erase may mask its interrupts.
+    TEST_ASSERT_EQUAL_INT(1, f.chip.busyModeOn);
+    TEST_ASSERT_EQUAL_HEX8(0x21u, f.chip.hostOctets.back());
+    TEST_ASSERT_EQUAL_INT(0, f.chip.busyModeOff);
+    TEST_ASSERT_EQUAL_UINT32(1u, f.backend->statistics().erasesGuarded);
+}
+
+void test_octets_after_an_erase_are_dropped_until_the_link_is_silent(void)
+{
+    Fixture f;
+    TEST_ASSERT_TRUE(f.init().isOk());
+    f.serviceRound();  // the start-up U_State.req is answered: nothing outstanding
+    f.ackGroups({GROUP_IN_TABLE});
+    const auto frame = encode(groupWrite(PEER_ADDRESS, GROUP_IN_TABLE, 0x01));
+    const auto before = f.backend->statistics();
+    TEST_ASSERT_TRUE(f.backend->beginFlashErase(false));
+    // The interrupt ran late: the head of a frame arrives during the erase,
+    // its tail after it, without the octets in between and with no gap that
+    // shows where the frame was cut. Some tail octets look like indications.
+    f.deliver(std::vector<uint8_t>(frame.begin(), frame.begin() + 3));
+    f.backend->endFlashErase();
+    f.deliver({0x8Bu, 0x03u, 0x07u, frame[7], frame[8]});
+    f.serviceRound();
+
+    TEST_ASSERT_EQUAL_UINT32(0u, f.chip.acks.size());
+    const auto stats = f.backend->statistics();
+    TEST_ASSERT_EQUAL_UINT32(8u, stats.resyncDiscards);
+    TEST_ASSERT_EQUAL_UINT32(before.unexpectedConfirms, stats.unexpectedConfirms);
+    TEST_ASSERT_EQUAL_UINT32(before.chipResets, stats.chipResets);
+    TEST_ASSERT_EQUAL_UINT32(before.stateIndications, stats.stateIndications);
+    TEST_ASSERT_EQUAL_UINT32(0u, stats.framesReceived);
+    TEST_ASSERT_EQUAL_INT(0, f.chip.busyModeOff);
+
+    // After 2 ms of silence a whole frame is taken and acknowledged again.
+    f.uart.advanceUs(2500u);
+    f.deliver(frame);
+    f.serviceRound();
+    TEST_ASSERT_EQUAL_UINT32(1u, f.telegrams.size());
+    TEST_ASSERT_EQUAL_MEMORY(frame.data(), f.telegrams[0].data(), frame.size());
+    TEST_ASSERT_EQUAL_UINT32(1u, f.chip.acks.size());
+    TEST_ASSERT_EQUAL_HEX8(ACK_ADDRESSED, f.chip.acks[0]);
+    // In step again: busy mode ends.
+    TEST_ASSERT_EQUAL_INT(1, f.chip.busyModeOff);
+}
+
+void test_busy_mode_ends_once_the_link_has_been_silent(void)
+{
+    Fixture f;
+    TEST_ASSERT_TRUE(f.init().isOk());
+    f.serviceRound();  // the start-up U_State.req is answered: nothing outstanding
+    TEST_ASSERT_TRUE(f.backend->beginFlashErase(false));
+    f.deliver({0x55u, 0x66u});
+    f.backend->endFlashErase();
+    f.deliver({0x77u});
+    f.serviceRound();
+    TEST_ASSERT_EQUAL_INT(0, f.chip.busyModeOff);  // still receiving: not in step yet
+
+    advanceMs(TpUartMediumBackend::RESYNC_SILENCE_MS);
+    f.serviceRound();
+    TEST_ASSERT_EQUAL_INT(1, f.chip.busyModeOff);
+    TEST_ASSERT_EQUAL_HEX8(0x22u, f.chip.hostOctets.back());
+    f.serviceRound();
+    TEST_ASSERT_EQUAL_INT(1, f.chip.busyModeOff);  // once
+}
+
+void test_send_waits_until_busy_mode_has_ended(void)
+{
+    Fixture f;
+    TEST_ASSERT_TRUE(f.init().isOk());
+    f.serviceRound();  // the start-up U_State.req is answered: nothing outstanding
+    const auto frame = encode(groupWrite(OWN_ADDRESS, GROUP_IN_TABLE, 0x01));
+    TEST_ASSERT_TRUE(f.backend->beginFlashErase(false));
+    f.backend->endFlashErase();
+    TEST_ASSERT_TRUE(f.backend->sendFrame(frame).error() == util::ErrorCode::Busy);
+
+    advanceMs(TpUartMediumBackend::RESYNC_SILENCE_MS);
+    f.serviceRound();
+    TEST_ASSERT_EQUAL_INT(1, f.chip.busyModeOff);
+    TEST_ASSERT_TRUE(f.backend->sendFrame(frame).isOk());
+}
+
+void test_erase_guard_declines_while_our_frame_or_a_received_one_is_in_flight(void)
+{
+    Fixture f;
+    TEST_ASSERT_TRUE(f.init().isOk());
+    advanceMs(60u);
+    f.serviceRound();  // the start-up U_State.req is answered
+    f.chip.confirm = ScriptedChip::Confirm::None;
+    TEST_ASSERT_TRUE(f.backend->sendFrame(encode(groupWrite(OWN_ADDRESS, GROUP_IN_TABLE, 0x01))).isOk());
+    f.serviceRound();
+    TEST_ASSERT_FALSE(f.backend->beginFlashErase(false));
+    TEST_ASSERT_EQUAL_INT(0, f.chip.busyModeOn);
+    TEST_ASSERT_EQUAL_UINT32(1u, f.backend->statistics().erasesDeclined);
+
+    // An erase that cannot wait goes ahead anyway.
+    TEST_ASSERT_TRUE(f.backend->beginFlashErase(true));
+    TEST_ASSERT_EQUAL_INT(1, f.chip.busyModeOn);
+    f.backend->endFlashErase();
+
+    Fixture g;
+    TEST_ASSERT_TRUE(g.init().isOk());
+    advanceMs(60u);
+    g.serviceRound();
+    const auto frame = encode(groupWrite(PEER_ADDRESS, GROUP_NOT_IN_TABLE, 0x01));
+    g.deliver(std::vector<uint8_t>(frame.begin(), frame.begin() + 4));  // a frame is coming in
+    TEST_ASSERT_FALSE(g.backend->beginFlashErase(false));
+}
+
+void test_erase_guard_before_init_has_nothing_to_do(void)
+{
+    Fixture f;
+    TEST_ASSERT_TRUE(f.backend->beginFlashErase(false));
+    f.backend->endFlashErase();
+    TEST_ASSERT_EQUAL_INT(0, f.chip.busyModeOn);
+}
+
 void test_bus_monitor_mode_acknowledges_nothing_and_leaves_through_a_reset(void)
 {
     Fixture f;
@@ -953,6 +1083,12 @@ int main(void)
     RUN_TEST(test_individual_frames_leave_the_own_address_to_the_chip);
     RUN_TEST(test_local_busy_answers_addressed_frames_with_busy);
     RUN_TEST(test_full_ring_answers_busy_and_drops_nothing_it_acknowledged);
+    RUN_TEST(test_erase_guard_sends_busy_mode_before_the_erase);
+    RUN_TEST(test_octets_after_an_erase_are_dropped_until_the_link_is_silent);
+    RUN_TEST(test_busy_mode_ends_once_the_link_has_been_silent);
+    RUN_TEST(test_send_waits_until_busy_mode_has_ended);
+    RUN_TEST(test_erase_guard_declines_while_our_frame_or_a_received_one_is_in_flight);
+    RUN_TEST(test_erase_guard_before_init_has_nothing_to_do);
     RUN_TEST(test_bus_monitor_mode_acknowledges_nothing_and_leaves_through_a_reset);
     RUN_TEST(test_state_indication_reports_the_link_up_then_degraded);
     RUN_TEST(test_two_unanswered_state_requests_report_the_link_down);

@@ -271,6 +271,93 @@ void test_erase_all_starts_an_empty_bank_even_before_service(void)
     TEST_ASSERT_EQUAL_UINT64(0u, flash.contractViolations());
 }
 
+namespace {
+
+/// Records the calls, and declines as many erases as it is told to.
+struct RecordingGuard : platform::FlashEraseGuard {
+    int declineNext = 0;
+    int begins = 0;
+    int forcedBegins = 0;
+    int ends = 0;
+    bool open = false;
+
+    bool beginFlashErase(bool mustProceed) override
+    {
+        ++begins;
+        forcedBegins += mustProceed ? 1 : 0;
+        if (!mustProceed && declineNext > 0) {
+            --declineNext;
+            return false;
+        }
+        CHECK(!open, "begin twice without an end");
+        open = true;
+        return true;
+    }
+
+    void endFlashErase() override
+    {
+        CHECK(open, "end without a begin");
+        open = false;
+        ++ends;
+    }
+};
+
+void fillUntilCompacted(FlashLog& log)
+{
+    uint8_t generation = 0;
+    while (log.statistics().compactions == 0u) {
+        TEST_ASSERT_TRUE(log.save(1, pattern(1, generation++, 40)).isOk());
+        TEST_ASSERT_TRUE(log.save(2, pattern(2, generation, 10)).isOk());
+    }
+}
+
+}  // namespace
+
+void test_erase_guard_brackets_every_page_erase_and_can_postpone_it(void)
+{
+    FlashHalVirtual flash(geometry(2u));
+    FlashLog log(flash.hal(), FlashLogConfig{1u});
+    RecordingGuard guard;
+    log.setEraseGuard(&guard);
+    TEST_ASSERT_TRUE(log.mount().isOk());
+    fillUntilCompacted(log);
+    TEST_ASSERT_TRUE(log.servicePending());
+
+    // Declined: nothing erased, not an error, and the work stays pending.
+    guard.declineNext = 2;
+    const uint32_t erasesBefore = log.statistics().pageErases;
+    TEST_ASSERT_TRUE(log.service().isOk());
+    TEST_ASSERT_TRUE(log.service().isOk());
+    TEST_ASSERT_EQUAL_UINT32(erasesBefore, log.statistics().pageErases);
+    TEST_ASSERT_EQUAL_UINT32(2u, log.statistics().eraseDeferrals);
+    TEST_ASSERT_EQUAL_UINT32(0u, log.statistics().storageErrors);
+    TEST_ASSERT_TRUE(log.servicePending());
+    TEST_ASSERT_EQUAL_INT(0, guard.ends);
+
+    drainService(log);
+    const uint32_t erased = log.statistics().pageErases - erasesBefore;
+    TEST_ASSERT_TRUE(erased > 0u);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(erased), guard.ends);
+    TEST_ASSERT_FALSE(guard.open);
+    TEST_ASSERT_EQUAL_INT(0, guard.forcedBegins);
+}
+
+void test_erase_all_and_formatting_go_ahead_through_the_guard(void)
+{
+    FlashHalVirtual flash(geometry(2u));
+    FlashLog log(flash.hal(), FlashLogConfig{1u});
+    RecordingGuard guard;
+    guard.declineNext = 100;  // would decline anything that may wait
+    log.setEraseGuard(&guard);
+    TEST_ASSERT_TRUE(log.mount().isOk());  // a blank region: formatting erases nothing
+    fillUntilCompacted(log);
+    TEST_ASSERT_TRUE(log.eraseAll().isOk());  // erases the spare itself, cannot wait
+    TEST_ASSERT_TRUE(guard.forcedBegins > 0);
+    TEST_ASSERT_EQUAL_INT(guard.forcedBegins, guard.ends);
+    TEST_ASSERT_FALSE(guard.open);
+    TEST_ASSERT_FALSE(loadOpt(log, 1).has_value());
+}
+
 void test_failed_program_closes_the_bank_and_the_next_save_compacts(void)
 {
     FlashHalVirtual flash(geometry(2u));
@@ -474,6 +561,8 @@ int main(void)
     RUN_TEST(test_service_compacts_ahead_of_need);
     RUN_TEST(test_service_does_not_compact_a_bank_full_of_live_data);
     RUN_TEST(test_erase_all_starts_an_empty_bank_even_before_service);
+    RUN_TEST(test_erase_guard_brackets_every_page_erase_and_can_postpone_it);
+    RUN_TEST(test_erase_all_and_formatting_go_ahead_through_the_guard);
     RUN_TEST(test_failed_program_closes_the_bank_and_the_next_save_compacts);
     RUN_TEST(test_garbage_after_the_log_closes_the_bank_but_keeps_what_precedes_it);
     RUN_TEST(test_scenario_compacts_and_erases);

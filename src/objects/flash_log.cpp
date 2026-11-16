@@ -196,15 +196,23 @@ bool FlashLog::bankBlank(uint8_t bank)
     return true;
 }
 
-bool FlashLog::erasePage(uint32_t pageAddr)
+FlashLog::Erase FlashLog::erasePage(uint32_t pageAddr, bool mustProceed)
 {
+    if (_eraseGuard != nullptr && !_eraseGuard->beginFlashErase(mustProceed) && !mustProceed) {
+        ++_stats.eraseDeferrals;
+        return Erase::Deferred;
+    }
     ++_stats.pageErases;
-    if (!_hal.ops.erase_page(_hal.context, pageAddr) || !pageBlank(pageAddr)) {
+    const bool erased = _hal.ops.erase_page(_hal.context, pageAddr);
+    if (_eraseGuard != nullptr) {
+        _eraseGuard->endFlashErase();
+    }
+    if (!erased || !pageBlank(pageAddr)) {
         ++_stats.storageErrors;
         KNX_LOGW(TAG, "Erase failed at 0x%08lx", static_cast<unsigned long>(pageAddr));
-        return false;
+        return Erase::Failed;
     }
-    return true;
+    return Erase::Done;
 }
 
 bool FlashLog::eraseBank(uint8_t bank)
@@ -214,7 +222,8 @@ bool FlashLog::eraseBank(uint8_t bank)
     const uint32_t pages = _hal.geometry.page_count / 2u;
     for (uint32_t page = 0; page < pages; ++page) {
         const uint32_t addr = bankAddress(bank) + page * _hal.geometry.page_size;
-        if (!pageBlank(addr) && !erasePage(addr)) {
+        // Its callers (formatting, eraseAll) cannot wait for the guard.
+        if (!pageBlank(addr) && erasePage(addr, true) != Erase::Done) {
             return false;
         }
     }
@@ -476,7 +485,11 @@ util::Result<void> FlashLog::service()
                 ++_nextErasePage;
                 continue;
             }
-            if (!erasePage(addr)) {
+            const Erase erase = erasePage(addr, false);
+            if (erase == Erase::Deferred) {
+                return util::Result<void>::ok();  // the medium asked to wait; next call
+            }
+            if (erase == Erase::Failed) {
                 return util::ErrorCode::StorageError;  // the same page again next time
             }
             ++_nextErasePage;

@@ -48,6 +48,24 @@ menu "Standalone build (not seen by ESP-IDF)"
             bool "baremetal (single-threaded, no RTOS)"
     endchoice
 
+    config KNX_ISR_IN_RAM
+        bool "Run the receive interrupt path from RAM"
+        depends on KNX_STANDALONE_PLATFORM_BAREMETAL
+        default y
+        help
+            Places the code marked KNX_ISR_RAM (the TP-UART backend's receive
+            path: frame assembly and the acknowledge decision) in .ramfunc,
+            so it keeps running while the MCU erases its flash. The board
+            must then keep its vector table and every handler that can fire
+            during an erase in RAM as well.
+
+            Say n to leave that code in flash and save its RAM (about 0.8
+            KiB with the TP-UART backend, plus the board's vector table
+            copy). The board then masks interrupts while a page erases, and
+            the product passes the medium to FlashLog::setEraseGuard(): the
+            TP-UART backend puts the chip into busy mode, so frames sent to
+            the device meanwhile are answered BUSY and repeated afterwards.
+
     config KNX_BUILD_TP1
         bool "Build the TP1 medium"
         default y

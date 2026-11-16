@@ -24,9 +24,11 @@
  *     On some parts it is worse than a stall: on the GD32F103, an interrupt
  *     taken while the core runs from flash during an erase locks the chip
  *     until a reset. A board there starts the erase and waits for it from
- *     RAM, and keeps its vector table and every handler that can fire
- *     meanwhile in RAM (KNX_ISR_RAM's section). Measured on the H8i8o; see
- *     docs/design/cortex-m-tpuart2-support.md §7.2.
+ *     RAM, and either masks interrupts meanwhile (the medium then makes the
+ *     bus repeat what it misses: FlashLog::setEraseGuard()) or keeps its
+ *     vector table and every handler that can fire in RAM (KNX_ISR_RAM).
+ *     Measured on the H8i8o; see docs/design/cortex-m-tpuart2-support.md
+ *     §7.2 and §7.3.
  *   - program(addr, data, len): addr and len are multiples of write_unit, and
  *     the range lies inside one page. Blocking.
  *   - read(addr, out, len): any address and length inside the region. Reading

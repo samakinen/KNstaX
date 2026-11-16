@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | **Accepted** 15 November 2026, including the compact profile (K7) as KNstaX scope even though it changes core structures such as group object storage. The first target runs bare metal with no RTOS. **K1 is implemented** (§6.3), and so are **K2** (§4.1), **K3** (§3.8) and **K5** (§7.1), host-tested. **K7 is started and the size gate (M1) is missed** (§9.1). Everything else is not implemented. Per DEVELOPMENT_GUIDELINES, README.md and the conformance status must not claim more than ships with tests. |
+| Status | **Accepted** 15 November 2026, including the compact profile (K7) as KNstaX scope even though it changes core structures such as group object storage. The first target runs bare metal with no RTOS. **K1 is implemented** (§6.3), and so are **K2** (§4.1), **K3** (§3.8) and **K5** (§7.1), host-tested, with flash erases guarded by the TP-UART2's busy mode so the receive path can stay in flash (§7.3). **K7 is started and the size gate (M1) is missed** (§9.1). Everything else is not implemented. Per DEVELOPMENT_GUIDELINES, README.md and the conformance status must not claim more than ships with tests. |
 | Motivating product | H8i8o 8DI/8DO module: GD32F103CB (Cortex-M3, 128 KiB flash, 20 KiB RAM) + Siemens TP-UART2. Its design lives in the h8i8o repository, `docs/design/`. |
 | Principle | Everything here is generic. A different board, MCU, I/O count or TP-UART-family chip should be able to use it unchanged. Board facts (pins, clocks, flash geometry) stay in the product repository. |
 
@@ -87,7 +87,8 @@ Tp1DataLinkLayer
 The values below were taken as the Siemens TP-UART2 technical manual's, cross-checked against
 `thelsing/knx`'s `tpuart_data_link_layer.cpp`. That cross-check was not good enough: the
 `U_SetAddress` value was the NCN5120's, and the H8i8o showed it (§3.8). Trust a value here once
-§3.8 records it as seen on a chip; the manual itself has not been at hand.
+§3.8 records it as seen on a chip. The manual (Siemens, KNX EIB TP-UART 2-IC technical manual,
+A6V11933793, release June 2024) was checked on 16 November 2026; §3.9 has what it changes.
 
 | Item | Value |
 |---|---|
@@ -97,6 +98,7 @@ The values below were taken as the Siemens TP-UART2 technical manual's, cross-ch
 | `U_SetAddress.req` | TP-UART2: **0x28** + address high + low (confirmed on the H8i8o). NCN5120: 0xF1 + address high + low + one dummy octet; the TP-UART2 ignores 0xF1 and raises its receive-error flag. |
 | `U_AckInformation` | 0x10, ORed with: 0x04 = NACK, 0x02 = BUSY, 0x01 = addressed (acknowledge this frame) |
 | `U_Busmon.req` | 0x05 |
+| `U_ActivateBusyMode` / `U_ResetBusyMode` | 0x21 / 0x22. Busy mode: for 700 ms (±10 ms), or until 0x22 or a `U_AckInformation`, the chip answers every frame it counts as addressed with BUSY (manual §3.2.3.1.5–6). Used around flash erases (§7.3). |
 | `U_L_DataStart` / `_Continue` / `_End` | 0x80, 0x80 \| index (1–63), 0x40 \| length (7–63); one data octet follows each |
 | Repetition count | TP-UART2: `U_MXRSTCNT` (0x24) + one octet. NCN5120: `U_SetRepetition` (0xF2) + 3 octets. |
 | `L_Data.con` | 0x8B positive, 0x0B negative (`(b & 0x7F) == 0x0B`, bit 7 = success) |
@@ -133,7 +135,7 @@ The last one forces a data-link change:
 | Destination | Who decides | How |
 |---|---|---|
 | Own individual address | Chip | `U_SetAddress`, called from `setOwnAddress()` |
-| Group address in our table, or tunnel address | Host | `U_AckInformation` with the addressed bit, sent from the RX interrupt as soon as the destination octets (indication octets 3–4) and the address-type bit (octet 5) are in. The chip's deadline is the end of the frame; this leaves a margin of several octet times. |
+| Group address in our table, or tunnel address | Host | `U_AckInformation` with the addressed bit, sent from the RX interrupt as soon as the destination octets (indication octets 3–4) and the address-type bit (octet 5) are in. The manual's deadline is 1.7 ms after the address-type octet (§3.9, item 2). |
 | Not ours | Host | Nothing sent; the chip does not acknowledge |
 | Local receive queue nearly full | Host | `U_AckInformation` with the busy bit (0x13), from `setLocalBusy()` state |
 
@@ -329,6 +331,28 @@ rest from the 2.5 KiB margin, to be rechecked once the whole application image e
 device check in `budgets/tp1-small-m3.json` now reserves the backend at its measured 368 B and a
 margin of 2,048 B, and passes with 178 B to spare. The KNstaX budgets of all three reference
 configurations were tightened to the new figures.
+
+### 3.9 Checked against the manual (16 November 2026)
+
+Confirmed by the manual: `U_SetAddress` 0x28, `U_MxRstCnt` 0x24 with the BUSY count in bits 7–5
+and the NACK count in bits 2–0 (3 each after reset), `U_AckInformation` 0x10–0x17, the 2–2.5 ms
+receive time-out that ends a frame. New: busy mode (0x21/0x22, §3.2 and §7.3).
+
+Two statements in this note disagree with the manual. Neither is acted on yet:
+
+1. **Address evaluation acknowledges every group telegram.** After `U_SetAddress`, *"a complete
+   address evaluation in the TP-UART is activated (group-addressed telegrams are now generally
+   confirmed)"* (§3.2.3.1.7). The chip then sends IACK for every group or broadcast frame on
+   the line, not only for those in our table, and §3.3's "not ours: the chip does not
+   acknowledge" is wrong. The manual adds that the host can still change the chip's answer with
+   `U_AckInformation`. Whether 0x10 (addressed bit clear) withdraws the acknowledgement is not
+   said; it needs a test with a second device. Until then the device acknowledges telegrams it
+   does not listen to, which can hide from a sender that the real receivers are missing.
+2. **The acknowledge deadline is 1.7 ms**, counted from the address-type octet (§3.2.3.1.8),
+   not the end of the frame. The interrupt decides at that octet, but its `U_AckInformation`
+   waits behind whatever the transmit path has queued: `txQueueLimitOctets` (4, about 2.3 ms)
+   can exceed the deadline while one of our frames is being fed to the chip. A limit of 2 (one
+   `U_L_Data` pair, about 1.15 ms) stays inside it.
 
 ## 4. K2: UART HAL
 
@@ -574,6 +598,62 @@ The H8i8o repository has the board's HAL (`bsp/gd32_fmc.c`) and two test images.
   fire in RAM, nothing is lost: all TP-UART2 octets arrived during a 37 ms erase. A handler
   left in flash (SysTick) delays the others until the erase ends, which loses octets.
   Programming from flash is safe. The HAL contract (`flash_hal.h`) now says so.
+- **Masking instead.** With only the erase start and wait in RAM and interrupts masked for the
+  erase, the chip does not lock up, and the UART keeps the last octet (9 of 10 lost). Masking
+  with the wait in flash still locks up. §7.3 builds on the masked variant.
+
+### 7.3 Erasing without code in RAM (16 November 2026)
+
+Keeping the receive path and the vector table in RAM cost the H8i8o about 1 KiB of its 20 KiB.
+The TP-UART2 has a mode made for this: *"If the host controller is temporarily not able to
+receive telegrams from the bus (e.g. due to no code execution during flash erase), the TP-UART
+should reject frames from the bus with BUSY acknowledges"* (manual §3.2.3.1.5).
+
+- **`platform::FlashEraseGuard`** (`include/knx/platform/flash_erase_guard.hpp`): a medium
+  that can make the bus repeat what it misses. `FlashLog::setEraseGuard()` calls it around
+  every page erase. `service()` postpones an erase the guard declines (`eraseDeferrals`);
+  `mount()` and `eraseAll()` cannot wait and go ahead.
+- **`TpUartMediumBackend`** implements it. Before the erase it sends `U_ActivateBusyMode` and
+  waits until the octet has left the UART; it declines while one of our frames is with the chip,
+  a frame is coming in, or a `U_State.ind` is due. From then on the receive path drops every
+  octet, because after a masked erase the interrupt runs late, with octets missing and
+  timestamps that no longer show frame ends. After the erase, the first octet that follows
+  2 ms of silence starts afresh, or `service()` sees 3 ms without octets; only then does it send
+  `U_ResetBusyMode`, as the manual asks. `sendFrame()` returns `Busy` until then.
+- **The board** masks interrupts for the erase in its HAL, with the start and the busy-wait in
+  RAM (about 40 B on the H8i8o).
+- **`KNX_ISR_IN_RAM`** (Kconfig, bare metal, default y) says whether `KNX_ISR_RAM` code goes to
+  `.ramfunc`. The `tp1-small` profile sets it to n.
+
+What it costs: during an erase (about 40 ms) every group telegram on the line is answered BUSY
+by our chip, which overrides other receivers' ACK, so the sender repeats it. A sender waits about
+150 bit times after BUSY and repeats up to 3 times, which spans more than the busy window, so the
+telegram still gets through, but every receiver sees a repetition. Erases follow compactions, so
+they are rare outside commissioning. Busy mode must never be left on: the chip ends it by
+itself after 700 ms, by which time the senders would have used up their repetitions.
+
+Not tested on a bus: from the device itself the BUSY answers cannot be seen (the chip does not
+answer its own frames), and a test needs a second sender timed against an erase. The owner
+accepted the manual's description (16 November 2026). The H8i8o measured the masked erase
+itself (`fw/erase-probe`) and runs `FlashLog` through the masked HAL.
+
+Tests: `test_tpuart_medium_backend` (busy mode sent before the erase; octets after it dropped,
+including some that look like indications, until silence; `U_ResetBusyMode` only then; sends
+held back meanwhile; declined while a frame is in flight) and `test_flash_log` (the guard
+brackets every erase, can postpone one, and is forced for `eraseAll()`). Disabling the
+resynchronisation makes the backend test fail.
+
+Size (tp1-small, Cortex-M3):
+
+| | Receive path in RAM | In flash, erase guarded |
+|---|---:|---:|
+| KNstaX flash | 86,518 B | 87,128 B |
+| KNstaX RAM, static + heap | 14,432 B | 13,584 B |
+| H8i8o device RAM, as the gate sums it | 20,440 / 20,480 B | 19,592 / 20,480 B |
+| H8i8o device flash | 118,161 / 131,072 B | 118,771 / 131,072 B |
+
+The RAM budgets of `tp1-small` (Cortex-M3 and M0+) were lowered to the new figures plus the
+margin. The board also no longer needs its vector table in RAM.
 
 ## 8. K6: software AES-128
 

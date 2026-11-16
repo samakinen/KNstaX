@@ -244,13 +244,32 @@ TpUartMediumBackend::~TpUartMediumBackend()
 
 [[gnu::always_inline]] inline void TpUartMediumBackend::onRxOctet(uint8_t octet, uint8_t flags, uint32_t timestampUs)
 {
+    const uint32_t lastUs = _rxLastUs;
+    _rxLastUs = timestampUs;
+
+    // Around a flash erase the interrupt may have run late, with octets lost
+    // and timestamps that no longer show where frames end: drop everything
+    // until, after the erase, an octet follows real silence. That octet is a
+    // frame start or an indication (frames to us were answered BUSY meanwhile).
+    const RxSync sync = _rxSync.load(std::memory_order_acquire);
+    if (sync != RxSync::InSync) {
+        if (sync == RxSync::Lost || static_cast<uint32_t>(timestampUs - lastUs) <= FRAME_GAP_US) {
+            _resyncDiscards.increment();
+            return;
+        }
+        // A plain store, not a compare-exchange (no library call on cores
+        // without LDREX): only Armed -> InSync is written here, and service()
+        // writes the same transition.
+        _rxSync.store(RxSync::InSync, std::memory_order_release);
+        _rxPhase.store(RxPhase::Idle, std::memory_order_relaxed);
+    }
+
     // More than 2 ms of silence ends whatever was being assembled.
     if (_rxPhase.load(std::memory_order_relaxed) == RxPhase::InFrame &&
-        static_cast<uint32_t>(timestampUs - _rxLastUs) > FRAME_GAP_US) {
+        static_cast<uint32_t>(timestampUs - lastUs) > FRAME_GAP_US) {
         _partialFramesDiscarded.increment();
         _rxPhase.store(RxPhase::Idle, std::memory_order_relaxed);
     }
-    _rxLastUs = timestampUs;
 
     if (_rxPhase.load(std::memory_order_relaxed) == RxPhase::Idle) {
         onIdleOctet(octet, flags);
@@ -363,6 +382,8 @@ void TpUartMediumBackend::resetRxState()
     _rxTail.store(0u, std::memory_order_relaxed);
     _rxCount = 0u;
     _rxExpected = 0u;
+    _rxSync.store(RxSync::InSync, std::memory_order_relaxed);
+    _busyModeActive = false;  // a reset ends busy mode in the chip too
     _confirmsSeen = _confirmCount.load(std::memory_order_relaxed);
     _resetsSeen = _resetIndCount.load(std::memory_order_relaxed);
     _stateIndsSeen = _stateIndCount.load(std::memory_order_relaxed);
@@ -457,8 +478,8 @@ util::Result<size_t> TpUartMediumBackend::sendFrame(std::span<const uint8_t> fra
     if (_busMonitor) {
         return util::ErrorCode::OperationNotSupported;
     }
-    if (_txPhase != TxPhase::None || _error) {
-        return util::ErrorCode::Busy;
+    if (_txPhase != TxPhase::None || _error || _busyModeActive) {
+        return util::ErrorCode::Busy;  // busy mode: until U_ResetBusyMode is out
     }
     if (frame.size() < MIN_FRAME || frame.size() > MAX_FRAME) {
         return util::ErrorCode::InvalidFrameSize;
@@ -679,11 +700,93 @@ util::Result<void> TpUartMediumBackend::service()
     }
     drainRx();
     handleIndications();
+    leaveBusyMode();
     pumpTx();
     handleTxTimeout();
     pollState();
     updateLinkState();
     return util::Result<void>::ok();
+}
+
+bool TpUartMediumBackend::beginFlashErase(bool mustProceed)
+{
+    if (!_initialized) {
+        return true;
+    }
+    const uint32_t nowMs = util::nowMs(&_timing);
+    // U_State.ind comes within about 1.4 ms; the reset wait bounds it generously.
+    const bool stateReplyDue = _statePollOutstanding &&
+                               static_cast<uint32_t>(nowMs - _lastStatePollMs) < _config.resetTimeoutMs;
+    if (!mustProceed && (_txPhase != TxPhase::None || stateReplyDue ||
+                         _rxPhase.load(std::memory_order_relaxed) == RxPhase::InFrame)) {
+        // Our frame's L_Data.con, a U_State.ind or the rest of a frame would
+        // arrive during the erase and be lost.
+        ++_erasesDeclined;
+        return false;
+    }
+    // No request may go between the U_L_Data pairs of a frame: finish feeding it.
+    const uint32_t feedStart = nowMs;
+    while (_txPhase == TxPhase::Feeding &&
+           static_cast<uint32_t>(util::nowMs(&_timing) - feedStart) < FORCED_ERASE_FEED_MS) {
+        pumpTx();
+        if (_txPhase == TxPhase::Feeding) {
+            util::delayMs(&_timing, 1u);
+        }
+    }
+
+    const uint8_t request = U_ACTIVATE_BUSY_MODE;
+    if (writeRequest(std::span<const uint8_t>(&request, 1u)).isOk()) {
+        _busyModeActive = true;
+        // The chip must have it before the erase stops the interrupts that
+        // feed the UART. The last octet may still be in the shift register;
+        // the hardware sends it on its own.
+        const uint32_t drainStart = util::nowMs(&_timing);
+        while (txQueued() != 0u &&
+               static_cast<uint32_t>(util::nowMs(&_timing) - drainStart) < BUSY_MODE_DRAIN_MS) {
+            util::delayMs(&_timing, 1u);
+        }
+    }
+    // Whatever arrives from now until the link is silent after the erase is dropped.
+    _rxSync.store(RxSync::Lost, std::memory_order_release);
+    ++_erasesGuarded;
+    return true;
+}
+
+void TpUartMediumBackend::endFlashErase()
+{
+    if (!_initialized) {
+        return;
+    }
+    _resyncDiscardsSeen = _resyncDiscards.read();
+    _resyncQuietSinceMs = util::nowMs(&_timing);
+    _rxSync.store(RxSync::Armed, std::memory_order_release);
+}
+
+void TpUartMediumBackend::leaveBusyMode()
+{
+    // The receive path is back in step once an octet has followed silence
+    // (the interrupt then says so), or once the link has been silent for
+    // RESYNC_SILENCE_MS. The RX timestamps may come from another clock than
+    // the platform's, so silence is judged here from the discard count: it
+    // does not move while nothing arrives.
+    if (_rxSync.load(std::memory_order_acquire) == RxSync::Armed) {
+        const uint32_t now = util::nowMs(&_timing);
+        const uint32_t discards = _resyncDiscards.read();
+        if (discards != _resyncDiscardsSeen) {
+            _resyncDiscardsSeen = discards;
+            _resyncQuietSinceMs = now;
+        } else if (static_cast<uint32_t>(now - _resyncQuietSinceMs) >= RESYNC_SILENCE_MS) {
+            _rxSync.store(RxSync::InSync, std::memory_order_release);
+        }
+    }
+    if (!_busyModeActive || _rxSync.load(std::memory_order_acquire) != RxSync::InSync) {
+        return;
+    }
+    // The manual asks for exactly this order: synchronise, then U_ResetBusyMode.
+    const uint8_t request = U_RESET_BUSY_MODE;
+    if (writeRequest(std::span<const uint8_t>(&request, 1u)).isOk()) {
+        _busyModeActive = false;
+    }
 }
 
 void TpUartMediumBackend::setEventCallback(Tp1EventCallback callback, void* context)
@@ -798,6 +901,9 @@ TpUartStatistics TpUartMediumBackend::statistics() const
     stats.ackDecisionsDeferred = _ackDecisionsDeferred.read();
     stats.echoesDropped = _echoesDropped.read();
     stats.ackWriteFailures = _ackWriteFailures.read();
+    stats.erasesGuarded = _erasesGuarded;
+    stats.erasesDeclined = _erasesDeclined;
+    stats.resyncDiscards = _resyncDiscards.read();
     stats.confirmsPositive = _confirmsPositive;
     stats.confirmsNegative = _confirmsNegative;
     stats.confirmTimeouts = _confirmTimeouts;

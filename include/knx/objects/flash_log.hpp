@@ -44,6 +44,11 @@
  * exceptions are mount(), which formats a region with no valid bank, and
  * eraseAll(), which erases the spare bank first if service() has not.
  *
+ * Erase guard. Where an erase stops the medium's receive path (interrupts
+ * masked for it), setEraseGuard() names a platform::FlashEraseGuard that is
+ * told before and after every page erase. service() postpones an erase the
+ * guard declines; mount() and eraseAll() cannot wait and go ahead.
+ *
  * Sizing. The live data (the latest record of each id) must fit in one bank
  * with room for the largest burst of saves made between two service() calls:
  * a save that needs a compaction while the spare bank is still waiting for
@@ -58,6 +63,7 @@
 #pragma once
 
 #include "knx/objects/flash_hal.h"
+#include "knx/platform/flash_erase_guard.hpp"
 #include "knx/util/result.hpp"
 
 #include <array>
@@ -86,6 +92,7 @@ struct FlashLogStatistics {
     uint32_t tornRecords = 0;     ///< records with a bad CRC seen at mount
     uint32_t formats = 0;         ///< mounts that found no valid bank
     uint32_t storageErrors = 0;   ///< erase, program, read or verify failures
+    uint32_t eraseDeferrals = 0;  ///< service() erases the guard asked to postpone
 };
 
 class FlashLog {
@@ -120,6 +127,10 @@ public:
     util::Result<void> mount();
 
     [[nodiscard]] bool mounted() const { return _mounted; }
+
+    /// Told before and after every page erase; nullptr (the default) for none.
+    /// Must outlive this object or be cleared first.
+    void setEraseGuard(platform::FlashEraseGuard* guard) { _eraseGuard = guard; }
 
     /**
      * @brief Append a record for @p id
@@ -167,7 +178,9 @@ public:
     /**
      * @brief One bounded step of background work
      *
-     * Erases one page of the spare bank if it needs it; otherwise compacts
+     * Erases one page of the spare bank if it needs it, unless the erase guard
+     * declines it for now (counted in eraseDeferrals, retried on the next
+     * call); otherwise compacts
      * when the free space is below the reserve (FlashLogConfig). Call it from
      * the main loop: at most one page erase or one compaction per call.
      *
@@ -223,7 +236,8 @@ private:
 
     bool bankBlank(uint8_t bank);
     bool pageBlank(uint32_t pageAddr);
-    bool erasePage(uint32_t pageAddr);
+    enum class Erase : uint8_t { Done, Failed, Deferred };
+    Erase erasePage(uint32_t pageAddr, bool mustProceed);
     bool eraseBank(uint8_t bank);
 
     util::Result<void> append(uint16_t id, uint16_t lengthField, std::span<const uint8_t> data);
@@ -232,6 +246,7 @@ private:
 
     knx_flash_hal_t _hal;
     FlashLogConfig _config;
+    platform::FlashEraseGuard* _eraseGuard = nullptr;
     uint32_t _bankBytes = 0;
     uint32_t _sequence = 0;
     uint32_t _writeOffset = 0;  // end of the log in the active bank
