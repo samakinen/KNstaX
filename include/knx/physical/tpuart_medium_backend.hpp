@@ -192,8 +192,12 @@ public:
      * @brief Open the UART, reset the chip and configure it
      *
      * Blocks for the reset: U_Reset.req, then up to resetTimeoutMs for
-     * U_Reset.ind, resetAttempts times. Then U_SetAddress, the repetition
-     * counts, U_Busmon when asked for, and U_State.req.
+     * U_Reset.ind, resetAttempts times. Then the repetition counts, U_Busmon
+     * when asked for, and U_State.req. U_SetAddress follows from the first
+     * service(): the owner restores its address only after init() (the BAU
+     * reads it from persistence), and the chip should hear one address, not
+     * the default and then the real one. Sending does not wait for it: the
+     * chip uses its address only to acknowledge frames it receives.
      *
      * @return InvalidParameter for an incomplete HAL; ResourceUnavailable if
      *         the UART does not open or takes no requests; Timeout if the chip
@@ -301,8 +305,10 @@ private:
     bool individualTableContains(uint16_t destination) const;
     static size_t nextSlot(size_t index) { return (index + 1u) % RX_SLOT_COUNT; }
 
-    util::Result<void> resetChip();
-    util::Result<void> configureChip();
+    /// deferAddress: leave U_SetAddress to service() (only init() does).
+    util::Result<void> resetChip(bool deferAddress = false);
+    util::Result<void> configureChip(bool deferAddress = false);
+    util::Result<void> sendAddress();
     util::Result<void> writeRequest(std::span<const uint8_t> octets);
     void resetRxState();
     void drainRx();
@@ -330,7 +336,8 @@ private:
     bool _initialized{false};
     bool _error{false};
     bool _busMonitor{false};
-    bool _addressPending{false};
+    bool _addressPending{false};    ///< U_SetAddress still to send
+    bool _configurePending{false};  ///< configuring after a chip reset failed; retried
     size_t _txCapacity{0};
 
     // --- Transmit (main context) ---------------------------------------------

@@ -347,6 +347,7 @@ util::Result<void> TpUartMediumBackend::init(const Tp1MediumConfig& config)
     setTxPhase(TxPhase::None);
     _error = false;
     _addressPending = false;
+    _configurePending = false;
 
     const knx_uart_hal_config_t uartConfig{_config.baud, _config.parity};
     if (!knx_uart_hal_open(&_hal, &uartConfig, &rxTrampoline, this)) {
@@ -356,7 +357,10 @@ util::Result<void> TpUartMediumBackend::init(const Tp1MediumConfig& config)
     // Nothing is queued yet, so what is free now is the whole TX buffer.
     _txCapacity = knx_uart_hal_tx_free(&_hal);
 
-    auto reset = resetChip();
+    // The address the owner passes here is usually its default: the real one
+    // comes from persistence after init() (setOwnAddress). U_SetAddress waits
+    // for the first service(), so the chip is given one address, not two.
+    auto reset = resetChip(true);
     if (reset.isError()) {
         knx_uart_hal_close(&_hal);
         _error = true;
@@ -403,7 +407,7 @@ util::Result<void> TpUartMediumBackend::writeRequest(std::span<const uint8_t> oc
                                                                    : util::Result<void>(util::ErrorCode::ResourceUnavailable);
 }
 
-util::Result<void> TpUartMediumBackend::resetChip()
+util::Result<void> TpUartMediumBackend::resetChip(bool deferAddress)
 {
     if (knx_uart_hal_has_reset(&_hal)) {
         // The reset input, where wired, also clears a chip that no longer
@@ -437,17 +441,31 @@ util::Result<void> TpUartMediumBackend::resetChip()
     if (!answered) {
         return util::ErrorCode::Timeout;
     }
-    return configureChip();
+    return configureChip(deferAddress);
 }
 
-util::Result<void> TpUartMediumBackend::configureChip()
+util::Result<void> TpUartMediumBackend::sendAddress()
 {
     const uint16_t address = _ownAddress.load(std::memory_order_relaxed);
     const std::array<uint8_t, 3> setAddress{U_SET_ADDRESS_REQ, static_cast<uint8_t>(address >> 8),
                                             static_cast<uint8_t>(address & 0xFFu)};
     auto result = writeRequest(setAddress);
-    if (result.isError()) {
-        return result;
+    if (result.isOk()) {
+        _addressPending = false;
+    }
+    return result;
+}
+
+util::Result<void> TpUartMediumBackend::configureChip(bool deferAddress)
+{
+    util::Result<void> result = util::Result<void>::ok();
+    if (deferAddress) {
+        _addressPending = true;
+    } else {
+        result = sendAddress();
+        if (result.isError()) {
+            return result;
+        }
     }
 
     const std::array<uint8_t, 2> repetitions{
@@ -474,7 +492,7 @@ util::Result<void> TpUartMediumBackend::configureChip()
     }
     _statePollOutstanding = true;
     _lastStatePollMs = util::nowMs(&_timing);
-    _addressPending = false;
+    _configurePending = false;
     return util::Result<void>::ok();
 }
 
@@ -609,7 +627,7 @@ void TpUartMediumBackend::handleIndications()
             emitTxOutcome(Tp1RxEventType::TxAckDeadlineMiss, Tp1AckClass::None);
         }
         if (configureChip().isError()) {
-            _addressPending = true;  // retried from service()
+            _configurePending = true;  // retried from service()
         }
     }
 
@@ -673,8 +691,12 @@ void TpUartMediumBackend::pollState()
         }
         return;
     }
-    if (_addressPending) {
+    if (_configurePending) {
         if (configureChip().isError()) {
+            return;
+        }
+    } else if (_addressPending) {
+        if (sendAddress().isError()) {
             return;
         }
     }

@@ -252,6 +252,11 @@ Where it differs from §3.1–3.6:
   gives `Down`.
 - **Requests between frames.** `U_SetAddress` after `setOwnAddress()` and `U_State.req` are sent
   from `service()` only while no frame is being fed to the chip.
+- **One address at start.** `init()` configures the chip without `U_SetAddress`; the first
+  `service()` sends it. The BAU passes its default address to `init()` and restores the real one
+  from persistence afterwards, so the chip used to hear FFFFh and then the real address (seen on
+  the H8i8o, 16 November 2026). Sending does not wait for the address: the chip uses it only to
+  acknowledge frames it receives. After a chip reset the backend sends it at once, as before.
 - **The receive ring** is 4 slots of `min(MAX_TP1_FRAME_LENGTH, 64)` octets. One slot is always
   the frame being assembled, so 3 complete frames wait for `service()`.
 

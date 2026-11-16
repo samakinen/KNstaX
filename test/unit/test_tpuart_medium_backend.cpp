@@ -248,11 +248,22 @@ struct Fixture {
         TEST_ASSERT_TRUE(backend->setAckGroupAddressView(groups.view()));
     }
 
-    util::Result<void> init(uint16_t ownAddress = OWN_ADDRESS)
+    util::Result<void> initOnly(uint16_t ownAddress = OWN_ADDRESS)
     {
         Tp1MediumConfig config;
         config.ownIndividualAddressRaw = ownAddress;
         return backend->init(config);
+    }
+
+    /// init(), then the first service() an owner's loop gives it: the address
+    /// goes to the chip there.
+    util::Result<void> init(uint16_t ownAddress = OWN_ADDRESS)
+    {
+        auto result = initOnly(ownAddress);
+        if (result.isOk()) {
+            TEST_ASSERT_TRUE(backend->service().isOk());
+        }
+        return result;
     }
 
     /// The chip answers what is queued, then the backend services.
@@ -345,8 +356,9 @@ void test_init_resets_and_configures_the_chip(void)
     TEST_ASSERT_TRUE(f.uart.isOpen());
     TEST_ASSERT_EQUAL_UINT32(19200u, f.uart.config()->baud);
     TEST_ASSERT_EQUAL_INT(KNX_UART_HAL_PARITY_EVEN, f.uart.config()->parity);
-    // U_Reset.req, U_SetAddress, U_MxRstCnt (3 BUSY, 3 NACK), U_State.req.
-    const std::vector<uint8_t> expected{0x01, 0x28, 0x11, 0x0A, 0x24, 0x63, 0x02};
+    // U_Reset.req, U_MxRstCnt (3 BUSY, 3 NACK), U_State.req; U_SetAddress
+    // from the first service().
+    const std::vector<uint8_t> expected{0x01, 0x24, 0x63, 0x02, 0x28, 0x11, 0x0A};
     TEST_ASSERT_EQUAL_UINT32(expected.size(), f.chip.hostOctets.size());
     TEST_ASSERT_EQUAL_MEMORY(expected.data(), f.chip.hostOctets.data(), expected.size());
     TEST_ASSERT_EQUAL_INT(static_cast<int>(Tp1MediumState::Idle), static_cast<int>(f.backend->getState()));
@@ -355,6 +367,29 @@ void test_init_resets_and_configures_the_chip(void)
     TEST_ASSERT_TRUE(caps.transceiverRepeats);
     TEST_ASSERT_TRUE(caps.supportsDetailedTxConfirm);
     TEST_ASSERT_TRUE(caps.supportsHardwareAutoAck);
+}
+
+void test_address_restored_after_init_is_the_only_one_the_chip_hears(void)
+{
+    // The BAU initialises the medium with its default address, restores the
+    // real one from persistence and only then runs its loop.
+    Fixture f;
+    TEST_ASSERT_TRUE(f.initOnly(0xFFFFu).isOk());
+    f.chip.pump();
+    TEST_ASSERT_FALSE(f.chip.address.has_value());
+    TEST_ASSERT_TRUE(f.backend->setOwnAddress(OWN_ADDRESS).isOk());
+    f.serviceRound();
+
+    size_t setAddressCount = 0;
+    for (size_t i = 0; i + 2 < f.chip.hostOctets.size(); ++i) {
+        if (f.chip.hostOctets[i] == 0x28u) {
+            ++setAddressCount;
+            TEST_ASSERT_EQUAL_HEX8(OWN_ADDRESS >> 8, f.chip.hostOctets[i + 1]);
+            TEST_ASSERT_EQUAL_HEX8(OWN_ADDRESS & 0xFFu, f.chip.hostOctets[i + 2]);
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT32(1u, setAddressCount);
+    TEST_ASSERT_EQUAL_HEX16(OWN_ADDRESS, *f.chip.address);
 }
 
 void test_init_fails_with_timeout_when_the_chip_never_answers(void)
@@ -1059,6 +1094,7 @@ int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_init_resets_and_configures_the_chip);
+    RUN_TEST(test_address_restored_after_init_is_the_only_one_the_chip_hears);
     RUN_TEST(test_init_fails_with_timeout_when_the_chip_never_answers);
     RUN_TEST(test_init_pulses_the_reset_pin_when_the_board_wires_it);
     RUN_TEST(test_init_refuses_an_incomplete_hal);
