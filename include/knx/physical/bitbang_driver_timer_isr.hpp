@@ -420,9 +420,6 @@ private:
     /// Earliest instant the staged frame may start after a BUSY acknowledge,
     /// or 0 (03_02_02 §2.4.2 and A.8).
     uint64_t _txHoldoffUntilUs{0};
-    /// The instant the staged frame comes due, while the TX alarm is armed
-    /// for exactly that instant; 0 otherwise.
-    uint64_t _txSlotDueUs{0};
 
     /// Compile-time hardware access for the hot path (see isr_hal_policy_*.hpp).
     IsrPolicy _isrHal{};
@@ -602,19 +599,6 @@ private:
     [[gnu::always_inline]] uint32_t referenceLatencyUs() const noexcept
     {
         return _lastCharStartIsOwn ? 0u : _reactionLatencyUs;
-    }
-
-    /// Whether the receiver holds nothing but a start bit that began at most
-    /// a fraction of a bit before @p nowUs on the bus (§3.5). The bound is
-    /// the one txEdgeLostPosition() uses, so every later edge of that sender
-    /// falls where it is attributed to the right bit.
-    [[gnu::always_inline]] bool startBitJustBegan(uint64_t nowUs) const noexcept
-    {
-        const bool onlyStartBit = _rxState == RX_START_BIT_PENDING
-                               || (_rxState == RX_RECEIVE && _rxBitPosition == 0);
-        return onlyStartBit && !_rxTelegramOpen
-            && static_cast<int64_t>(nowUs + _reactionLatencyUs - _rxEdgeUs)
-                   <= static_cast<int64_t>(_txEarlyEdgeUs);
     }
 
     /// Reset the RX character sampler and drop its alarm. Per-telegram state
@@ -805,9 +789,11 @@ private:
     /// frame; normal and low frames wait 3 bit times more (03_02_02 §2.3).
     static constexpr uint32_t BUS_IDLE_FLOOR_BT = 50u;
     /// While transmitting, an edge in the last 1/4 of a bit cell belongs to
-    /// the next cell (§3.4). The split is not in the middle: interrupt
-    /// latency only ever makes an edge look later than it was, and this
-    /// node's own echo comes at the start of a cell.
+    /// the next cell (§3.4). A sender may be up to 7 µs ahead of this node
+    /// and still send in parallel (08_02_02 §8.2.2); the rest is interrupt
+    /// jitter. The split is not in the middle: interrupt latency only ever
+    /// makes an edge look later than it was, and this node's own echo comes
+    /// at the start of a cell.
     static constexpr uint32_t TX_EARLY_EDGE_DIVISOR = 4u;
     /// The ACK window stays open this long after the frame end.
     static constexpr uint32_t ACK_WINDOW_BT = 35u;

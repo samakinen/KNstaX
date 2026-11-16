@@ -14,7 +14,8 @@ specification. When the behaviour has to change, change this document in the
 same commit.
 
 Spec references are to KNX Standard v3.0.0, Volume 3 Part 2 Chapter 2
-(03_02_02, Communication Medium TP1), unless another part is named.
+(03_02_02, Communication Medium TP1), unless another part is named. 08_02_02
+is the TP1 conformance test specification (Volume 8 Part 2 Chapter 2).
 
 ## 1. Scope and position in the stack
 
@@ -219,27 +220,37 @@ with this frame.
 Losing arbitration is how TP1 shares the bus, not an error. It does not touch
 the data link's BUSY or NAK budget.
 
-### 3.5 Joining a start bit
+### 3.5 Bus free detection
 
-A frame comes due at one instant: the end of the bus-idle wait (§4.2). Every
-other sender of the same access class comes due at the same instant, and
-bitwise arbitration is meant to decide between them. A sender a few
-microseconds ahead has its start edge seen before this node's slot alarm
-runs. Waiting for it, as for any character in progress, would give it the bus
-whatever the two frames' priorities are.
+Before the start bit of a frame the node checks that no other device is
+transmitting (§1.5 of the standard). Two tests, in `txHandleWaitingSlot()`:
 
-So when the slot alarm is the one scheduled for the due instant
-(`_txSlotDueUs`) and the receiver holds nothing but a start bit that began at
-most a quarter of a bit before it on the bus (`startBitJustBegan()`), the node
-sends its own start bit at its own instant. The receiver's view of that start
-bit is dropped. From there on the two senders are on one grid: the other
-sender's edges come just before this node's cell ends, where §3.4 attributes
-them to the right bit, and if it wins, the takeover receives its frame whole.
+1. **The receiver is idle.** Any edge that has reached `onRxEdge()` since the
+   last telegram makes it not idle, validated or not.
+2. **The line reads recessive**, read at the instant the frame comes due.
+   This catches a start bit whose edge interrupt has not run yet: the edge is
+   delayed by interrupt latency, the level is not, and the dominant part of a
+   start bit lasts 35 µs.
 
-The bound is the one §3.4 uses, and it is measured on the bus: the reaction
-latency (§4.4) is added to the distance between the two timestamps. A start
-bit further ahead than that is a sender that got the bus first, and the frame
-waits behind it. So does any character but the first of a telegram.
+If either fails the frame waits one bit time and tries again, behind the
+other device's message cycle (§2.3.1: "after detection that the bus is not
+free ... wait until the end of the message cycle in progress").
+
+The conformance test (08_02_02 §8.2.2, Table 22) puts numbers on it, with
+td3 the start of the other device's telegram relative to this node's:
+
+| td3 | Required | Here |
+|---|---|---|
+| < −7 µs | no sending | the level test, or the idle test once the edge interrupt has run |
+| −7 µs … 0 | either | sends, unless the level already reads dominant |
+| 0 … 32 µs | send in parallel | sends; with the same contents the other device's edges come only in this node's own 0 bits, where they count as its echo (§3.4) |
+
+A sender that this node did not detect and that is a few microseconds ahead
+is on the same bit grid. Its edges come just before this node's cells end,
+which is why §3.4 attributes an edge in the last quarter of a cell to the
+next bit.
+
+The DL-ACK is sent without bus free detection (§1.5; 08_02_02 §8.2.3).
 
 ## 4. Timing schedule
 
@@ -315,8 +326,18 @@ Two constant delays lie between the bus and the schedule:
   up to the pin write plus the transceiver's transmit delay.
 
 Their sum is the **reaction latency** (`reactionLatencyUs`,
-`CONFIG_KNX_TP1_BITBANG_REACTION_LATENCY_US`). Where it matters depends on
-what a delay runs from and to:
+`CONFIG_KNX_TP1_BITBANG_REACTION_LATENCY_US`). The standard's tolerances are
+defined on the bus, and it says that where signals are used on the processor
+side of a transceiver, the transceiver's delays count as well (A.7). The ones
+that bear on this driver (§2.3.1, Figure 39):
+
+| Sent character | Nominal | Allowed |
+|---|---|---|
+| acknowledge after the frame end (t_as) | 15 bit times | −5 µs … +20 µs |
+| next character of a frame, start bit to start bit (t_cp) | 13 bit times | −2 µs … +5 µs |
+| first character of a frame after the bus went idle (t_ts) | 50 or 53 bit times | −50 µs, no upper limit |
+
+Where the latency matters depends on what a delay runs from and to:
 
 | Delay | From → to | Effect of the latency | Compensated |
 |---|---|---|---|
@@ -332,9 +353,15 @@ what a delay runs from and to:
 delay that runs from this node's own character would shorten the idle time on
 the bus below the 50 or 53 bit times.
 
+Uncompensated, the acknowledge is late by the whole latency, which on its
+own can exceed the +20 µs of t_as. The idle wait has no upper limit, so a late
+frame start is allowed; it only loses the bus to devices that are on time.
+
 Only the constant part can be taken off. Interrupt jitter stays, so the value
 to configure is the smallest latency the board shows: then nothing is ever
-driven early. With `CONFIG_KNX_TP1_BITBANG_TIMING_STATS` the driver measures
+driven early (the acknowledge may be 5 µs early at most). The jitter itself
+has to fit the tolerances above: +5 µs between the characters of a frame is
+the tightest, and `timerJitterUs` is the figure to hold against it. With `CONFIG_KNX_TP1_BITBANG_TIMING_STATS` the driver measures
 it as `txEchoDelayUs`, the time from the scheduled start bit of a frame to the
 timestamp of its own echo, which passes through all four parts once. The
 default is 0, which compensates nothing.
@@ -489,7 +516,7 @@ nothing.
 - **ISR unit tests** (`test/unit/test_bitbang_driver_timer_isr.cpp`). Each
   bit, the acknowledge decision, the ACK window, the bus access classes,
   arbitration loss with takeover (with the winner late and early on the bit
-  grid), joining a start bit, the reaction latency, the BUSY hold-off, and
+  grid), bus free detection, the reaction latency, the BUSY hold-off, and
   acknowledges that superimpose.
 - **Virtual-bus tests** (`test_tp1_bitbang_virtual_*`). Timing faults, edge
   loss and duplication, jitter, stale alarms.
@@ -498,7 +525,9 @@ nothing.
   the virtual bus.
 
 The virtual bus does not echo this node's transmission onto its receive line.
-Tests of arbitration therefore script the winner's waveform only.
+Tests of arbitration therefore script the winner's waveform only. Its receive
+line idles recessive for the polarity the driver configured, so the level
+test of §3.5 passes on an idle bus.
 
 ## 9. Known limits
 
@@ -511,14 +540,24 @@ Tests of arbitration therefore script the winner's waveform only.
 - **Two copies of the event pump (open).** The task-side pump exists twice,
   in `BitBangDriverTimerIsrEspIdf` and in the host test driver
   `VirtualBitBangTp1Driver`. They have to be kept in step by hand.
+- **No access fairness (open, §2.3.4).** The standard asks that devices do
+  not all access the bus exactly 50 or 53 bit times after it went idle, and
+  allows a start anywhere in a window of less than 3 bit times after that
+  point. This driver always starts at the earliest instant. A small random
+  delay inside the window would meet the requirement; it must stay below 3
+  bit times, so that a 50-bit frame still goes before the 53-bit ones.
 - **Reaction latency is a per-board constant.** It defaults to 0 and has to
-  be measured (§4.4). Until it is set, the DL-ACK is late by it, and a frame
-  joins another sender's start bit (§3.5) more often than it starts level
-  with it.
-- **Joining is untested on a real bus.** §3.5 and the early-edge rule of §3.4
-  are covered on the virtual bus only, which has no transceiver delay and no
-  echo. They change what is driven while another device drives, so they need
-  a scope and a second device before they are relied on.
+  be measured (§4.4). Until it is set, the DL-ACK is late by it, which can
+  exceed the +20 µs the standard allows.
+- **Inter-character tolerance depends on interrupt jitter.** Characters are
+  scheduled exactly 13 bit times apart, but each start bit is driven by a
+  timer interrupt, and the standard allows +5 µs (§4.4). Critical sections
+  elsewhere in the firmware that mask level-3 interrupts for longer break it.
+- **Bus timing is unverified on hardware.** Bus free detection, the
+  early-edge rule of §3.4 and the latency compensation are covered on the
+  virtual bus only, which has no transceiver delay and no echo. The checks to
+  run on a bench are 08_02_02 §8.2 (delay stepping) and §10.1.2 (50 and 53
+  bit times).
 - **CSMA polling.** A frame waiting behind a reception polls the bus once per
   bit time. Each poll is a short TX interrupt that can delay an RX edge or
   sample by its own duration.

@@ -85,7 +85,6 @@ bool BitBangDriverTimerIsrT<IsrPolicy>::init(const knx_timer_gpio_hal_t& hal,
     _lastCharStartUs = 0;
     _lastCharStartIsOwn = false;
     _txHoldoffUntilUs = 0;
-    _txSlotDueUs = 0;
     _txState = TX_IDLE;
     _rxState = RX_IDLE;
     _rxZeroDetected = 0;
@@ -191,8 +190,9 @@ bool BitBangDriverTimerIsrT<IsrPolicy>::send(std::span<const uint8_t> frame)
     // priority (00 system, 01 normal, 10 urgent, 11 low): system and urgent
     // frames wait the 50-bit floor, normal and low 53. A repeated frame (CTRL
     // bit 5 cleared) is in the 50-bit class whatever its priority, so a
-    // repetition goes out ahead of new normal and low traffic. No margin is
-    // added: it would hand the bus to other devices' lower-priority frames.
+    // repetition goes out ahead of new normal and low traffic (§2.3.2). The
+    // frame starts at the earliest instant; the spreading of accesses that
+    // §2.3.4 asks for is not implemented (docs §9).
     static constexpr uint8_t kTxWaitBitsByPriority[4] = {61u, 64u, 61u, 64u};
     const bool repeated = (frame[0] & datalink::CTRL_REPEAT) == 0u;
     _txIdleWaitUs = _bitUs * (repeated ? uint32_t{CHARACTER_BT + BUS_IDLE_FLOOR_BT}
@@ -781,7 +781,6 @@ KNX_TIMER_GPIO_HAL_ISR_ATTR uint64_t BitBangDriverTimerIsrT<IsrPolicy>::txHandle
         // have started; ours superimposes on theirs, and what the receiver
         // decoded of theirs is meaningless now.
         abandonReception();
-        _txSlotDueUs = 0;
         _txCurrentByte = _ackSlotByte;
         _dlAckEchoSeen = false;
         _txBitPosition = -1;
@@ -790,37 +789,31 @@ KNX_TIMER_GPIO_HAL_ISR_ATTR uint64_t BitBangDriverTimerIsrT<IsrPolicy>::txHandle
         return processEndOfTxBit(nowUs);
     }
 
-    // Nonzero when this alarm is the instant the frame was found due at.
-    const uint64_t dueUs = _txSlotDueUs;
-    _txSlotDueUs = 0;
-
+    // Bus free detection (03_02_02 §1.5): never start while a character is
+    // being received. A long telegram refreshes _lastCharStartUs only once
+    // per character, so the elapsed-time test alone could pass in the middle
+    // of it. Poll once per bit until the receiver is idle again.
     if (_rxState != RX_IDLE) {
-        // CSMA: never start while a character is being received. A long
-        // telegram refreshes _lastCharStartUs only once per character, so the
-        // elapsed-time test alone could pass in the middle of it. Poll once
-        // per bit until the receiver is idle again.
-        //
-        // The exception is a start bit that began as this frame came due:
-        // another sender of the same access class, at most a fraction of a
-        // bit ahead. Waiting would give it the bus without arbitration, so
-        // this node sends its start bit too and lets the frames arbitrate
-        // (§3.5). What the receiver saw of that start bit is dropped; if the
-        // other sender wins, the takeover of §3.4 receives its frame.
-        if (nowUs != dueUs || !startBitJustBegan(nowUs)) {
-            return _bitUs;
-        }
-        resetRxSamplingState();
-    } else {
-        // The idle time runs from the last character on the bus. When that
-        // was another device's, the reaction latency comes off (§4.4).
-        uint64_t earliestStartUs = _lastCharStartUs + _txIdleWaitUs - referenceLatencyUs();
-        if (earliestStartUs < _txHoldoffUntilUs) {
-            earliestStartUs = _txHoldoffUntilUs;
-        }
-        if (nowUs < earliestStartUs) {
-            _txSlotDueUs = earliestStartUs;
-            return earliestStartUs - nowUs;
-        }
+        return _bitUs;
+    }
+
+    // The idle time runs from the last character on the bus. When that was
+    // another device's, the reaction latency comes off (§4.4).
+    uint64_t earliestStartUs = _lastCharStartUs + _txIdleWaitUs - referenceLatencyUs();
+    if (earliestStartUs < _txHoldoffUntilUs) {
+        earliestStartUs = _txHoldoffUntilUs;
+    }
+    if (nowUs < earliestStartUs) {
+        return earliestStartUs - nowUs;
+    }
+
+    // The check "immediately before the start bit": another sender's start
+    // bit whose edge interrupt has not run yet shows as a dominant level. A
+    // device that started more than 7 us before this one must be given the
+    // bus (08_02_02 §8.2.2); the level is the only evidence that is not
+    // delayed by interrupt latency. The pending edge then starts reception.
+    if (rxIsDominant()) {
+        return _bitUs;
     }
 
     _txBitPosition = -1;

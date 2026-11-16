@@ -328,6 +328,14 @@ bool TimerGpioHalVirtualBus::configurePinsShim(void* context,
     self->_rxPin = rx_pin;
     self->_pullupEnabled = enable_pullup;
     self->_rxEdgeTrigger = rx_edge;
+    // A driver that names the edge of a dominant bit has told the bus its
+    // polarity: the idle line reads recessive for it, as a real one does.
+    // The TP1 driver checks the level before it sends (bus free detection).
+    if (rx_edge == KNX_TIMER_GPIO_HAL_RX_EDGE_RISING) {
+        self->_rxLevel = 0;
+    } else if (rx_edge == KNX_TIMER_GPIO_HAL_RX_EDGE_FALLING) {
+        self->_rxLevel = 1;
+    }
     return true;
 }
 
