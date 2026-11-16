@@ -49,7 +49,8 @@ bool BitBangDriverTimerIsrT<IsrPolicy>::init(const knx_timer_gpio_hal_t& hal,
     if (bitUs == 0u
             || config.bitSamplingOffsetUs <= config.startBitValidationTimeUs
             || config.bitSamplingOffsetUs >= bitUs
-                   * (ACK_START_FROM_FRAME_END_BT - TELEGRAM_COMPLETE_FROM_FRAME_END_BT)) {
+                   * (ACK_START_FROM_FRAME_END_BT - TELEGRAM_COMPLETE_FROM_FRAME_END_BT)
+            || config.reactionLatencyUs >= bitUs) {
         return false;
     }
 
@@ -69,6 +70,8 @@ bool BitBangDriverTimerIsrT<IsrPolicy>::init(const knx_timer_gpio_hal_t& hal,
                       - config.bitSamplingOffsetUs;
     _busyHoldoffUs = bitUs * (CHARACTER_BT + BUSY_HOLDOFF_BT);
     _txEarlyEdgeUs = bitUs / TX_EARLY_EDGE_DIVISOR;
+    _reactionLatencyUs = config.reactionLatencyUs;
+    _firstSampleDelayUs = config.bitSamplingOffsetUs - config.startBitValidationTimeUs + bitUs;
     _txIdleWaitUs = 0;
 
     _msgHead.store(0, std::memory_order_relaxed);
@@ -80,7 +83,9 @@ bool BitBangDriverTimerIsrT<IsrPolicy>::init(const knx_timer_gpio_hal_t& hal,
     _rxAlarmUs = 0;
     _rxEdgeUs = 0;
     _lastCharStartUs = 0;
+    _lastCharStartIsOwn = false;
     _txHoldoffUntilUs = 0;
+    _txSlotDueUs = 0;
     _txState = TX_IDLE;
     _rxState = RX_IDLE;
     _rxZeroDetected = 0;
@@ -288,6 +293,13 @@ KNX_TIMER_GPIO_HAL_ISR_ATTR void BitBangDriverTimerIsrT<IsrPolicy>::onRxEdge()
     _rxZeroDetected = 1;
 
     if (isDrivingBits()) {
+#ifdef CONFIG_KNX_TP1_BITBANG_TIMING_STATS
+        // The echo of a frame's start bit: the reaction latency of this
+        // board, measured (§4.4).
+        if (_txState == TX_SENDING_ZERO_ACTIVE && _txBitPosition == 0 && !_sendingAck) {
+            BITBANG_TIMING_RECORD(_timingStats.txEchoDelayUs, timerNow() - _lastCharStartUs);
+        }
+#endif
         const int8_t lostPosition = txEdgeLostPosition();
         if (lostPosition == TX_EDGE_NOT_LOST) {
             // The local echo of a bit this node drives, or the same 0 from a
@@ -473,32 +485,26 @@ KNX_TIMER_GPIO_HAL_ISR_ATTR uint64_t BitBangDriverTimerIsrT<IsrPolicy>::processS
     // A character starts. Its edge becomes the bus's last character start
     // (the CSMA reference), and its bit cells are timed from it.
     _lastCharStartUs = _rxEdgeUs;
-    // Clear the edge flag now, before the D0 cell begins, so an edge in the
-    // D0 cell survives even if the start-bit-slot alarm below fires late.
+    _lastCharStartIsOwn = false;
+    // Clear the edge flag now, before the D0 cell begins: the next thing the
+    // sampler looks at is the D0 edge.
     _rxZeroDetected = 0;
     _rxByte = 0;
-    _rxBitPosition = -1;
+    _rxBitPosition = 0;
     _rxState = RX_RECEIVE;
     if (_txState == TX_WAITING_ACK) {
         _ackStartValidated = true;
     }
-    // Next alarm at edge + bitSamplingOffsetUs: this alarm fired at
-    // edge + startBitValidationTimeUs.
-    return _sampleOffsetUs - _startValidationUs;
+    // The start bit is confirmed, so its own cell needs no sample. The next
+    // alarm is the D0 sample at edge + bitSamplingOffsetUs + one bit; this
+    // alarm fired at edge + startBitValidationTimeUs.
+    return _firstSampleDelayUs;
 }
 
 template<typename IsrPolicy>
 KNX_TIMER_GPIO_HAL_ISR_ATTR uint64_t BitBangDriverTimerIsrT<IsrPolicy>::processReceiveBit()
 {
     const int8_t position = _rxBitPosition;
-
-    // The start-bit slot: the bit was confirmed by processStartBit(), and the
-    // edge flag must survive for the D0 sample.
-    if (position == -1) {
-        _rxBitPosition = 0;
-        return _bitUs;
-    }
-
     const uint8_t bit = _rxZeroDetected ? 0 : 1;
     _rxZeroDetected = 0;
 
@@ -542,7 +548,7 @@ KNX_TIMER_GPIO_HAL_ISR_ATTR uint64_t BitBangDriverTimerIsrT<IsrPolicy>::rxHandle
         if (ackByte == ACK_BYTE_BUSY || ackByte == ACK_BYTE_NACK_BUSY) {
             // The repetition waits at least 150 bit times after the BUSY
             // character, on top of the usual bus-idle wait (03_02_02 A.8).
-            _txHoldoffUntilUs = _lastCharStartUs + _busyHoldoffUs;
+            _txHoldoffUntilUs = _lastCharStartUs + _busyHoldoffUs - referenceLatencyUs();
         }
         (void)queueMessage(MessageType::TxAckResponse, ackByte, diagNowUs());
         return 0;
@@ -672,12 +678,14 @@ KNX_TIMER_GPIO_HAL_ISR_ATTR uint64_t BitBangDriverTimerIsrT<IsrPolicy>::rxHandle
 
     // Arm the DL-ACK slot. The returned delay is added by onTimerAlarm() to
     // this alarm's scheduled instant, so the ACK starts t_ack after the frame
-    // end without picking up interrupt latency (§4.2). A frame staged in
-    // TX_WAITING_SLOT keeps its place and follows the ACK.
+    // end without picking up interrupt jitter (§4.2). The frame was timed
+    // from another device's edges, so the constant reaction latency comes
+    // off (§4.4). A frame staged in TX_WAITING_SLOT keeps its place and
+    // follows the ACK.
     _ackSlotByte = ackByte;
     _sendingAck = true;
     _txState = TX_WAITING_SLOT;
-    return _ackSlotDelayUs;
+    return _ackSlotDelayUs - referenceLatencyUs();
 }
 
 template<typename IsrPolicy>
@@ -709,6 +717,7 @@ KNX_TIMER_GPIO_HAL_ISR_ATTR uint64_t BitBangDriverTimerIsrT<IsrPolicy>::processE
             // Start bit. Its scheduled instant becomes the bus's last
             // character start, the reference the receive path also uses.
             _lastCharStartUs = nowUs;
+            _lastCharStartIsOwn = true;
             _txBitPosition = 0;
             return sendBit(0);
         case 8:
@@ -772,6 +781,7 @@ KNX_TIMER_GPIO_HAL_ISR_ATTR uint64_t BitBangDriverTimerIsrT<IsrPolicy>::txHandle
         // have started; ours superimposes on theirs, and what the receiver
         // decoded of theirs is meaningless now.
         abandonReception();
+        _txSlotDueUs = 0;
         _txCurrentByte = _ackSlotByte;
         _dlAckEchoSeen = false;
         _txBitPosition = -1;
@@ -780,21 +790,37 @@ KNX_TIMER_GPIO_HAL_ISR_ATTR uint64_t BitBangDriverTimerIsrT<IsrPolicy>::txHandle
         return processEndOfTxBit(nowUs);
     }
 
-    // CSMA: never start while a character is being received. A long telegram
-    // refreshes _lastCharStartUs only once per character, so the elapsed-time
-    // test alone could pass in the middle of it. Poll once per bit until the
-    // receiver is idle again.
+    // Nonzero when this alarm is the instant the frame was found due at.
+    const uint64_t dueUs = _txSlotDueUs;
+    _txSlotDueUs = 0;
+
     if (_rxState != RX_IDLE) {
-        return _bitUs;
-    }
-
-    if (nowUs < _txHoldoffUntilUs) {
-        return _txHoldoffUntilUs - nowUs;
-    }
-
-    const uint64_t earliestStartUs = _lastCharStartUs + _txIdleWaitUs;
-    if (nowUs < earliestStartUs) {
-        return earliestStartUs - nowUs;
+        // CSMA: never start while a character is being received. A long
+        // telegram refreshes _lastCharStartUs only once per character, so the
+        // elapsed-time test alone could pass in the middle of it. Poll once
+        // per bit until the receiver is idle again.
+        //
+        // The exception is a start bit that began as this frame came due:
+        // another sender of the same access class, at most a fraction of a
+        // bit ahead. Waiting would give it the bus without arbitration, so
+        // this node sends its start bit too and lets the frames arbitrate
+        // (§3.5). What the receiver saw of that start bit is dropped; if the
+        // other sender wins, the takeover of §3.4 receives its frame.
+        if (nowUs != dueUs || !startBitJustBegan(nowUs)) {
+            return _bitUs;
+        }
+        resetRxSamplingState();
+    } else {
+        // The idle time runs from the last character on the bus. When that
+        // was another device's, the reaction latency comes off (§4.4).
+        uint64_t earliestStartUs = _lastCharStartUs + _txIdleWaitUs - referenceLatencyUs();
+        if (earliestStartUs < _txHoldoffUntilUs) {
+            earliestStartUs = _txHoldoffUntilUs;
+        }
+        if (nowUs < earliestStartUs) {
+            _txSlotDueUs = earliestStartUs;
+            return earliestStartUs - nowUs;
+        }
     }
 
     _txBitPosition = -1;

@@ -27,6 +27,8 @@ struct BitBangBoardProfile {
     // cell splits the late/early alarm tolerance evenly. See Kconfig.
     uint32_t bitSamplingOffsetUs{52};
     uint32_t startBitValidationTimeUs{15};
+    // Measured per board; 0 leaves reactions uncompensated. See Kconfig.
+    uint32_t reactionLatencyUs{0};
     LinkSignalConfig linkSignal{};
 };
 
@@ -63,6 +65,9 @@ inline BitBangBoardProfile defaultBitBangBoardProfile() {
 #endif
 #if defined(CONFIG_KNX_TP1_BITBANG_START_BIT_VALIDATION_US)
     profile.startBitValidationTimeUs = static_cast<uint32_t>(CONFIG_KNX_TP1_BITBANG_START_BIT_VALIDATION_US);
+#endif
+#if defined(CONFIG_KNX_TP1_BITBANG_REACTION_LATENCY_US)
+    profile.reactionLatencyUs = static_cast<uint32_t>(CONFIG_KNX_TP1_BITBANG_REACTION_LATENCY_US);
 #endif
 #if defined(CONFIG_KNX_TP1_BITBANG_LINK_PIN)
     profile.linkSignal.pin = static_cast<uint8_t>(CONFIG_KNX_TP1_BITBANG_LINK_PIN);
@@ -109,6 +114,7 @@ inline void applyBitBangBoardProfile(const BitBangBoardProfile& profile, BitBang
     config.zeroEqualizationTimeUs = profile.zeroEqualizationTimeUs;
     config.bitSamplingOffsetUs = profile.bitSamplingOffsetUs;
     config.startBitValidationTimeUs = profile.startBitValidationTimeUs;
+    config.reactionLatencyUs = profile.reactionLatencyUs;
 
     if (!config.linkSignal.isConfigured()) {
         config.linkSignal = profile.linkSignal;

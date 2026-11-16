@@ -49,6 +49,11 @@ struct BitBangConfig {
     uint32_t zeroEqualizationTimeUs; ///< Recessive equalization width after dominant pulse
     uint32_t bitSamplingOffsetUs;    ///< Receive sample point after detected edge
     uint32_t startBitValidationTimeUs; ///< Bus must stay dominant this long to confirm a start bit
+    /// Constant delay from an edge on the bus to what this node drives in
+    /// answer, beyond the schedule: edge interrupt latency, alarm latency and
+    /// the transceiver's two delays. Taken off the delays that run from
+    /// another device's signal (docs/reference/tp1_bitbang_isr.md §4.4).
+    uint32_t reactionLatencyUs;
     
     // High-precision timing (nanoseconds for hardware timers)
     uint32_t bitCellNs;     ///< Bit cell time in ns (52083 for TP1)
@@ -74,6 +79,7 @@ struct BitBangConfig {
         , zeroEqualizationTimeUs(69)
         , bitSamplingOffsetUs(52)  // mid-bit-cell; see bitbang_board_profile.hpp
         , startBitValidationTimeUs(15)
+        , reactionLatencyUs(0)
         , bitCellNs(52083)    // Precise timing
         , halfBitNs(26042)    // Precise timing
     {}
@@ -151,6 +157,12 @@ struct BitBangConfig {
         if (startBitValidationTimeUs == 0
             || startBitValidationTimeUs >= zeroActiveTimeUs
             || startBitValidationTimeUs >= bitSamplingOffsetUs) {
+            return util::Result<void>::err(util::ErrorCode::InvalidParameter);
+        }
+
+        // A latency of a bit time or more is not a constant to subtract; the
+        // interrupts are not being served in time at all.
+        if (reactionLatencyUs >= serialBitTimeUs) {
             return util::Result<void>::err(util::ErrorCode::InvalidParameter);
         }
         

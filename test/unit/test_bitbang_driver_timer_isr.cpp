@@ -418,7 +418,10 @@ void test_first_data_zero_edge_after_start_sample_keeps_byte_sync_point()
     TEST_ASSERT_EQUAL_UINT8(1u, driver._rxZeroDetected);
 }
 
-void test_late_start_sample_followed_by_first_data_edge_reanchors_when_bit_position_is_zero()
+// The start-bit re-read schedules the D0 sample directly, from the instant it
+// was scheduled for: a re-read that runs late does not move the sample grid,
+// and the D0 edge that follows it is kept.
+void test_late_start_bit_reread_keeps_the_sample_grid_on_the_edge()
 {
     driver.shutdown();
     virtualBus.reset();
@@ -432,11 +435,10 @@ void test_late_start_sample_followed_by_first_data_edge_reanchors_when_bit_posit
     TEST_ASSERT_TRUE(driver.init(hal, config));
     driver.setSelfCheckEnabled(false);  // writes internal state directly
 
-    driver._rxState = BitBangDriverTimerIsr::RX_RECEIVE;
-    driver._lastCharStartUs = 0;
-    driver._rxBitPosition = -1;
+    driver._rxState = BitBangDriverTimerIsr::RX_START_BIT_PENDING;
+    driver._rxEdgeUs = 0;
     driver._rxZeroDetected = 1;
-    driver._rxAlarmUs = 52;
+    driver._rxAlarmUs = 15;
     // Mark the deadline as the one programmed into hardware. onTimerAlarm()
     // services only the alarm that was actually armed, so a test that
     // fabricates a deadline has to say so — but it must not go through
@@ -445,20 +447,21 @@ void test_late_start_sample_followed_by_first_data_edge_reanchors_when_bit_posit
     driver._armedAlarmOwner = BitBangDriverTimerIsr::AlarmOwner::Rx;
     driver._armedAlarmUs = driver._rxAlarmUs;
 
-    virtualBus.advanceTimeUs(104);
+    virtualBus.advanceTimeUs(30);
     driver.onTimerAlarm();
 
+    TEST_ASSERT_EQUAL_UINT8(BitBangDriverTimerIsr::RX_RECEIVE, driver._rxState);
     TEST_ASSERT_EQUAL_INT(0, driver._rxBitPosition);
     TEST_ASSERT_EQUAL_UINT64(156u, driver._rxAlarmUs);
-    // The start-bit slot (position -1) leaves _rxZeroDetected alone;
-    // processStartBit() clears it. It keeps the value set up above.
-    TEST_ASSERT_EQUAL_UINT8(1u, driver._rxZeroDetected);
+    TEST_ASSERT_EQUAL_UINT64(0u, driver._lastCharStartUs);
+    TEST_ASSERT_EQUAL_UINT8(0u, driver._rxZeroDetected);
 
     driver.onRxEdge();
 
     TEST_ASSERT_EQUAL_INT(0, driver._rxBitPosition);
     TEST_ASSERT_EQUAL_UINT64(156u, driver._rxAlarmUs);
     TEST_ASSERT_EQUAL_UINT64(0u, driver._lastCharStartUs);
+    TEST_ASSERT_EQUAL_UINT8(1u, driver._rxZeroDetected);
 }
 
 void test_late_mid_byte_timer_callback_keeps_rx_sample_grid()
@@ -1129,6 +1132,179 @@ void test_repeated_frame_waits_50_bit_times_whatever_its_priority()
     TEST_ASSERT_EQUAL_UINT64(11u + 50u, busAccessDelayBits(0x1C)); // extended, low, repeated
 }
 
+// ── Joining a start bit (docs/reference/tp1_bitbang_isr.md §3.5) ─────────────
+
+// Put a character on the bus, stage a low-priority frame behind it and return
+// the instant the frame comes due: 53 bit times of idle line later.
+uint64_t stageFrameAndReturnDueUs(const std::vector<uint8_t>& frame)
+{
+    const uint64_t charStartUs = virtualBus.nowUs() + 20;
+    (void)virtualBus.scheduleRxLevelAtUs(charStartUs - 1, 0);
+    scheduleCharacterAt(virtualBus, BitBangDriverTimerIsr::ACK_BYTE_ACK, charStartUs);
+    virtualBus.advanceTimeUs(20 + 20 * kBitUs);
+    TEST_ASSERT_TRUE(driver.send(frame));
+    virtualBus.clearCapturedTxTransitions();
+    return charStartUs + (11u + 53u) * kBitUs;
+}
+
+uint64_t firstDominantUs()
+{
+    for (const auto& transition : virtualBus.capturedTxTransitions()) {
+        if (transition.level == 1) {
+            return transition.timestampUs;
+        }
+    }
+    return 0;
+}
+
+// A sender of the same class whose start bit begins a few microseconds before
+// this node's is not given the bus: this node sends its start bit at its own
+// instant and the frames arbitrate. Here the other frame wins, in the third
+// octet, and is received whole.
+void joinAndLoseTo(uint64_t leadUs)
+{
+    driver.setOwnAddress(kOwnAddressRaw);
+    const auto ownFrame = makeStandardFrame(kOwnAddressRaw, 0x1105u, false);
+    const auto winner = makeStandardFrame(0x1102u, kOwnAddressRaw, false);
+
+    const uint64_t dueUs = stageFrameAndReturnDueUs(ownFrame);
+    for (size_t i = 0; i < winner.size(); ++i) {
+        scheduleCharacterAt(virtualBus, winner[i], dueUs - leadUs + i * kCharSpacingUs);
+    }
+    virtualBus.advanceTimeUs(dueUs + 2 * kBitUs - virtualBus.nowUs());
+    TEST_ASSERT_EQUAL_UINT64(dueUs, firstDominantUs());
+
+    virtualBus.advanceTimeUs(20 * kCharSpacingUs);
+    const auto messages = drainMessages();
+    std::vector<uint8_t> received;
+    int collisions = 0;
+    bool skippedReference = false;
+    bool sawEnd = false;
+    for (const auto& message : messages) {
+        if (message.type == BitBangDriverTimerIsr::MessageType::End) {
+            if (!skippedReference) {
+                skippedReference = true;  // the one-octet reference character
+                received.clear();
+                continue;
+            }
+            if (!sawEnd) {
+                TEST_ASSERT_EQUAL_UINT8(0u, message.data);
+                sawEnd = true;
+            }
+        }
+        if (message.type == BitBangDriverTimerIsr::MessageType::Data && !sawEnd) {
+            received.push_back(message.data);
+        }
+        if (message.type == BitBangDriverTimerIsr::MessageType::Collision) {
+            ++collisions;
+        }
+        if (message.type == BitBangDriverTimerIsr::MessageType::ParityError
+                || message.type == BitBangDriverTimerIsr::MessageType::FramingError) {
+            TEST_FAIL_MESSAGE("the winner's frame must decode without character errors");
+        }
+    }
+    TEST_ASSERT_EQUAL_INT(1, collisions);
+    TEST_ASSERT_TRUE(sawEnd);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(winner.size()), static_cast<int>(received.size()));
+    TEST_ASSERT_EQUAL_MEMORY(winner.data(), received.data(), winner.size());
+    TEST_ASSERT_EQUAL_INT(BitBangDriverTimerIsr::ACK_BYTE_ACK, sentAckByte(messages));
+}
+
+void test_start_bit_still_being_validated_is_joined()
+{
+    joinAndLoseTo(10);  // the re-read 15 us after the edge has not run yet
+}
+
+void test_start_bit_just_validated_is_joined()
+{
+    joinAndLoseTo(20);
+}
+
+// Further ahead than a fraction of a bit the other sender simply has the bus.
+void test_start_bit_well_ahead_is_not_joined()
+{
+    const auto ownFrame = makeStandardFrame(kOwnAddressRaw, 0x1105u, false);
+    const auto other = makeStandardFrame(0x1102u, 0x1199u, false);
+
+    const uint64_t dueUs = stageFrameAndReturnDueUs(ownFrame);
+    for (size_t i = 0; i < other.size(); ++i) {
+        scheduleCharacterAt(virtualBus, other[i], dueUs - 40u + i * kCharSpacingUs);
+    }
+    const uint64_t otherEndUs = dueUs - 40u + (other.size() - 1u) * kCharSpacingUs + 11u * kBitUs;
+    virtualBus.advanceTimeUs(otherEndUs - virtualBus.nowUs());
+    TEST_ASSERT_EQUAL_UINT64(0u, firstDominantUs());
+
+    virtualBus.advanceTimeUs(100 * kBitUs);
+    TEST_ASSERT_FALSE(sawMessage(drainMessages(), BitBangDriverTimerIsr::MessageType::Collision));
+    // 53 bit times after the other frame's last character.
+    TEST_ASSERT_EQUAL_UINT64(otherEndUs + 53u * kBitUs, firstDominantUs());
+}
+
+// ── Reaction latency (docs/reference/tp1_bitbang_isr.md §4.4) ────────────────
+
+void reinitWithReactionLatency(uint32_t latencyUs)
+{
+    driver.shutdown();
+    virtualBus.reset();
+    (void)virtualBus.bind(hal);
+    BitBangConfig config;
+    config.txPin = 4;
+    config.rxPin = 5;
+    config.enablePullup = false;
+    config.reactionLatencyUs = latencyUs;
+    TEST_ASSERT_TRUE(driver.init(hal, config));
+}
+
+// What follows another device's signal is driven early by the configured
+// latency, so that it reaches the bus on time.
+void test_reaction_latency_comes_off_the_acknowledge_delay()
+{
+    reinitWithReactionLatency(20);
+    driver.setOwnAddress(kOwnAddressRaw);
+    const auto frame = makeStandardFrame(kRemoteAddressRaw, kOwnAddressRaw, false);
+
+    const uint64_t startUs = virtualBus.nowUs() + 20;
+    (void)virtualBus.scheduleRxLevelAtUs(startUs - 1, 0);
+    for (size_t i = 0; i < frame.size(); ++i) {
+        scheduleCharacterAt(virtualBus, frame[i], startUs + i * kCharSpacingUs);
+    }
+    const uint64_t frameEndUs = startUs + (frame.size() - 1u) * kCharSpacingUs + 11u * kBitUs;
+    virtualBus.advanceTimeUs(frameEndUs + 40u * kBitUs - virtualBus.nowUs());
+
+    TEST_ASSERT_EQUAL_UINT64(frameEndUs + 15u * kBitUs - 20u, firstDominantUs());
+}
+
+void test_reaction_latency_comes_off_the_idle_wait_after_a_received_character()
+{
+    reinitWithReactionLatency(20);
+    const auto frame = makeStandardFrame(kOwnAddressRaw, 0xFFFFu, false);
+    const uint64_t dueUs = stageFrameAndReturnDueUs(frame);
+    virtualBus.advanceTimeUs(40000);
+    TEST_ASSERT_EQUAL_UINT64(dueUs - 20u, firstDominantUs());
+}
+
+// A frame that follows this node's own transmission is timed from a character
+// that was itself driven late by the same amount: nothing comes off, or the
+// idle time on the bus would be short.
+void test_reaction_latency_is_not_taken_off_the_idle_wait_after_an_own_frame()
+{
+    reinitWithReactionLatency(20);
+    // To the individual broadcast: no ACK window, nothing on the bus after it.
+    const auto frame = makeStandardFrame(kOwnAddressRaw, 0xFFFFu, false);
+
+    TEST_ASSERT_TRUE(driver.send(frame));
+    for (int i = 0; i < 40000 && driver._txState != BitBangDriverTimerIsr::TX_IDLE; ++i) {
+        virtualBus.advanceTimeUs(1);
+    }
+    TEST_ASSERT_EQUAL_UINT8(BitBangDriverTimerIsr::TX_IDLE, driver._txState);
+    const uint64_t startUs = firstDominantUs();
+    virtualBus.clearCapturedTxTransitions();
+    TEST_ASSERT_TRUE(driver.send(frame));
+    virtualBus.advanceTimeUs(40000);
+    TEST_ASSERT_EQUAL_UINT64(startUs + (frame.size() - 1u) * kCharSpacingUs + (11u + 53u) * kBitUs,
+                             firstDominantUs());
+}
+
 int main()
 {
     UNITY_BEGIN();
@@ -1142,7 +1318,7 @@ int main()
     RUN_TEST(test_start_bit_glitch_shorter_than_validation_time_is_rejected);
     RUN_TEST(test_start_bit_late_validation_fire_accepts_real_start_bit);
     RUN_TEST(test_first_data_zero_edge_after_start_sample_keeps_byte_sync_point);
-    RUN_TEST(test_late_start_sample_followed_by_first_data_edge_reanchors_when_bit_position_is_zero);
+    RUN_TEST(test_late_start_bit_reread_keeps_the_sample_grid_on_the_edge);
     RUN_TEST(test_rx_edge_in_receive_state_does_not_reschedule_timer);
     RUN_TEST(test_tx_ack_window_clears_stale_rx_loopback_state);
     RUN_TEST(test_late_mid_byte_timer_callback_keeps_rx_sample_grid);
@@ -1169,5 +1345,11 @@ int main()
     RUN_TEST(test_early_edges_of_a_competitor_sending_the_same_bits_are_no_collision);
     RUN_TEST(test_bus_idle_wait_follows_the_access_class);
     RUN_TEST(test_repeated_frame_waits_50_bit_times_whatever_its_priority);
+    RUN_TEST(test_start_bit_still_being_validated_is_joined);
+    RUN_TEST(test_start_bit_just_validated_is_joined);
+    RUN_TEST(test_start_bit_well_ahead_is_not_joined);
+    RUN_TEST(test_reaction_latency_comes_off_the_acknowledge_delay);
+    RUN_TEST(test_reaction_latency_comes_off_the_idle_wait_after_a_received_character);
+    RUN_TEST(test_reaction_latency_is_not_taken_off_the_idle_wait_after_an_own_frame);
     return UNITY_END();
 }

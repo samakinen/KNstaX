@@ -312,7 +312,7 @@ private:
     enum RxState : uint8_t {
         RX_IDLE = 0,              ///< no character in progress, no RX alarm
         RX_START_BIT_PENDING = 1, ///< edge seen, start bit not yet validated
-        RX_RECEIVE = 2,           ///< sampling start, data, parity and stop bits
+        RX_RECEIVE = 2,           ///< sampling data, parity and stop bits
         RX_WAIT_MORE_DATA = 3,    ///< character done; next start bit or telegram end
     };
 
@@ -353,7 +353,8 @@ private:
     /// A dominant edge was seen since the last bit sample.
     uint8_t    _rxZeroDetected{0};
     uint8_t    _rxByte{0};
-    /// Bit position the next RX sample belongs to: -1 start, 0..7 data, 8 parity, 9 stop.
+    /// Bit position the next RX sample belongs to: 0..7 data, 8 parity, 9
+    /// stop; -1 while no character is being sampled.
     int8_t     _rxBitPosition{-1};
     /// Bit position the next TX bit-end services; same numbering as RX.
     int8_t     _txBitPosition{-1};
@@ -381,6 +382,9 @@ private:
     bool       _dlAckEchoSeen{false};
     bool       _ackStartEdgeSeen{false};
     bool       _ackStartValidated{false};
+    /// _lastCharStartUs is the scheduled start of a character this node
+    /// drove, not the stamped edge of a received one.
+    bool       _lastCharStartIsOwn{false};
     uint8_t    _txArbitrationLosses{0};
     uint16_t   _rxByteCount{0};
     uint16_t   _txBytePosition{0};
@@ -400,6 +404,8 @@ private:
     uint32_t _ackSlotDelayUs{0};      ///< telegram complete → DL-ACK start bit
     uint32_t _busyHoldoffUs{0};       ///< BUSY start bit → earliest repetition
     uint32_t _txEarlyEdgeUs{0};       ///< end of a TX bit cell: an edge here is the next bit's
+    uint32_t _reactionLatencyUs{0};   ///< bus edge → own drive on the bus, beyond the schedule
+    uint32_t _firstSampleDelayUs{0};  ///< start-bit re-read → D0 sample
     uint32_t _txIdleWaitUs{0};        ///< last start bit → own start bit, for the staged frame
 
     uint64_t _armedAlarmUs{0};
@@ -414,6 +420,9 @@ private:
     /// Earliest instant the staged frame may start after a BUSY acknowledge,
     /// or 0 (03_02_02 §2.4.2 and A.8).
     uint64_t _txHoldoffUntilUs{0};
+    /// The instant the staged frame comes due, while the TX alarm is armed
+    /// for exactly that instant; 0 otherwise.
+    uint64_t _txSlotDueUs{0};
 
     /// Compile-time hardware access for the hot path (see isr_hal_policy_*.hpp).
     IsrPolicy _isrHal{};
@@ -585,6 +594,28 @@ private:
     int8_t txEdgeLostPosition() const;
     void loseArbitration(int8_t lostPosition);
     void takeOverReceptionAfterArbitrationLoss(int8_t lostPosition);
+
+    /// What to take off a delay that runs from _lastCharStartUs to something
+    /// this node drives (§4.4). A received character was stamped late and
+    /// the reaction to it is driven late, by a constant; a character this
+    /// node drove carries the same lateness as the next one it drives.
+    [[gnu::always_inline]] uint32_t referenceLatencyUs() const noexcept
+    {
+        return _lastCharStartIsOwn ? 0u : _reactionLatencyUs;
+    }
+
+    /// Whether the receiver holds nothing but a start bit that began at most
+    /// a fraction of a bit before @p nowUs on the bus (§3.5). The bound is
+    /// the one txEdgeLostPosition() uses, so every later edge of that sender
+    /// falls where it is attributed to the right bit.
+    [[gnu::always_inline]] bool startBitJustBegan(uint64_t nowUs) const noexcept
+    {
+        const bool onlyStartBit = _rxState == RX_START_BIT_PENDING
+                               || (_rxState == RX_RECEIVE && _rxBitPosition == 0);
+        return onlyStartBit && !_rxTelegramOpen
+            && static_cast<int64_t>(nowUs + _reactionLatencyUs - _rxEdgeUs)
+                   <= static_cast<int64_t>(_txEarlyEdgeUs);
+    }
 
     /// Reset the RX character sampler and drop its alarm. Per-telegram state
     /// is not touched: closing a telegram is finishRxTelegram()'s job.

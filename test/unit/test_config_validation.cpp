@@ -178,6 +178,16 @@ void test_bitbang_config_invalid_zero_timing_sum() {
     TEST_ASSERT_TRUE(result.isError());
 }
 
+void test_bitbang_config_invalid_reaction_latency_of_a_bit_time() {
+    physical::BitBangConfig config;
+    config.txPin = 1;
+    config.rxPin = 2;
+    config.reactionLatencyUs = 60;
+    TEST_ASSERT_TRUE(config.validate().isOk());
+    config.reactionLatencyUs = config.serialBitTimeUs;
+    TEST_ASSERT_TRUE(config.validate().isError());
+}
+
 void test_apply_bitbang_board_profile_applies_transceiver_traits() {
     physical::BitBangBoardProfile profile;
     profile.txPin = 6;
@@ -189,6 +199,7 @@ void test_apply_bitbang_board_profile_applies_transceiver_traits() {
     profile.zeroActiveTimeUs = 40;
     profile.zeroEqualizationTimeUs = 68;
     profile.bitSamplingOffsetUs = 81;
+    profile.reactionLatencyUs = 22;
 
     physical::BitBangConfig config;
     physical::applyBitBangBoardProfile(profile, config);
@@ -202,6 +213,7 @@ void test_apply_bitbang_board_profile_applies_transceiver_traits() {
     TEST_ASSERT_EQUAL_UINT32(40, config.zeroActiveTimeUs);
     TEST_ASSERT_EQUAL_UINT32(68, config.zeroEqualizationTimeUs);
     TEST_ASSERT_EQUAL_UINT32(81, config.bitSamplingOffsetUs);
+    TEST_ASSERT_EQUAL_UINT32(22, config.reactionLatencyUs);
     TEST_ASSERT_TRUE(config.validate().isOk());
 }
 
@@ -232,6 +244,7 @@ int main(int argc, char** argv) {
     RUN_TEST(test_bitbang_config_invalid_baud_rate_too_high);
     RUN_TEST(test_bitbang_config_valid_baud_rates);
     RUN_TEST(test_bitbang_config_invalid_zero_timing_sum);
+    RUN_TEST(test_bitbang_config_invalid_reaction_latency_of_a_bit_time);
     RUN_TEST(test_apply_bitbang_board_profile_applies_transceiver_traits);
     
     return UNITY_END();

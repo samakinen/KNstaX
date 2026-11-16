@@ -403,6 +403,9 @@ void BitBangDriverTimerIsrEspIdf::process() {
                     KNX_LOGD(TAG, "ISR rxBit:    min=%" PRIu32 " max=%" PRIu32 " avg=%" PRIu32 " cyc (n=%" PRIu32 ")",
                              ts.processReceiveBitCycles.minVal, ts.processReceiveBitCycles.maxVal,
                              ts.processReceiveBitCycles.avg(),  ts.processReceiveBitCycles.count);
+                    KNX_LOGD(TAG, "TX echo:      min=%" PRIu32 " max=%" PRIu32 " avg=%" PRIu32 " us  (n=%" PRIu32 ")",
+                             ts.txEchoDelayUs.minVal, ts.txEchoDelayUs.maxVal,
+                             ts.txEchoDelayUs.avg(),  ts.txEchoDelayUs.count);
                     _core.resetTimingStats();
                 }
 #endif

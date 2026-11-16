@@ -117,6 +117,15 @@ struct BitBangTimingStats {
      */
     BitBangTimingChannel processReceiveBitCycles;
 
+    /**
+     * µs from the scheduled start bit of a frame this node sends to the
+     * timestamp of its own echo: alarm latency, the transceiver's transmit and
+     * receive delay and the edge interrupt's latency together. This is the
+     * value for CONFIG_KNX_TP1_BITBANG_REACTION_LATENCY_US; use the minimum
+     * seen on a quiet bus.
+     */
+    BitBangTimingChannel txEchoDelayUs;
+
     void reset() noexcept
     {
         timerJitterUs.reset();
@@ -124,6 +133,7 @@ struct BitBangTimingStats {
         onRxEdgeCycles.reset();
         processStartBitCycles.reset();
         processReceiveBitCycles.reset();
+        txEchoDelayUs.reset();
     }
 };
 

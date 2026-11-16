@@ -131,6 +131,31 @@ menu "KNX Stack Configuration"
                 discarded. Values of 15-20 µs are recommended. Must be less than
                 the zero-active time and the RX sample offset.
 
+        config KNX_TP1_BITBANG_REACTION_LATENCY_US
+            int "Reaction latency to compensate (µs)"
+            depends on KNX_TP1_BITBANG
+            default 0
+            range 0 60
+            help
+                Constant delay between an edge on the bus and what the driver
+                drives in answer, beyond the schedule: GPIO interrupt latency
+                before the edge is timestamped, timer interrupt latency before
+                the pin is written, and the transceiver's receive and transmit
+                delays.
+
+                It is subtracted only from delays that run from another
+                device's signal: the acknowledge 15 bit times after a received
+                frame, the bus-idle wait after a received character and the
+                wait after a BUSY. Timing inside a frame the driver sends is
+                not touched: every bit is late by the same amount, so the
+                waveform is correct.
+
+                Measure it with KNX_TP1_BITBANG_TIMING_STATS: the "TX echo"
+                line reports the delay from a scheduled start bit to the
+                timestamp of its own echo. Use the minimum seen on a quiet
+                bus, so that the driver never reacts early. 0 disables the
+                compensation.
+
         config KNX_TP1_BITBANG_LINK_PIN
             int "Bit-Bang link-health (KNX_OK) pin"
             depends on KNX_TP1_BITBANG

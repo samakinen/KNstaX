@@ -68,7 +68,7 @@ count.
 |---|---|---|
 | `RX_IDLE` | no character in progress | none |
 | `RX_START_BIT_PENDING` | a dominant edge seen; re-read pending | edge + `startBitValidationTimeUs` |
-| `RX_RECEIVE` | sampling start-bit slot, D0–D7, parity, stop | next sample point |
+| `RX_RECEIVE` | sampling D0–D7, parity, stop | next sample point |
 | `RX_WAIT_MORE_DATA` | character complete; waiting for the next one or the telegram end | stop sample + 3 bit times |
 
 ```mermaid
@@ -125,7 +125,8 @@ Rules that are easy to break:
 Bit positions in `_txBitPosition` (and `_rxBitPosition`) are −1 for the start
 bit, 0–7 for data, 8 for parity and 9 for stop. `_txBitPosition` names the
 position the next bit-end will service, so the bit on the wire is the one
-before it.
+before it. The receiver never samples position −1: the start bit is confirmed
+by its re-read, which schedules the D0 sample directly.
 
 A dominant edge where this node sends a recessive bit, outside a DL-ACK, means
 another sender won arbitration (§3.4). Other edges while this node drives a
@@ -218,6 +219,28 @@ with this frame.
 Losing arbitration is how TP1 shares the bus, not an error. It does not touch
 the data link's BUSY or NAK budget.
 
+### 3.5 Joining a start bit
+
+A frame comes due at one instant: the end of the bus-idle wait (§4.2). Every
+other sender of the same access class comes due at the same instant, and
+bitwise arbitration is meant to decide between them. A sender a few
+microseconds ahead has its start edge seen before this node's slot alarm
+runs. Waiting for it, as for any character in progress, would give it the bus
+whatever the two frames' priorities are.
+
+So when the slot alarm is the one scheduled for the due instant
+(`_txSlotDueUs`) and the receiver holds nothing but a start bit that began at
+most a quarter of a bit before it on the bus (`startBitJustBegan()`), the node
+sends its own start bit at its own instant. The receiver's view of that start
+bit is dropped. From there on the two senders are on one grid: the other
+sender's edges come just before this node's cell ends, where §3.4 attributes
+them to the right bit, and if it wins, the takeover receives its frame whole.
+
+The bound is the one §3.4 uses, and it is measured on the bus: the reaction
+latency (§4.4) is added to the distance between the two timestamps. A start
+bit further ahead than that is a sender that got the bus first, and the frame
+waits behind it. So does any character but the first of a telegram.
+
 ## 4. Timing schedule
 
 All times are in µs on one free-running 64-bit timer. The configuration
@@ -237,7 +260,7 @@ Three deadlines are anchored elsewhere:
 
 | Deadline | Anchor |
 |---|---|
-| start-bit validation | the edge timestamp in `onRxEdge()` |
+| start-bit re-read | the edge timestamp in `onRxEdge()` |
 | first CSMA evaluation of a staged frame | now + 1 bit, in `send()` |
 | sample point after arbitration takeover | the lost character's start bit |
 
@@ -253,14 +276,14 @@ alarm (TX).
 | Event | Time |
 |---|---|
 | start-bit re-read | `t0 + v` |
-| sample of bit position k (−1…9) | `t0 + s + (k+1)·bit` |
+| sample of bit position k (0…9) | `t0 + s + (k+1)·bit` |
 | telegram complete (after the last stop sample) | `+ 3·bit` = frame end + 2·bit + s |
-| DL-ACK start bit | telegram complete + (13·bit − s) = frame end + 15·bit (t_ack) |
+| DL-ACK start bit | telegram complete + (13·bit − s) = frame end + 15·bit (t_ack), less the reaction latency (§4.4) |
 | TX: dominant part of a `0` | `zeroActiveTimeUs`, then `zeroEqualizationTimeUs` |
 | TX: character to character | 11·bit + 2·bit gap |
 | ACK window (own frame) | opens at the last stop bit, closes frame end + 35·bit |
-| bus-idle wait before a frame | last character start + (11 + 50)·bit (system, urgent, and every repeated frame) or (11 + 53)·bit (normal, low) |
-| after a BUSY acknowledge | additionally ≥ BUSY start + (11 + 150)·bit (A.8) |
+| bus-idle wait before a frame | last character start + (11 + 50)·bit (system, urgent, and every repeated frame) or (11 + 53)·bit (normal, low); less the reaction latency when that character was received (§4.4) |
+| after a BUSY acknowledge | additionally ≥ BUSY start + (11 + 150)·bit (A.8), less the reaction latency |
 
 The tightest margin in the driver is the start-bit re-read. The dominant pulse
 lasts 35 µs, so edge-ISR entry latency plus alarm lateness plus `v` must stay
@@ -281,6 +304,40 @@ survived a reprogram harmless.
 The RX→TX hand-off (arming the DL-ACK slot) is the one case where an RX
 handler's delay schedules the TX timeline: the handler returns a delay while
 leaving the receiver idle.
+
+### 4.4 Reaction latency
+
+Two constant delays lie between the bus and the schedule:
+
+- A received edge is timestamped late: the transceiver's receive delay plus
+  the GPIO interrupt's latency up to the timer read.
+- A scheduled transition reaches the bus late: the timer interrupt's latency
+  up to the pin write plus the transceiver's transmit delay.
+
+Their sum is the **reaction latency** (`reactionLatencyUs`,
+`CONFIG_KNX_TP1_BITBANG_REACTION_LATENCY_US`). Where it matters depends on
+what a delay runs from and to:
+
+| Delay | From → to | Effect of the latency | Compensated |
+|---|---|---|---|
+| bits and characters of a frame or DL-ACK this node sends | own drive → own drive | every transition is late by the same amount; the waveform on the bus is exact | no |
+| sample points of a received character | stamped edge → sample | edges are latched, and both ends shift together | no |
+| idle wait after a character this node sent | own drive → own drive | the idle time on the bus is exact | no |
+| DL-ACK at t_ack after a received frame | bus edge → own drive | the acknowledge is late, and wider where it superimposes on others | yes |
+| idle wait after a received character | bus edge → own drive | the frame starts late and seldom arbitrates | yes |
+| wait after a BUSY acknowledge | bus edge → own drive | the repetition is late | yes |
+
+`_lastCharStartIsOwn` records which kind the CSMA reference is, and
+`referenceLatencyUs()` returns the latency or 0 accordingly. Taking it off a
+delay that runs from this node's own character would shorten the idle time on
+the bus below the 50 or 53 bit times.
+
+Only the constant part can be taken off. Interrupt jitter stays, so the value
+to configure is the smallest latency the board shows: then nothing is ever
+driven early. With `CONFIG_KNX_TP1_BITBANG_TIMING_STATS` the driver measures
+it as `txEchoDelayUs`, the time from the scheduled start bit of a frame to the
+timestamp of its own echo, which passes through all four parts once. The
+default is 0, which compensates nothing.
 
 ## 5. Invariants
 
@@ -432,7 +489,8 @@ nothing.
 - **ISR unit tests** (`test/unit/test_bitbang_driver_timer_isr.cpp`). Each
   bit, the acknowledge decision, the ACK window, the bus access classes,
   arbitration loss with takeover (with the winner late and early on the bit
-  grid), the BUSY hold-off, and acknowledges that superimpose.
+  grid), joining a start bit, the reaction latency, the BUSY hold-off, and
+  acknowledges that superimpose.
 - **Virtual-bus tests** (`test_tp1_bitbang_virtual_*`). Timing faults, edge
   loss and duplication, jitter, stale alarms.
 - **Stack tests above the MAC** (`test_bau_onwire`,
@@ -453,23 +511,14 @@ Tests of arbitration therefore script the winner's waveform only.
 - **Two copies of the event pump (open).** The task-side pump exists twice,
   in `BitBangDriverTimerIsrEspIdf` and in the host test driver
   `VirtualBitBangTp1Driver`. They have to be kept in step by hand.
-- **No arbitration against a punctual competitor (open).** The CSMA reference
-  is a software edge timestamp, so this node's start bit is scheduled late by
-  the edge interrupt's latency. A hardware-timed sender of the same access
-  class starts that much earlier; its start edge is seen before this node's
-  slot alarm, and the frame waits (`_rxState != RX_IDLE`) instead of
-  arbitrating. The bus is never disturbed, but within a class this node
-  yields even when its frame has the higher priority (system against urgent,
-  normal against low). Joining a character whose start edge is at most a
-  fraction of a bit old would fix it; §3.4 already handles the competitor's
-  early edges. It changes what is driven onto the bus, so it needs a scope
-  and a second device on the bench.
-- **Transmit latency is not compensated (open).** The DL-ACK and the first
-  start bit of a frame are driven late by the edge-timestamp latency plus the
-  alarm latency (compare `timerJitterUs`). Acknowledges of several devices
-  superimpose, so a late one widens the dominant pulses the sender sees. A
-  board-profile constant subtracted from `_ackSlotDelayUs` and
-  `_txIdleWaitUs` would centre both; its value has to be measured per board.
+- **Reaction latency is a per-board constant.** It defaults to 0 and has to
+  be measured (§4.4). Until it is set, the DL-ACK is late by it, and a frame
+  joins another sender's start bit (§3.5) more often than it starts level
+  with it.
+- **Joining is untested on a real bus.** §3.5 and the early-edge rule of §3.4
+  are covered on the virtual bus only, which has no transceiver delay and no
+  echo. They change what is driven while another device drives, so they need
+  a scope and a second device before they are relied on.
 - **CSMA polling.** A frame waiting behind a reception polls the bus once per
   bit time. Each poll is a short TX interrupt that can delay an RX edge or
   sample by its own duration.
