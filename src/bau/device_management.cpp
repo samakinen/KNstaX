@@ -1283,8 +1283,9 @@ void DeviceManagement::wireManagementServices()
 #endif
 
     // --- Serial-number-addressed commissioning ----------------------------
-    // PID_SERIAL_NUMBER already carries the device's KNX serial number (this
-    // stack derives it from the MAC), so the commissioning service can simply
+    // PID_SERIAL_NUMBER already carries the device's KNX serial number (the
+    // product runtime sets it from Platform::uniqueSerialNumber() before
+    // init(); a host may set its own), so the commissioning service can simply
     // adopt it rather than introducing a second source of truth.
     const auto serial = _model.deviceObject().getSerialNumber();
     if (serial.size() >= application::kKnxSerialNumberBytes) {

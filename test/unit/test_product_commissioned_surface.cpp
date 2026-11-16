@@ -192,6 +192,31 @@ void test_product_commissioned_surface_starts_via_tp1_mac_physical(void)
     TEST_ASSERT_TRUE(isInitialIndividualAddress(runtime->individualAddress()));
 }
 
+void test_product_commissioned_serial_number_comes_from_the_platform(void)
+{
+    // PID_SERIAL_NUMBER: manufacturer id, then the platform's unique number.
+    platform::LinuxPlatform platform;
+    const uint32_t unique = platform.uniqueSerialNumber();
+    TEST_ASSERT_NOT_EQUAL(0u, unique);
+
+    auto result = startCommissionedProduct(
+        platform,
+        kCommissionedSurfaceProduct,
+        makeCommissionedBindings(kCommissionedSurfaceProduct),
+        makeNullBackend());
+    TEST_ASSERT_TRUE(result.isOk());
+    auto runtime = std::move(result.value());
+
+    const auto serial = runtime->deviceObject().getSerialNumber();
+    const uint8_t expected[6] = {
+        0x00, 0xFA,
+        static_cast<uint8_t>(unique >> 24), static_cast<uint8_t>(unique >> 16),
+        static_cast<uint8_t>(unique >> 8), static_cast<uint8_t>(unique),
+    };
+    TEST_ASSERT_EQUAL_UINT32(6u, serial.size());
+    TEST_ASSERT_EQUAL_MEMORY(expected, serial.data(), 6);
+}
+
 void test_product_commissioned_surface_forwards_owner_work_hint_and_notification(void)
 {
     using runtime_type = CommissionedProductRuntime<decltype(kCommissionedSurfaceProduct)>;
@@ -709,6 +734,7 @@ int main(void)
     RUN_TEST(test_product_commissioned_surface_uses_public_commissioning_apis_by_default);
     RUN_TEST(test_product_commissioned_surface_honors_storage_namespace_override);
     RUN_TEST(test_product_commissioned_surface_starts_via_tp1_mac_physical);
+    RUN_TEST(test_product_commissioned_serial_number_comes_from_the_platform);
     RUN_TEST(test_product_commissioned_surface_forwards_owner_work_hint_and_notification);
     RUN_TEST(test_product_commissioned_export_descriptor_includes_parameters);
     RUN_TEST(test_product_commissioned_security_off_by_default);

@@ -209,7 +209,7 @@ public:
         }
 
         _bau = std::make_unique<bau::BusAccessUnit>(platform, std::move(mediumBackend));
-        return finishStart();
+        return finishStart(platform);
     }
 #endif
 
@@ -221,7 +221,7 @@ public:
         }
 
         _bau = std::make_unique<bau::BusAccessUnit>(platform, std::move(stackPort));
-        return finishStart();
+        return finishStart(platform);
     }
 
 #if KNX_FEATURE_TP1
@@ -234,7 +234,7 @@ public:
 
         auto stackPort = bau::createTp1StackPort(platform, std::move(physical));
         _bau = std::make_unique<bau::BusAccessUnit>(platform, std::move(stackPort));
-        return finishStart();
+        return finishStart(platform);
     }
 #endif
 
@@ -248,7 +248,7 @@ public:
 
         auto stackPort = bau::createTp1StackPort(platform, std::move(physical));
         _bau = std::make_unique<bau::BusAccessUnit>(platform, std::move(stackPort));
-        return finishStart();
+        return finishStart(platform);
     }
 #endif  // KNX_IP_TUNNELING
 
@@ -263,7 +263,7 @@ public:
 
         auto stackPort = bau::createTp1StackPort(platform, std::move(physical));
         _bau = std::make_unique<bau::BusAccessUnit>(platform, std::move(stackPort));
-        return finishStart();
+        return finishStart(platform);
     }
 #endif  // KNX_FEATURE_NETIP
 
@@ -698,7 +698,7 @@ public:
     }
 #endif  // KNX_SECURE_ENABLED
 
-    util::Result<void> finishStart()
+    util::Result<void> finishStart(const platform::Platform& platform)
     {
         _core.attach(_bau.get());
 
@@ -713,7 +713,7 @@ public:
             dropBau();
             return util::ErrorCode::InvalidParameter;
         }
-        applyIdentity();
+        applyIdentity(platform);
         applyPreStartConfiguration();
 
         // Apply any transmit-shaping configured before start() (the BAU only
@@ -770,7 +770,7 @@ public:
         _bau.reset();
     }
 
-    void applyIdentity()
+    void applyIdentity(const platform::Platform& platform)
     {
         // Declared before anything else touches the device object: ETS reads
         // the Device Descriptor before it will download, and the mask version
@@ -798,6 +798,23 @@ public:
             static_cast<uint8_t>(hardwareSerial & 0xFFu),
         };
         device.setHardwareType(hardwareType);
+
+        // PID_SERIAL_NUMBER (03/05/01 §4.3.11): manufacturer id, then the
+        // platform's unique 32-bit number. Before init(), so serial-number
+        // addressing and Data Secure start from it. A platform with no unique
+        // number (0) leaves the serial at zero; the host may still set one
+        // through deviceObject() after start().
+        if (const uint32_t unique = platform.uniqueSerialNumber(); unique != 0u) {
+            const uint8_t serial[6] = {
+                static_cast<uint8_t>((manufacturerValue >> 8) & 0xFFu),
+                static_cast<uint8_t>(manufacturerValue & 0xFFu),
+                static_cast<uint8_t>((unique >> 24) & 0xFFu),
+                static_cast<uint8_t>((unique >> 16) & 0xFFu),
+                static_cast<uint8_t>((unique >> 8) & 0xFFu),
+                static_cast<uint8_t>(unique & 0xFFu),
+            };
+            device.setSerialNumber(serial);
+        }
 
         device.setOrderInfo(std::string(_definition.identity.orderNumber));
 
