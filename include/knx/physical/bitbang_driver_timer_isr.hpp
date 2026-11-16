@@ -399,6 +399,7 @@ private:
     uint32_t _ackWindowUs{0};         ///< last TX bit-end → ACK window closes
     uint32_t _ackSlotDelayUs{0};      ///< telegram complete → DL-ACK start bit
     uint32_t _busyHoldoffUs{0};       ///< BUSY start bit → earliest repetition
+    uint32_t _txEarlyEdgeUs{0};       ///< end of a TX bit cell: an edge here is the next bit's
     uint32_t _txIdleWaitUs{0};        ///< last start bit → own start bit, for the staged frame
 
     uint64_t _armedAlarmUs{0};
@@ -578,8 +579,12 @@ private:
     uint64_t txHandleWaitingSlot(uint64_t nowUs);
     uint64_t txHandleWaitingAck();
 
-    void loseArbitration();
-    void takeOverReceptionAfterArbitrationLoss();
+    /// txEdgeLostPosition() results besides a bit position 0..8.
+    static constexpr int8_t TX_EDGE_NOT_LOST = -1;
+    static constexpr int8_t TX_EDGE_OUTSIDE_CHARACTER = -2;
+    int8_t txEdgeLostPosition() const;
+    void loseArbitration(int8_t lostPosition);
+    void takeOverReceptionAfterArbitrationLoss(int8_t lostPosition);
 
     /// Reset the RX character sampler and drop its alarm. Per-telegram state
     /// is not touched: closing a telegram is finishRxTelegram()'s job.
@@ -765,6 +770,14 @@ private:
     /// A character is 11 bit times; the inter-character gap is 2.
     static constexpr uint32_t CHARACTER_BT = 11u;
     static constexpr uint32_t INTER_CHARACTER_GAP_BT = 2u;
+    /// Idle line before a system or urgent frame and before any repeated
+    /// frame; normal and low frames wait 3 bit times more (03_02_02 §2.3).
+    static constexpr uint32_t BUS_IDLE_FLOOR_BT = 50u;
+    /// While transmitting, an edge in the last 1/4 of a bit cell belongs to
+    /// the next cell (§3.4). The split is not in the middle: interrupt
+    /// latency only ever makes an edge look later than it was, and this
+    /// node's own echo comes at the start of a cell.
+    static constexpr uint32_t TX_EARLY_EDGE_DIVISOR = 4u;
     /// The ACK window stays open this long after the frame end.
     static constexpr uint32_t ACK_WINDOW_BT = 35u;
     /// Wait after a BUSY acknowledge, from the end of the BUSY character

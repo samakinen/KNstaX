@@ -127,9 +127,10 @@ bit, 0–7 for data, 8 for parity and 9 for stop. `_txBitPosition` names the
 position the next bit-end will service, so the bit on the wire is the one
 before it.
 
-A dominant edge in `TX_SENDING_ONE` outside a DL-ACK means another sender won
-arbitration (§3.4). Other edges while this node drives a bit are its own echo
-and are ignored, apart from setting `_rxZeroDetected`.
+A dominant edge where this node sends a recessive bit, outside a DL-ACK, means
+another sender won arbitration (§3.4). Other edges while this node drives a
+bit are its own echo, or the same 0 from a sender still level with it. They
+are ignored, apart from setting `_rxZeroDetected`.
 
 ### 3.3 Composite transmitter modes
 
@@ -170,18 +171,43 @@ for the response a task sends right after a request.
 
 ### 3.4 Arbitration loss
 
-The trigger is a dominant edge in `TX_SENDING_ONE` outside a DL-ACK.
+The trigger is a dominant edge in a bit cell where this node sends a 1,
+outside a DL-ACK. `txEdgeLostPosition()` decides which cell an edge belongs
+to from its time on the TX bit grid, not from `_txState` alone:
+
+| Edge arrives | Belongs to | Arbitration lost if |
+|---|---|---|
+| in the dominant part of a 0 | this cell (own echo) | never |
+| in the last quarter of a cell, or after the cell's alarm is due | the next cell | the next bit is a 1 |
+| anywhere else in a 1 | this cell | always |
+| anywhere else in the recessive part of a 0 | this cell (late echo) | never |
+
+The second row is needed because two senders are never level to the
+microsecond, and because the edge interrupt can run before the alarm that
+ends the cell even when the edge came after it (both pending, the GPIO
+interrupt dispatched first). Without it, an edge a few microseconds early is
+charged to the wrong bit: a loss is missed (the cell on the wire was a 0), or
+found one bit early (it was a 1), or found where both senders send the same 0.
+The split is a quarter of a cell and not a half, because interrupt latency
+only makes an edge look later than it was.
+
+The next cell of the stop bit and gap is the start bit, which every
+synchronised sender sends, so an edge just before it is not a loss. An edge
+elsewhere in the stop bit or the gap is a sender that is not synchronised
+with this frame.
+
 `loseArbitration()` then does the following:
 
 1. Queues `Collision`.
-2. If the edge fell inside a character, hands that character to the receiver
+2. If the lost bit is inside a character, hands that character to the receiver
    (`takeOverReceptionAfterArbitrationLoss`). Up to the bit where the two
    frames diverged, the wired-AND bus carried exactly what this node sent. So
    the octets already sent are published as the winner's first `Data`
    messages, and folded into the check octet and the header decoder. The
    current character continues in `RX_RECEIVE` from the diverging bit, which
-   `_rxZeroDetected` makes a 0. The winner's frame is then received whole,
-   and acknowledged if it is addressed here.
+   `_rxZeroDetected` makes a 0. Its sample point is the middle of that bit's
+   cell, so it lies ahead whether the edge came early or late. The winner's
+   frame is then received whole, and acknowledged if it is addressed here.
 3. Otherwise (stop bit or gap), leaves the receiver idle, so the same edge
    starts a character as a start bit.
 4. Puts the frame back into `TX_WAITING_SLOT`. Its pending alarm makes the
@@ -233,7 +259,7 @@ alarm (TX).
 | TX: dominant part of a `0` | `zeroActiveTimeUs`, then `zeroEqualizationTimeUs` |
 | TX: character to character | 11·bit + 2·bit gap |
 | ACK window (own frame) | opens at the last stop bit, closes frame end + 35·bit |
-| bus-idle wait before a frame | last character start + (11 + 50)·bit (system, urgent) or (11 + 53)·bit (normal, low) |
+| bus-idle wait before a frame | last character start + (11 + 50)·bit (system, urgent, and every repeated frame) or (11 + 53)·bit (normal, low) |
 | after a BUSY acknowledge | additionally ≥ BUSY start + (11 + 150)·bit (A.8) |
 
 The tightest margin in the driver is the start-bit re-read. The dominant pulse
@@ -372,7 +398,9 @@ Inside the core:
 
 - **No timer reads on the TX path.** Every TX transition is scheduled from the
   alarm's scheduled instant, including the character-start stamp used for
-  CSMA. The only reads are on an RX edge and in `send()`.
+  CSMA. The only reads are on an RX edge and in `send()`. An edge in the
+  recessive part of a transmitted cell costs one read (§3.4); the node's own
+  echo, which comes in the dominant part, costs none.
 - **No multiplications in the ISR.** All derived timing is precomputed in
   `init()`.
 - **No library calls.** Parity is a shift-XOR fold (RV32IMAC has no popcount
@@ -402,8 +430,9 @@ nothing.
   ISR runs in a host test. White-box tests that write internal fields directly
   turn it off for that test with `setSelfCheckEnabled(false)`.
 - **ISR unit tests** (`test/unit/test_bitbang_driver_timer_isr.cpp`). Each
-  bit, the acknowledge decision, the ACK window, arbitration loss with
-  takeover, the BUSY hold-off, and acknowledges that superimpose.
+  bit, the acknowledge decision, the ACK window, the bus access classes,
+  arbitration loss with takeover (with the winner late and early on the bit
+  grid), the BUSY hold-off, and acknowledges that superimpose.
 - **Virtual-bus tests** (`test_tp1_bitbang_virtual_*`). Timing faults, edge
   loss and duplication, jitter, stale alarms.
 - **Stack tests above the MAC** (`test_bau_onwire`,
@@ -424,6 +453,23 @@ Tests of arbitration therefore script the winner's waveform only.
 - **Two copies of the event pump (open).** The task-side pump exists twice,
   in `BitBangDriverTimerIsrEspIdf` and in the host test driver
   `VirtualBitBangTp1Driver`. They have to be kept in step by hand.
+- **No arbitration against a punctual competitor (open).** The CSMA reference
+  is a software edge timestamp, so this node's start bit is scheduled late by
+  the edge interrupt's latency. A hardware-timed sender of the same access
+  class starts that much earlier; its start edge is seen before this node's
+  slot alarm, and the frame waits (`_rxState != RX_IDLE`) instead of
+  arbitrating. The bus is never disturbed, but within a class this node
+  yields even when its frame has the higher priority (system against urgent,
+  normal against low). Joining a character whose start edge is at most a
+  fraction of a bit old would fix it; §3.4 already handles the competitor's
+  early edges. It changes what is driven onto the bus, so it needs a scope
+  and a second device on the bench.
+- **Transmit latency is not compensated (open).** The DL-ACK and the first
+  start bit of a frame are driven late by the edge-timestamp latency plus the
+  alarm latency (compare `timerJitterUs`). Acknowledges of several devices
+  superimpose, so a late one widens the dominant pulses the sender sees. A
+  board-profile constant subtracted from `_ackSlotDelayUs` and
+  `_txIdleWaitUs` would centre both; its value has to be measured per board.
 - **CSMA polling.** A frame waiting behind a reception polls the bus once per
   bit time. Each poll is a short TX interrupt that can delay an RX edge or
   sample by its own duration.

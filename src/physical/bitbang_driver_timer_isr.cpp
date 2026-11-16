@@ -68,6 +68,7 @@ bool BitBangDriverTimerIsrT<IsrPolicy>::init(const knx_timer_gpio_hal_t& hal,
     _ackSlotDelayUs = bitUs * (ACK_START_FROM_FRAME_END_BT - TELEGRAM_COMPLETE_FROM_FRAME_END_BT)
                       - config.bitSamplingOffsetUs;
     _busyHoldoffUs = bitUs * (CHARACTER_BT + BUSY_HOLDOFF_BT);
+    _txEarlyEdgeUs = bitUs / TX_EARLY_EDGE_DIVISOR;
     _txIdleWaitUs = 0;
 
     _msgHead.store(0, std::memory_order_relaxed);
@@ -183,10 +184,14 @@ bool BitBangDriverTimerIsrT<IsrPolicy>::send(std::span<const uint8_t> frame)
     // t_idle, measured here from the start bit of the last character on the
     // bus — 11 bits for that character plus the idle time. CTRL[3:2] is the
     // priority (00 system, 01 normal, 10 urgent, 11 low): system and urgent
-    // frames wait the 50-bit floor, normal and low 53. No margin is added: it
-    // would hand the bus to other devices' lower-priority frames.
+    // frames wait the 50-bit floor, normal and low 53. A repeated frame (CTRL
+    // bit 5 cleared) is in the 50-bit class whatever its priority, so a
+    // repetition goes out ahead of new normal and low traffic. No margin is
+    // added: it would hand the bus to other devices' lower-priority frames.
     static constexpr uint8_t kTxWaitBitsByPriority[4] = {61u, 64u, 61u, 64u};
-    _txIdleWaitUs = _bitUs * kTxWaitBitsByPriority[(frame[0] >> 2u) & 0x03u];
+    const bool repeated = (frame[0] & datalink::CTRL_REPEAT) == 0u;
+    _txIdleWaitUs = _bitUs * (repeated ? uint32_t{CHARACTER_BT + BUS_IDLE_FLOOR_BT}
+                                       : uint32_t{kTxWaitBitsByPriority[(frame[0] >> 2u) & 0x03u]});
 
     if (!behindAck) {
         // First CSMA evaluation one bit time from now. Behind a DL-ACK the
@@ -282,22 +287,25 @@ KNX_TIMER_GPIO_HAL_ISR_ATTR void BitBangDriverTimerIsrT<IsrPolicy>::onRxEdge()
 
     _rxZeroDetected = 1;
 
-    if (_txState == TX_SENDING_ONE && !_sendingAck) {
-        // A dominant edge while this node sends a recessive bit: another
-        // sender won arbitration. If it happened inside a character the
-        // receiver has taken over that character; otherwise the edge is the
-        // start bit of the winner's character and is handled below.
-        loseArbitration();
+    if (isDrivingBits()) {
+        const int8_t lostPosition = txEdgeLostPosition();
+        if (lostPosition == TX_EDGE_NOT_LOST) {
+            // The local echo of a bit this node drives, or the same 0 from a
+            // sender that is still level with it.
+            BITBANG_TIMING_END(_timingStats.onRxEdgeCycles, onRxEdge);
+            return;
+        }
+        // Another sender's 0 where this node sends a 1: it won arbitration.
+        // If that happened inside a character the receiver has taken the
+        // character over; otherwise the edge is handled below as the start
+        // bit of a character.
+        loseArbitration(lostPosition);
         if (_rxState != RX_IDLE) {
             rearmTimer();
             selfCheckState("onRxEdge/arbitration");
             BITBANG_TIMING_END(_timingStats.onRxEdgeCycles, onRxEdge);
             return;
         }
-    } else if (isDrivingBits()) {
-        // The local echo of a bit this node drives.
-        BITBANG_TIMING_END(_timingStats.onRxEdgeCycles, onRxEdge);
-        return;
     }
 
     if (_txState == TX_WAITING_ACK && _rxState == RX_IDLE) {
@@ -854,19 +862,63 @@ KNX_TIMER_GPIO_HAL_ISR_ATTR uint64_t BitBangDriverTimerIsrT<IsrPolicy>::processT
     }
 }
 
-// Arbitration lost (03_02_02 §2.3): the edge is another sender's dominant bit
-// while this node sends a recessive one. Called only in TX_SENDING_ONE outside
-// a DL-ACK, where the line is already released.
+// Place a dominant edge seen while this node drives bits on its own bit grid
+// and decide whether it means arbitration is lost (§3.4). Returns the bit
+// position that was lost (0..7 data, 8 parity), TX_EDGE_OUTSIDE_CHARACTER for
+// a loss in the stop bit or the gap, or TX_EDGE_NOT_LOST.
+//
+// The state alone does not say which bit the edge belongs to. A competitor is
+// never level with this node to the microsecond, and this interrupt can run
+// before the alarm that ends the current cell even when the edge came after
+// it. So an edge in the last part of a cell, or after the cell's alarm is
+// due, is the next cell's: it is a loss only if that bit is a 1.
 template<typename IsrPolicy>
-KNX_TIMER_GPIO_HAL_ISR_ATTR void BitBangDriverTimerIsrT<IsrPolicy>::loseArbitration()
+KNX_TIMER_GPIO_HAL_ISR_ATTR int8_t BitBangDriverTimerIsrT<IsrPolicy>::txEdgeLostPosition() const
+{
+    // Acknowledges superimpose and are not arbitrated. In the dominant part
+    // of a 0 the edge is this node's own echo.
+    if (_sendingAck || _txState == TX_SENDING_ZERO_ACTIVE) {
+        return TX_EDGE_NOT_LOST;
+    }
+
+    // _txBitPosition names the cell that follows the one on the wire: -1 the
+    // next character's start bit, 0..7 data, 8 parity, 9 the stop bit. The TX
+    // alarm is the end of the cell on the wire.
+    const int8_t nextPosition = _txBitPosition;
+    const int64_t remainingUs = static_cast<int64_t>(_txAlarmUs - timerNow());
+    if (remainingUs <= static_cast<int64_t>(_txEarlyEdgeUs) && nextPosition != 9) {
+        if (nextPosition < 0) {
+            return TX_EDGE_NOT_LOST;  // the start bit both senders send
+        }
+        const uint8_t nextBit = nextPosition == 8
+                                    ? parityBit(_txCurrentByte)
+                                    : static_cast<uint8_t>((_txCurrentByte >> nextPosition) & 0x1u);
+        return nextBit != 0u ? nextPosition : TX_EDGE_NOT_LOST;
+    }
+
+    if (_txState != TX_SENDING_ONE) {
+        return TX_EDGE_NOT_LOST;  // late echo or ringing in a 0 this node sent
+    }
+    // The 1 on the wire: a data or parity bit, or the stop bit and the gap
+    // (nextPosition -1), where no synchronised sender sends anything.
+    return nextPosition >= 1 ? static_cast<int8_t>(nextPosition - 1) : TX_EDGE_OUTSIDE_CHARACTER;
+}
+
+// Arbitration lost (03_02_02 §2.3): the edge is another sender's dominant bit
+// where this node sends a recessive one, at @p lostPosition of the current
+// character (see txEdgeLostPosition()). The line is released: the cell on
+// the wire is a 1 or the recessive rest of a 0.
+template<typename IsrPolicy>
+KNX_TIMER_GPIO_HAL_ISR_ATTR void BitBangDriverTimerIsrT<IsrPolicy>::loseArbitration(int8_t lostPosition)
 {
     (void)queueMessage(MessageType::Collision, 0);
-    takeOverReceptionAfterArbitrationLoss();
+    takeOverReceptionAfterArbitrationLoss(lostPosition);
 
     // Losing arbitration is how TP1 shares the bus, not an error: the frame
     // goes back to waiting for the bus, behind the winner's frame and its
-    // acknowledge. The TX alarm armed for the end of the lost bit stays and
-    // lands in txHandleWaitingSlot(), which polls until the receiver is idle.
+    // acknowledge. The TX alarm armed for the end of the cell on the wire
+    // stays and lands in txHandleWaitingSlot(), which polls until the
+    // receiver is idle.
     ++_txArbitrationLosses;
     if (_txArbitrationLosses < MAX_TX_ARBITRATION_ATTEMPTS) {
         _txBytePosition = 0;
@@ -889,16 +941,15 @@ KNX_TIMER_GPIO_HAL_ISR_ATTR void BitBangDriverTimerIsrT<IsrPolicy>::loseArbitrat
 // what this node sent, so the octets already sent and the bits of the current
 // character are the winner's too (§3.4).
 template<typename IsrPolicy>
-KNX_TIMER_GPIO_HAL_ISR_ATTR void BitBangDriverTimerIsrT<IsrPolicy>::takeOverReceptionAfterArbitrationLoss()
+KNX_TIMER_GPIO_HAL_ISR_ATTR void BitBangDriverTimerIsrT<IsrPolicy>::takeOverReceptionAfterArbitrationLoss(
+    int8_t lostPosition)
 {
-    // _txBitPosition is the position the next bit-end services, so the bit
-    // on the wire is one before it: 1..8 → data bit 0..7, 9 → parity. At -1
-    // the node is in the stop bit or the gap, and the edge is a start bit.
-    const int8_t nextPosition = _txBitPosition;
-    if (nextPosition < 1 || nextPosition > 9) {
+    // Outside a character (stop bit or gap) nothing sent so far belongs to
+    // the other sender's character, and the edge is a start bit.
+    if (lostPosition < 0 || lostPosition > 8) {
         return;
     }
-    const uint8_t bitOnWire = static_cast<uint8_t>(nextPosition - 1);
+    const uint8_t bitOnWire = static_cast<uint8_t>(lostPosition);
 
     diagRxFrameStart(_lastCharStartUs);
     for (uint16_t i = 0; i < _txBytePosition; ++i) {
@@ -910,7 +961,9 @@ KNX_TIMER_GPIO_HAL_ISR_ATTR void BitBangDriverTimerIsrT<IsrPolicy>::takeOverRece
     _rxByte = bitOnWire >= 8u
                   ? _txCurrentByte
                   : static_cast<uint8_t>(_txCurrentByte & ((1u << bitOnWire) - 1u));
-    // _rxZeroDetected, set by this edge, makes the bit sampled next a 0.
+    // _rxZeroDetected, set by this edge, makes the bit sampled next a 0. The
+    // sample point is the middle of the lost bit's cell, so it lies ahead
+    // whether the edge came early or late in that cell.
     _rxBitPosition = static_cast<int8_t>(bitOnWire);
     _rxState = RX_RECEIVE;
     _rxAlarmUs = _lastCharStartUs + _sampleOffsetUs + uint64_t{_bitUs} * (bitOnWire + 1u);

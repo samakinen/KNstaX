@@ -253,6 +253,10 @@ void test_collision_when_bus_goes_dominant_during_recessive_one_bit()
     // a logical '1'): a dominant edge there is another transmitter winning
     // bitwise arbitration. During dominant-driven phases the edge is our own.
     driver._txState = BitBangDriverTimerIsr::TX_SENDING_ONE;
+    // The middle of data bit 2 (a 1), with the cell ending in 60 us.
+    driver._txBitPosition = 3;
+    driver._txCurrentByte = 0xFF;
+    driver._txAlarmUs = virtualBus.nowUs() + 61;
     (void)virtualBus.scheduleRxLevelAtUs(virtualBus.nowUs(), 1);
     virtualBus.advanceTimeUs(1);
     driver.onRxEdge();
@@ -988,6 +992,143 @@ void test_arbitration_loss_receives_the_winning_frame()
     TEST_ASSERT_EQUAL_INT(1, ownOutcomes);
 }
 
+// A competitor's clock never matches this node's to the microsecond, and the
+// edge interrupt can run before the alarm that ends the current bit cell. An
+// edge just before a cell boundary is the next bit's: here the winner runs
+// 3 µs early from its second character on, so its diverging 0 arrives while
+// this node is still in the equalisation of its own preceding 0.
+void test_arbitration_loss_is_placed_on_the_bit_grid_when_the_winner_runs_early()
+{
+    driver.setOwnAddress(kOwnAddressRaw);
+    const auto ownFrame = makeStandardFrame(kOwnAddressRaw, 0x1105u, false);
+    const auto winner = makeStandardFrame(0x1102u, kOwnAddressRaw, false);
+
+    TEST_ASSERT_TRUE(driver.send(ownFrame));
+    virtualBus.clearCapturedTxTransitions();
+    for (int i = 0; i < 20000 && virtualBus.capturedTxTransitions().empty(); ++i) {
+        virtualBus.advanceTimeUs(1);
+    }
+    TEST_ASSERT_FALSE(virtualBus.capturedTxTransitions().empty());
+    const uint64_t ownStartUs = virtualBus.capturedTxTransitions().front().timestampUs;
+
+    scheduleCharacterAt(virtualBus, winner[0], ownStartUs + 1u);
+    for (size_t i = 1; i < winner.size(); ++i) {
+        scheduleCharacterAt(virtualBus, winner[i], ownStartUs + i * kCharSpacingUs - 3u);
+    }
+    virtualBus.advanceTimeUs(40000);
+
+    const auto messages = drainMessages();
+    std::vector<uint8_t> received;
+    bool sawEnd = false;
+    int collisions = 0;
+    for (const auto& message : messages) {
+        if (message.type == BitBangDriverTimerIsr::MessageType::Collision) {
+            ++collisions;
+        }
+        if (message.type == BitBangDriverTimerIsr::MessageType::Data && !sawEnd) {
+            received.push_back(message.data);
+        }
+        if (message.type == BitBangDriverTimerIsr::MessageType::End && !sawEnd) {
+            TEST_ASSERT_EQUAL_UINT8(0u, message.data);
+            sawEnd = true;
+        }
+        if (message.type == BitBangDriverTimerIsr::MessageType::ParityError
+                || message.type == BitBangDriverTimerIsr::MessageType::FramingError) {
+            TEST_FAIL_MESSAGE("the winner's frame must decode without character errors");
+        }
+    }
+    TEST_ASSERT_EQUAL_INT(1, collisions);
+    TEST_ASSERT_TRUE(sawEnd);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(winner.size()), static_cast<int>(received.size()));
+    TEST_ASSERT_EQUAL_MEMORY(winner.data(), received.data(), winner.size());
+    TEST_ASSERT_EQUAL_INT(BitBangDriverTimerIsr::ACK_BYTE_ACK, sentAckByte(messages));
+}
+
+// The mirror case: a competitor sending the same bits a little early is not a
+// collision, in a character or at the start bit that ends the gap. It drops
+// out where the frames diverge and this node's frame goes out whole.
+void test_early_edges_of_a_competitor_sending_the_same_bits_are_no_collision()
+{
+    const auto ownFrame = makeStandardFrame(kOwnAddressRaw, 0x1105u, false);
+
+    TEST_ASSERT_TRUE(driver.send(ownFrame));
+    virtualBus.clearCapturedTxTransitions();
+    for (int i = 0; i < 20000 && virtualBus.capturedTxTransitions().empty(); ++i) {
+        virtualBus.advanceTimeUs(1);
+    }
+    TEST_ASSERT_FALSE(virtualBus.capturedTxTransitions().empty());
+    const uint64_t ownStartUs = virtualBus.capturedTxTransitions().front().timestampUs;
+
+    // The competitor loses in the third octet; up to there it sends what
+    // this node sends.
+    scheduleCharacterAt(virtualBus, ownFrame[0], ownStartUs + 1u);
+    scheduleCharacterAt(virtualBus, ownFrame[1], ownStartUs + kCharSpacingUs - 3u);
+    virtualBus.advanceTimeUs(40000);
+
+    const auto messages = drainMessages();
+    TEST_ASSERT_FALSE(sawMessage(messages, BitBangDriverTimerIsr::MessageType::Collision));
+    TEST_ASSERT_FALSE(sawMessage(messages, BitBangDriverTimerIsr::MessageType::Data));
+    TEST_ASSERT_TRUE(sawMessage(messages, BitBangDriverTimerIsr::MessageType::TxAckResponse));
+
+    // Every 0 of the frame was driven: start bits, data and parity.
+    size_t expectedZeros = 0;
+    for (uint8_t octet : ownFrame) {
+        expectedZeros += 1u + (8u - static_cast<size_t>(__builtin_popcount(octet)))
+                       + ((__builtin_popcount(octet) & 1) == 0 ? 1u : 0u);
+    }
+    size_t drivenZeros = 0;
+    for (const auto& transition : virtualBus.capturedTxTransitions()) {
+        if (transition.level == 1) {
+            ++drivenZeros;
+        }
+    }
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(expectedZeros), static_cast<int>(drivenZeros));
+}
+
+// ── Bus access classes (03_02_02 §2.3) ───────────────────────────────────────
+
+// First dominant level of a frame with the given control field, in bit times
+// after the start bit of a character that was on the bus just before.
+uint64_t busAccessDelayBits(uint8_t control)
+{
+    const uint64_t charStartUs = virtualBus.nowUs() + 20;
+    (void)virtualBus.scheduleRxLevelAtUs(charStartUs - 1, 0);
+    scheduleCharacterAt(virtualBus, BitBangDriverTimerIsr::ACK_BYTE_ACK, charStartUs);
+    virtualBus.advanceTimeUs(20 + 20 * kBitUs);
+
+    auto frame = makeStandardFrame(kOwnAddressRaw, 0x0A01u, true);
+    frame[0] = control;
+    virtualBus.clearCapturedTxTransitions();
+    TEST_ASSERT_TRUE(driver.send(frame));
+    virtualBus.advanceTimeUs(40000);
+
+    for (const auto& transition : virtualBus.capturedTxTransitions()) {
+        if (transition.level == 1) {
+            TEST_ASSERT_EQUAL_UINT64(0u, (transition.timestampUs - charStartUs) % kBitUs);
+            return (transition.timestampUs - charStartUs) / kBitUs;
+        }
+    }
+    TEST_FAIL_MESSAGE("the frame was never sent");
+    return 0;
+}
+
+// 50 bit times of idle line for system and urgent frames and for every
+// repeated frame, 53 for normal and low ones, after the 11-bit character.
+void test_bus_idle_wait_follows_the_access_class()
+{
+    TEST_ASSERT_EQUAL_UINT64(11u + 50u, busAccessDelayBits(0xB0)); // system
+    TEST_ASSERT_EQUAL_UINT64(11u + 50u, busAccessDelayBits(0xB8)); // urgent
+    TEST_ASSERT_EQUAL_UINT64(11u + 53u, busAccessDelayBits(0xB4)); // normal
+    TEST_ASSERT_EQUAL_UINT64(11u + 53u, busAccessDelayBits(0xBC)); // low
+}
+
+void test_repeated_frame_waits_50_bit_times_whatever_its_priority()
+{
+    TEST_ASSERT_EQUAL_UINT64(11u + 50u, busAccessDelayBits(0x94)); // normal, repeated
+    TEST_ASSERT_EQUAL_UINT64(11u + 50u, busAccessDelayBits(0x9C)); // low, repeated
+    TEST_ASSERT_EQUAL_UINT64(11u + 50u, busAccessDelayBits(0x1C)); // extended, low, repeated
+}
+
 int main()
 {
     UNITY_BEGIN();
@@ -1024,5 +1165,9 @@ int main()
     RUN_TEST(test_armed_ack_survives_an_earlier_acknowledge_of_another_device);
     RUN_TEST(test_ack_intent_does_not_outlive_its_telegram);
     RUN_TEST(test_arbitration_loss_receives_the_winning_frame);
+    RUN_TEST(test_arbitration_loss_is_placed_on_the_bit_grid_when_the_winner_runs_early);
+    RUN_TEST(test_early_edges_of_a_competitor_sending_the_same_bits_are_no_collision);
+    RUN_TEST(test_bus_idle_wait_follows_the_access_class);
+    RUN_TEST(test_repeated_frame_waits_50_bit_times_whatever_its_priority);
     return UNITY_END();
 }
