@@ -198,6 +198,7 @@ set(KNX_SOURCES_ETS
 set(KNX_SOURCES_VIRTUAL
     "src/physical/timer_gpio_hal_virtual.cpp"
     "src/physical/uart_hal_virtual.cpp"
+    "src/physical/virtual_tpuart_chip.cpp"
     "src/objects/flash_hal_virtual.cpp"
     "src/physical/virtual_time_engine.cpp"
     "src/physical/virtual_tp1_bus_peer.cpp"

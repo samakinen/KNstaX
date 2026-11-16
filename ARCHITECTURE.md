@@ -203,7 +203,10 @@ enforces that document.
 
 - The chip owns bit timing, bus access, sending the L2 acknowledge, observing the acknowledge of our own frame and repetition. The backend therefore reports `Tp1CapabilityProfile::transceiverRepeats`, and `Tp1DataLinkLayer` makes exactly one attempt per frame and takes the chip's `L_Data.con` as the final outcome. A negative confirmation does not say whether the peer answered NACK, BUSY or nothing, so for a group frame it is treated as "nobody listening" (sent), as the bit-bang path treats an unanswered group frame after its repetitions.
 - The acknowledge decision for group addresses (and assumed individual addresses) is made in the UART receive interrupt, which writes `U_AckInformation` as soon as the destination is known; the chip acknowledges the own individual address itself. The interrupt reads the address table's storage itself, under the table's generation (see the group address view above): a frame that arrives while the list changes is not acknowledged, and its sender repeats it.
+- The chip takes `U_AckInformation` only within 1.7 ms of the address-type octet. An octet written from the interrupt queues behind whatever the main context has queued, so the main context writes nothing (no `U_L_Data` pair, no request) while a received frame waits for its acknowledge decision. What it queued before the frame started has left long before the decision, 6.8 ms later.
 - The receive path runs from RAM on bare metal (`KNX_ISR_RAM`, `include/knx/platform/isr_ram.hpp`) and never calls out of it; the size gate fails if it does.
+
+- `VirtualTpUartChip` (`include/knx/physical/virtual_tpuart_chip.hpp`, host only) simulates the chip on a character-level TP1 line with scripted partners and fault injection; `-L tpuart` runs the backend and the stack over it.
 
 Design, protocol values and status: `docs/design/cortex-m-tpuart2-support.md` §3.
 

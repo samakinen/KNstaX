@@ -220,6 +220,10 @@ TpUartMediumBackend::~TpUartMediumBackend()
         _rxEcho = false;
         _rxSlots[_rxTail.load(std::memory_order_relaxed)].data[0] = octet;
         _rxPhase.store(RxPhase::InFrame, std::memory_order_relaxed);
+        // The main context writes nothing from now until the decision.
+        _rxFrameStarts = static_cast<uint8_t>(_rxFrameStarts + 1u);
+        _rxFrameStarts = _rxFrameStarts == 0u ? 1u : _rxFrameStarts;
+        _rxAwaitingDecision.store(_rxFrameStarts, std::memory_order_release);
         return;
     }
     if ((octet & L_DATA_CON_MASK) == L_DATA_CON) {
@@ -262,6 +266,7 @@ TpUartMediumBackend::~TpUartMediumBackend()
         // writes the same transition.
         _rxSync.store(RxSync::InSync, std::memory_order_release);
         _rxPhase.store(RxPhase::Idle, std::memory_order_relaxed);
+        _rxAwaitingDecision.store(0u, std::memory_order_release);
     }
 
     // More than 2 ms of silence ends whatever was being assembled.
@@ -269,6 +274,7 @@ TpUartMediumBackend::~TpUartMediumBackend()
         static_cast<uint32_t>(timestampUs - lastUs) > FRAME_GAP_US) {
         _partialFramesDiscarded.increment();
         _rxPhase.store(RxPhase::Idle, std::memory_order_relaxed);
+        _rxAwaitingDecision.store(0u, std::memory_order_release);
     }
 
     if (_rxPhase.load(std::memory_order_relaxed) == RxPhase::Idle) {
@@ -308,6 +314,7 @@ TpUartMediumBackend::~TpUartMediumBackend()
             decideAck(static_cast<uint16_t>((slot.data[destination] << 8) | slot.data[destination + 1u]),
                       (addressType & ADDRESS_TYPE_GROUP) != 0u);
         }
+        _rxAwaitingDecision.store(0u, std::memory_order_release);
     }
 
     if (_rxExpected != 0u && _rxCount >= _rxExpected) {
@@ -383,6 +390,7 @@ void TpUartMediumBackend::resetRxState()
     _rxCount = 0u;
     _rxExpected = 0u;
     _rxSync.store(RxSync::InSync, std::memory_order_relaxed);
+    _rxAwaitingDecision.store(0u, std::memory_order_relaxed);
     _busyModeActive = false;  // a reset ends busy mode in the chip too
     _confirmsSeen = _confirmCount.load(std::memory_order_relaxed);
     _resetsSeen = _resetIndCount.load(std::memory_order_relaxed);
@@ -514,8 +522,12 @@ void TpUartMediumBackend::pumpTx()
 {
     // One U_L_Data request pair per octet: Start/Continue carries the octet's
     // index, End (on the FCS) the index of the last octet. A few octets at a
-    // time, so an acknowledge from the RX interrupt does not queue behind a
-    // whole frame (design note §4.1).
+    // time, and none while a received frame waits for its acknowledge
+    // decision, so the acknowledge from the RX interrupt finds the UART empty
+    // (design note §3.9).
+    if (holdForAckDecision()) {
+        return;
+    }
     while (_txPhase == TxPhase::Feeding && _txPosition < _txLength) {
         if (txQueued() + 2u > _config.txQueueLimitOctets) {
             return;
@@ -628,10 +640,29 @@ void TpUartMediumBackend::handleTxTimeout()
     _error = reset.isError();
 }
 
+bool TpUartMediumBackend::holdForAckDecision()
+{
+    const uint8_t frame = _rxAwaitingDecision.load(std::memory_order_acquire);
+    if (frame == 0u) {
+        return false;
+    }
+    const uint32_t now = util::nowMs(&_timing);
+    if (frame != _ackHoldFrameSeen) {
+        _ackHoldFrameSeen = frame;
+        _ackHoldSinceMs = now;
+    }
+    // A frame cut off before its destination leaves the mark behind until the
+    // next octet; do not wait for it longer than its octets could take.
+    return static_cast<uint32_t>(now - _ackHoldSinceMs) < ACK_DECISION_HOLD_MS;
+}
+
 void TpUartMediumBackend::pollState()
 {
     if (_txPhase != TxPhase::None) {
         return;  // no requests between the U_L_Data pairs of a frame
+    }
+    if (holdForAckDecision()) {
+        return;  // the address, the state request: after the acknowledge
     }
     if (_error) {
         // The chip did not come back after a reset: keep trying, once per interval.
@@ -779,7 +810,7 @@ void TpUartMediumBackend::leaveBusyMode()
             _rxSync.store(RxSync::InSync, std::memory_order_release);
         }
     }
-    if (!_busyModeActive || _rxSync.load(std::memory_order_acquire) != RxSync::InSync) {
+    if (!_busyModeActive || _rxSync.load(std::memory_order_acquire) != RxSync::InSync || holdForAckDecision()) {
         return;
     }
     // The manual asks for exactly this order: synchronise, then U_ResetBusyMode.

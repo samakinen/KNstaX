@@ -59,6 +59,16 @@ public:
     std::vector<uint8_t> transmit(size_t maxOctets);
     std::vector<uint8_t> transmitAll();
 
+    /// Called after every accepted write(), from inside it (and so possibly
+    /// from inside the RX callback). A simulated far end uses it to start
+    /// clocking octets out without polling. Null clears it.
+    using TxListener = void (*)(void* context);
+    void setTxListener(TxListener listener, void* context)
+    {
+        _txListener = listener;
+        _txListenerContext = context;
+    }
+
     // --- Observation ------------------------------------------------------
 
     bool isOpen() const { return _open; }
@@ -92,6 +102,8 @@ private:
     knx_uart_hal_rx_cb_t _rxCb{nullptr};
     void* _rxContext{nullptr};
     bool _inRxCallback{false};
+    TxListener _txListener{nullptr};
+    void* _txListenerContext{nullptr};
 
     std::deque<uint8_t> _txQueue;
     std::vector<uint8_t> _transmitted;

@@ -104,6 +104,9 @@ bool UartHalVirtual::writeShim(void* context, const uint8_t* data, size_t len)
     if (self->_inRxCallback) {
         ++self->_writesFromRxCallback;
     }
+    if (self->_txListener != nullptr) {
+        self->_txListener(self->_txListenerContext);
+    }
     return true;
 }
 

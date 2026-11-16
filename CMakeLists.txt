@@ -664,6 +664,8 @@ else()
             LABELS ${TP1_VIRTUAL_UNIT})
         knx_add_test(test_tpuart_medium_backend SOURCES test/unit/test_tpuart_medium_backend.cpp
             LABELS tp1 tpuart unit)
+        knx_add_test(test_tpuart_chip_simulator SOURCES test/unit/test_tpuart_chip_simulator.cpp
+            LABELS tpuart ${TP1_VIRTUAL_UNIT})
         knx_add_test(test_tp1_bitbang_virtual_bus SOURCES test/unit/test_tp1_bitbang_virtual_bus.cpp
             LABELS ${TP1_VIRTUAL_UNIT})
         knx_add_test(test_tp1_bitbang_virtual_faults SOURCES test/unit/test_tp1_bitbang_virtual_faults.cpp

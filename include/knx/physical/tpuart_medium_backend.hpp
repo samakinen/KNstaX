@@ -83,9 +83,10 @@ struct TpUartConfig {
     /// The KNX defaults are 3 and 3 (03_02_02 §2.4.2).
     uint8_t busyRepetitions{3u};
     uint8_t nackRepetitions{3u};
-    /// Octets the transmit path keeps queued in the UART at most. An
-    /// acknowledge written from the RX interrupt waits behind them, so this
-    /// bounds its latency: 4 octets are about 2.3 ms at 19200 baud. At least 2.
+    /// Octets the transmit path keeps queued in the UART at most (at least
+    /// 2). It does not bound the acknowledge's latency: the main context
+    /// writes nothing while a received frame waits for its acknowledge
+    /// decision, so the U_AckInformation finds the UART empty.
     uint8_t txQueueLimitOctets{4u};
     /// No L_Data.con within this time: the frame is reported as a deadline
     /// miss and the chip is reset (it is assumed lost).
@@ -157,6 +158,10 @@ public:
     /// Silence after an erase that puts the receive path back in step: the
     /// 2 ms frame gap plus a millisecond for the platform clock's resolution.
     static constexpr uint32_t RESYNC_SILENCE_MS = 3u;
+    /// Longest the main context holds its writes for a received frame's
+    /// acknowledge decision. Octets 0 to 5 take 6.8 ms on the bus; a frame
+    /// still undecided after this was cut off.
+    static constexpr uint32_t ACK_DECISION_HOLD_MS = 10u;
     static constexpr uint8_t U_L_DATA_START_CONTINUE = 0x80u;
     static constexpr uint8_t U_L_DATA_END = 0x40u;
     /// 28h on the TP-UART2 (confirmed on the H8i8o: frames to the address are
@@ -308,6 +313,10 @@ private:
     void pollState();
     void updateLinkState();
     void leaveBusyMode();
+    /// True while a received frame waits for its acknowledge decision: the
+    /// U_AckInformation must reach the chip within 1.7 ms of the address-type
+    /// octet (manual §3.2.3.1.8), so nothing may queue ahead of it.
+    bool holdForAckDecision();
     void emit(const Tp1RxEvent& event);
     void emitTxOutcome(Tp1RxEventType type, Tp1AckClass ackClass);
     size_t txQueued() const;
@@ -357,6 +366,10 @@ private:
     uint32_t _erasesGuarded{0};
     uint32_t _erasesDeclined{0};
 
+    // --- Acknowledge decision hold (main context) -----------------------------
+    uint8_t _ackHoldFrameSeen{0};
+    uint32_t _ackHoldSinceMs{0};
+
     // --- Receive (interrupt context only, except the ring indices) ----------
     std::array<RxSlot, RX_SLOT_COUNT> _rxSlots{};
     std::atomic<uint8_t> _rxHead{0};   ///< next slot service() reads; main writes
@@ -367,6 +380,7 @@ private:
     uint8_t _rxXor{0};
     bool _rxBad{false};
     bool _rxEcho{false};  ///< the frame being assembled is our own, echoed by the chip
+    uint8_t _rxFrameStarts{0};  ///< frame starts seen, wrapping, never 0
     uint32_t _rxLastUs{0};
     std::atomic<RxSync> _rxSync{RxSync::InSync};
 
@@ -374,6 +388,8 @@ private:
     std::atomic<uint8_t> _confirmCount{0};
     std::atomic<uint8_t> _confirmPositive{0}; // uint8_t, not bool: its load inlines at -Os (no call out of RAM)
     std::atomic<uint8_t> _resetIndCount{0};
+    /// _rxFrameStarts of the frame that waits for its acknowledge decision; 0: none.
+    std::atomic<uint8_t> _rxAwaitingDecision{0};
     std::atomic<uint8_t> _stateIndCount{0};
     std::atomic<uint8_t> _stateIndValue{0};
     IsrCounter _framesReceived;

@@ -259,8 +259,9 @@ To confirm on a real TP-UART2 (with B5 of the H8i8o checklist):
 
 1. `U_AckInformation` written between the `U_L_Data` pairs of a frame being fed is accepted (the
    backend relies on it; it feeds at most `txQueueLimitOctets` ahead).
-2. The deadline for `U_AckInformation` after the address type octet, against the default limit
-   of 4 queued octets (about 2.3 ms at 19200 baud).
+2. The deadline for `U_AckInformation` after the address type octet. The manual gives 1.7 ms
+   (§3.9); the backend now holds every other write while a frame waits for its decision, so the
+   acknowledge finds the UART empty.
 3. ~~`U_MxRstCnt` (0x24) takes the BUSY count in bits 7–5 and the NACK count in bits 2–0.~~ The
    NACK count is **confirmed** (below); the BUSY count is not yet seen.
 4. The chip sends `L_Data.con` for every frame, also those to the individual address FFFFh.
@@ -351,8 +352,21 @@ Two statements in this note disagree with the manual. Neither is acted on yet:
 2. **The acknowledge deadline is 1.7 ms**, counted from the address-type octet (§3.2.3.1.8),
    not the end of the frame. The interrupt decides at that octet, but its `U_AckInformation`
    waits behind whatever the transmit path has queued: `txQueueLimitOctets` (4, about 2.3 ms)
-   can exceed the deadline while one of our frames is being fed to the chip. A limit of 2 (one
-   `U_L_Data` pair, about 1.15 ms) stays inside it.
+   can exceed the deadline while one of our frames is being fed to the chip. **Fixed with K4
+   (16 November 2026).** A limit of 2, as first proposed here, is not enough: the octet in the
+   UART's shift register (and, on a USART, the one in its data register) is not counted as
+   queued, so two queued octets still put the acknowledge up to 4 octet times (2.3 ms) behind.
+   Instead the interrupt marks a frame from its first octet until its decision, and the main
+   context writes nothing meanwhile: no `U_L_Data` pair, no `U_State.req`, `U_SetAddress` or
+   `U_ResetBusyMode`. Whatever it queued before the frame started has left long before the
+   decision, 6.8 ms later. A frame cut off before its destination releases the hold after
+   `ACK_DECISION_HOLD_MS` (10 ms). The chip simulator showed the miss (the chip then answered
+   ACK by its own address evaluation for a frame the device had asked to refuse with BUSY) and
+   shows it gone (`test_busy_answer_is_in_time_while_our_own_frame_is_being_fed`). Cost
+   (tp1-small, Cortex-M3, size gate): 148 B of flash and 8 B in the backend object. The
+   backend object measured 408 B before this change, not the 376 B the budget reserved (the
+   busy-mode fields added with §7.3 were not counted); the reserve is now the measured 416 B,
+   and the device RAM 19,632 of 20,480 B.
 
 ## 4. K2: UART HAL
 
@@ -425,6 +439,69 @@ incrementally and keep only a few octets queued. §3.5 is to be read with this i
 
 Every behaviour in §3 gets a test under a new ctest label `tpuart`. The interop harness can then
 run the full stack over the simulated chip against `xknx`, as it does for bit-bang.
+
+### 5.1 Status of K4 (16 November 2026)
+
+Done. `include/knx/physical/virtual_tpuart_chip.hpp` (host only, in the virtual sources) has
+three parts on one microsecond clock:
+
+- **`VirtualTp1CharacterBus`**, a TP1 line at the level of characters rather than edges: 11-bit
+  characters 13 bit times apart, the acknowledge slot 15 bit times after the frame with the
+  receivers' answers wired-ANDed (ACK with BUSY reads BUSY), and 50 bit times of idle line
+  before a frame. It is not the edge-level bus of `-L tp1-virtual`: a TP-UART needs no bit
+  timing from the host, and joining that bus would need a bit-level receiver in the simulator.
+  So the TP-UART and bit-bang backends cannot yet share one simulated line.
+- **`VirtualTpUartChip`**, the host protocol on a `UartHalVirtual` (which gained a write
+  listener, so the simulator clocks host octets in at 573 µs each without polling). It follows
+  the manual: reset (address evaluation off, repetition counts 3/3, busy mode off), `U_State`,
+  `U_ProductID`, `U_SetAddress` (active once no frame is being received), `U_MxRstCnt`, busy mode
+  (700 ms, ended by `U_ResetBusyMode` or any `U_AckInformation`), bus monitor mode, one frame
+  buffer (a second frame is refused with the PE flag), a wrong checksum from the host refused
+  with RE, repetitions with the repeat flag cleared and the FCS recomputed, and a frame with the
+  repeat flag cleared sent once. It passes every bus octet to the host as it arrives, its own
+  frames too. It acknowledges by its own address evaluation (every group frame once an address
+  is set, §3.9 item 1) or as `U_AckInformation` says, if that arrives within 1.7 ms of the
+  address-type octet; a late one is counted and ignored. A frame with a bad checksum it would
+  acknowledge is answered NACK and reported with RE. Whether `U_AckInformation` with the
+  addressed bit clear withdraws the chip's acknowledge is a configuration option (default yes),
+  since the manual does not say.
+- **`VirtualTp1Partner`**, another device that sends frames (optionally with a corrupted octet)
+  and answers with a scripted acknowledge.
+
+Its timings are those of the H8i8o's chip (§3.8): `U_Reset.ind` 6.9 ms and its `00` glitch
+1.4 ms after `U_Reset.req`, `U_State.ind` 1.4 ms after the request, repetitions 17.3 ms apart
+for a 9-octet frame, `L_Data.con` 2.7 ms after the last echoed octet. The tests check them.
+
+Fault injection: an octet towards the host lost or corrupted (any octet, or one at an index of
+the next received frame, with UART error flags), a missing `L_Data.con`, a stalled host input
+(a late `U_AckInformation`), a spontaneous chip reset, BUSY, NACK or silence from partners,
+and corrupted octets on the line.
+
+`test_tpuart_chip_simulator` (labels `tpuart`, `tp1-virtual`, 23 tests) covers the simulator
+against the H8i8o's figures and the backend over it: start-up through the reset glitch,
+the temperature warning, positive and negative confirmations, the BUSY and NACK repetition
+counts, a lost confirmation and a chip reset mid-frame, acknowledging in time (and the late
+case), the chip's own acknowledge of every group frame (§3.9 item 1), local busy, lost and
+corrupted octets, a frame corrupted on the line, busy mode around a flash erase, and two
+complete stacks exchanging a group write through their chips. The scripted-chip tests in
+`test_tpuart_medium_backend` stay: they check the octets on the host link one by one.
+
+What the simulator found:
+
+- **The acknowledge deadline was missed while one of our frames was being fed** (§3.9 item 2,
+  now fixed).
+- Nothing else in the backend. Two of its assumptions held up under the timing model:
+  `beginFlashErase` returns once `U_ActivateBusyMode` has left the UART's queue, about half an
+  octet time before the chip has it, and no frame can reach its acknowledge slot in that time;
+  and an octet lost towards the host leaves a 2.7 ms gap, which ends the frame by the 2 ms rule.
+
+Not done:
+
+- **Collisions and priorities.** Frames on the simulated line wait their turn; there is no
+  bit-level arbitration and no difference in idle time by priority. A BUSY repetition waits the
+  same 50 bit times as any other frame.
+- **The `xknx` interop run** over the simulated chip. The interop harness drives a bit-bang
+  device on the edge-level bus; it needs a TP-UART device target first.
 
 ## 6. K1: bare-metal build and `CooperativePlatform`
 
