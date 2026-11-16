@@ -493,8 +493,8 @@ wins.
 
 Implemented and host-tested: `knx_flash_hal_t` (`include/knx/objects/flash_hal.h`), `FlashLog`
 (`include/knx/objects/flash_log.hpp`, the log itself) and `FlashLogPersistence` (the
-`ObjectPersistence` adapter). The header of `flash_log.hpp` is the format's specification. Never
-run on a real flash.
+`ObjectPersistence` adapter). The header of `flash_log.hpp` is the format's specification. It
+runs on the H8i8o's GD32F103 flash (§7.2).
 
 Where it differs from the sketch above:
 
@@ -553,9 +553,27 @@ exceeded before K5 (2,322 B); it is now 2,464 B against 2,420 B measured.
 
 Not done:
 
-- A board implementation for the H8i8o (GD32F103 FMC), and a measurement of the page erase
-  time there (H8i8o bring-up B9).
 - The power-fail save path (K10).
+
+### 7.2 On the H8i8o (16 November 2026)
+
+The H8i8o repository has the board's HAL (`bsp/gd32_fmc.c`) and two test images. Measured at
+8 MHz:
+
+- **Timing.** A 1 KiB page erase takes 36.8–39.2 ms, a half-word program about 100 µs. A
+  save of up to 200 octets takes up to 12.9 ms. A `service()` call that compacts takes up
+  to 142 ms, because it copies every live record.
+- **Power cuts.** 57 boots after system resets at random moments found every record whole.
+  Six mounts counted a record the reset had cut. Once, a reset left the active bank full with
+  the spare bank still waiting for its erase, and the first save after boot failed with
+  `StorageFull`, as §7.1 designs. A product drains `service()` at start-up before its first
+  save.
+- **An erase can lock the chip.** On the GD32F103, an interrupt taken while the core runs from
+  flash during an erase locks the chip until a reset: the core and the debug port stop. With
+  the erase started and awaited from RAM, and the vector table and every handler that can
+  fire in RAM, nothing is lost: all TP-UART2 octets arrived during a 37 ms erase. A handler
+  left in flash (SysTick) delays the others until the erase ends, which loses octets.
+  Programming from flash is safe. The HAL contract (`flash_hal.h`) now says so.
 
 ## 8. K6: software AES-128
 
