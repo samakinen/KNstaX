@@ -641,6 +641,7 @@ else()
         knx_add_test(test_product_commissioned_surface NEEDS SECURITY SOURCES test/unit/test_product_commissioned_surface.cpp
             LABELS sdk-public-surface unit)
         knx_add_test(test_product_runtime_core NEEDS DPT_FLOAT SOURCES test/unit/test_product_runtime_core.cpp LABELS unit)
+        knx_add_test(test_parameter_layout SOURCES test/unit/test_parameter_layout.cpp LABELS unit)
 
         knx_add_test(test_logging SOURCES test/unit/test_logging.cpp LABELS unit)
         knx_add_test(test_datalink_edge_cases SOURCES test/unit/test_datalink_edge_cases.cpp LABELS unit)
