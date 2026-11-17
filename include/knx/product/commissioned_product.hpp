@@ -2815,6 +2815,7 @@ auto startCommissionedProduct(platform::Platform& platform,
 ///   const auto json = exportDescriptorToJson(kExport);
 /// @endcode
 template <typename EndpointDefinitionT, typename ParameterSchemaT>
+    requires(!detail::kIsLayoutParameters<std::remove_cvref_t<ParameterSchemaT>>)
 constexpr auto makeCommissionedExportDescriptor(
     const CommissionedProductDefinition<EndpointDefinitionT, ParameterSchemaT>& definition)
 {
@@ -2833,6 +2834,31 @@ constexpr auto makeCommissionedExportDescriptor(
         .capacities = compiled.exportDescriptor.capacities,
         .communicationObjects = compiled.exportDescriptor.communicationObjects,
         .parameters = paramDescriptors,
+    };
+
+    return result;
+}
+
+/// The same for a product built with makeCommissionedProduct<kParameters>():
+/// the communication objects only. Its parameters are exported as blocks, by
+/// parameter_layout_export.hpp; exportCommissionedProductToJson() in
+/// commissioned_product_export.hpp writes both.
+template <typename EndpointDefinitionT, typename ParameterSchemaT>
+    requires detail::kIsLayoutParameters<std::remove_cvref_t<ParameterSchemaT>>
+constexpr auto makeCommissionedExportDescriptor(
+    const CommissionedProductDefinition<EndpointDefinitionT, ParameterSchemaT>& definition)
+{
+    using endpoint_def_t = std::remove_cvref_t<EndpointDefinitionT>;
+
+    const auto compiled = compileEndpointDefinition(definition.endpointDefinition);
+
+    StaticExportDescriptor<endpoint_def_t::kPortCount, 0> result{
+        .identity = compiled.exportDescriptor.identity,
+        .features = compiled.exportDescriptor.features,
+        .security = compiled.exportDescriptor.security,
+        .capacities = compiled.exportDescriptor.capacities,
+        .communicationObjects = compiled.exportDescriptor.communicationObjects,
+        .parameters = {},
     };
 
     return result;

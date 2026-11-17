@@ -409,6 +409,202 @@ def _emit_parameters(static_elem, dynamic_channel, app_ref: str, rs_ref: str, pa
 
 
 
+def _condition_tests(condition):
+    """The <when test="..."> texts for one visibility condition, outermost first.
+
+    ETS tests one controlling parameter per <choose>: a value, a list of values
+    separated by spaces, or a comparison. A range has no single test, so it is
+    two nested ones."""
+    op = condition.get('op', 'anyOf')
+    values = [int(v) for v in condition.get('values', [])]
+    if op == 'anyOf' and values:
+        return [' '.join(str(v) for v in values)]
+    if op == 'notEqual' and len(values) == 1:
+        return [f'!={values[0]}']
+    if op == 'range' and len(values) == 2:
+        return [f'>={values[0]}', f'<={values[1]}']
+    raise ValueError(f'visibility condition {condition!r} is not one the exporter knows')
+
+
+def _numeric_parameter_type(kind: int, size_in_bit: int, p):
+    """(tag, attrs, name) of the ParameterType for a parameter without options."""
+    fmt = lambda v: str(int(v)) if float(v) == int(v) else repr(float(v))
+    has_bounds = 'min' in p and 'max' in p
+    if kind in (_PARAM_KIND_FLOAT, _PARAM_KIND_FLOAT_DPT9):
+        _, tag, attrs = _param_type_for_kind('', kind)
+        attrs = dict(attrs)
+        if has_bounds:
+            attrs['minInclusive'] = fmt(p['min'])
+            attrs['maxInclusive'] = fmt(p['max'])
+        name = ('dpt9' if kind == _PARAM_KIND_FLOAT_DPT9 else 'float')
+        return tag, attrs, f"{name}_{attrs['minInclusive']}_{attrs['maxInclusive']}"
+    if kind == _PARAM_KIND_BOOLEAN:
+        # A yes/no value without option texts is a check box, not a number box.
+        return ('TypeNumber',
+                {'SizeInBit': '8', 'Type': 'unsignedInt', 'minInclusive': '0', 'maxInclusive': '1',
+                 'UIHint': 'CheckBox'},
+                'bool')
+    signed = kind == _PARAM_KIND_SIGNED16
+    low = -(1 << (size_in_bit - 1)) if signed else 0
+    high = (1 << (size_in_bit - 1)) - 1 if signed else (1 << size_in_bit) - 1
+    if has_bounds:
+        low, high = int(p['min']), int(p['max'])
+    return ('TypeNumber',
+            {'SizeInBit': str(size_in_bit), 'Type': 'signedInt' if signed else 'unsignedInt',
+             'minInclusive': str(low), 'maxInclusive': str(high)},
+            f"{'s' if signed else 'u'}{size_in_bit}_{low}_{high}")
+
+
+def _emit_parameter_blocks(static_elem, dynamic_channel, app_ref: str, rs_ref: str, json_obj):
+    """Fill ParameterTypes/Parameters/ParameterRefs and the Dynamic section from
+    the `parameterBlocks` of a product with a parameter layout
+    (docs/design/parameter-model.md).
+
+    A block that repeats is written out once per instance: its parameters, and
+    one ParameterBlock named after the instance. Every memory offset is
+    base + instance × stride + offset, all three from the C++ layout; nothing
+    about the layout is derived here. Returns the size of the image, which is
+    what ETS must download."""
+    blocks = json_obj.get('parameterBlocks', [])
+    image_size = int(json_obj.get('parameterImage', {}).get('size', 0))
+    if not blocks:
+        return 0
+
+    # The layout is the firmware's; this only refuses a document that
+    # contradicts itself, so a broken export cannot become a product file.
+    end = 0
+    for block in blocks:
+        base, stride, count = int(block['base']), int(block['stride']), int(block['count'])
+        if base != end:
+            raise ValueError(f"parameter block {block.get('key')!r} starts at {base}, expected {end}")
+        for parameter in block['parameters']:
+            if int(parameter['offset']) + int(parameter['sizeInBit']) // 8 > stride:
+                raise ValueError(
+                    f"parameter {parameter.get('key')!r} of block {block.get('key')!r} "
+                    f"does not fit the block's {stride} octets")
+        end = base + stride * count
+    if end != image_size:
+        raise ValueError(f'the parameter blocks end at {end}, the image is {image_size} octets')
+
+    types_elem = ET.SubElement(static_elem, 'ParameterTypes')
+    params_elem = ET.SubElement(static_elem, 'Parameters')
+    refs_elem = ET.SubElement(static_elem, 'ParameterRefs')
+
+    # Option lists first: one ParameterType each, shared by every parameter and
+    # every instance that uses the list.
+    option_type_ids = {}
+    for option_type in json_obj.get('optionTypes', []):
+        type_id = f"{app_ref}_PT-opt{int(option_type['id'])}"
+        option_type_ids[int(option_type['id'])] = type_id
+        pt = ET.SubElement(types_elem, 'ParameterType')
+        pt.set('Id', type_id)
+        pt.set('Name', type_id.rsplit('_', 1)[-1])
+        restriction = ET.SubElement(pt, 'TypeRestriction',
+                                    {'Base': 'Value', 'SizeInBit': str(int(option_type['sizeInBit']))})
+        for index, option in enumerate(option_type.get('options', [])):
+            value = int(option.get('value', 0))
+            enum = ET.SubElement(restriction, 'Enumeration')
+            enum.set('Text', str(option.get('label', value)))
+            enum.set('Value', str(value))
+            enum.set('Id', f'{type_id}_EN-{value}')
+            enum.set('DisplayOrder', str(index))
+
+    numeric_type_ids = {}
+
+    def numeric_type_for(parameter):
+        tag, attrs, name = _numeric_parameter_type(int(parameter['valueKind']),
+                                                   int(parameter['sizeInBit']), parameter)
+        key = (tag, tuple(sorted(attrs.items())))
+        existing = numeric_type_ids.get(key)
+        if existing is not None:
+            return existing
+        type_id = f'{app_ref}_PT-n{len(numeric_type_ids) + 1}'
+        pt = ET.SubElement(types_elem, 'ParameterType')
+        pt.set('Id', type_id)
+        pt.set('Name', name)
+        ET.SubElement(pt, tag, attrs)
+        numeric_type_ids[key] = type_id
+        return type_id
+
+    # Pass 1: the parameters and their refs, instance by instance, in image
+    # order. Conditions may point forwards, so the Dynamic part comes after.
+    ref_ids = {}
+    number = 0
+    for block in blocks:
+        block_index = int(block['index'])
+        count = int(block['count'])
+        for instance in range(count):
+            instance_tag = f'{instance + 1}' if count > 1 else ''
+            for parameter in block['parameters']:
+                number += 1
+                kind = int(parameter['valueKind'])
+                if 'optionType' in parameter:
+                    type_id = option_type_ids[int(parameter['optionType'])]
+                else:
+                    type_id = numeric_type_for(parameter)
+
+                param_id = f'{app_ref}_P-{number}'
+                pe = ET.SubElement(params_elem, 'Parameter')
+                pe.set('Id', param_id)
+                pe.set('Name', f"{block.get('key', 'block')}{instance_tag}_{parameter.get('key')}")
+                pe.set('ParameterType', type_id)
+                pe.set('Text', parameter.get('name') or parameter.get('key', ''))
+                pe.set('Value', _param_default_text(kind, parameter.get('default')))
+                if parameter.get('unit'):
+                    pe.set('SuffixText', parameter['unit'])
+                mem = ET.SubElement(pe, 'Memory')
+                mem.set('CodeSegment', rs_ref)
+                mem.set('Offset', str(int(block['base']) + instance * int(block['stride'])
+                                      + int(parameter['offset'])))
+                mem.set('BitOffset', '0')
+
+                ref_id = f'{param_id}_R-{number}'
+                pref = ET.SubElement(refs_elem, 'ParameterRef')
+                pref.set('Id', ref_id)
+                pref.set('RefId', param_id)
+                ref_ids[(block_index, instance, int(parameter['id']))] = ref_id
+
+    def under_condition(parent, condition, own_block, instance):
+        """The element to put content in so that it shows only while the
+        condition holds. A parameter of the same block is the one of the same
+        instance; any other block appears once."""
+        if not condition:
+            return parent
+        controlling_block = int(condition['block'])
+        controlling_instance = instance if controlling_block == own_block else 0
+        controlling_ref = ref_ids[(controlling_block, controlling_instance, int(condition['parameter']))]
+        for test in _condition_tests(condition):
+            choose = ET.SubElement(parent, 'choose')
+            choose.set('ParamRefId', controlling_ref)
+            parent = ET.SubElement(choose, 'when')
+            parent.set('test', test)
+        return parent
+
+    # Pass 2: one ParameterBlock per block instance.
+    block_number = 0
+    for block in blocks:
+        block_index = int(block['index'])
+        count = int(block['count'])
+        name = block.get('name') or block.get('key') or 'Settings'
+        for instance in range(count):
+            block_number += 1
+            if '{n}' in name:
+                text = name.replace('{n}', str(instance + 1))
+            else:
+                text = f'{name} {instance + 1}' if count > 1 else name
+            holder = under_condition(dynamic_channel, block.get('visible'), block_index, instance)
+            element = ET.SubElement(holder, 'ParameterBlock')
+            element.set('Id', f'{app_ref}_PB-{block_number}')
+            element.set('Name', f"{block.get('key', 'block')}{instance + 1 if count > 1 else ''}")
+            element.set('Text', text)
+            for parameter in block['parameters']:
+                target = under_condition(element, parameter.get('visible'), block_index, instance)
+                ET.SubElement(target, 'ParameterRefRef').set(
+                    'RefId', ref_ids[(block_index, instance, int(parameter['id']))])
+
+    return image_size
+
+
 # Load State Machine index of the Application Program interface object, as this
 # stack registers its interface objects: 0 = Device, 1 = Address Table,
 # 2 = Association Table, 3 = Group Object Table, 4 = Application Program.
@@ -797,7 +993,14 @@ def export_product_json_to_knxprod(json_obj) -> str:
     # state machine, so ETS never allocated a parameter segment.
     rs.set('LoadStateMachine', str(rs_load_state_machine))
     rs.set('Offset', str(rs_offset))
-    rs.set('Size', '256')
+    # A product with a parameter layout has a segment of exactly its image: the
+    # device's memory region ends where the image ends. One with a flat
+    # parameter list keeps the fixed 256 octets the device reserves for it.
+    parameter_blocks = json_obj.get('parameterBlocks') or []
+    if parameter_blocks and json_obj.get('parameters'):
+        raise SystemExit('the export carries both "parameters" and "parameterBlocks"; '
+                         'a product has one parameter model')
+    rs.set('Size', str(int(json_obj.get('parameterImage', {}).get('size', 0))) if parameter_blocks else '256')
 
     # Dynamic section is created before parameter emission so the parameter
     # blocks can be attached to it; XML sibling order within <ApplicationProgram>
@@ -810,7 +1013,10 @@ def export_product_json_to_knxprod(json_obj) -> str:
     dynamic = ET.SubElement(app, 'Dynamic')
     dyn_root = ET.SubElement(dynamic, 'ChannelIndependentBlock')
 
-    param_bytes = _emit_parameters(static, dyn_root, app_ref, rs_ref, json_obj.get('parameters', []))
+    if parameter_blocks:
+        param_bytes = _emit_parameter_blocks(static, dyn_root, app_ref, rs_ref, json_obj)
+    else:
+        param_bytes = _emit_parameters(static, dyn_root, app_ref, rs_ref, json_obj.get('parameters', []))
 
     com_objects_parent = ET.SubElement(static, 'ComObjectTable')
     com_refs_parent = ET.SubElement(static, 'ComObjectRefs')

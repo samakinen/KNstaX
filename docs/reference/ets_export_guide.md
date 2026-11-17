@@ -61,6 +61,18 @@ both by the firmware and by the host exporter.
 
 ## Parameters
 
+There are two ways to declare parameters while the new model is being
+introduced ([parameter-model.md](../design/parameter-model.md)):
+
+- **A parameter layout** (`makeCommissionedProduct<kParameters>(...)`): blocks
+  that can repeat, almost no cost on the device. New products use this. See
+  "Parameter layouts" below.
+- **A parameter schema** (`makeParameterSchema(...)`): the older flat list,
+  described in the rest of this section. It will be removed once the products
+  that use it have moved.
+
+A product uses one of the two; the exporter refuses a file that carries both.
+
 Parameters are declared in a schema attached to the product and are downloaded
 by ETS into a memory-mapped block, laid out in declaration order.
 
@@ -150,6 +162,83 @@ patchy outside ETS itself: Kaenx-Creator ships no float validation, mis-imports
 the size as 16-bit, and parses the default value with the system locale. Keep
 exported default values integer-valued (`22`, not `22.0`) so they parse
 identically under every locale.
+
+## Parameter layouts
+
+```cpp
+#include "knx/product/commissioned_product.hpp"
+
+enum class Function : uint8_t { Disabled, Switch, Dimming };
+enum class Action : uint8_t { Nothing, On, Off, Toggle };
+
+// An option list is a named constant. Parameters that share it share one ETS
+// ParameterType.
+inline constexpr auto kActionOptions = params::options<Action>(
+    {{Action::Nothing, "Nothing"}, {Action::On, "On"}, {Action::Off, "Off"}, {Action::Toggle, "Toggle"}});
+
+enum class Dev : uint8_t { StartupDelayS, Expert };
+enum class In : uint8_t { Function, OnClosing, OnOpening, LongPressMs };
+
+inline constexpr auto kDeviceBlock = params::parameterBlock<Dev>(
+    {.key = "device", .name = "Device"},
+    params::param<Dev::StartupDelayS, uint8_t>({.name = "Start-up delay", .def = 2, .min = 0, .max = 60, .unit = "s"}),
+    params::param<Dev::Expert, bool>({.name = "Show the diagnostics page"}));
+
+inline constexpr auto kInputBlock = params::parameterBlock<In>(
+    {.key = "input", .name = "Input {n}"},
+    params::param<In::Function, Function>({.name = "Function", .def = Function::Switch, .options = kFunctionOptions}),
+    params::param<In::OnClosing, Action>({.name = "On closing", .def = Action::Toggle, .options = kActionOptions,
+                                          .visible = params::when<In::Function>(Function::Switch)}),
+    params::param<In::OnOpening, Action>({.name = "On opening", .options = kActionOptions,
+                                          .visible = params::when<In::Function>(Function::Switch)}),
+    params::param<In::LongPressMs, uint16_t>({.name = "Long press after", .def = 500, .min = 300, .max = 3000,
+                                              .unit = "ms",
+                                              .visible = params::whenNot<In::Function>(Function::Disabled)}));
+
+inline constexpr auto kParameters = params::parameterLayout(kDeviceBlock, params::repeat<8>(kInputBlock));
+
+inline constexpr auto kProduct = makeCommissionedProduct<kParameters>(makeEndpointDefinition<...>(...));
+```
+
+What ETS shows:
+
+- **One page per block instance.** `repeat<8>` gives "Input 1" to "Input 8";
+  `{n}` in the block name is the instance, counted from 1. A name without
+  `{n}` gets the number appended.
+- **A drop-down** for a parameter with `options`, **a check box** for a `bool`
+  without options, a number field with the unit as suffix otherwise.
+- **Conditions.** A parameter or a whole block is shown only while a
+  controlling parameter holds certain values:
+
+  | Declaration | Shown while the controlling parameter |
+  |---|---|
+  | `when<Id>(value)` | equals the value |
+  | `whenAny<Id>(a, b, ...)` | equals one of up to 8 values |
+  | `whenNot<Id>(value)` | does not equal the value |
+  | `whenRange<Id>(low, high)` | is between the two, inclusive |
+
+  The controlling parameter is in the same block (then it is the one of the
+  same instance) or in a block that appears once. A block's own condition
+  names a parameter of another block. A condition that breaks these rules does
+  not compile, and neither does a default outside `min..max` or outside the
+  option list.
+
+Conditions are for ETS only. The device does not evaluate them, and a hidden
+parameter keeps the value it last had: firmware branches on the controlling
+parameter, never on "hidden means default".
+
+Widths in the parameter memory:
+
+| Type | Width |
+|---|---|
+| `bool`, `uint8_t`, an enum over `uint8_t` | 1 octet |
+| `uint16_t`, `int16_t`, an enum over those, `Dpt9Float` | 2 octets |
+| `float` | 4 octets |
+
+The offsets are computed by the C++ layout and written into the export; the
+Python exporter places each parameter at `base + instance × stride + offset`
+and derives nothing itself. The code segment of the product file and the
+download are exactly as long as the image.
 
 ## Communication object flags
 
@@ -288,11 +377,13 @@ Honest list of what the exporter does not yet produce:
 
 - **English only.** A single `<Language Identifier="en-US">` block; no
   translations. A product sold outside one language market needs them.
-- **One channel.** All parameter blocks and communication objects live under a
-  single `<Channel>`; a multi-channel product (four independent dimmer
-  outputs, say) would want one channel per instance.
-- **Visibility conditions are equality-only.** `<choose>/<when>` supports
-  ranges and multiple tests; only `parameter == value` is exposed.
+- **No channels.** Parameter pages and communication objects are not grouped
+  into ETS `<Channel>` elements. A parameter layout gives one page per block
+  instance, but the communication objects of a repeated function are still a
+  flat list, and an object cannot be hidden by a parameter (step P4 of
+  [parameter-model.md](../design/parameter-model.md)).
+- **A parameter schema has equality-only conditions.** Ranges and several
+  values need a parameter layout.
 - **The manufacturer name is taken from the product display name.** Fine for
   development against manufacturer id 0x00FA; a real product needs its own
   allocated manufacturer id and name.

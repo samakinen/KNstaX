@@ -602,6 +602,10 @@ else()
         knx_add_test(test_exporter_parameter_ux
             COMMAND ${Python3_EXECUTABLE} ${KNXPROD_EXPORTER_DIR}/test_exporter_parameter_ux.py
             LABELS script)
+        # Parameter blocks of a product with a parameter layout (pure Python, no wrapper).
+        knx_add_test(test_exporter_parameter_blocks
+            COMMAND ${Python3_EXECUTABLE} ${KNXPROD_EXPORTER_DIR}/test_exporter_parameter_blocks.py
+            LABELS script)
         # Medium, mask version and master-data ids in the catalogue entry (pure Python).
         knx_add_test(test_exporter_medium
             COMMAND ${Python3_EXECUTABLE} ${KNXPROD_EXPORTER_DIR}/test_exporter_medium.py

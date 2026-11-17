@@ -3,23 +3,22 @@
 //
 // Exports the constexpr symbol @PRODUCT_SYMBOL@ from:
 //   @DEFINITION_ABS_PATH@
-// to JSON via makeCommissionedExportDescriptor() + exportDescriptorToJson().
+// to JSON via exportCommissionedProductToJson().
 //
-// The commissioned descriptor is used (not the endpoint-only one) so the
-// product's ETS parameter schema is exported alongside the communication
-// objects — the Python exporter turns both into the .knxprod.xml ETS imports.
+// The product's ETS parameters are exported alongside the communication
+// objects — as blocks for a product with a parameter layout, as a flat list
+// for one with a parameter schema — and the Python exporter turns both into
+// the .knxprod.xml ETS imports.
 
 #include "@DEFINITION_ABS_PATH@"
-#include "knx/product/commissioned_product.hpp"
-#include "knx/product/exporter.hpp"
+#include "knx/product/commissioned_product_export.hpp"
 
 #include <fstream>
 #include <iostream>
 
 int main(int argc, char* argv[])
 {
-    const auto descriptor = knx::product::makeCommissionedExportDescriptor(@PRODUCT_SYMBOL@);
-    const auto json = knx::product::exportDescriptorToJson(descriptor);
+    const auto json = knx::product::exportCommissionedProductToJson(@PRODUCT_SYMBOL@);
 
     if (argc >= 2) {
         std::ofstream f(argv[1]);

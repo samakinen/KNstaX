@@ -143,10 +143,42 @@ def validate_file(path: Path):
     return True
 
 
+def check_parameter_offsets(json_path: Path, knxprod_path: Path):
+    """Every parameter of the product file sits where the C++ layout puts it.
+
+    The JSON carries base, stride and offset from the layout the firmware
+    compiles; the product file must place instance i of a parameter at
+    base + i × stride + offset, and declare a segment of exactly the image."""
+    import json
+    document = json.loads(json_path.read_text(encoding='utf-8'))
+    expected = []
+    for block in document['parameterBlocks']:
+        for instance in range(block['count']):
+            for parameter in block['parameters']:
+                expected.append(block['base'] + instance * block['stride'] + parameter['offset'])
+    root = ET.parse(knxprod_path).getroot()
+    actual = [int(m.get('Offset')) for m in root.findall('.//knx:Parameter/knx:Memory', NS)]
+    if actual != expected:
+        raise AssertionError(f'parameter offsets {actual} differ from the layout {expected}')
+    size = document['parameterImage']['size']
+    segment = require(root, './/knx:RelativeSegment')
+    if int(segment.get('Size')) != size:
+        raise AssertionError(f"segment size {segment.get('Size')} is not the image size {size}")
+    write = require(root, './/knx:LdCtrlWriteRelMem')
+    if int(write.get('Size')) != size:
+        raise AssertionError(f"the load procedure writes {write.get('Size')} octets, the image is {size}")
+    print(f'{knxprod_path.name}: {len(actual)} parameters at the offsets of the layout, image {size} octets')
+
+
 def main():
     run_wrapper()
     ok = True
-    for name in ('pilot_a_export.knxprod.xml', 'pilot_b_export.knxprod.xml'):
+    try:
+        check_parameter_offsets(OUT_DIR / 'pilot_c_export.json', OUT_DIR / 'pilot_c_export.knxprod.xml')
+    except (AssertionError, OSError, KeyError) as e:
+        print('Offset check failed:', e, file=sys.stderr)
+        ok = False
+    for name in ('pilot_a_export.knxprod.xml', 'pilot_b_export.knxprod.xml', 'pilot_c_export.knxprod.xml'):
         p = OUT_DIR / name
         if not p.exists():
             print(f'Expected output missing: {p}', file=sys.stderr)
@@ -159,7 +191,7 @@ def main():
         print('One or more validations failed', file=sys.stderr)
         return 2
 
-    print('Both .knxprod files validated successfully')
+    print('All .knxprod files validated successfully')
     return 0
 
 

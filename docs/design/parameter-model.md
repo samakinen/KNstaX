@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | **In progress**, 17 November 2026. Steps P0 and P1 (§8) are built and tested, see "P0 result" and "P1 result": a product can take the new model with `makeCommissionedProduct<kParameters>()`, and ETS downloads, storage and restore work through the stack. Not built: the exporter (P2), so no `.knxprod` comes from the new model yet; the old model is still in place beside it (P3). |
+| Status | **In progress**, 17 November 2026. Steps P0 and P1 (§8) are built and tested, see "P0 result" and "P1 result": a product can take the new model with `makeCommissionedProduct<kParameters>()`, and ETS downloads, storage and restore work through the stack. Step P2, the exporter, is built too ("P2 result"): a product with the new model exports to a product file that passes the KNX schema and is signed by the ETS tools. Open: an ETS6 import and download of such a product on a device, and the old model is still in place beside the new one (P3). |
 | Goal | ETS parameters cost a product almost nothing at run time, on a 128 KiB Cortex-M as on an ESP32, and a product with *n* identical channels declares a channel once. |
 | Replaces | `StaticParameterSchema`, `ParameterState`, `ParameterCallbacks` and the per-parameter `onParameterChanged` in `commissioned_product.hpp`. The project is greenfield, so the old model is removed, not kept beside the new one. |
 | Motivating product | H8i8o milestone M6: 8 binary inputs and 8 outputs, about 200 parameters (h8i8o `docs/design/02-application-spec.md`). |
@@ -458,6 +458,44 @@ the figure is to be back under the budget then. The H8i8o device check of the ga
 10,915 B of flash headroom. This branch should not be merged before P3 for that reason.
 
 Not covered by P1: an ETS6 download of a product with the new model, which needs the exporter (P2).
+
+### P2 result (17 November 2026)
+
+Built:
+
+- **C++.** `parameterLayoutToJson()` (`parameter_layout_export.hpp`) writes `parameterImage`,
+  `optionTypes` and `parameterBlocks`; an option list is one entry however many parameters use it,
+  recognised by the constant it is declared as. `exportCommissionedProductToJson()`
+  (`commissioned_product_export.hpp`) is the one call for either parameter model, and
+  `knx_commissioned_product()` uses it, so a product's CMake does not change.
+- **Checks at compile time.** `params::checkLayout()` runs when a product names its layout. It
+  refuses a condition on an unknown parameter, on a parameter of another repeated block, on the
+  parameter itself, a block condition from inside the block, and a default outside `min..max` or
+  outside the option list. The last one matters on the device: the default image would fail its
+  own bounds check.
+- **Python.** `exporter.py` expands each block into one set of `Parameter` and `ParameterRef`
+  elements and one `ParameterBlock` per instance, with offsets `base + instance × stride + offset`.
+  Shared option lists and equal numeric ranges become one `ParameterType` each. Conditions become
+  `<choose>/<when>` with the tests `a b c`, `!=v`, and `>=lo` around `<=hi`. A `bool` without
+  options is a check box. The code segment and the download are the size of the image.
+- **Fixture and tests.** Pilot C in `tools/product_exporter` is a whole product with a repeated
+  block, a shared option list and every condition form. `test_exporter_parameter_blocks.py`
+  (10 cases), the offset comparison between the JSON and the product file in
+  `test_validate_knxprod_xsd.py`, and the JSON and `checkLayout` cases in `test_parameter_layout`.
+
+Checked: Pilot C validates against the KNX project schema 23 with `xmlschema` (the test image does
+not have that package and falls back to the structural check, as before), and OpenKNXproducer
+4.3.12 signs it into a `.knxprod` with the ETS6 libraries.
+
+Not done in P2:
+
+- **ETS6 import and download on a device.** No product on a board uses the new model yet; the
+  H8i8o application (M6) will be the first. The pages are `ParameterBlock`s directly under the
+  `ChannelIndependentBlock`, the form the old exporter already used and ETS6 imported.
+- **ETS Modules.** Every instance is written out. A file with 8 × 12 parameters has 96 `Parameter`
+  elements; that is fine for import but grows with the instance count.
+- **`knxprod2profile.py`** was not taught the blocks. The offset comparison is done on the JSON
+  and the product file instead.
 
 ## 9. Open questions
 

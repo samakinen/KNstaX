@@ -7,7 +7,8 @@
  * The parameter model of docs/design/parameter-model.md. Until the old model
  * is removed it stands beside the StaticParameterSchema of
  * commissioned_product.hpp. A product takes it with
- * makeCommissionedProduct<kParameters>(...); the exporter does not read it yet.
+ * makeCommissionedProduct<kParameters>(...); parameter_layout_export.hpp
+ * writes it for the knxprod exporter.
  *
  * A product declares parameter blocks, each with its own id enum, and a layout
  * that lists the blocks and how often each repeats:
@@ -774,44 +775,8 @@ private:
 template <const auto& Layout>
 using ViewFor = ParameterView<std::remove_cvref_t<decltype(Layout)>>;
 
-/// Offset in the image of parameter Id in instance `instance` of its block.
-/// The block is the one whose id enum is the type of Id.
-template <typename LayoutT, auto Id>
-[[nodiscard]] constexpr size_t offsetInImage(size_t instance = 0) noexcept
-{
-    using IdEnum = decltype(Id);
-    using BlockT = typename LayoutT::template block_type<IdEnum>;
-    return LayoutT::template kBase<IdEnum> + instance * BlockT::kStride + BlockT::template kOffset<Id>;
-}
-
-/// The value type of parameter Id in a layout.
-template <typename LayoutT, auto Id>
-using value_type_in = typename LayoutT::template block_type<decltype(Id)>::template value_type_of<Id>;
-
-/// Write one parameter into an image. The instance must exist.
-template <typename LayoutT, auto Id>
-constexpr void store(std::span<uint8_t, LayoutT::kSize> image, size_t instance,
-                     value_type_in<LayoutT, Id> value) noexcept
-{
-    detail::encode(value, image.data() + offsetInImage<LayoutT, Id>(instance));
-}
-
-/**
- * @brief Names a layout as the parameters of a product
- *
- * `makeCommissionedProduct<kParameters>(...)` puts this type, and nothing of
- * the layout object, into the product definition: the runtime reaches the
- * default image, the bounds and the fingerprint through the template argument.
- */
-template <const auto& Layout>
-struct LayoutParameters {
-    using layout_type = std::remove_cvref_t<decltype(Layout)>;
-    using view_type = ParameterView<layout_type>;
-    static constexpr size_t kImageSize = layout_type::kSize;
-};
-
 // ---------------------------------------------------------------------------
-// Export: walking a layout (host tools and tests; not for firmware)
+// Checking a layout
 // ---------------------------------------------------------------------------
 
 /// One declared parameter as the exporter needs it.
@@ -840,6 +805,143 @@ struct ParameterInfo {
     std::span<const Option> options{};
     Condition visible{};
 };
+
+enum class LayoutError : uint8_t {
+    None,
+    ConditionBlockUnknown,
+    ConditionParameterUnknown,
+    ConditionOnRepeatedBlock,
+    ConditionOnItself,
+    BlockConditionOnOwnBlock,
+    DefaultOutsideBounds,
+};
+
+template <typename... Rs, typename Visitor>
+constexpr void forEachParameter(const ParameterLayout<Rs...>& layout, Visitor&& visit);
+
+/**
+ * @brief The first thing wrong with a layout, or LayoutError::None
+ *
+ * Conditions: the controlling parameter exists; it is in the same block or in
+ * a block that appears once; a parameter does not control itself and a block
+ * is not controlled from inside. Defaults: inside min..max, or one of the
+ * options, since the device refuses an image that is not.
+ */
+template <typename... Rs>
+constexpr LayoutError checkLayout(const ParameterLayout<Rs...>& layout)
+{
+    LayoutError error = LayoutError::None;
+    const auto fail = [&](LayoutError found) {
+        if (error == LayoutError::None) {
+            error = found;
+        }
+    };
+    const auto checkCondition = [&](const Condition& condition, const ParameterInfo& owner, bool ofBlock) {
+        if (condition.op == ConditionOp::Always) {
+            return;
+        }
+        bool blockFound = false;
+        bool parameterFound = false;
+        size_t instances = 0;
+        forEachParameter(layout, [&](const ParameterInfo& other) {
+            if (other.block == condition.block) {
+                blockFound = true;
+                instances = other.blockCount;
+                parameterFound = parameterFound || other.id == condition.parameterId;
+            }
+        });
+        const bool sameBlock = condition.block == owner.block;
+        if (!blockFound) {
+            fail(LayoutError::ConditionBlockUnknown);
+        } else if (!parameterFound) {
+            fail(LayoutError::ConditionParameterUnknown);
+        } else if (ofBlock && sameBlock) {
+            fail(LayoutError::BlockConditionOnOwnBlock);
+        } else if (!sameBlock && instances != 1u) {
+            fail(LayoutError::ConditionOnRepeatedBlock);
+        } else if (!ofBlock && sameBlock && condition.parameterId == owner.id) {
+            fail(LayoutError::ConditionOnItself);
+        }
+    };
+    forEachParameter(layout, [&](const ParameterInfo& info) {
+        checkCondition(info.visible, info, false);
+        checkCondition(info.blockVisible, info, true);
+        if (info.min != info.max) {
+            if (info.defaultValue < info.min || info.defaultValue > info.max) {
+                fail(LayoutError::DefaultOutsideBounds);
+            }
+        } else if (!info.options.empty()) {
+            bool listed = false;
+            for (const Option& option : info.options) {
+                listed = listed || static_cast<double>(option.value) == info.defaultValue;
+            }
+            if (!listed) {
+                fail(LayoutError::DefaultOutsideBounds);
+            }
+        }
+    });
+    return error;
+}
+
+/// Offset in the image of parameter Id in instance `instance` of its block.
+/// The block is the one whose id enum is the type of Id.
+template <typename LayoutT, auto Id>
+[[nodiscard]] constexpr size_t offsetInImage(size_t instance = 0) noexcept
+{
+    using IdEnum = decltype(Id);
+    using BlockT = typename LayoutT::template block_type<IdEnum>;
+    return LayoutT::template kBase<IdEnum> + instance * BlockT::kStride + BlockT::template kOffset<Id>;
+}
+
+/// The value type of parameter Id in a layout.
+template <typename LayoutT, auto Id>
+using value_type_in = typename LayoutT::template block_type<decltype(Id)>::template value_type_of<Id>;
+
+/// Write one parameter into an image. The instance must exist.
+template <typename LayoutT, auto Id>
+constexpr void store(std::span<uint8_t, LayoutT::kSize> image, size_t instance,
+                     value_type_in<LayoutT, Id> value) noexcept
+{
+    detail::encode(value, image.data() + offsetInImage<LayoutT, Id>(instance));
+}
+
+/**
+ * @brief Names a layout as the parameters of a product
+ *
+ * `makeCommissionedProduct<kParameters>(...)` puts this type, and nothing of
+ * the layout object, into the product definition: the runtime reaches the
+ * default image, the bounds and the fingerprint through the template argument.
+ *
+ * Naming a layout here also checks it (checkLayout()), so a condition that
+ * ETS could not show, or a default the device would refuse, fails the build.
+ */
+template <const auto& Layout>
+struct LayoutParameters {
+    using layout_type = std::remove_cvref_t<decltype(Layout)>;
+    using view_type = ParameterView<layout_type>;
+    static constexpr size_t kImageSize = layout_type::kSize;
+    /// The layout object, for the exporter. Firmware does not read it.
+    static constexpr const auto& layout = Layout;
+
+    static constexpr LayoutError kError = checkLayout(Layout);
+    static_assert(kError != LayoutError::ConditionBlockUnknown,
+                  "a visibility condition names a parameter of a block that is not in this layout");
+    static_assert(kError != LayoutError::ConditionParameterUnknown,
+                  "a visibility condition names a parameter its block does not declare");
+    static_assert(kError != LayoutError::ConditionOnRepeatedBlock,
+                  "a visibility condition names a parameter of another, repeated block; it can name "
+                  "a parameter of its own block or of a block that appears once");
+    static_assert(kError != LayoutError::ConditionOnItself, "a parameter is shown depending on itself");
+    static_assert(kError != LayoutError::BlockConditionOnOwnBlock,
+                  "a block is shown depending on one of its own parameters; the controlling "
+                  "parameter must be in another block");
+    static_assert(kError != LayoutError::DefaultOutsideBounds,
+                  "a parameter's default is outside its min..max, or is not one of its options");
+};
+
+// ---------------------------------------------------------------------------
+// Export: walking a layout (host tools and tests; not for firmware)
+// ---------------------------------------------------------------------------
 
 /// Calls visit(const ParameterInfo&) for every declared parameter, in image order.
 template <typename... Rs, typename Visitor>

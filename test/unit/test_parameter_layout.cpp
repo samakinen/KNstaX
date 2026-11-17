@@ -4,6 +4,7 @@
 #include "unity.h"
 
 #include "knx/product/parameter_layout.hpp"
+#include "knx/product/parameter_layout_export.hpp"
 
 #include <array>
 #include <cstdint>
@@ -90,6 +91,51 @@ static_assert(kRenamed.kFingerprint == kSameShape.kFingerprint);
 static_assert(kSwapped.kFingerprint != kSameShape.kFingerprint);
 static_assert(kRetyped.kFingerprint != kSameShape.kFingerprint);
 static_assert(kTwice.kFingerprint != kSameShape.kFingerprint);
+
+// A layout is checked when a product names it (params::LayoutParameters): what
+// ETS could not show, or the device would refuse, does not build.
+static_assert(params::checkLayout(kLayout) == params::LayoutError::None);
+
+enum class Other : uint8_t { Flag };
+inline constexpr auto kOtherBlock =
+    params::parameterBlock<Other>({.key = "other"}, params::param<Other::Flag, bool>({.name = "Flag"}));
+
+// A parameter of a block that is not in the layout.
+static_assert(params::checkLayout(params::parameterLayout(params::parameterBlock<Out>(
+                  {}, params::param<Out::Trim, int16_t>({.visible = params::when<Other::Flag>(true)}))))
+              == params::LayoutError::ConditionBlockUnknown);
+// A parameter its block does not declare.
+static_assert(params::checkLayout(params::parameterLayout(params::parameterBlock<Out>(
+                  {}, params::param<Out::Trim, int16_t>({.visible = params::when<Out::OnDelaySeconds>(1)}))))
+              == params::LayoutError::ConditionParameterUnknown);
+// A parameter of another block that repeats: which instance would it be?
+static_assert(params::checkLayout(params::parameterLayout(
+                  params::repeat<2>(kOtherBlock),
+                  params::parameterBlock<Out>(
+                      {}, params::param<Out::Trim, int16_t>({.visible = params::when<Other::Flag>(true)}))))
+              == params::LayoutError::ConditionOnRepeatedBlock);
+// ... while a block that appears once can control any other.
+static_assert(params::checkLayout(params::parameterLayout(
+                  kOtherBlock,
+                  params::repeat<2>(params::parameterBlock<Out>(
+                      {.visible = params::when<Other::Flag>(true)},
+                      params::param<Out::Trim, int16_t>({.visible = params::when<Other::Flag>(true)})))))
+              == params::LayoutError::None);
+static_assert(params::checkLayout(params::parameterLayout(params::parameterBlock<Other>(
+                  {}, params::param<Other::Flag, bool>({.visible = params::when<Other::Flag>(true)}))))
+              == params::LayoutError::ConditionOnItself);
+static_assert(params::checkLayout(params::parameterLayout(params::parameterBlock<Other>(
+                  {.visible = params::when<Other::Flag>(true)}, params::param<Other::Flag, bool>({}))))
+              == params::LayoutError::BlockConditionOnOwnBlock);
+// A default the bounds check of the device would refuse.
+static_assert(params::checkLayout(params::parameterLayout(params::parameterBlock<Out>(
+                  {}, params::param<Out::Trim, int16_t>({.def = 500, .min = -100, .max = 100}))))
+              == params::LayoutError::DefaultOutsideBounds);
+enum class Gap : uint8_t { Choice };
+static_assert(params::checkLayout(params::parameterLayout(params::parameterBlock<Gap>(
+                  {}, params::param<Gap::Choice, Function>(
+                          {.def = static_cast<Function>(2), .options = kFunctionOptions}))))
+              == params::LayoutError::DefaultOutsideBounds);
 
 inline constexpr auto& kDefaults = params::kDefaultImageOf<kLayout>;
 inline constexpr auto& kBounds = params::kBoundsOf<kLayout>;
@@ -261,6 +307,41 @@ void test_export_walk_reports_offsets_and_conditions(void)
     TEST_ASSERT_EQUAL_DOUBLE(-5.0, seen[8].defaultValue);
 }
 
+// What the knxprod exporter is given: every offset from the layout, an option
+// list once, a condition by block index and parameter id.
+void test_json_carries_the_layout(void)
+{
+    const std::string json = parameterLayoutToJson(kLayout);
+    const auto has = [&](std::string_view text) { return json.find(text) != std::string::npos; };
+    const auto count = [&](std::string_view text) {
+        size_t found = 0;
+        for (size_t at = json.find(text); at != std::string::npos; at = json.find(text, at + 1u)) {
+            ++found;
+        }
+        return found;
+    };
+
+    TEST_ASSERT_TRUE(has("\"parameterImage\":{\"size\":63,"));
+    TEST_ASSERT_TRUE(has("{\"index\":0,\"key\":\"device\",\"name\":\"Device\",\"count\":1,\"base\":0,\"stride\":3,"));
+    TEST_ASSERT_TRUE(has("{\"index\":1,\"key\":\"input\",\"name\":\"Input {n}\",\"count\":8,\"base\":3,\"stride\":6,"));
+    TEST_ASSERT_TRUE(has("{\"index\":2,\"key\":\"output\",\"name\":\"Output {n}\",\"count\":3,\"base\":51,\"stride\":4,"));
+
+    // A repeated block is declared once; the exporter expands it.
+    TEST_ASSERT_EQUAL_UINT(1u, count("\"name\":\"Long press after\""));
+    TEST_ASSERT_TRUE(has("{\"id\":7,\"key\":\"p7\",\"name\":\"Long press after\",\"valueKind\":3,\"sizeInBit\":16,"
+                         "\"offset\":3,\"default\":500,\"min\":300,\"max\":3000,\"unit\":\"ms\","
+                         "\"visible\":{\"block\":1,\"parameter\":4,\"op\":\"anyOf\",\"values\":[1,3]}}"));
+    TEST_ASSERT_TRUE(has("\"name\":\"Trim\",\"valueKind\":4,\"sizeInBit\":16,\"offset\":2,\"default\":-5,\"min\":-100,\"max\":100}"));
+    TEST_ASSERT_TRUE(has("\"name\":\"Offset\",\"valueKind\":8,\"sizeInBit\":16,\"offset\":1,\"default\":-1.5,"));
+
+    // Two option lists, each written once and named by its index.
+    TEST_ASSERT_EQUAL_UINT(2u, count("\"sizeInBit\":8,\"options\":["));
+    TEST_ASSERT_TRUE(has("{\"id\":0,\"sizeInBit\":8,\"options\":[{\"value\":0,\"label\":\"Disabled\"},"
+                         "{\"value\":1,\"label\":\"Switch\"},{\"value\":3,\"label\":\"Dimming\"}]}"));
+    TEST_ASSERT_TRUE(has("\"name\":\"Function\",\"valueKind\":5,\"sizeInBit\":8,\"offset\":0,\"default\":0,\"optionType\":0}"));
+    TEST_ASSERT_TRUE(has("\"name\":\"On closing\",\"valueKind\":5,\"sizeInBit\":8,\"offset\":2,\"default\":3,\"optionType\":1,"));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -272,5 +353,6 @@ int main(void)
     RUN_TEST(test_bounds_reject_an_image_that_is_too_short);
     RUN_TEST(test_dpt9_round_trips_through_the_image);
     RUN_TEST(test_export_walk_reports_offsets_and_conditions);
+    RUN_TEST(test_json_carries_the_layout);
     return UNITY_END();
 }

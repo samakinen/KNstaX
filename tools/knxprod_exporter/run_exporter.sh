@@ -21,5 +21,5 @@ mkdir -p "$OUT_DIR"
 cd "$OUT_DIR"
 
 "$CPP_BIN"
-python3 "$PY_EXPORTER" --format knxprod --input pilot_a_export.json pilot_b_export.json
-python3 "$PY_EXPORTER" --format kaenx --input pilot_a_export.json pilot_b_export.json
+python3 "$PY_EXPORTER" --format knxprod --input pilot_a_export.json pilot_b_export.json pilot_c_export.json
+python3 "$PY_EXPORTER" --format kaenx --input pilot_a_export.json pilot_b_export.json pilot_c_export.json

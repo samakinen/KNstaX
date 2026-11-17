@@ -50,8 +50,11 @@ inline std::string jsonEscape(std::string_view s)
     return out;
 }
 
+/// @param extraMembers further members of the document, as
+///        `"name":value,"name":value` without braces (the parameter blocks of
+///        parameter_layout_export.hpp). Empty adds nothing.
 template <typename DescT>
-std::string exportDescriptorToJson(const DescT& d)
+std::string exportDescriptorToJson(const DescT& d, std::string_view extraMembers = {})
 {
     std::ostringstream o;
     o << std::boolalpha;
@@ -167,6 +170,10 @@ std::string exportDescriptorToJson(const DescT& d)
         o << "}";
     }
     o << "]";
+
+    if (!extraMembers.empty()) {
+        o << "," << extraMembers;
+    }
 
     o << "}";
     return o.str();
