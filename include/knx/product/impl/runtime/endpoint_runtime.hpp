@@ -550,31 +550,6 @@ public:
         return _bau->groupObjectTable().objectCount();
     }
 
-    /// Install a callback that is invoked whenever the KNX management model
-    /// writes new program data (ETS parameter block) to the application program
-    /// interface object.  The callback fires immediately with the current
-    /// program data so the caller can apply any values already stored from a
-    /// previous ETS session.
-    ///
-    /// Must be called after a successful start() so that the BAU and its
-    /// ApplicationProgramObject are initialised.
-    void wireParameterDataCallback(
-        objects::ApplicationProgramObject::ProgramDataChangedCallback callback)
-    {
-        if (!_bau) {
-            return;
-        }
-
-        auto& prog = _bau->applicationProgram();
-        prog.setOnProgramDataChanged(callback);
-
-        // Apply any program data that was restored from persistence.
-        const auto existing = prog.getProgramData();
-        if (!existing.empty()) {
-            callback(existing);
-        }
-    }
-
     /// The product's parameter image (docs/design/parameter-model.md §3.4).
     /// Before start(): the stack then lets ETS write into it, stores it with
     /// its fingerprint and restores it.
@@ -631,39 +606,6 @@ public:
         _bau->markParameterImageChanged();
         program.notifyProgramDataChanged();
         return true;
-    }
-
-    /// For expert/test use: simulate ETS writing the application program data
-    /// through the KNX management model (A_PropertyValue_Write → PID_PROGRAM_DATA).
-    ///
-    /// This exercises the same ApplicationProgramObject → notifyProgramDataChanged
-    /// → wireParameterDataCallback chain that a live ETS commissioning session
-    /// uses.  Must be called after a successful start().
-    void simulateEtsProgramDataWriteForExpertUse(std::span<const uint8_t> data)
-    {
-        if (!_bau) {
-            return;
-        }
-        auto& prog = _bau->applicationProgram();
-        prog.setProgramData(data);
-        prog.notifyProgramDataChanged();
-    }
-
-    /// Persist an encoded parameter byte block to the ApplicationProgramObject
-    /// WITHOUT firing the ProgramDataChanged callback.  Use this when parameter
-    /// values have already been applied in-memory (e.g. via ParameterState::apply)
-    /// and you only need to sync the persisted representation so the values are
-    /// restored correctly on the next boot.
-    ///
-    /// Calling simulateEtsProgramDataWriteForExpertUse would also persist, but it
-    /// redundantly re-fires all onParameterChanged callbacks.  This helper avoids
-    /// that second pass while still keeping persistence consistent.
-    void persistParameterBytesOnly(std::span<const uint8_t> data)
-    {
-        if (!_bau) {
-            return;
-        }
-        _bau->applicationProgram().setProgramData(data);
     }
 
 #if KNX_SECURE_ENABLED

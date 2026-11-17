@@ -149,56 +149,18 @@ struct Dpt9Float {
     constexpr operator float() const { return value; }
 };
 
-/// One entry of an enumerated parameter's value list, as exported.
-struct ExportParameterOption {
-    int64_t value{0};
-    std::string_view label{};
-};
-
-inline constexpr size_t kMaxExportParameterOptions = 24;
-
-struct ExportParameterDescriptor {
-    uint16_t id;
-    std::string_view key;
-    std::string_view displayName;
-    application::PropertyDataType propType;
-    ExportParameterValueKind valueKind;
-    bool required;
-    /// Schema default, widened to double for export (ETS <Parameter Value>).
-    /// Meaningless for non-numeric kinds (Text, None).
-    double defaultValue{0.0};
-    /// Enumerated values, when the parameter declares them.  A non-empty list
-    /// makes the exporter emit a <TypeRestriction> so ETS renders a drop-down
-    /// instead of a raw number field.
-    std::array<ExportParameterOption, kMaxExportParameterOptions> options{};
-    size_t optionCount{0};
-    /// Inclusive numeric bounds; both zero means "use the value type's range".
-    double minValue{0.0};
-    double maxValue{0.0};
-    std::string_view unit{};
-    /// ETS section heading; empty means the default block.
-    std::string_view group{};
-    /// Visibility condition; 0xFFFF means unconditional.
-    uint16_t visibleWhenParameterId{0xFFFFu};
-    int64_t visibleWhenValue{0};
-    /// Section-level visibility condition, applied to `group` as a whole so an
-    /// unused section disappears rather than rendering as an empty heading.
-    /// 0xFFFF means unconditional.
-    uint16_t groupVisibleWhenParameterId{0xFFFFu};
-    int64_t groupVisibleWhenValue{0};
-};
-
-template <size_t CommunicationObjectCountV, size_t ParameterCountV = 0>
+/// The identity and the communication objects of a product, for the knxprod
+/// exporter. Parameters are exported from the product's parameter layout
+/// (parameter_layout_export.hpp).
+template <size_t CommunicationObjectCountV>
 struct StaticExportDescriptor {
     static constexpr size_t kCommunicationObjectCount = CommunicationObjectCountV;
-    static constexpr size_t kParameterCount = ParameterCountV;
 
     ExportProductIdentity identity;
     ExportFeatureFlags features;
     ExportSecurityDescriptor security;
     ExportCapacities capacities;
     std::array<ExportCommunicationObjectDescriptor, CommunicationObjectCountV> communicationObjects;
-    std::array<ExportParameterDescriptor, ParameterCountV> parameters;
 };
 
 template <typename ObjectIdT>
@@ -257,22 +219,11 @@ constexpr ExportCommunicationObjectDescriptor makeExportCommunicationObjectDescr
     };
 }
 
-constexpr ExportParameterDescriptor makeExportParameterDescriptor(uint16_t id,
-                                                                  std::string_view key,
-                                                                  std::string_view displayName,
-                                                                  ExportParameterValueKind valueKind,
-                                                                  bool required = false,
-                                                                  application::PropertyDataType propType = static_cast<application::PropertyDataType>(0),
-                                                                  double defaultValue = 0.0)
-{
-    return ExportParameterDescriptor{id, key, displayName, propType, valueKind, required, defaultValue};
-}
-
 template <typename ProductDefinitionT>
 constexpr auto makeStaticExportDescriptorFromDefinition()
 {
     constexpr const auto& definition = ProductDefinitionT::kDefinition;
-    StaticExportDescriptor<ProductDefinitionT::kDefinition.kDatapointCount, 0> descriptor{
+    StaticExportDescriptor<ProductDefinitionT::kDefinition.kDatapointCount> descriptor{
         ExportProductIdentity{
             definition.identity.profileKey,
             definition.identity.productDisplayName,
@@ -304,7 +255,6 @@ constexpr auto makeStaticExportDescriptorFromDefinition()
                              definition.capacities.datapointLinkCapacity,
                              definition.capacities.autoResponseQueueCapacity,
                              definition.capacities.transmissionOutcomeQueueCapacity),
-        {},
         {},
     };
 

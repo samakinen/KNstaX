@@ -18,7 +18,7 @@
  *   CE-6cp  Port direction flags enforced at compile time (CommandPort/StatePort).
  *   CE-7cp  Product definition compiles with semantic port helpers.
  *   CE-8cp  Fault reporting wired — onFault + reportFault.
- *   CE-9cp  ETS parameter round-trip via applyParameterDataBytes / onParameterChanged.
+ *   CE-9cp  ETS parameter round-trip via loadParameterImage / onParametersChanged.
  *   CE-10cp Bounded-storage bindings compile and run without heap allocation.
  *   CE-11cp Port count is a compile-time constant; CO table matches port count.
  *
@@ -59,7 +59,11 @@ enum class CeParam : uint16_t {
     DefaultState = 0,
 };
 
-constexpr auto kCeProduct = makeCommissionedProduct(
+inline constexpr auto kCeParameters = params::parameterLayout(params::parameterBlock<CeParam>(
+    {.key = "device", .name = "Device"},
+    params::param<CeParam::DefaultState, bool>({.name = "Default state", .def = false, .key = "default_state"})));
+
+constexpr auto kCeProduct = makeCommissionedProduct<kCeParameters>(
     makeEndpointDefinition<
         CePort,
         semantics::SwitchCommand<CePort::Command, "command", "Command">,
@@ -78,9 +82,7 @@ constexpr auto kCeProduct = makeCommissionedProduct(
             .namespacePrefix = "ce_commissioned",
             .schemaVersion   = 1,
             .persistKnxState = true,
-        }),
-    makeParameterSchema(
-        parameter<CeParam::DefaultState>("default_state", false)));
+        }));
 
 static std::unique_ptr<physical::Tp1MediumBackend> makeNullBackend()
 {
@@ -297,8 +299,6 @@ void test_ce7cp_product_definition_compiles_with_semantics(void)
     constexpr auto exportDesc = makeCommissionedExportDescriptor(kCeProduct);
     static_assert(exportDesc.kCommunicationObjectCount == 2u,
                   "CE-7cp: export descriptor CO count mismatch");
-    static_assert(exportDesc.kParameterCount == 1u,
-                  "CE-7cp: export descriptor parameter count mismatch");
 }
 
 // ---------------------------------------------------------------------------
@@ -338,11 +338,11 @@ void test_ce8cp_fault_reporting_wired(void)
 }
 
 // ---------------------------------------------------------------------------
-// CE-9cp: ETS parameter round-trip via applyParameterDataBytes
+// CE-9cp: ETS parameter round-trip via loadParameterImage
 //
-// Verifies that raw program-data bytes (as written by ETS over the KNX
-// management protocol) are decoded and applied to the parameter state, and
-// that any registered onParameterChanged callbacks fire.
+// Verifies that a parameter image (as ETS writes it over the KNX management
+// protocol) is taken into use and read back through parameters(), and that
+// the onParametersChanged callback fires.
 // ---------------------------------------------------------------------------
 static void test_ce9cp_ets_parameter_round_trip(void)
 {
@@ -358,36 +358,35 @@ static void test_ce9cp_ets_parameter_round_trip(void)
         makeCommissionedBindings(kCeProduct)
             .onCommand<CePort::Command>([](bool) {})
             .provideState<CePort::State>([] { return false; })
-            .onParameterChanged<CeParam::DefaultState>([&](bool v) {
+            .onParametersChanged([&](params::ViewFor<kCeParameters> parameters) {
                 ++callbackFireCount;
-                callbackValue = v;
+                callbackValue = parameters.block<CeParam>().get<CeParam::DefaultState>();
             }),
         makeNullBackend());
     TEST_ASSERT_TRUE(result.isOk());
     auto runtime = std::move(result.value());
 
     // Default value before any ETS write.
-    const bool defaultVal = runtime->parameters().get<CeParam::DefaultState>();
+    const bool defaultVal = runtime->parameters().block<CeParam>().get<CeParam::DefaultState>();
     TEST_ASSERT_FALSE(defaultVal);
     TEST_ASSERT_EQUAL_INT(0, callbackFireCount);
 
-    // Simulate ETS writing parameter data: one byte, bool = true (0x01).
-    // CeParam::DefaultState is a bool → 1 byte, big-endian.
+    // Simulate ETS writing the parameter image: one octet, bool = true (0x01).
     const std::array<uint8_t, 1> etsBytesOn = {0x01};
-    expert::applyParameterDataBytes(*runtime, etsBytesOn);
+    TEST_ASSERT_TRUE(expert::loadParameterImage(*runtime, etsBytesOn));
 
     TEST_ASSERT_EQUAL_INT(1, callbackFireCount);
     TEST_ASSERT_TRUE(callbackValue);
-    const bool afterOn = runtime->parameters().get<CeParam::DefaultState>();
+    const bool afterOn = runtime->parameters().block<CeParam>().get<CeParam::DefaultState>();
     TEST_ASSERT_TRUE(afterOn);
 
     // Simulate ETS resetting the parameter back to false (0x00).
     const std::array<uint8_t, 1> etsBytesOff = {0x00};
-    expert::applyParameterDataBytes(*runtime, etsBytesOff);
+    TEST_ASSERT_TRUE(expert::loadParameterImage(*runtime, etsBytesOff));
 
     TEST_ASSERT_EQUAL_INT(2, callbackFireCount);
     TEST_ASSERT_FALSE(callbackValue);
-    const bool afterOff = runtime->parameters().get<CeParam::DefaultState>();
+    const bool afterOff = runtime->parameters().block<CeParam>().get<CeParam::DefaultState>();
     TEST_ASSERT_FALSE(afterOff);
 }
 

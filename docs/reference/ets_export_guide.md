@@ -61,109 +61,10 @@ both by the firmware and by the host exporter.
 
 ## Parameters
 
-There are two ways to declare parameters while the new model is being
-introduced ([parameter-model.md](../design/parameter-model.md)):
-
-- **A parameter layout** (`makeCommissionedProduct<kParameters>(...)`): blocks
-  that can repeat, almost no cost on the device. New products use this. See
-  "Parameter layouts" below.
-- **A parameter schema** (`makeParameterSchema(...)`): the older flat list,
-  described in the rest of this section. It will be removed once the products
-  that use it have moved.
-
-A product uses one of the two; the exporter refuses a file that carries both.
-
-Parameters are declared in a schema attached to the product and are downloaded
-by ETS into a memory-mapped block, laid out in declaration order.
-
-```cpp
-constexpr auto kParameters = makeParameterSchema(
-    ParameterDescriptor<Param::HvacMode, uint16_t>{
-        .key = "default_hvac_mode",
-        .displayName = "Default HVAC operating mode",
-        .defaultValue = 1,
-        .options = parameterOptions({0, "Auto"},
-                                    {1, "Comfort"},
-                                    {2, "Standby"},
-                                    {3, "Economy"},
-                                    {4, "Building Protection"}),
-    },
-    ParameterDescriptor<Param::Hysteresis, Dpt9Float>{
-        .key = "thermostat_hysteresis",
-        .displayName = "Thermostat hysteresis",
-        .defaultValue = 1.0f,
-        .minValue = 0.1,
-        .maxValue = 5.0,
-        .unit = "K",
-    });
-```
-
-### `options` is the difference between a usable product and a table lookup
-
-Without `options`, an enumerated parameter exports as a bare number field and
-the integrator has to be told out of band that `2` means Standby — which is how
-products end up with labels like `"Mode (0=Auto,1=Comfort,2=Standby)"`. With
-`options`, the exporter emits a `<TypeRestriction>` with `<Enumeration>`
-children and ETS renders a drop-down.
-
-Declare options on every enumerated parameter. It costs one line and it is the
-part of the product an integrator actually touches.
-
-### `group`, and conditional visibility
-
-```cpp
-ParameterDescriptor<Param::CoolingEnabled, uint16_t>{
-    .key = "cooling_enabled", .displayName = "Cooling enabled", .defaultValue = 1,
-    .options = parameterOptions({0, "Off"}, {1, "On"}),
-    .group = "Cooling",
-},
-ParameterDescriptor<Param::CoolingGain, Dpt9Float>{
-    .key = "cooling_kp", .displayName = "Cooling gain", .defaultValue = 25.0f,
-    .unit = "%/K",
-    .group = "Cooling",
-    // Hidden while cooling is switched off.
-    .visibleWhenParameterId = static_cast<uint16_t>(Param::CoolingEnabled),
-    .visibleWhenValue = 1,
-},
-```
-
-`group` puts the parameter in a named ETS section; parameters sharing a group
-render together, in declaration order. Products that declare no groups get a
-single block exactly as before.
-
-`visibleWhenParameterId` / `visibleWhenValue` emit `<choose>/<when>`, so ETS
-hides the parameter unless the controlling parameter holds that value. Showing
-settings that currently do nothing is a standing source of misconfiguration —
-an integrator who tunes a cooling PID on a heating-only unit has no way to know
-it had no effect.
-
-### `minValue` / `maxValue` / `unit`
-
-Bounds narrow the generated `ParameterType`, so ETS rejects out-of-range input
-at configuration time rather than letting the device receive a value it has to
-defend against. `unit` becomes the field's suffix text.
-
-Bounds are only applied when they differ — an all-zero pair means "unset" and
-falls back to the value type's full range.
-
-### Value kinds and memory width
-
-| Kind | Width | Notes |
-|---|---|---|
-| `bool` | 1 octet | |
-| `uint8_t` | 1 octet | |
-| `uint16_t` / enum | 2 octets | |
-| `int16_t` | 2 octets | |
-| `Dpt9Float` | 2 octets | KNX-native half-float; **prefer this for fractional values** |
-| `float` | 4 octets | IEEE-754. Third-party tooling handles this poorly — see below. |
-
-`Dpt9Float` is preferred over `float` because knxprod `TypeFloat` support is
-patchy outside ETS itself: Kaenx-Creator ships no float validation, mis-imports
-the size as 16-bit, and parses the default value with the system locale. Keep
-exported default values integer-valued (`22`, not `22.0`) so they parse
-identically under every locale.
-
-## Parameter layouts
+Parameters are declared as a *parameter layout*: blocks of parameters, each
+block with its own id enum, a block optionally repeated. ETS downloads them
+into a memory-mapped image whose layout the C++ declaration decides
+([parameter-model.md](../design/parameter-model.md)).
 
 ```cpp
 #include "knx/product/commissioned_product.hpp"
@@ -222,6 +123,47 @@ What ETS shows:
   names a parameter of another block. A condition that breaks these rules does
   not compile, and neither does a default outside `min..max` or outside the
   option list.
+
+### Sections: several pages for one block
+
+A block with many parameters puts some of them on pages of their own. A
+section changes the pages only; the parameters stay in declaration order in
+the image.
+
+```cpp
+inline constexpr auto kRoomBlock = params::parameterBlock<P>(
+    {.key = "room"},
+    params::section({.name = "Room control - general"},
+                    params::param<P::HeatingEnabled, bool>({.name = "Heating", .def = true}),
+                    params::param<P::CoolingEnabled, bool>({.name = "Cooling"})),
+    params::section({.name = "Cooling control", .visible = params::when<P::CoolingEnabled>(true)},
+                    params::param<P::CoolingGain, Dpt9Float>({.name = "Gain", .def = 25, .min = 1, .max = 100})));
+```
+
+- A block that appears once and has all its parameters in sections shows only
+  the section pages, under their own names. Otherwise a section page is named
+  "block: section", after the block's own page.
+- The condition is declared once for the page. Its controlling parameter is
+  outside the section, in the same block or in a block that appears once.
+
+### Options, bounds and units
+
+Declare `options` on every enumerated parameter. Without them ETS shows a bare
+number field and the integrator has to be told out of band that 2 means
+Standby. An option list is a named constant, so parameters that offer the same
+choices share one ETS type.
+
+`min` and `max` narrow the ETS input field, and the device checks a downloaded
+image against the same bounds: an image with a value outside them is refused
+as a whole. `unit` is shown as a suffix.
+
+`Dpt9Float` (the KNX 2-octet float) is preferred over `float`: knxprod
+`TypeFloat` support is patchy outside ETS itself. Kaenx-Creator ships no float
+validation, mis-imports the size as 16 bit, and parses the default value with
+the system locale. Keep defaults and bounds integer-valued (`22`, not `22.5`)
+where the product allows it, so they parse identically under every locale.
+
+### Conditions are for ETS only
 
 Conditions are for ETS only. The device does not evaluate them, and a hidden
 parameter keeps the value it last had: firmware branches on the controlling
@@ -364,7 +306,7 @@ change with it.**
 
 The `Unload` step is not decoration: the load state machine only accepts a
 segment allocation from the Unloaded state, so without it a second download of
-an already-commissioned device fails. `Size` is the exact parameter block the
+an already-commissioned device fails. `Size` is the exact parameter image the
 device decodes, and `Verify="1"` uses the read-back the device already sends in
 response to `A_Memory_Write`.
 
@@ -382,8 +324,6 @@ Honest list of what the exporter does not yet produce:
   instance, but the communication objects of a repeated function are still a
   flat list, and an object cannot be hidden by a parameter (step P4 of
   [parameter-model.md](../design/parameter-model.md)).
-- **A parameter schema has equality-only conditions.** Ranges and several
-  values need a parameter layout.
 - **The manufacturer name is taken from the product display name.** Fine for
   development against manufacturer id 0x00FA; a real product needs its own
   allocated manufacturer id and name.

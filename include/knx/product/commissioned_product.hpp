@@ -107,9 +107,6 @@ namespace semantics = endpoint::semantics;
 template <typename ProductDefinitionT, size_t BindingCapacity = kDefaultBindingCapacity>
 class CommissionedBindingsBuilder;
 
-template <typename ProductDefinitionT>
-class CommissionedParametersView;
-
 template <typename ProductDefinitionT, size_t BindingCapacity = kDefaultBindingCapacity>
 class CommissionedProductRuntime;
 
@@ -151,113 +148,11 @@ template <typename ProductDefinitionT, size_t BindingCapacity, typename... Bindi
 auto bindDemoGroupAddresses(CommissionedProductRuntime<ProductDefinitionT, BindingCapacity>& runtime,
                             Bindings&&... bindings) -> util::Result<void>;
 
-template <auto ParameterId, typename ProductDefinitionT, size_t BindingCapacity>
-auto applyDemoParameterValue(
-    CommissionedProductRuntime<ProductDefinitionT, BindingCapacity>& runtime,
-    typename ProductDefinitionT::template ParameterValueType<ParameterId> value) -> util::Result<void>;
-
 template <typename ProductDefinitionT, size_t BindingCapacity>
-void applyParameterDataBytes(CommissionedProductRuntime<ProductDefinitionT, BindingCapacity>& runtime,
-                             std::span<const uint8_t> data);
+bool loadParameterImage(CommissionedProductRuntime<ProductDefinitionT, BindingCapacity>& runtime,
+                        std::span<const uint8_t> image);
 
 } // namespace expert
-
-/// Sentinel for ParameterDescriptor::visibleWhenParameterId meaning
-/// "always visible".  0xFFFF is not a usable parameter id.
-inline constexpr uint16_t kNoVisibilityCondition = 0xFFFFu;
-
-/// One selectable value of an enumerated parameter.
-struct ParameterOption {
-    int64_t value{0};
-    /// Label ETS puts in the drop-down.
-    std::string_view label{};
-};
-
-inline constexpr size_t kMaxParameterOptions = 24;
-
-/// Fixed-capacity option list carried in a constexpr product definition.
-struct ParameterOptions {
-    std::array<ParameterOption, kMaxParameterOptions> entries{};
-    size_t count{0};
-
-    constexpr bool empty() const { return count == 0; }
-    constexpr const ParameterOption* begin() const { return entries.data(); }
-    constexpr const ParameterOption* end() const { return entries.data() + count; }
-};
-
-/**
- * @brief Declare the selectable values of an enumerated parameter.
- *
- * Without options an enum parameter exports as a bare number box and the
- * integrator has to know that 2 means Standby.  With them ETS renders a
- * drop-down, which is the difference between a product an integrator can
- * configure and one they have to be handed a table for.
- *
- *   .options = parameterOptions({0, "Auto"}, {1, "Comfort"}, {2, "Standby"})
- */
-template <typename... OptionTs>
-constexpr ParameterOptions parameterOptions(OptionTs... options)
-{
-    static_assert(sizeof...(OptionTs) <= kMaxParameterOptions,
-                  "Too many parameter options; raise kMaxParameterOptions");
-    return ParameterOptions{{ParameterOption{options}...}, sizeof...(OptionTs)};
-}
-
-template <auto ParameterId, typename ValueT>
-struct ParameterDescriptor {
-    using id_type = std::remove_cv_t<decltype(ParameterId)>;
-    using value_type = ValueT;
-
-    static constexpr auto id = ParameterId;
-
-    std::string_view key{};
-    /// Human-readable label shown by ETS/Kaenx (knxprod Parameter Text).
-    /// Empty falls back to the technical key.
-    std::string_view displayName{};
-    ValueT defaultValue{};
-    /// Selectable values.  Only meaningful for enumerated/boolean parameters;
-    /// leaving it empty exports a plain numeric field.
-    ParameterOptions options{};
-    /// Inclusive numeric bounds for free-form numeric parameters.  When both
-    /// are zero the exporter falls back to the full range of the value type.
-    double minValue{0.0};
-    double maxValue{0.0};
-    /// Optional unit suffix ETS appends to the input field (e.g. "°C", "s").
-    std::string_view unit{};
-    /// Section heading this parameter appears under in ETS.  Parameters sharing
-    /// a group are rendered together; leaving it empty puts the parameter in
-    /// the product's default block.  A product with thirty parameters in one
-    /// flat list is materially harder to configure than the same thirty split
-    /// into "Temperature", "Ventilation" and "Heating".
-    std::string_view group{};
-    /// Show this parameter only when parameter `visibleWhenParameterId` equals
-    /// `visibleWhenValue`.  Lets a product hide the cooling PID settings when
-    /// cooling is switched off, instead of showing settings that do nothing.
-    /// Ignored when `visibleWhenParameterId` is left at its sentinel.
-    uint16_t visibleWhenParameterId{kNoVisibilityCondition};
-    int64_t visibleWhenValue{0};
-    /// Show the whole `group` section only when parameter
-    /// `groupVisibleWhenParameterId` equals `groupVisibleWhenValue`.  Every
-    /// parameter of the group must declare the same pair; the exporter refuses
-    /// a partially gated group.  Use this instead of repeating the same
-    /// per-parameter condition on every member: that variant leaves ETS showing
-    /// a section heading with nothing under it, which reads as a broken
-    /// product.  The controlling parameter must live in a different group, or
-    /// switching the section off would hide the switch itself.  The two
-    /// conditions compose — a section gated on "Heating sequence = Used" can
-    /// still hide its PI terms while the algorithm is two-point.
-    uint16_t groupVisibleWhenParameterId{kNoVisibilityCondition};
-    int64_t groupVisibleWhenValue{0};
-};
-
-template <typename... ParameterTs>
-struct StaticParameterSchema {
-    using descriptors_tuple = std::tuple<ParameterTs...>;
-
-    static constexpr size_t kParameterCount = sizeof...(ParameterTs);
-
-    descriptors_tuple descriptors{};
-};
 
 struct KnxPersistenceIdentity {
     // Advanced override for KNX-managed commissioned-state persistence.
@@ -341,325 +236,41 @@ private:
 };
 #endif
 
-template <auto... Ids>
-consteval bool parameterIdsUnique()
-{
-    if constexpr (sizeof...(Ids) <= 1u) {
-        return true;
-    } else {
-        constexpr auto ids = std::array{Ids...};
-        for (size_t outer = 0; outer < ids.size(); ++outer) {
-            for (size_t inner = outer + 1u; inner < ids.size(); ++inner) {
-                if (ids[outer] == ids[inner]) {
-                    return false;
-                }
-            }
-        }
-
-        return true;
-    }
-}
-
-template <auto ParameterId, typename... DescriptorTs>
-consteval size_t findParameterIndex()
-{
-    constexpr auto ids = std::array{DescriptorTs::id...};
-    for (size_t index = 0; index < ids.size(); ++index) {
-        if (ids[index] == ParameterId) {
-            return index;
-        }
-    }
-
-    return ids.size();
-}
-
-template <typename SchemaT>
-struct ParameterDescriptorFor;
-
-template <typename... DescriptorTs>
-struct ParameterDescriptorFor<StaticParameterSchema<DescriptorTs...>> {
-    static_assert(parameterIdsUnique<DescriptorTs::id...>(),
-                  "StaticParameterSchema parameter IDs must be unique");
-
-    template <auto ParameterId>
-    struct At {
-        static constexpr size_t index = findParameterIndex<ParameterId, DescriptorTs...>();
-        static_assert(index < sizeof...(DescriptorTs),
-                      "Parameter ID is not part of this product parameter schema");
-
-        using type = std::tuple_element_t<index, std::tuple<DescriptorTs...>>;
-    };
-};
-
-template <typename SchemaT>
+template <typename ParametersT>
 struct ParameterCallbacks;
 
-template <typename... DescriptorTs>
-struct ParameterCallbacks<StaticParameterSchema<DescriptorTs...>> {
-    template <typename ValueT>
-    using callback_type_for = util::InplaceFunction<void(ValueT), 64>;
-
-    using callbacks_tuple = std::tuple<callback_type_for<typename DescriptorTs::value_type>...>;
-
-    callbacks_tuple callbacks{};
-
-    template <auto ParameterId, typename Callback>
-    void set(Callback&& callback)
-    {
-        constexpr size_t index = ParameterDescriptorFor<StaticParameterSchema<DescriptorTs...>>
-                                     ::template At<ParameterId>::index;
-        using callback_type = callback_type_for<
-            typename ParameterDescriptorFor<StaticParameterSchema<DescriptorTs...>>
-                ::template At<ParameterId>::type::value_type>;
-
-        std::get<index>(callbacks) = callback_type(std::forward<Callback>(callback));
-    }
-};
-
-template <typename SchemaT>
+template <typename ParametersT>
 class ParameterState;
 
 // ---------------------------------------------------------------------------
-// Byte-level encoding/decoding helpers for ETS ProgramData round-trip
+// Parameters: one image, read through a view (parameter_layout.hpp)
 // ---------------------------------------------------------------------------
-namespace byte_io {
 
-// Runtime helpers (not constexpr): the Dpt9Float branches delegate to the
-// shared application::Dpt9 codec, which is a runtime function.
-template <typename ValueT>
-inline ValueT fromBigEndianBytes(std::span<const uint8_t> bytes) noexcept
-{
-    if constexpr (std::is_same_v<ValueT, bool>) {
-        return bytes[0] != 0u;
-    } else if constexpr (std::is_same_v<ValueT, uint8_t>) {
-        return bytes[0];
-    } else if constexpr (std::is_same_v<ValueT, uint16_t>) {
-        return static_cast<uint16_t>(
-            (static_cast<uint16_t>(bytes[0]) << 8u) | bytes[1]);
-    } else if constexpr (std::is_same_v<ValueT, int16_t>) {
-        return static_cast<int16_t>(
-            (static_cast<uint16_t>(bytes[0]) << 8u) | bytes[1]);
-    } else if constexpr (std::is_same_v<ValueT, float>) {
-        uint32_t raw =
-            (static_cast<uint32_t>(bytes[0]) << 24u) |
-            (static_cast<uint32_t>(bytes[1]) << 16u) |
-            (static_cast<uint32_t>(bytes[2]) << 8u) |
-             static_cast<uint32_t>(bytes[3]);
-        float value;
-        std::memcpy(&value, &raw, sizeof(float));
-        return value;
-    } else if constexpr (std::is_same_v<ValueT, Dpt9Float>) {
-        // KNX DPT9 2-byte half-float — the format ETS writes into parameter
-        // memory for TypeFloat Encoding="DPT 9". Decoded by the shared codec.
-        static_assert(KNX_FEATURE_DPT_FLOAT || sizeof(ValueT) == 0,
-                      "a DPT 9 float parameter needs KNX_DPT_FLOAT (CONFIG_KNX_DPT_FLOAT=y)");
-#if KNX_FEATURE_DPT_FLOAT
-        float value = 0.0f;
-        if (application::Dpt9::decode(bytes.first(2), value).isError()) {
-            return Dpt9Float{0.0f};
-        }
-        return Dpt9Float{value};
-#else
-        (void)bytes;
-        return Dpt9Float{0.0f};
-#endif
-    } else if constexpr (std::is_enum_v<ValueT>) {
-        using U = std::underlying_type_t<ValueT>;
-        if constexpr (sizeof(U) == 1u) {
-            return static_cast<ValueT>(bytes[0]);
-        } else {
-            return static_cast<ValueT>(static_cast<U>(
-                (static_cast<uint16_t>(bytes[0]) << 8u) | bytes[1]));
-        }
-    } else {
-        return ValueT{};
-    }
-}
+/// True for a product that declares parameters.
+template <typename ParametersT>
+inline constexpr bool kHasParameters = false;
 
-template <typename ValueT>
-inline void toBigEndianBytes(ValueT value, std::span<uint8_t> out) noexcept
-{
-    if constexpr (std::is_same_v<ValueT, bool>) {
-        out[0] = value ? 0x01u : 0x00u;
-    } else if constexpr (std::is_same_v<ValueT, uint8_t>) {
-        out[0] = value;
-    } else if constexpr (std::is_same_v<ValueT, uint16_t>) {
-        out[0] = static_cast<uint8_t>(value >> 8u);
-        out[1] = static_cast<uint8_t>(value & 0xFFu);
-    } else if constexpr (std::is_same_v<ValueT, int16_t>) {
-        const auto uv = static_cast<uint16_t>(value);
-        out[0] = static_cast<uint8_t>(uv >> 8u);
-        out[1] = static_cast<uint8_t>(uv & 0xFFu);
-    } else if constexpr (std::is_same_v<ValueT, float>) {
-        uint32_t raw;
-        std::memcpy(&raw, &value, sizeof(float));
-        out[0] = static_cast<uint8_t>((raw >> 24u) & 0xFFu);
-        out[1] = static_cast<uint8_t>((raw >> 16u) & 0xFFu);
-        out[2] = static_cast<uint8_t>((raw >>  8u) & 0xFFu);
-        out[3] = static_cast<uint8_t>( raw          & 0xFFu);
-    } else if constexpr (std::is_same_v<ValueT, Dpt9Float>) {
-        static_assert(KNX_FEATURE_DPT_FLOAT || sizeof(ValueT) == 0,
-                      "a DPT 9 float parameter needs KNX_DPT_FLOAT (CONFIG_KNX_DPT_FLOAT=y)");
-#if KNX_FEATURE_DPT_FLOAT
-        out[0] = 0u;
-        out[1] = 0u;
-        (void)application::Dpt9::encode(value.value, out.first(2));
-#else
-        (void)value;
-        (void)out;
-#endif
-    } else if constexpr (std::is_enum_v<ValueT>) {
-        using U = std::underlying_type_t<ValueT>;
-        toBigEndianBytes(static_cast<U>(value), out);
-    }
-    // Text / None: no-op
-}
+template <const auto& Layout>
+inline constexpr bool kHasParameters<params::LayoutParameters<Layout>> = true;
 
-} // namespace byte_io
+/// The value type of a parameter of a product. Defined only for a product
+/// with parameters, and looked at only when a parameter is named.
+template <typename ParametersT, auto ParameterId>
+struct ParameterValueOf;
 
-
-template <typename... DescriptorTs>
-class ParameterState<StaticParameterSchema<DescriptorTs...>> {
-public:
-    using schema_type = StaticParameterSchema<DescriptorTs...>;
-
-    // Callbacks by rvalue reference: the tuple holds one InplaceFunction per
-    // parameter, so a by-value sink would cost a full copy of it on the
-    // constructing frame's stack.
-    explicit ParameterState(const schema_type& schema,
-                            ParameterCallbacks<schema_type>&& callbacks = {})
-        : _schema(&schema)
-        , _callbacks(std::move(callbacks))
-    {
-    }
-
-    template <auto ParameterId>
-    auto get() const
-        -> typename ParameterDescriptorFor<schema_type>::template At<ParameterId>::type::value_type
-    {
-        constexpr size_t index = ParameterDescriptorFor<schema_type>::template At<ParameterId>::index;
-        using value_type = typename ParameterDescriptorFor<schema_type>::template At<ParameterId>::type::value_type;
-
-        const auto& overrideValue = std::get<index>(_values);
-        if (overrideValue.has_value()) {
-            return overrideValue.value();
-        }
-
-        return static_cast<value_type>(std::get<index>(_schema->descriptors).defaultValue);
-    }
-
-    template <auto ParameterId>
-    bool hasCustomValue() const
-    {
-        constexpr size_t index = ParameterDescriptorFor<schema_type>::template At<ParameterId>::index;
-        return std::get<index>(_values).has_value();
-    }
-
-    template <auto ParameterId>
-    auto apply(typename ParameterDescriptorFor<schema_type>::template At<ParameterId>::type::value_type value)
-        -> util::Result<void>
-    {
-        constexpr size_t index = ParameterDescriptorFor<schema_type>::template At<ParameterId>::index;
-        std::get<index>(_values) = value;
-
-        auto& callback = std::get<index>(_callbacks.callbacks);
-        if (callback) {
-            callback(value);
-        }
-
-        return util::Result<void>::ok();
-    }
-
-    /// Deserialise parameter values from a raw KNX ProgramData byte block and
-    /// apply each recognised value to this ParameterState, firing the
-    /// corresponding `onParameterChanged` callback.  Parameters with
-    /// non-serialisable types (Text, None) are skipped.  Bytes are read
-    /// sequentially in schema declaration order, big-endian.
-    void applyFromBytes(std::span<const uint8_t> data)
-    {
-        size_t offset = 0;
-        applyFromBytesAt<0>(data, offset);
-    }
-
-    /// Serialise all current parameter values (or their defaults) into a raw
-    /// KNX ProgramData byte block.  The layout is consistent with applyFromBytes.
-    std::vector<uint8_t> toBytes() const
-    {
-        std::vector<uint8_t> result;
-        appendBytesAt<0>(result);
-        return result;
-    }
-
-private:
-    template <size_t I>
-    void applyFromBytesAt(std::span<const uint8_t> data, size_t& offset)
-    {
-        if constexpr (I < sizeof...(DescriptorTs)) {
-            using Descriptor = std::tuple_element_t<I, std::tuple<DescriptorTs...>>;
-            using ValueT = typename Descriptor::value_type;
-            constexpr auto kind = detail::exportParameterValueKind<ValueT>();
-            constexpr size_t width = detail::exportParameterValueByteWidth(kind);
-            if constexpr (width > 0u) {
-                if (offset + width <= data.size()) {
-                    const auto value = byte_io::fromBigEndianBytes<ValueT>(data.subspan(offset, width));
-                    std::get<I>(_values) = value;
-                    auto& cb = std::get<I>(_callbacks.callbacks);
-                    if (cb) { cb(value); }
-                    offset += width;
-                }
-            }
-            applyFromBytesAt<I + 1>(data, offset);
-        }
-    }
-
-    template <size_t I>
-    void appendBytesAt(std::vector<uint8_t>& out) const
-    {
-        if constexpr (I < sizeof...(DescriptorTs)) {
-            using Descriptor = std::tuple_element_t<I, std::tuple<DescriptorTs...>>;
-            using ValueT = typename Descriptor::value_type;
-            constexpr auto kind = detail::exportParameterValueKind<ValueT>();
-            constexpr size_t width = detail::exportParameterValueByteWidth(kind);
-            if constexpr (width > 0u) {
-                const auto& optVal = std::get<I>(_values);
-                const ValueT v = optVal.has_value() ? *optVal
-                                                    : static_cast<ValueT>(std::get<I>(_schema->descriptors).defaultValue);
-                const size_t base = out.size();
-                out.resize(base + width, 0u);
-                byte_io::toBigEndianBytes(v, std::span<uint8_t>(out.data() + base, width));
-            }
-            appendBytesAt<I + 1>(out);
-        }
-    }
-
-    const schema_type* _schema;
-    std::tuple<std::optional<typename DescriptorTs::value_type>...> _values{};
-    ParameterCallbacks<schema_type> _callbacks{};
+template <const auto& Layout, auto ParameterId>
+struct ParameterValueOf<params::LayoutParameters<Layout>, ParameterId> {
+    using type = params::value_type_in<typename params::LayoutParameters<Layout>::layout_type, ParameterId>;
 };
 
-// ---------------------------------------------------------------------------
-// The parameter model of parameter_layout.hpp: one image, read through a view
-// ---------------------------------------------------------------------------
+/// A product without parameters has no callback and no image.
+template <>
+struct ParameterCallbacks<params::NoParameters> {};
 
-template <typename SchemaT>
-inline constexpr bool kIsLayoutParameters = false;
-
-template <const auto& Layout>
-inline constexpr bool kIsLayoutParameters<params::LayoutParameters<Layout>> = true;
-
-/// The value type of a parameter of a layout-based product.
-template <typename SchemaT, auto ParameterId>
-using layout_parameter_value_t = params::value_type_in<typename SchemaT::layout_type, ParameterId>;
-
-/// ParameterValueType<Id> of a layout-based product definition.
-template <const auto& Layout>
-struct ParameterDescriptorFor<params::LayoutParameters<Layout>> {
-    template <auto ParameterId>
-    struct At {
-        struct type {
-            using value_type = layout_parameter_value_t<params::LayoutParameters<Layout>, ParameterId>;
-        };
-    };
+template <>
+class ParameterState<params::NoParameters> {
+public:
+    explicit ParameterState(ParameterCallbacks<params::NoParameters>&& /*callbacks*/ = {}) {}
 };
 
 template <const auto& Layout>
@@ -671,8 +282,8 @@ struct ParameterCallbacks<params::LayoutParameters<Layout>> {
 template <const auto& Layout>
 class ParameterState<params::LayoutParameters<Layout>> {
 public:
-    using schema_type = params::LayoutParameters<Layout>;
-    using layout_type = typename schema_type::layout_type;
+    using parameters_type = params::LayoutParameters<Layout>;
+    using layout_type = typename parameters_type::layout_type;
     using view_type = params::ViewFor<Layout>;
 
     static_assert(layout_type::kSize >= 1u, "a parameter layout holds at least one parameter");
@@ -680,7 +291,7 @@ public:
                   "the parameter image does not fit the application code segment "
                   "(objects::tableseg::kApplicationCodeMaxSize)");
 
-    explicit ParameterState(const schema_type& /*schema*/, ParameterCallbacks<schema_type>&& callbacks = {})
+    explicit ParameterState(ParameterCallbacks<parameters_type>&& callbacks = {})
         : _image(params::kDefaultImageOf<Layout>)
         , _callbacks(std::move(callbacks))
     {
@@ -737,7 +348,7 @@ private:
     }
 
     std::array<uint8_t, layout_type::kSize> _image;
-    ParameterCallbacks<schema_type> _callbacks{};
+    ParameterCallbacks<parameters_type> _callbacks{};
 };
 
 template <typename ProductDefinitionT>
@@ -777,80 +388,33 @@ ResolvedKnxPersistenceIdentity resolveKnxPersistenceIdentity(const ProductDefini
 
 } // namespace detail
 
-template <typename SchemaT, auto ParameterId>
-using parameter_descriptor_t =
-    typename detail::ParameterDescriptorFor<std::remove_cvref_t<SchemaT>>::template At<ParameterId>::type;
-
-template <typename SchemaT, auto ParameterId>
-inline constexpr size_t parameter_index_v =
-    detail::ParameterDescriptorFor<std::remove_cvref_t<SchemaT>>::template At<ParameterId>::index;
-
-template <auto ParameterId, typename ValueT>
-constexpr auto parameter(std::string_view key,
-                         ValueT defaultValue) -> ParameterDescriptor<ParameterId, std::remove_cvref_t<ValueT>>
-{
-    return ParameterDescriptor<ParameterId, std::remove_cvref_t<ValueT>>{
-        .key = key,
-        .displayName = key,
-        .defaultValue = std::forward<ValueT>(defaultValue),
-    };
-}
-
-/// Overload with a human-readable ETS label distinct from the technical key.
-template <auto ParameterId, typename ValueT>
-constexpr auto parameter(std::string_view key,
-                         std::string_view displayName,
-                         ValueT defaultValue) -> ParameterDescriptor<ParameterId, std::remove_cvref_t<ValueT>>
-{
-    return ParameterDescriptor<ParameterId, std::remove_cvref_t<ValueT>>{
-        .key = key,
-        .displayName = displayName,
-        .defaultValue = std::forward<ValueT>(defaultValue),
-    };
-}
-
-template <typename... ParameterTs>
-constexpr auto makeParameterSchema(ParameterTs... parameters)
-    -> StaticParameterSchema<std::remove_cvref_t<ParameterTs>...>
-{
-    return StaticParameterSchema<std::remove_cvref_t<ParameterTs>...>{
-        std::tuple<std::remove_cvref_t<ParameterTs>...>{std::forward<ParameterTs>(parameters)...},
-    };
-}
-
-template <typename EndpointDefinitionT, typename ParameterSchemaT = StaticParameterSchema<>>
+/**
+ * @brief What a product is: its ports, and how its parameters are laid out
+ *
+ * The parameters are part of the type only. `ParametersT` is
+ * params::NoParameters, or params::LayoutParameters<kParameters> naming the
+ * product's parameter layout; nothing of the layout object is stored here.
+ */
+template <typename EndpointDefinitionT, typename ParametersT = params::NoParameters>
 struct CommissionedProductDefinition {
     using endpoint_definition_type = std::remove_cvref_t<EndpointDefinitionT>;
-    using parameter_schema_type = std::remove_cvref_t<ParameterSchemaT>;
+    using parameters_type = std::remove_cvref_t<ParametersT>;
     using port_id_type = typename endpoint_definition_type::port_id_type;
 
+    /// The value type of a parameter, e.g. ParameterValueType<In::DebounceMs>.
     template <auto ParameterId>
-    using ParameterValueType = typename parameter_descriptor_t<parameter_schema_type, ParameterId>::value_type;
+    using ParameterValueType = typename detail::ParameterValueOf<parameters_type, ParameterId>::type;
 
     endpoint_definition_type endpointDefinition{};
-    parameter_schema_type parameterSchema{};
 };
 
+/// A product without ETS parameters.
 template <typename EndpointDefinitionT>
 constexpr auto makeCommissionedProduct(EndpointDefinitionT endpointDefinition)
-    -> CommissionedProductDefinition<std::remove_cvref_t<EndpointDefinitionT>, StaticParameterSchema<>>
+    -> CommissionedProductDefinition<std::remove_cvref_t<EndpointDefinitionT>, params::NoParameters>
 {
-    return CommissionedProductDefinition<std::remove_cvref_t<EndpointDefinitionT>, StaticParameterSchema<>>{
+    return CommissionedProductDefinition<std::remove_cvref_t<EndpointDefinitionT>, params::NoParameters>{
         .endpointDefinition = std::move(endpointDefinition),
-        .parameterSchema = makeParameterSchema(),
-    };
-}
-
-template <typename EndpointDefinitionT, typename ParameterSchemaT>
-constexpr auto makeCommissionedProduct(EndpointDefinitionT endpointDefinition,
-                                       ParameterSchemaT parameterSchema)
-    -> CommissionedProductDefinition<std::remove_cvref_t<EndpointDefinitionT>,
-                                     std::remove_cvref_t<ParameterSchemaT>>
-{
-    return CommissionedProductDefinition<std::remove_cvref_t<EndpointDefinitionT>,
-                                         std::remove_cvref_t<ParameterSchemaT>>{
-        .endpointDefinition = std::move(endpointDefinition),
-        .parameterSchema = std::move(parameterSchema),
     };
 }
 
@@ -872,7 +436,6 @@ constexpr auto makeCommissionedProduct(EndpointDefinitionT endpointDefinition)
 {
     return CommissionedProductDefinition<std::remove_cvref_t<EndpointDefinitionT>, params::LayoutParameters<Layout>>{
         .endpointDefinition = std::move(endpointDefinition),
-        .parameterSchema = {},
     };
 }
 
@@ -1120,7 +683,7 @@ class CommissionedBindingsBuilder {
 public:
     using product_definition_type = std::remove_cvref_t<ProductDefinitionT>;
     using endpoint_definition_type = typename product_definition_type::endpoint_definition_type;
-    using parameter_schema_type = typename product_definition_type::parameter_schema_type;
+    using parameters_type = typename product_definition_type::parameters_type;
 
     explicit CommissionedBindingsBuilder(endpoint::EndpointBindings<endpoint_definition_type, BindingCapacity> endpointBindings)
         : _endpointBindings(std::move(endpointBindings))
@@ -1211,20 +774,6 @@ public:
         return std::move(*this);
     }
 
-    template <auto ParameterId, typename Callback>
-    auto& onParameterChanged(Callback&& callback) &
-    {
-        _parameterCallbacks.template set<ParameterId>(std::forward<Callback>(callback));
-        return *this;
-    }
-
-    template <auto ParameterId, typename Callback>
-    auto onParameterChanged(Callback&& callback) && -> CommissionedBindingsBuilder&&
-    {
-        onParameterChanged<ParameterId>(std::forward<Callback>(callback));
-        return std::move(*this);
-    }
-
     /**
      * Register the one parameter callback of a product built with
      * makeCommissionedProduct<kParameters>(). It gets a view over the new
@@ -1282,7 +831,7 @@ public:
 
 private:
     endpoint::EndpointBindings<endpoint_definition_type, BindingCapacity> _endpointBindings;
-    detail::ParameterCallbacks<parameter_schema_type> _parameterCallbacks{};
+    detail::ParameterCallbacks<parameters_type> _parameterCallbacks{};
     LifecycleChangedCallback _lifecycleCallback;
 
     template <typename DefinitionT, size_t Cap>
@@ -1374,42 +923,12 @@ auto makeCommissionedBindings(const ProductDefinitionT& definition)
         endpoint::makeEndpointBindings<BindingCapacity>(definition.endpointDefinition));
 }
 
-template <typename ProductDefinitionT>
-class CommissionedParametersView {
-public:
-    using product_definition_type = std::remove_cvref_t<ProductDefinitionT>;
-    using parameter_schema_type = typename product_definition_type::parameter_schema_type;
-
-    template <auto ParameterId>
-    auto get() const -> typename product_definition_type::template ParameterValueType<ParameterId>
-    {
-        return _state->template get<ParameterId>();
-    }
-
-    template <auto ParameterId>
-    bool hasCustomValue() const
-    {
-        return _state->template hasCustomValue<ParameterId>();
-    }
-
-private:
-    explicit CommissionedParametersView(detail::ParameterState<parameter_schema_type>* state)
-        : _state(state)
-    {
-    }
-
-    detail::ParameterState<parameter_schema_type>* _state;
-
-    template <typename DefinitionT, size_t Cap>
-    friend class CommissionedProductRuntime;
-};
-
 template <typename ProductDefinitionT, size_t BindingCapacity>
 class CommissionedProductRuntime {
 public:
     using product_definition_type = std::remove_cvref_t<ProductDefinitionT>;
     using endpoint_definition_type = typename product_definition_type::endpoint_definition_type;
-    using parameter_schema_type = typename product_definition_type::parameter_schema_type;
+    using parameters_type = typename product_definition_type::parameters_type;
     using port_id_type = typename product_definition_type::port_id_type;
     using endpoint_runtime_type = endpoint::EndpointRuntime<endpoint_definition_type, BindingCapacity>;
     using OwnerWorkHint = typename endpoint_runtime_type::OwnerWorkHint;
@@ -1422,12 +941,12 @@ public:
     // straight into a member. They are consumed here either way.
     CommissionedProductRuntime(const product_definition_type& definition,
                                endpoint::EndpointBindings<endpoint_definition_type, BindingCapacity>&& endpointBindings,
-                               detail::ParameterCallbacks<parameter_schema_type>&& parameterCallbacks,
+                               detail::ParameterCallbacks<parameters_type>&& parameterCallbacks,
                                LifecycleChangedCallback lifecycleCallback,
                                CommissionedProductOptions options)
         : _definition(definition)
         , _knxPersistenceIdentity(detail::resolveKnxPersistenceIdentity(definition, options.persistence))
-        , _parametersState(_definition.parameterSchema, std::move(parameterCallbacks))
+        , _parametersState(std::move(parameterCallbacks))
         , _lifecycleCallback(std::move(lifecycleCallback))
         , _runtime(
               _definition.endpointDefinition,
@@ -1444,7 +963,7 @@ public:
         , _secureOptions(options.secure)
 #endif
     {
-        if constexpr (detail::kIsLayoutParameters<parameter_schema_type>) {
+        if constexpr (detail::kHasParameters<parameters_type>) {
             _runtime.bindParameterImage(_parametersState.binding());
         }
     }
@@ -2058,7 +1577,8 @@ public:
     }
 
     /// Set/read a port's send-on-change / cyclic / min-interval policy. Typically
-    /// driven from ETS parameters via onParameterChanged + endpoint::TransmitPolicyBinder.
+    /// driven from ETS parameters: build the policy from parameters() after start and again
+    /// after onParametersChanged.
     template <auto LogicalId>
     auto setTransmitPolicy(const application::GroupObjectTransmitPolicy& policy) -> util::Result<void>
     {
@@ -2093,9 +1613,7 @@ public:
     // management protocol and restores them from persistence on reboot.
     // Firmware does not call these methods at all in that flow.
     //
-    // Parameter values written via applyCommissionedParameter are persisted
-    // through ApplicationProgramObject (PID_PROGRAM_DATA) and are restored
-    // on the next boot through the standard KNX management persistence path.
+    // Parameters are changed from the device with setParameter(), below.
     // -----------------------------------------------------------------------
 
     template <auto LogicalId>
@@ -2115,39 +1633,16 @@ public:
         return endpoint::bindGroupAddresses(_runtime, std::forward<Bindings>(bindings)...);
     }
 
-    // Inject a parameter value. The value is applied immediately to the
-    // in-memory ParameterState (firing onParameterChanged) and the full
-    // encoded parameter block is written to the ApplicationProgramObject so
-    // the value is persisted across reboots and visible to the KNX management
-    // model via A_PropertyValue_Read on PID_PROGRAM_DATA.
-    template <auto ParameterId>
-    auto applyCommissionedParameter(
-        typename product_definition_type::template ParameterValueType<ParameterId> value)
-        -> util::Result<void>
-    {
-        const auto result = _parametersState.template apply<ParameterId>(std::move(value));
-        if (!result.isError()) {
-            const auto bytes = _parametersState.toBytes();
-            _runtime.persistParameterBytesOnly(bytes);
-        }
-        return result;
-    }
-
     /// Device object access for host-specific identity (e.g. serial number
     /// from a factory-programmed MAC).
     auto& deviceObject() { return _runtime.deviceObject(); }
 
-    /// The parameters: a view over the image for a product built with
-    /// makeCommissionedProduct<kParameters>(), a CommissionedParametersView
-    /// for one with a parameter schema.
+    /// The parameters: a typed view over the image. Reading one is a load at
+    /// a constant offset.
     auto parameters() const
+        requires detail::kHasParameters<parameters_type>
     {
-        if constexpr (detail::kIsLayoutParameters<parameter_schema_type>) {
-            return _parametersState.view();
-        } else {
-            return CommissionedParametersView<product_definition_type>(
-                const_cast<detail::ParameterState<parameter_schema_type>*>(&_parametersState));
-        }
+        return _parametersState.view();
     }
 
     /**
@@ -2372,14 +1867,9 @@ private:
     friend auto expert::bindDemoGroupAddresses(CommissionedProductRuntime<DefinitionT, Cap>& runtime,
                                                Bindings&&... bindings) -> util::Result<void>;
 
-    template <auto ParameterId, typename DefinitionT, size_t Cap>
-    friend auto expert::applyDemoParameterValue(
-        CommissionedProductRuntime<DefinitionT, Cap>& runtime,
-        typename DefinitionT::template ParameterValueType<ParameterId> value) -> util::Result<void>;
-
     template <typename DefinitionT, size_t Cap>
-    friend void expert::applyParameterDataBytes(CommissionedProductRuntime<DefinitionT, Cap>& runtime,
-                                                std::span<const uint8_t> data);
+    friend bool expert::loadParameterImage(CommissionedProductRuntime<DefinitionT, Cap>& runtime,
+                                           std::span<const uint8_t> image);
 
     template <typename... Bindings>
     auto bindCommissionedGroupAddressesForExpertUse(Bindings&&... bindings) -> util::Result<void>
@@ -2387,40 +1877,22 @@ private:
         return endpoint::bindGroupAddresses(_runtime, std::forward<Bindings>(bindings)...);
     }
 
-    template <auto ParameterId>
-    auto applyCommissionedParameterForExpertUse(
-        typename product_definition_type::template ParameterValueType<ParameterId> value) -> util::Result<void>
+    /// Replace the whole image the way a completed ETS download does.
+    bool loadParameterImageForExpertUse(std::span<const uint8_t> image)
     {
-        return _parametersState.template apply<ParameterId>(std::move(value));
-    }
-
-    void applyParameterDataBytesForExpertUse(std::span<const uint8_t> data)
-    {
-        // Route through the ApplicationProgramObject so the full KNX management-model
-        // write chain (wireParameterDataCallback → APO.notifyProgramDataChanged →
-        // ParameterState::applyFromBytes) is exercised.  This is the same path ETS
-        // uses when it downloads program data over the KNX bus.
-        if constexpr (detail::kIsLayoutParameters<parameter_schema_type>) {
-            (void)_runtime.loadParameterImageForExpertUse(data);
-        } else {
-            _runtime.simulateEtsProgramDataWriteForExpertUse(data);
-        }
+        return _runtime.loadParameterImageForExpertUse(image);
     }
 
     void wireParameters()
     {
-        if constexpr (detail::kIsLayoutParameters<parameter_schema_type>) {
+        if constexpr (detail::kHasParameters<parameters_type>) {
             _runtime.onParameterImageChanged([this]() { _parametersState.notifyChanged(); });
-        } else {
-            _runtime.wireParameterDataCallback([this](std::span<const uint8_t> data) {
-                _parametersState.applyFromBytes(data);
-            });
         }
     }
 
     product_definition_type _definition;
     ResolvedKnxPersistenceIdentity _knxPersistenceIdentity;
-    detail::ParameterState<parameter_schema_type> _parametersState;
+    detail::ParameterState<parameters_type> _parametersState;
     LifecycleChangedCallback _lifecycleCallback;
     DeviceLifecycleState _lastLifecycleState{DeviceLifecycleState::Uncommissioned};
     endpoint_runtime_type _runtime;
@@ -2804,64 +2276,15 @@ auto startCommissionedProduct(platform::Platform& platform,
 }
 #endif  // KNX_FEATURE_NETIP
 
-/// Build a StaticExportDescriptor that includes both communication objects and
-/// parameter descriptors from a CommissionedProductDefinition.
-///
-/// Use this instead of makeExportDescriptor() when your product has parameters
-/// that should be visible in the ETS catalogue.
-///
-/// @code
-///   constexpr auto kExport = makeCommissionedExportDescriptor(kMyProduct);
-///   const auto json = exportDescriptorToJson(kExport);
-/// @endcode
-template <typename EndpointDefinitionT, typename ParameterSchemaT>
-    requires(!detail::kIsLayoutParameters<std::remove_cvref_t<ParameterSchemaT>>)
+/// The communication objects and identity of a product, for the exporter.
+/// Its parameters are exported as blocks by parameter_layout_export.hpp;
+/// exportCommissionedProductToJson() in commissioned_product_export.hpp
+/// writes both.
+template <typename EndpointDefinitionT, typename ParametersT>
 constexpr auto makeCommissionedExportDescriptor(
-    const CommissionedProductDefinition<EndpointDefinitionT, ParameterSchemaT>& definition)
+    const CommissionedProductDefinition<EndpointDefinitionT, ParametersT>& definition)
 {
-    using endpoint_def_t = std::remove_cvref_t<EndpointDefinitionT>;
-    using schema_t = std::remove_cvref_t<ParameterSchemaT>;
-
-    constexpr size_t kParamCount = schema_t::kParameterCount;
-
-    const auto compiled = compileEndpointDefinition(definition.endpointDefinition);
-    const auto paramDescriptors = detail::makeExportParameterDescriptors(definition.parameterSchema);
-
-    StaticExportDescriptor<endpoint_def_t::kPortCount, kParamCount> result{
-        .identity = compiled.exportDescriptor.identity,
-        .features = compiled.exportDescriptor.features,
-        .security = compiled.exportDescriptor.security,
-        .capacities = compiled.exportDescriptor.capacities,
-        .communicationObjects = compiled.exportDescriptor.communicationObjects,
-        .parameters = paramDescriptors,
-    };
-
-    return result;
-}
-
-/// The same for a product built with makeCommissionedProduct<kParameters>():
-/// the communication objects only. Its parameters are exported as blocks, by
-/// parameter_layout_export.hpp; exportCommissionedProductToJson() in
-/// commissioned_product_export.hpp writes both.
-template <typename EndpointDefinitionT, typename ParameterSchemaT>
-    requires detail::kIsLayoutParameters<std::remove_cvref_t<ParameterSchemaT>>
-constexpr auto makeCommissionedExportDescriptor(
-    const CommissionedProductDefinition<EndpointDefinitionT, ParameterSchemaT>& definition)
-{
-    using endpoint_def_t = std::remove_cvref_t<EndpointDefinitionT>;
-
-    const auto compiled = compileEndpointDefinition(definition.endpointDefinition);
-
-    StaticExportDescriptor<endpoint_def_t::kPortCount, 0> result{
-        .identity = compiled.exportDescriptor.identity,
-        .features = compiled.exportDescriptor.features,
-        .security = compiled.exportDescriptor.security,
-        .capacities = compiled.exportDescriptor.capacities,
-        .communicationObjects = compiled.exportDescriptor.communicationObjects,
-        .parameters = {},
-    };
-
-    return result;
+    return compileEndpointDefinition(definition.endpointDefinition).exportDescriptor;
 }
 
 } // namespace knx::product

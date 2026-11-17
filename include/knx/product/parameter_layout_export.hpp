@@ -9,8 +9,9 @@
  *
  *   "parameterImage":  size and fingerprint of the image
  *   "optionTypes":     every option list once, however many parameters use it
- *   "parameterBlocks": the blocks with base, stride and repeat count, and
- *                      their parameters with the offset in the block
+ *   "parameterBlocks": the blocks with base, stride and repeat count, their
+ *                      parameters with the offset in the block, and their
+ *                      sections (pages inside a block)
  *
  * Every offset comes from the layout the firmware compiles. The Python side
  * places a parameter at base + instance × stride + offset and derives nothing.
@@ -105,13 +106,26 @@ std::string parameterLayoutToJson(const params::ParameterLayout<Rs...>& layout)
     }
     o << "]";
 
+    // The sections of the block that is being written, closed with its parameters.
+    std::string sections;
+    int lastSection = -1;
+    const auto closeBlock = [&] {
+        o << "],\"sections\":[" << sections << "]}";
+        sections.clear();
+        lastSection = -1;
+    };
+
     o << ",\"parameterBlocks\":[";
     size_t blockIndex = 0;
     for (size_t i = 0; i < parameters.size(); ++i) {
         const auto& info = parameters[i];
         const bool first = i == 0u || parameters[i - 1u].block != info.block;
         if (first) {
-            o << (i ? "]}," : "") << "{\"index\":" << blockIndex++ << ",\"key\":\"" << jsonEscape(info.blockKey)
+            if (i) {
+                closeBlock();
+                o << ",";
+            }
+            o << "{\"index\":" << blockIndex++ << ",\"key\":\"" << jsonEscape(info.blockKey)
               << "\",\"name\":\"" << jsonEscape(info.blockName) << "\",\"count\":" << info.blockCount
               << ",\"base\":" << info.blockBase << ",\"stride\":" << info.blockStride;
             if (info.blockVisible.op != params::ConditionOp::Always) {
@@ -140,13 +154,31 @@ std::string parameterLayoutToJson(const params::ParameterLayout<Rs...>& layout)
         if (!info.options.empty()) {
             o << ",\"optionType\":" << optionTypeOf(info);
         }
+        if (info.section >= 0) {
+            o << ",\"section\":" << info.section;
+            if (info.section != lastSection) {
+                lastSection = info.section;
+                std::ostringstream section;
+                section << (sections.empty() ? "" : ",") << "{\"index\":" << info.section << ",\"name\":\""
+                        << jsonEscape(info.sectionName) << "\"";
+                if (info.sectionVisible.op != params::ConditionOp::Always) {
+                    section << ",\"visible\":";
+                    detail::writeConditionJson(section, info.sectionVisible, blocks);
+                }
+                section << "}";
+                sections += section.str();
+            }
+        }
         if (info.visible.op != params::ConditionOp::Always) {
             o << ",\"visible\":";
             detail::writeConditionJson(o, info.visible, blocks);
         }
         o << "}";
     }
-    o << (parameters.empty() ? "]" : "]}]");
+    if (!parameters.empty()) {
+        closeBlock();
+    }
+    o << "]";
     return o.str();
 }
 

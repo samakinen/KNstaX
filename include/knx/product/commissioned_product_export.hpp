@@ -4,13 +4,10 @@
  * @file commissioned_product_export.hpp
  * @brief A commissioned product as the JSON the knxprod exporter reads (host tools only)
  *
- * One call for both parameter models:
- *
  *   const std::string json = knx::product::exportCommissionedProductToJson(kProduct);
  *
- * A product built with makeCommissionedProduct<kParameters>() is written with
- * its parameter blocks (parameter_layout_export.hpp); a product with a
- * parameter schema with the flat "parameters" list.
+ * The parameters of a product built with makeCommissionedProduct<kParameters>()
+ * are written as blocks (parameter_layout_export.hpp).
  */
 
 #pragma once
@@ -23,14 +20,13 @@
 
 namespace knx::product {
 
-template <typename EndpointDefinitionT, typename ParameterSchemaT>
+template <typename EndpointDefinitionT, typename ParametersT>
 std::string exportCommissionedProductToJson(
-    const CommissionedProductDefinition<EndpointDefinitionT, ParameterSchemaT>& definition)
+    const CommissionedProductDefinition<EndpointDefinitionT, ParametersT>& definition)
 {
     const auto descriptor = makeCommissionedExportDescriptor(definition);
-    if constexpr (detail::kIsLayoutParameters<std::remove_cvref_t<ParameterSchemaT>>) {
-        return exportDescriptorToJson(descriptor,
-                                      parameterLayoutToJson(std::remove_cvref_t<ParameterSchemaT>::layout));
+    if constexpr (detail::kHasParameters<std::remove_cvref_t<ParametersT>>) {
+        return exportDescriptorToJson(descriptor, parameterLayoutToJson(std::remove_cvref_t<ParametersT>::layout));
     } else {
         return exportDescriptorToJson(descriptor);
     }

@@ -289,11 +289,6 @@ private:
     std::array<uint8_t, objects::tableseg::kGroupAddressTableSize> _groupAddressSegment{};
     std::array<uint8_t, objects::tableseg::kAssociationTableSize> _associationSegment{};
     std::array<uint8_t, objects::tableseg::kGroupObjectTableSize> _groupObjectSegment{};
-    /// The application code segment of a product without a parameter image
-    /// (objects::ParameterImageBinding): ETS writes here and LoadCompleted
-    /// copies it to the program data. With an image bound, ETS writes into
-    /// the image and this stays empty.
-    std::vector<uint8_t> _applicationCodeSegment;
 };
 
 } // namespace bau

@@ -946,11 +946,6 @@ util::Result<void> BusAccessStackPort::registerMemoryRegion(const application::M
                         : util::Result<void>::err(util::ErrorCode::NotInitialized);
 }
 
-bool BusAccessStackPort::memoryRegionWritten(MemoryAddress regionStart) const
-{
-    return _application ? _application->memoryRegionWritten(regionStart) : false;
-}
-
 // ---------------------------------------------------------------------------
 // Group transmission
 // ---------------------------------------------------------------------------

@@ -12,8 +12,8 @@
  * CommissionedProductRuntime.
  *
  * These helpers wrap CommissionedProductRuntime::applyCommissionedGroupAddresses
- * and applyCommissionedParameter. They are aliases that exist to make the
- * "this is a test-only call" intent visible at the call site.
+ * and the loading of a whole parameter image. They exist to make the "this is
+ * a test-only call" intent visible at the call site.
  */
 
 #pragma once
@@ -35,26 +35,18 @@ auto bindDemoGroupAddresses(CommissionedProductRuntime<ProductDefinitionT, Bindi
     return runtime.applyCommissionedGroupAddresses(std::forward<Bindings>(bindings)...);
 }
 
-template <auto ParameterId, typename ProductDefinitionT, size_t BindingCapacity>
-auto applyDemoParameterValue(
-    CommissionedProductRuntime<ProductDefinitionT, BindingCapacity>& runtime,
-    typename ProductDefinitionT::template ParameterValueType<ParameterId> value) -> util::Result<void>
-{
-    return runtime.template applyCommissionedParameter<ParameterId>(std::move(value));
-}
-
-/// Apply raw ETS ProgramData bytes to a commissioned product's parameter state.
+/// Replace a product's whole parameter image the way a completed ETS download
+/// does: the image is checked against its bounds, stored, and
+/// onParametersChanged fires. False when the size is wrong or a value is
+/// outside its bounds.
 ///
-/// Use in unit/integration tests to simulate what ETS does when it downloads
-/// device parameters over TP1 or KNXnet/IP.  The byte layout is sequential
-/// big-endian: bool→1 byte, uint8_t→1 byte, uint16_t/int16_t/Enum→2 bytes,
-/// float→4 bytes.  Parameters whose kind is None or Text consume no bytes and
-/// are skipped.
+/// For tests and demo set-ups without ETS. To change one parameter, use
+/// CommissionedProductRuntime::setParameter().
 template <typename ProductDefinitionT, size_t BindingCapacity>
-void applyParameterDataBytes(CommissionedProductRuntime<ProductDefinitionT, BindingCapacity>& runtime,
-                             std::span<const uint8_t> data)
+bool loadParameterImage(CommissionedProductRuntime<ProductDefinitionT, BindingCapacity>& runtime,
+                        std::span<const uint8_t> image)
 {
-    runtime.applyParameterDataBytesForExpertUse(data);
+    return runtime.loadParameterImageForExpertUse(image);
 }
 
 } // namespace knx::product::expert

@@ -762,8 +762,9 @@ configurations: Cortex-M0+ flash 114058 to 82683 B; `tp1-standard`, Cortex-M4 fl
 - **`DptValue` for state providers and writes.** The decode on a bus write and the encode of a provider
   still build a `DptValue`, which holds a `float` and a `std::string` in its variant (32 B on a
   32-bit target). Removing that is S2.
-- **Out of scope, noted.** `ParameterState::applyFromBytesAt<I>` is a per-parameter template, so it
-  still costs code per parameter (possible S1b). Runtime persistence semantics were not touched
+- **Out of scope, noted.** The parameter state was a per-parameter template and cost code per
+  parameter. It has since been replaced by the parameter layout
+  ([parameter-model.md](parameter-model.md)), which costs none. Runtime persistence semantics were not touched
   (`persisted` is still export-only).
 - **Behaviour changes to know.** A bus write whose value does not match the port type and for which no
   handler is bound now yields `OperationNotReady`, not `DecodeFailed` (the callback discards the

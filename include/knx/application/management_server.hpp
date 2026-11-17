@@ -156,7 +156,6 @@ public:
     void setPropertyDescriptionProvider(PropertyDescriptionProvider provider);
     util::Result<void> registerMemoryRegion(const MemoryRegion& region, std::span<uint8_t> storage,
                                             MemoryWriteGuard writeGuard = {});
-    bool memoryRegionWritten(MemoryAddress regionStart) const;
 
     DeviceDescriptorService& deviceDescriptorService() { return *_deviceDescriptorService; }
     PropertyServices& propertyServices() { return *_propertyServices; }
@@ -260,10 +259,6 @@ private:
     struct MemorySegmentBinding {
         MemoryRegion region;
         std::span<uint8_t> storage;
-        /// Set once a memory write lands anywhere in this region. Lets callers
-        /// tell "ETS downloaded zeros" from "ETS never touched this segment" —
-        /// the buffer reads all-zero either way.
-        bool written{false};
         /// Refuses writes while it returns false (see MemoryWriteGuard).
         MemoryWriteGuard writeGuard{};
     };

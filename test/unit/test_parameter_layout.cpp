@@ -307,6 +307,61 @@ void test_export_walk_reports_offsets_and_conditions(void)
     TEST_ASSERT_EQUAL_DOUBLE(-5.0, seen[8].defaultValue);
 }
 
+// Sections put parameters of one block on pages of their own. They change
+// the pages, never the image.
+enum class Room : uint8_t { Cooling, HeatGain, CoolMode, CoolGain };
+
+inline constexpr auto kRoomBlock = params::parameterBlock<Room>(
+    {.key = "room", .name = "Room"},
+    params::param<Room::Cooling, bool>({.name = "Cooling"}),
+    params::section({.name = "Heating"}, params::param<Room::HeatGain, uint8_t>({.name = "Gain", .def = 5})),
+    params::section({.name = "Cooling", .visible = params::when<Room::Cooling>(true)},
+                    params::param<Room::CoolMode, uint16_t>({.name = "Mode"}),
+                    params::param<Room::CoolGain, uint8_t>({.name = "Gain", .def = 7})));
+inline constexpr auto kRoomLayout = params::parameterLayout(kRoomBlock);
+using RoomBlock = std::remove_cvref_t<decltype(kRoomBlock)>;
+
+static_assert(RoomBlock::kParameterCount == 4u);
+static_assert(RoomBlock::kStride == 5u);
+static_assert(RoomBlock::kOffset<Room::CoolMode> == 2u);
+static_assert(RoomBlock::kOffset<Room::CoolGain> == 4u);
+static_assert(kRoomBlock.sectionCount == 2u);
+static_assert(params::kDefaultImageOf<kRoomLayout>[4] == 7u);
+static_assert(params::checkLayout(kRoomLayout) == params::LayoutError::None);
+// The switch of a section must be outside it.
+static_assert(params::checkLayout(params::parameterLayout(params::parameterBlock<Room>(
+                  {}, params::section({.name = "Cooling", .visible = params::when<Room::Cooling>(true)},
+                                      params::param<Room::Cooling, bool>({}),
+                                      params::param<Room::CoolGain, uint8_t>({})))))
+              == params::LayoutError::SectionConditionOnOwnSection);
+
+void test_sections_reach_the_export(void)
+{
+    std::vector<int> sections;
+    params::forEachParameter(kRoomLayout, [&](const params::ParameterInfo& info) {
+        sections.push_back(info.section);
+        if (info.section == 1) {
+            TEST_ASSERT_TRUE(info.sectionName == "Cooling");
+            TEST_ASSERT_TRUE(info.sectionVisible.op == params::ConditionOp::AnyOf);
+        }
+    });
+    TEST_ASSERT_EQUAL_UINT(4u, sections.size());
+    TEST_ASSERT_EQUAL_INT(-1, sections[0]);
+    TEST_ASSERT_EQUAL_INT(0, sections[1]);
+    TEST_ASSERT_EQUAL_INT(1, sections[2]);
+    TEST_ASSERT_EQUAL_INT(1, sections[3]);
+
+    const std::string json = parameterLayoutToJson(kRoomLayout);
+    TEST_ASSERT_TRUE(json.find("\"sections\":[{\"index\":0,\"name\":\"Heating\"},{\"index\":1,\"name\":\"Cooling\","
+                               "\"visible\":{\"block\":0,\"parameter\":0,\"op\":\"anyOf\",\"values\":[1]}}]")
+                     != std::string::npos);
+    TEST_ASSERT_TRUE(json.find("\"name\":\"Mode\",\"valueKind\":3,\"sizeInBit\":16,\"offset\":2,\"default\":0,\"section\":1}")
+                     != std::string::npos);
+    // A parameter outside every section has no "section" member.
+    TEST_ASSERT_TRUE(json.find("\"name\":\"Cooling\",\"valueKind\":1,\"sizeInBit\":8,\"offset\":0,\"default\":0}")
+                     != std::string::npos);
+}
+
 // What the knxprod exporter is given: every offset from the layout, an option
 // list once, a condition by block index and parameter id.
 void test_json_carries_the_layout(void)
@@ -354,5 +409,6 @@ int main(void)
     RUN_TEST(test_dpt9_round_trips_through_the_image);
     RUN_TEST(test_export_walk_reports_offsets_and_conditions);
     RUN_TEST(test_json_carries_the_layout);
+    RUN_TEST(test_sections_reach_the_export);
     return UNITY_END();
 }

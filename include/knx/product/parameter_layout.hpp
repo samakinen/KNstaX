@@ -4,10 +4,8 @@
  * @file parameter_layout.hpp
  * @brief ETS parameters as a byte image with a compile-time layout
  *
- * The parameter model of docs/design/parameter-model.md. Until the old model
- * is removed it stands beside the StaticParameterSchema of
- * commissioned_product.hpp. A product takes it with
- * makeCommissionedProduct<kParameters>(...); parameter_layout_export.hpp
+ * The parameter model of docs/design/parameter-model.md. A product takes it
+ * with makeCommissionedProduct<kParameters>(...); parameter_layout_export.hpp
  * writes it for the knxprod exporter.
  *
  * A product declares parameter blocks, each with its own id enum, and a layout
@@ -384,6 +382,49 @@ struct BlockSpec {
     Condition visible{};
 };
 
+/// A page of its own inside a block: a name, and when ETS shows it.
+struct SectionSpec {
+    std::string_view name{};
+    Condition visible{};
+};
+
+/// Parameters of a block that ETS shows on a page of their own. It changes
+/// nothing in the image: the parameters stay in declaration order.
+template <typename... Ps>
+struct Section {
+    SectionSpec spec{};
+    std::tuple<Ps...> parameters{};
+};
+
+/**
+ * @brief Put some parameters of a block on a page of their own.
+ *
+ *   params::parameterBlock<P>(
+ *       {.key = "device"},
+ *       params::section({.name = "Heating", .visible = params::when<P::HeatingEnabled>(true)},
+ *                       params::param<P::HeatingGain, uint8_t>({...}),
+ *                       params::param<P::HeatingTime, uint16_t>({...})),
+ *       ...);
+ *
+ * The condition is declared once for the page. Its controlling parameter is
+ * outside the section.
+ */
+template <typename... Ps>
+constexpr Section<Ps...> section(SectionSpec spec, Ps... parameters)
+{
+    return Section<Ps...>{spec, std::tuple<Ps...>{parameters...}};
+}
+
+/// Sections one block can declare.
+inline constexpr size_t kMaxSections = 24;
+
+/// Where a section sits in its block's parameter list.
+struct SectionSpan {
+    SectionSpec spec{};
+    uint16_t first{0};
+    uint16_t count{0};
+};
+
 template <typename IdEnum, typename... Ps>
 struct ParameterBlock {
     static_assert(std::is_enum_v<IdEnum>, "a parameter block is identified by its id enum");
@@ -413,12 +454,65 @@ struct ParameterBlock {
 
     BlockSpec spec{};
     std::tuple<Ps...> parameters{};
+    /// Export data: the pages inside the block.
+    std::array<SectionSpan, kMaxSections> sections{};
+    size_t sectionCount{0};
 };
 
-template <typename IdEnum, typename... Ps>
-constexpr ParameterBlock<IdEnum, Ps...> parameterBlock(BlockSpec spec, Ps... parameters)
+namespace detail {
+
+template <typename T>
+inline constexpr bool kIsSection = false;
+template <typename... Ps>
+inline constexpr bool kIsSection<Section<Ps...>> = true;
+
+template <typename T>
+inline constexpr size_t kItemParameters = 1;
+template <typename... Ps>
+inline constexpr size_t kItemParameters<Section<Ps...>> = sizeof...(Ps);
+
+template <auto Id, typename V>
+constexpr std::tuple<Param<Id, V>> flattenItem(const Param<Id, V>& parameter)
 {
-    return ParameterBlock<IdEnum, Ps...>{spec, std::tuple<Ps...>{parameters...}};
+    return std::tuple<Param<Id, V>>{parameter};
+}
+
+template <typename... Ps>
+constexpr std::tuple<Ps...> flattenItem(const Section<Ps...>& section)
+{
+    return section.parameters;
+}
+
+template <typename IdEnum, typename... Ps>
+constexpr ParameterBlock<IdEnum, Ps...> makeBlock(BlockSpec spec, const std::tuple<Ps...>& parameters,
+                                                  const std::array<SectionSpan, kMaxSections>& sections,
+                                                  size_t sectionCount)
+{
+    return ParameterBlock<IdEnum, Ps...>{spec, parameters, sections, sectionCount};
+}
+
+} // namespace detail
+
+/// A block from its parameters, in image order. An item is a param<>() or a
+/// section() of them.
+template <typename IdEnum, typename... Items>
+constexpr auto parameterBlock(BlockSpec spec, const Items&... items)
+{
+    static_assert((size_t{0} + ... + (detail::kIsSection<Items> ? 1u : 0u)) <= kMaxSections,
+                  "too many sections in one block; raise params::kMaxSections");
+    std::array<SectionSpan, kMaxSections> sections{};
+    size_t sectionCount = 0;
+    size_t at = 0;
+    const auto note = [&](const auto& item) {
+        using Item = std::remove_cvref_t<decltype(item)>;
+        if constexpr (detail::kIsSection<Item>) {
+            sections[sectionCount++] = SectionSpan{item.spec, static_cast<uint16_t>(at),
+                                                   static_cast<uint16_t>(detail::kItemParameters<Item>)};
+        }
+        at += detail::kItemParameters<Item>;
+    };
+    (note(items), ...);
+    return detail::makeBlock<IdEnum>(spec, std::tuple_cat(detail::flattenItem(items)...), sections, sectionCount);
 }
 
 /// A block that appears N times in the layout, one after the other.
@@ -789,6 +883,10 @@ struct ParameterInfo {
     size_t blockBase{0};
     size_t blockStride{0};
     size_t blockCount{0};
+    /// Index of the parameter's section in its block, or -1 for the block's own page.
+    int section{-1};
+    std::string_view sectionName{};
+    Condition sectionVisible{};
 
     uint16_t id{0};
     ExportParameterValueKind kind{ExportParameterValueKind::None};
@@ -813,6 +911,7 @@ enum class LayoutError : uint8_t {
     ConditionOnRepeatedBlock,
     ConditionOnItself,
     BlockConditionOnOwnBlock,
+    SectionConditionOnOwnSection,
     DefaultOutsideBounds,
 };
 
@@ -836,18 +935,23 @@ constexpr LayoutError checkLayout(const ParameterLayout<Rs...>& layout)
             error = found;
         }
     };
-    const auto checkCondition = [&](const Condition& condition, const ParameterInfo& owner, bool ofBlock) {
+    enum class Of { Parameter, Section, Block };
+    const auto checkCondition = [&](const Condition& condition, const ParameterInfo& owner, Of of) {
         if (condition.op == ConditionOp::Always) {
             return;
         }
         bool blockFound = false;
         bool parameterFound = false;
         size_t instances = 0;
+        int controllingSection = -1;
         forEachParameter(layout, [&](const ParameterInfo& other) {
             if (other.block == condition.block) {
                 blockFound = true;
                 instances = other.blockCount;
-                parameterFound = parameterFound || other.id == condition.parameterId;
+                if (other.id == condition.parameterId) {
+                    parameterFound = true;
+                    controllingSection = other.section;
+                }
             }
         });
         const bool sameBlock = condition.block == owner.block;
@@ -855,17 +959,20 @@ constexpr LayoutError checkLayout(const ParameterLayout<Rs...>& layout)
             fail(LayoutError::ConditionBlockUnknown);
         } else if (!parameterFound) {
             fail(LayoutError::ConditionParameterUnknown);
-        } else if (ofBlock && sameBlock) {
+        } else if (of == Of::Block && sameBlock) {
             fail(LayoutError::BlockConditionOnOwnBlock);
         } else if (!sameBlock && instances != 1u) {
             fail(LayoutError::ConditionOnRepeatedBlock);
-        } else if (!ofBlock && sameBlock && condition.parameterId == owner.id) {
+        } else if (of == Of::Section && sameBlock && controllingSection == owner.section) {
+            fail(LayoutError::SectionConditionOnOwnSection);
+        } else if (of == Of::Parameter && sameBlock && condition.parameterId == owner.id) {
             fail(LayoutError::ConditionOnItself);
         }
     };
     forEachParameter(layout, [&](const ParameterInfo& info) {
-        checkCondition(info.visible, info, false);
-        checkCondition(info.blockVisible, info, true);
+        checkCondition(info.visible, info, Of::Parameter);
+        checkCondition(info.sectionVisible, info, Of::Section);
+        checkCondition(info.blockVisible, info, Of::Block);
         if (info.min != info.max) {
             if (info.defaultValue < info.min || info.defaultValue > info.max) {
                 fail(LayoutError::DefaultOutsideBounds);
@@ -905,6 +1012,9 @@ constexpr void store(std::span<uint8_t, LayoutT::kSize> image, size_t instance,
     detail::encode(value, image.data() + offsetInImage<LayoutT, Id>(instance));
 }
 
+/// The parameters of a product that declares none.
+struct NoParameters {};
+
 /**
  * @brief Names a layout as the parameters of a product
  *
@@ -935,6 +1045,9 @@ struct LayoutParameters {
     static_assert(kError != LayoutError::BlockConditionOnOwnBlock,
                   "a block is shown depending on one of its own parameters; the controlling "
                   "parameter must be in another block");
+    static_assert(kError != LayoutError::SectionConditionOnOwnSection,
+                  "a section is shown depending on one of its own parameters; the controlling "
+                  "parameter must be outside the section");
     static_assert(kError != LayoutError::DefaultOutsideBounds,
                   "a parameter's default is outside its min..max, or is not one of its options");
 };
@@ -951,12 +1064,22 @@ constexpr void forEachParameter(const ParameterLayout<Rs...>& layout, Visitor&& 
     const auto walkEntry = [&](const auto& repeated) {
         using BlockT = typename std::remove_cvref_t<decltype(repeated)>::block_type;
         size_t offset = 0;
+        size_t index = 0;
         std::apply(
             [&](const auto&... parameter) {
                 const auto one = [&](const auto& p) {
                     using ParamT = std::remove_cvref_t<decltype(p)>;
                     using V = typename ParamT::value_type;
                     ParameterInfo info{};
+                    for (size_t s = 0; s < repeated.block.sectionCount; ++s) {
+                        const SectionSpan& span = repeated.block.sections[s];
+                        if (index >= span.first && index < static_cast<size_t>(span.first) + span.count) {
+                            info.section = static_cast<int>(s);
+                            info.sectionName = span.spec.name;
+                            info.sectionVisible = span.spec.visible;
+                        }
+                    }
+                    ++index;
                     info.blockKey = repeated.block.spec.key;
                     info.blockName = repeated.block.spec.name;
                     info.blockVisible = repeated.block.spec.visible;

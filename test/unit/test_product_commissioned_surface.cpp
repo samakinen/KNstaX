@@ -10,6 +10,7 @@
 #include "knx/physical/tp1_mac_physical.hpp"
 #include "knx/platform/linux_platform.hpp"
 #include "knx/product/commissioned_product.hpp"
+#include "knx/product/commissioned_product_export.hpp"
 
 #include <filesystem>
 #include <memory>
@@ -29,8 +30,14 @@ enum class CommissionedSurfaceParameter : uint16_t {
     DefaultRelayState = 5,
 };
 
+inline constexpr auto kCommissionedSurfaceParameters =
+    params::parameterLayout(params::parameterBlock<CommissionedSurfaceParameter>(
+        {.key = "device", .name = "Device"},
+        params::param<CommissionedSurfaceParameter::DefaultRelayState, bool>(
+            {.name = "Default relay state", .def = false, .key = "default_relay_state"})));
+
 constexpr auto kCommissionedSurfaceProduct =
-    makeCommissionedProduct(
+    makeCommissionedProduct<kCommissionedSurfaceParameters>(
         makeEndpointDefinition<CommissionedSurfacePort,
                                semantics::SwitchCommand<CommissionedSurfacePort::RelayCommand,
                                                         "relay_command">,
@@ -50,9 +57,7 @@ constexpr auto kCommissionedSurfaceProduct =
                 .namespacePrefix = "commissioned_surface",
                 .schemaVersion = 3,
                 .persistKnxState = true,
-            }),
-        makeParameterSchema(
-            parameter<CommissionedSurfaceParameter::DefaultRelayState>("default_relay_state", false)));
+            }));
 
 std::unique_ptr<physical::Tp1MediumBackend> makeNullBackend()
 {
@@ -101,13 +106,15 @@ void test_product_commissioned_surface_uses_public_commissioning_apis_by_default
                              runtime->knxPersistenceIdentity().storageNamespace.c_str());
     TEST_ASSERT_EQUAL_UINT16(3u, runtime->knxPersistenceIdentity().schemaVersion);
     TEST_ASSERT_TRUE(isInitialIndividualAddress(runtime->individualAddress()));
-    TEST_ASSERT_FALSE(runtime->parameters().hasCustomValue<CommissionedSurfaceParameter::DefaultRelayState>());
+    const auto relayDefault = [&] {
+        return runtime->parameters()
+            .template block<CommissionedSurfaceParameter>()
+            .template get<CommissionedSurfaceParameter::DefaultRelayState>();
+    };
+    TEST_ASSERT_FALSE(relayDefault());
 
-    TEST_ASSERT_TRUE(runtime->template applyCommissionedParameter<
-                         CommissionedSurfaceParameter::DefaultRelayState>(true)
-                         .isOk());
-    TEST_ASSERT_TRUE(runtime->parameters().hasCustomValue<CommissionedSurfaceParameter::DefaultRelayState>());
-    TEST_ASSERT_TRUE(runtime->parameters().get<CommissionedSurfaceParameter::DefaultRelayState>());
+    TEST_ASSERT_TRUE(runtime->template setParameter<CommissionedSurfaceParameter::DefaultRelayState>(true).isOk());
+    TEST_ASSERT_TRUE(relayDefault());
     TEST_ASSERT_TRUE(runtime->applyCommissionedGroupAddresses(
         groupAddressBinding(CommissionedSurfacePort::RelayState, GroupAddress(2, 1, 9)))
                          .isOk());
@@ -232,7 +239,7 @@ void test_product_commissioned_surface_forwards_owner_work_hint_and_notification
     runtime_type runtime(
         kCommissionedSurfaceProduct,
         std::move(endpointBindings),
-        detail::ParameterCallbacks<typename runtime_type::parameter_schema_type>{},
+        detail::ParameterCallbacks<typename runtime_type::parameters_type>{},
         {},
         CommissionedProductOptions{
             .standaloneDemoIndividualAddress = IndividualAddress(1, 1, 44),
@@ -259,22 +266,19 @@ void test_product_commissioned_surface_forwards_owner_work_hint_and_notification
     TEST_ASSERT_EQUAL_UINT(1u, runtime.pendingBusActionCount());
 }
 
-void test_product_commissioned_export_descriptor_includes_parameters(void)
+void test_product_commissioned_export_includes_parameters(void)
 {
     constexpr auto exportDesc = makeCommissionedExportDescriptor(kCommissionedSurfaceProduct);
 
     // Two communication objects defined in the fixture
     TEST_ASSERT_EQUAL_UINT(2u, exportDesc.kCommunicationObjectCount);
 
-    // One parameter defined in the fixture
-    TEST_ASSERT_EQUAL_UINT(1u, exportDesc.kParameterCount);
-
-    const auto& param = exportDesc.parameters[0];
-    TEST_ASSERT_EQUAL_STRING("default_relay_state", param.key.data());
-    TEST_ASSERT_EQUAL_INT(static_cast<int>(ExportParameterValueKind::Boolean),
-                          static_cast<int>(param.valueKind));
-    TEST_ASSERT_EQUAL_UINT16(static_cast<uint16_t>(CommissionedSurfaceParameter::DefaultRelayState),
-                             param.id);
+    // One parameter defined in the fixture, exported with its block
+    const std::string json = exportCommissionedProductToJson(kCommissionedSurfaceProduct);
+    TEST_ASSERT_TRUE(json.find("\"parameterImage\":{\"size\":1,") != std::string::npos);
+    TEST_ASSERT_TRUE(json.find("{\"id\":5,\"key\":\"default_relay_state\",\"name\":\"Default relay state\","
+                               "\"valueKind\":1,\"sizeInBit\":8,\"offset\":0,\"default\":0}")
+                     != std::string::npos);
 }
 
 void test_product_commissioned_security_off_by_default(void)
@@ -575,7 +579,7 @@ void test_product_commissioned_security_helpers_refuse_before_start(void)
     runtime_type runtime(
         kCommissionedSurfaceProduct,
         std::move(endpointBindings),
-        detail::ParameterCallbacks<typename runtime_type::parameter_schema_type>{},
+        detail::ParameterCallbacks<typename runtime_type::parameters_type>{},
         {},
         CommissionedProductOptions{});
 
@@ -736,7 +740,7 @@ int main(void)
     RUN_TEST(test_product_commissioned_surface_starts_via_tp1_mac_physical);
     RUN_TEST(test_product_commissioned_serial_number_comes_from_the_platform);
     RUN_TEST(test_product_commissioned_surface_forwards_owner_work_hint_and_notification);
-    RUN_TEST(test_product_commissioned_export_descriptor_includes_parameters);
+    RUN_TEST(test_product_commissioned_export_includes_parameters);
     RUN_TEST(test_product_commissioned_security_off_by_default);
     RUN_TEST(test_product_commissioned_secure_options_wires_tool_key);
     RUN_TEST(test_product_commissioned_secure_options_enabled_no_key);

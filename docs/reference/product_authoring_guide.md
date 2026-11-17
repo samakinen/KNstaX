@@ -62,10 +62,11 @@ target. That file is not an illustration — it is the definition the
 
 `commissioned_product.hpp` provides:
 
-- `makeCommissionedProduct(...)` — wraps an endpoint definition with an optional
-  parameter schema into one compiled object.
+- `makeCommissionedProduct(...)` — wraps an endpoint definition into one compiled
+  object; `makeCommissionedProduct<kParameters>(...)` also names the product's
+  parameter layout.
 - `makeCommissionedBindings(...)` — a fluent builder for all firmware callbacks:
-  `onCommand`, `onStateWrite`, `provideState`, `onParameterChanged`,
+  `onCommand`, `onStateWrite`, `provideState`, `onParametersChanged`,
   `onProgrammingModeChanged`, `onLifecycleChanged`, `onFault`.
 
   A binding is stored as a three-word entry, and only for the ports that can
@@ -130,12 +131,13 @@ the definition, so table overflow is impossible by construction.
 `CommissionedProductRuntime::kPortCount` and `registeredGroupObjectCount()` expose
 this as a verifiable invariant.
 
-**ETS parameter delivery**: parameter data written by ETS via the KNX management
-model (`A_PropertyValue_Write` → `PID_PROGRAM_DATA`) is decoded by
-`ApplicationProgramObject`, forwarded through `wireParameterDataCallback`, decoded
-by `ParameterState::applyFromBytes`, and delivered to `onParameterChanged`
-handlers. The `expert::applyParameterDataBytes` helper exercises the same path
-in tests and demos.
+**ETS parameter delivery**: the parameters are one image, a byte array of
+exactly the layout's size that the runtime owns. ETS writes into it with
+`A_Memory_Write`; at `LoadCompleted` the stack checks every value against its
+declared bounds, stores the image with the layout's fingerprint, and calls
+`onParametersChanged` with a view over the new values. `parameters()` gives the
+same view at any time; reading a parameter is a load at a constant offset.
+`expert::loadParameterImage` takes the same path in tests and demos.
 
 ---
 
@@ -185,22 +187,37 @@ Put this `constexpr` in its own header (e.g. `product.hpp`) with no hardware
 or platform dependencies so the same object can be used by the firmware binary
 and the ETS export build target.
 
-**3. Add a parameter schema if needed (optional).**
+**3. Add parameters if needed (optional).**
 
 ```cpp
-enum class SwitchParam : uint16_t {
-    DefaultState = 0,
-};
+enum class SwitchParam : uint8_t { DefaultState, OffDelayS };
 
-constexpr auto kSwitchProduct = makeCommissionedProduct(
-    makeEndpointDefinition<...>(...),
-    makeParameterSchema(
-        parameter<SwitchParam::DefaultState>("default_state", false)));
+inline constexpr auto kSwitchParameters = params::parameterLayout(params::parameterBlock<SwitchParam>(
+    {.key = "switch", .name = "Switch"},
+    params::param<SwitchParam::DefaultState, bool>({.name = "State after start"}),
+    params::param<SwitchParam::OffDelayS, uint16_t>(
+        {.name = "Switch-off delay", .def = 0, .min = 0, .max = 3600, .unit = "s"})));
+
+constexpr auto kSwitchProduct = makeCommissionedProduct<kSwitchParameters>(
+    makeEndpointDefinition<...>(...));
 ```
 
-Parameter data is delivered by ETS via the KNX management model and fires
-`onParameterChanged` handlers. Parameters can also be applied programmatically
-via `applyCommissionedParameter(...)` for testing or startup defaults.
+The firmware reads them through a view, once after start and again when ETS
+has downloaded new ones:
+
+```cpp
+bindings.onParametersChanged([](params::ViewFor<kSwitchParameters> p) {
+    g_offDelayS = p.block<SwitchParam>().get<SwitchParam::OffDelayS>();
+});
+// ... after startCommissionedProduct():
+g_offDelayS = app->parameters().block<SwitchParam>().get<SwitchParam::OffDelayS>();
+```
+
+A product with several identical channels declares the channel's block once
+and repeats it: `params::repeat<8>(kInputBlock)`, read with
+`parameters().block<In>(channel)`. `setParameter<Id>(value)` changes a
+parameter from the device itself. The [ETS export guide](ets_export_guide.md)
+describes options, conditions and sections.
 
 **4. Build the bindings and start the product.**
 

@@ -36,8 +36,16 @@ enum class ThermostatParameter : uint16_t {
     DefaultSetpoint = 0,
 };
 
+// One ETS parameter. A DPT 9 value, the KNX float that ETS and third-party
+// tools handle best.
+inline constexpr auto kThermostatParameters =
+    params::parameterLayout(params::parameterBlock<ThermostatParameter>(
+        {.key = "thermostat", .name = "Thermostat"},
+        params::param<ThermostatParameter::DefaultSetpoint, Dpt9Float>(
+            {.name = "Default setpoint", .def = 22.0f, .min = 5, .max = 35, .unit = "°C", .key = "default_setpoint"})));
+
 constexpr auto kThermostatProduct =
-    makeCommissionedProduct(
+    makeCommissionedProduct<kThermostatParameters>(
         makeEndpointDefinition<ThermostatPort,
                                semantics::TemperatureStateInOut<ThermostatPort::Setpoint,
                                                                 "setpoint_temperature",
@@ -63,9 +71,7 @@ constexpr auto kThermostatProduct =
                 .namespacePrefix = "tp1_thermostat",
                 .schemaVersion = 1,
                 .persistKnxState = true,
-            }),
-        makeParameterSchema(
-            parameter<ThermostatParameter::DefaultSetpoint>("default_setpoint", 22.0f)));
+            }));
 
 } // namespace
 
@@ -98,8 +104,8 @@ int main() {
             .provideState<ThermostatPort::HvacMode>([&]() {
                 return hvacMode;
             })
-            .onParameterChanged<ThermostatParameter::DefaultSetpoint>([&](float value) {
-                setpoint = value;
+            .onParametersChanged([&](params::ViewFor<kThermostatParameters> parameters) {
+                setpoint = parameters.block<ThermostatParameter>().get<ThermostatParameter::DefaultSetpoint>();
                 KNX_LOGI("Example.Thermostat", "Default setpoint parameter: %.1f C", setpoint);
             })
             .onProgrammingModeChanged([](bool enabled) {
@@ -120,7 +126,7 @@ int main() {
     }
 
     auto app = std::move(appResult.value());
-    setpoint = app->parameters().get<ThermostatParameter::DefaultSetpoint>();
+    setpoint = app->parameters().block<ThermostatParameter>().get<ThermostatParameter::DefaultSetpoint>();
 
     float lastPublishedRoomTemp = roomTemp;
     uint32_t lastPublishMs = 0;

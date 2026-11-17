@@ -96,7 +96,7 @@ struct CompiledEndpointDefinition {
     RuntimeProductIdentity identity{};
     PersistencePolicy persistence{};
     RuntimeDescriptorSet<kCommunicationObjectCount, port_id_type> runtime{};
-    StaticExportDescriptor<kCommunicationObjectCount, 0> exportDescriptor{};
+    StaticExportDescriptor<kCommunicationObjectCount> exportDescriptor{};
 
     constexpr std::optional<size_t> slotForLogicalId(port_id_type logicalId) const
     {
@@ -274,111 +274,6 @@ constexpr ExportCapacities makeExportCapacities(
         transmittingCount == 0u ? Count : transmittingCount);
 }
 
-// ---------------------------------------------------------------------------
-// Parameter export helpers
-// ---------------------------------------------------------------------------
-
-template <typename ValueT>
-constexpr ExportParameterValueKind exportParameterValueKind() noexcept
-{
-    if constexpr (std::is_same_v<ValueT, bool>) {
-        return ExportParameterValueKind::Boolean;
-    } else if constexpr (std::is_same_v<ValueT, uint8_t>) {
-        return ExportParameterValueKind::Unsigned8;
-    } else if constexpr (std::is_same_v<ValueT, uint16_t>) {
-        return ExportParameterValueKind::Unsigned16;
-    } else if constexpr (std::is_same_v<ValueT, int16_t>) {
-        return ExportParameterValueKind::Signed16;
-    } else if constexpr (std::is_enum_v<ValueT>) {
-        return ExportParameterValueKind::Enum;
-    } else if constexpr (std::is_same_v<ValueT, std::string_view>) {
-        return ExportParameterValueKind::Text;
-    } else if constexpr (std::is_same_v<ValueT, float>) {
-        return ExportParameterValueKind::Float;
-    } else if constexpr (std::is_same_v<ValueT, Dpt9Float>) {
-        return ExportParameterValueKind::FloatDpt9;
-    } else {
-        return ExportParameterValueKind::None;
-    }
-}
-
-/// Returns the number of bytes occupied by one parameter value of the given kind
-/// in the KNX ProgramData serialisation block.  Returns 0 for kinds that are
-/// not serialisable (None, Text).
-constexpr size_t exportParameterValueByteWidth(ExportParameterValueKind kind) noexcept
-{
-    switch (kind) {
-        case ExportParameterValueKind::Boolean:   return 1;
-        case ExportParameterValueKind::Unsigned8: return 1;
-        case ExportParameterValueKind::Unsigned16: return 2;
-        case ExportParameterValueKind::Signed16:  return 2;
-        case ExportParameterValueKind::Enum:      return 2;
-        case ExportParameterValueKind::Float:     return 4;
-        case ExportParameterValueKind::FloatDpt9: return 2;
-        case ExportParameterValueKind::Text:      return 0;
-        case ExportParameterValueKind::None:      return 0;
-    }
-    return 0;
-}
-
-template <typename DescriptorT>
-constexpr ExportParameterDescriptor makeExportParameterDescriptorFrom(const DescriptorT& desc)
-{
-    using ValueT = typename DescriptorT::value_type;
-    double defaultValue = 0.0;
-    if constexpr (std::is_arithmetic_v<ValueT>) {
-        defaultValue = static_cast<double>(desc.defaultValue);
-    } else if constexpr (std::is_enum_v<ValueT>) {
-        defaultValue = static_cast<double>(static_cast<int64_t>(desc.defaultValue));
-    } else if constexpr (std::is_same_v<ValueT, Dpt9Float>) {
-        defaultValue = static_cast<double>(desc.defaultValue.value);
-    }
-    auto exported = makeExportParameterDescriptor(
-        static_cast<uint16_t>(DescriptorT::id),
-        desc.key,
-        desc.displayName.empty() ? desc.key : desc.displayName,
-        exportParameterValueKind<ValueT>(),
-        false, // not required by default
-        static_cast<application::PropertyDataType>(0),
-        defaultValue);
-
-    // Carry the authoring-side presentation metadata through to the exporter.
-    // Options are what turn an enum into an ETS drop-down; bounds and unit
-    // turn a bare spin box into a field an integrator can trust.
-    exported.optionCount = desc.options.count;
-    for (size_t i = 0; i < desc.options.count && i < kMaxExportParameterOptions; ++i) {
-        exported.options[i] =
-            ExportParameterOption{desc.options.entries[i].value, desc.options.entries[i].label};
-    }
-    exported.minValue = desc.minValue;
-    exported.maxValue = desc.maxValue;
-    exported.unit = desc.unit;
-    exported.group = desc.group;
-    exported.visibleWhenParameterId = desc.visibleWhenParameterId;
-    exported.visibleWhenValue = desc.visibleWhenValue;
-    exported.groupVisibleWhenParameterId = desc.groupVisibleWhenParameterId;
-    exported.groupVisibleWhenValue = desc.groupVisibleWhenValue;
-
-    return exported;
-}
-
-template <typename DescriptorsTupleT, size_t... Indices>
-constexpr auto makeExportParameterDescriptorsFromTuple(const DescriptorsTupleT& descriptors,
-                                                       std::index_sequence<Indices...>)
-    -> std::array<ExportParameterDescriptor, sizeof...(Indices)>
-{
-    return {makeExportParameterDescriptorFrom(std::get<Indices>(descriptors))...};
-}
-
-template <typename SchemaT>
-constexpr auto makeExportParameterDescriptors(const SchemaT& schema)
-    -> std::array<ExportParameterDescriptor, SchemaT::kParameterCount>
-{
-    return makeExportParameterDescriptorsFromTuple(
-        schema.descriptors,
-        std::make_index_sequence<SchemaT::kParameterCount>{});
-}
-
 } // namespace detail
 
 template <typename DefinitionT>
@@ -409,7 +304,7 @@ constexpr auto compileEndpointDefinition(const DefinitionT& definition)
         .runtime = RuntimeDescriptorSet<cleaned_definition_t::kPortCount, port_id_type>{
             .communicationObjects = runtimeObjects,
         },
-        .exportDescriptor = StaticExportDescriptor<cleaned_definition_t::kPortCount, 0>{
+        .exportDescriptor = StaticExportDescriptor<cleaned_definition_t::kPortCount>{
             .identity =
                 {
                     .profileKey = definition.identity.productKey,
@@ -433,7 +328,6 @@ constexpr auto compileEndpointDefinition(const DefinitionT& definition)
                                                              cleaned_definition_t::kPortCount),
             .capacities = detail::makeExportCapacities(runtimeObjects),
             .communicationObjects = exportObjects,
-            .parameters = {},
         },
     };
 }

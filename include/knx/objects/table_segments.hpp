@@ -48,12 +48,11 @@ static_assert(kAssociationTableBase + kAssociationTableSize <= 0x5000u,
 constexpr uint32_t kGroupObjectTableBase = 0x5000;
 constexpr uint32_t kGroupObjectTableSize = 2u + 256u * 2u;
 
-// Application program code segment (object index 4): matches the knxprod
-// Code RelativeSegment RS-0000 (256 bytes, no parameters defined).
+// Application program code segment (object index 4): the product's parameter
+// image (ParameterImageBinding), exactly as long as the image. A product
+// without parameters has no segment. The image can take the address space up
+// to the group address segment.
 constexpr uint32_t kApplicationCodeBase = 0x0100;
-constexpr uint32_t kApplicationCodeSize = 0x0100;
-// The most a product's parameter image can take: the address space up to the
-// group address segment.
 constexpr uint32_t kApplicationCodeMaxSize = kGroupAddressTableBase - kApplicationCodeBase;
 
 } // namespace tableseg

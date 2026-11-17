@@ -235,11 +235,17 @@ def check_knxprod_file(path, expected):
     # ETS reads the load state machine and the offset back out of the code
     # segment's id, and rejects the download of anything else ("is not a valid
     # id ID"), so the id has to agree with the attributes beside it.
-    segment = require(root, './/knx:ApplicationProgram/knx:Static/knx:Code/knx:RelativeSegment')
-    expected_segment_id = '{0}_RS-{1:02d}-{2:05d}'.format(
-        app_id, int(segment.get('LoadStateMachine')), int(segment.get('Offset')))
-    expect_equal(segment.get('Id'), expected_segment_id,
-                 f'RelativeSegment Id does not match its own attributes in {path}')
+    # Only a product with parameters has a segment: without them the device has
+    # no parameter image and the file declares none.
+    segment = root.find('.//knx:ApplicationProgram/knx:Static/knx:Code/knx:RelativeSegment', NS)
+    has_parameters = root.find('.//knx:ApplicationProgram/knx:Static/knx:Parameters/knx:Parameter', NS) is not None
+    if has_parameters != (segment is not None):
+        raise SystemExit(f'code segment and parameters do not go together in {path}')
+    if segment is not None:
+        expected_segment_id = '{0}_RS-{1:02d}-{2:05d}'.format(
+            app_id, int(segment.get('LoadStateMachine')), int(segment.get('Offset')))
+        expect_equal(segment.get('Id'), expected_segment_id,
+                     f'RelativeSegment Id does not match its own attributes in {path}')
 
     # The device's table ceilings have to reach the knxprod, or ETS links no
     # group address at all ("The maximum associations of the device are been

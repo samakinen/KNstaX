@@ -248,38 +248,19 @@ util::Result<void> writeProgramData(
         return util::Result<void>::err(util::ErrorCode::OutOfRange);
     }
 
-    if (domain->hasParameterImage()) {
-        // The image has a fixed size: a write lands in it or is refused.
-        const auto image = domain->parameterImage();
-        if (offset + count > image.size()) {
-            return util::Result<void>::err(util::ErrorCode::OutOfRange);
-        }
-        auto res = in.readBytes(image.subspan(offset, count));
-        if (res.isError()) {
-            return res;
-        }
-        if (domain->acceptParameterImage()) {
-            domain->notifyProgramDataChanged();
-        }
-        return util::Result<void>::ok();
+    // The image has a fixed size: a write lands in it or is refused. A
+    // product without parameters has no image, so every write is refused.
+    const auto image = domain->parameterImage();
+    if (offset + count > image.size()) {
+        return util::Result<void>::err(util::ErrorCode::OutOfRange);
     }
-
-    std::vector<uint8_t> chunk(count, 0);
-    auto res = in.readBytes(chunk);
+    auto res = in.readBytes(image.subspan(offset, count));
     if (res.isError()) {
         return res;
     }
-
-    std::vector<uint8_t> updated(domain->getProgramData().begin(), domain->getProgramData().end());
-    if (offset > updated.size()) {
-        updated.resize(offset, 0);
+    if (domain->acceptParameterImage()) {
+        domain->notifyProgramDataChanged();
     }
-    if (offset + count > updated.size()) {
-        updated.resize(offset + count, 0);
-    }
-    std::copy(chunk.begin(), chunk.end(), updated.begin() + offset);
-    domain->setProgramData(updated);
-    domain->notifyProgramDataChanged();
     return util::Result<void>::ok();
 }
 
@@ -526,10 +507,6 @@ KernelBinding ApplicationProgramObject::kernelBinding() const {
 // === Parameter image ===
 
 void ApplicationProgramObject::setProgramData(std::span<const uint8_t> data) {
-    if (!hasParameterImage()) {
-        _programData.assign(data.begin(), data.end());
-        return;
-    }
     if (data.empty()) {
         resetParameterImage();
         return;
@@ -540,7 +517,6 @@ void ApplicationProgramObject::setProgramData(std::span<const uint8_t> data) {
 
 void ApplicationProgramObject::bindParameterImage(const ParameterImageBinding& binding) {
     _image = binding;
-    _programData.clear();
     resetParameterImage();
 }
 

@@ -169,10 +169,6 @@ public:
     void setParameterEnd(MemoryAddress address) { _parameterEnd = address; }
     MemoryAddress getParameterEnd() const { return _parameterEnd; }
 
-    // Parameter data access
-    void setParameterData(std::span<const uint8_t> data) { _parameterData.assign(data.begin(), data.end()); }
-    std::span<const uint8_t> getParameterData() const { return _parameterData; }
-
     // Parameter size calculation
     uint16_t getParameterSize() const {
         if (_parameterStart.isZero() && _parameterEnd.isZero()) {
@@ -183,14 +179,11 @@ public:
 
     // === Program Data ===
 
-    // PID_PROGRAM_DATA (22) - Application-specific program data. With a
-    // parameter image bound this is the image: a write is cut to its size and
-    // an empty write returns it to the defaults.
+    // PID_PROGRAM_DATA (22): the product's parameter image; empty for a
+    // product without parameters. A write is cut to the image's size and an
+    // empty write returns it to the defaults.
     void setProgramData(std::span<const uint8_t> data);
-    std::span<const uint8_t> getProgramData() const
-    {
-        return hasParameterImage() ? std::span<const uint8_t>(_image.image) : std::span<const uint8_t>(_programData);
-    }
+    std::span<const uint8_t> getProgramData() const { return _image.image; }
 
     // === Parameter image ===
 
@@ -220,9 +213,9 @@ public:
     /// the application program unloaded.
     void restoreParameterImageRecord(std::span<const uint8_t> record);
 
-    /// Register a callback that is invoked whenever the KNX management model
-    /// (e.g. ETS over TP1 or KNXnet/IP) writes new program data to this object.
-    /// The span is valid only for the duration of the call.
+    /// Register a callback that is invoked when a new parameter image was
+    /// taken into use: after ETS completed a download that passed the bounds
+    /// check, and after a write to PID_PROGRAM_DATA. The span is the image.
     using ProgramDataChangedCallback = std::function<void(std::span<const uint8_t>)>;
     void setOnProgramDataChanged(ProgramDataChangedCallback callback)
     {
@@ -271,10 +264,8 @@ private:
     // Parameter memory
     MemoryAddress _parameterStart{MemoryAddress(0)};
     MemoryAddress _parameterEnd{MemoryAddress(0)};
-    std::vector<uint8_t> _parameterData;
 
-    // Program data
-    std::vector<uint8_t> _programData;
+    // Program data: the parameter image
     ParameterImageBinding _image{};
     ProgramDataChangedCallback _onProgramDataChanged;
 

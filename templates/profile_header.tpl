@@ -106,7 +106,7 @@ static inline constexpr const char* kFunctionNames[{{GROUP_OBJECT_COUNT}}] = {
 {{FUNCTION_NAMES}}
 };
 
-static constexpr knx::product::StaticExportDescriptor<ProductDefinition::kDefinition.kDatapointCount, {{PARAMETER_COUNT}}>
+static constexpr knx::product::StaticExportDescriptor<ProductDefinition::kDefinition.kDatapointCount>
     kExportDescriptor{
         knx::product::ExportProductIdentity{
             ProductDefinition::kDefinition.identity.profileKey,
@@ -126,9 +126,6 @@ static constexpr knx::product::StaticExportDescriptor<ProductDefinition::kDefini
                                            ProductDefinition::kDefinition.capacities.transmissionOutcomeQueueCapacity),
         {
     {{EXPORT_OBJECTS}}
-        },
-        {
-    {{PARAMETER_DESCRIPTORS}}
         },
 };
 

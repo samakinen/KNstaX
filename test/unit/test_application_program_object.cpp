@@ -167,22 +167,57 @@ void test_AppProgram_NoParameters() {
     TEST_ASSERT_FALSE(appProg->hasParameters());
 }
 
-void test_AppProgram_ParameterData() {
-    std::vector<uint8_t> params = {0x01, 0x02, 0x03, 0x04, 0x05};
-    appProg->setParameterData(std::span<const uint8_t>(params));
-    
-    const auto result = appProg->getParameterData();
-    TEST_ASSERT_EQUAL_INT(5, result.size());
-    TEST_ASSERT_EQUAL_MEMORY(params.data(), result.data(), 5);
-}
+// The program data is the product's parameter image: a buffer the product
+// binds, of a fixed size, that starts at the defaults.
+void test_AppProgram_ProgramData_is_the_parameter_image() {
+    TEST_ASSERT_EQUAL_INT(0, appProg->getProgramData().size());  // no parameters, no data
+    TEST_ASSERT_FALSE(appProg->hasParameterImage());
 
-void test_AppProgram_ProgramData() {
-    std::vector<uint8_t> data = {0xAA, 0xBB, 0xCC, 0xDD};
+    static const std::array<uint8_t, 4> defaults = {1, 2, 3, 4};
+    std::array<uint8_t, 4> image{};
+    appProg->bindParameterImage(ParameterImageBinding{
+        .image = image,
+        .defaults = defaults.data(),
+        .fingerprint = 0xA1B2C3D4u,
+        .withinBounds = [](std::span<const uint8_t> candidate) { return candidate[0] != 0xFFu; },
+    });
+    TEST_ASSERT_TRUE(appProg->hasParameterImage());
+    TEST_ASSERT_EQUAL_MEMORY(defaults.data(), appProg->getProgramData().data(), 4);
+
+    const std::vector<uint8_t> data = {0xAA, 0xBB, 0xCC, 0xDD};
     appProg->setProgramData(std::span<const uint8_t>(data));
-    
-    const auto result = appProg->getProgramData();
-    TEST_ASSERT_EQUAL_INT(4, result.size());
-    TEST_ASSERT_EQUAL_MEMORY(data.data(), result.data(), 4);
+    TEST_ASSERT_EQUAL_INT(4, appProg->getProgramData().size());
+    TEST_ASSERT_EQUAL_MEMORY(data.data(), image.data(), 4);
+
+    // The stored record is the fingerprint and the image, and comes back.
+    std::vector<uint8_t> record;
+    appProg->appendParameterImageRecord(record);
+    TEST_ASSERT_EQUAL_INT(8, record.size());
+    TEST_ASSERT_EQUAL_HEX8(0xA1, record[0]);
+    TEST_ASSERT_EQUAL_HEX8(0xD4, record[3]);
+    appProg->resetParameterImage();
+    TEST_ASSERT_EQUAL_MEMORY(defaults.data(), image.data(), 4);
+    appProg->restoreParameterImageRecord(record);
+    TEST_ASSERT_EQUAL_MEMORY(data.data(), image.data(), 4);
+    TEST_ASSERT_EQUAL_UINT8(loadstate::kLoaded, appProg->loadState());
+
+    // A record of another layout is not taken into use.
+    record[0] ^= 0x01u;
+    appProg->restoreParameterImageRecord(record);
+    TEST_ASSERT_EQUAL_MEMORY(defaults.data(), image.data(), 4);
+    TEST_ASSERT_EQUAL_UINT8(loadstate::kUnloaded, appProg->loadState());
+
+    // An image outside its bounds is refused as a whole.
+    appProg->setLoadState(loadstate::kLoaded);
+    image[0] = 0xFFu;
+    TEST_ASSERT_FALSE(appProg->acceptParameterImage());
+    TEST_ASSERT_EQUAL_MEMORY(defaults.data(), image.data(), 4);
+    TEST_ASSERT_EQUAL_UINT8(loadstate::kError, appProg->loadState());
+
+    // Not loaded: the record says so in one octet.
+    record.clear();
+    appProg->appendParameterImageRecord(record);
+    TEST_ASSERT_EQUAL_INT(1, record.size());
 }
 
 // === Property Access Tests ===
@@ -366,8 +401,7 @@ int main(int argc, char** argv) {
     // Parameter management
     RUN_TEST(test_AppProgram_ParameterAddresses);
     RUN_TEST(test_AppProgram_NoParameters);
-    RUN_TEST(test_AppProgram_ParameterData);
-    RUN_TEST(test_AppProgram_ProgramData);
+    RUN_TEST(test_AppProgram_ProgramData_is_the_parameter_image);
     
     // Property access
     RUN_TEST(test_AppProgram_PropertyAccess_ProgramVersion);

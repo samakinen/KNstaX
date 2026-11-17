@@ -61,6 +61,10 @@ public:
 
 std::unique_ptr<RecordingPlatform> gPlatform;
 std::unique_ptr<knx::bau::BusAccessUnit> gBau;
+/// The parameter image of the device under test in the Master Reset tests.
+/// It outlives every BusAccessUnit that binds it.
+constexpr std::array<uint8_t, 4> kParameterDefaults{};
+std::array<uint8_t, 4> gParameterImage{};
 /// What the firmware configures before init() at every boot: its factory
 /// defaults. Empty unless a test sets it.
 std::function<void(knx::bau::BusAccessUnit&)> gBeforeInit;
@@ -617,13 +621,24 @@ const std::array<uint8_t, 16> kEtsToolKey{
     0x74, 0xED, 0xDB, 0xC0, 0xF6, 0xF1, 0xE9, 0x7C};
 constexpr uint64_t kSequenceNumberSending = 5000u;
 
+const std::array<uint8_t, 4> kDownloadedParameters{0x11, 0x22, 0x33, 0x44};
+
+/// True when the device's parameters are the downloaded ones; false when
+/// they are back at their defaults.
+bool parametersKept() {
+    const auto image = gBau->applicationProgram().getProgramData();
+    TEST_ASSERT_EQUAL_UINT32(4u, image.size());
+    const bool kept = std::equal(image.begin(), image.end(), kDownloadedParameters.begin());
+    TEST_ASSERT_TRUE(kept || std::equal(image.begin(), image.end(), kParameterDefaults.begin()));
+    return kept;
+}
+
 /// A device in the state ETS leaves it in: addressed, linked, parameterised
 /// and secured, and persisted, as it would be before the reset arrives.
 void commissionForReset() {
     TEST_ASSERT_TRUE(gBau->deviceObject().applyIndividualAddress(kCommissionedAddress).isOk());
     (void)gBau->addressTable().addEntry(GroupAddress(0x0A03u));
-    const std::array<uint8_t, 4> parameters{0x11, 0x22, 0x33, 0x44};
-    gBau->applicationProgram().setProgramData(parameters);
+    gBau->applicationProgram().setProgramData(kDownloadedParameters);
     TEST_ASSERT_TRUE(gBau->writeProperty(
         InterfaceObjectType::security(), InterfaceObjectInstance(1),
         static_cast<application::PropertyID>(objects::SecurityProperty::ToolKey), 1,
@@ -672,6 +687,13 @@ void rebootFromPersistence() {
     gRoutingGroupChanges = 0;
     gBau->management().setRoutingMulticastAddressCallback([](IpAddress) { ++gRoutingGroupChanges; });
 #endif
+    // The product's parameter image: four octets, all zero by default.
+    gBau->applicationProgram().bindParameterImage(objects::ParameterImageBinding{
+        .image = gParameterImage,
+        .defaults = kParameterDefaults.data(),
+        .fingerprint = 0x48384938u,
+        .withinBounds = nullptr,
+    });
     if (gBeforeInit) {
         gBeforeInit(*gBau);
     }
@@ -711,7 +733,7 @@ void test_master_reset_factory_reset_restores_ex_factory_state(void) {
     rebootFromPersistence();
     TEST_ASSERT_EQUAL_HEX16(kUnaddressed.raw, gBau->deviceObject().readIndividualAddress().raw);
     TEST_ASSERT_EQUAL_UINT16(0u, gBau->addressTable().entryCount());
-    TEST_ASSERT_EQUAL_UINT32(0u, gBau->applicationProgram().getProgramData().size());
+    TEST_ASSERT_FALSE(parametersKept());
     TEST_ASSERT_TRUE(toolKeyCleared());
     TEST_ASSERT_FALSE(gBau->securityObject().isSecurityEnabled());
     TEST_ASSERT_TRUE(gBau->securityObject().getSendingSequence() >= kSequenceNumberSending);
@@ -785,7 +807,7 @@ void test_master_reset_reset_ia_resets_only_the_address(void) {
     rebootFromPersistence();
     TEST_ASSERT_EQUAL_HEX16(kUnaddressed.raw, gBau->deviceObject().readIndividualAddress().raw);
     TEST_ASSERT_EQUAL_UINT16(1u, gBau->addressTable().entryCount());
-    TEST_ASSERT_EQUAL_UINT32(4u, gBau->applicationProgram().getProgramData().size());
+    TEST_ASSERT_TRUE(parametersKept());
     TEST_ASSERT_FALSE(toolKeyCleared());
 }
 
@@ -799,7 +821,7 @@ void test_master_reset_reset_ap_and_param_drop_the_parameters(void) {
         TEST_ASSERT_EQUAL_INT(0x00, restartErrorCode(masterReset(eraseCode)));
 
         rebootFromPersistence();
-        TEST_ASSERT_EQUAL_UINT32(0u, gBau->applicationProgram().getProgramData().size());
+        TEST_ASSERT_FALSE(parametersKept());
         TEST_ASSERT_EQUAL_UINT16(1u, gBau->addressTable().entryCount());
         TEST_ASSERT_EQUAL_HEX16(kCommissionedAddress.raw, gBau->deviceObject().readIndividualAddress().raw);
         TEST_ASSERT_FALSE(toolKeyCleared());
@@ -815,7 +837,7 @@ void test_master_reset_reset_links_clears_the_tables(void) {
 
     rebootFromPersistence();
     TEST_ASSERT_EQUAL_UINT16(0u, gBau->addressTable().entryCount());
-    TEST_ASSERT_EQUAL_UINT32(4u, gBau->applicationProgram().getProgramData().size());
+    TEST_ASSERT_TRUE(parametersKept());
     TEST_ASSERT_FALSE(toolKeyCleared());
 }
 

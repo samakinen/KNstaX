@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | **In progress**, 17 November 2026. Steps P0 and P1 (§8) are built and tested, see "P0 result" and "P1 result": a product can take the new model with `makeCommissionedProduct<kParameters>()`, and ETS downloads, storage and restore work through the stack. Step P2, the exporter, is built too ("P2 result"): a product with the new model exports to a product file that passes the KNX schema and is signed by the ETS tools. Open: an ETS6 import and download of such a product on a device, and the old model is still in place beside the new one (P3). |
+| Status | **Built**, 17 November 2026: steps P0 to P3 (§8). The parameter layout is the only parameter model; the old one is removed from KNstaX and Habinari has moved to the new one. Open: an ETS6 import and download on a device (first on the H8i8o), and step P4, channels for communication objects. |
 | Goal | ETS parameters cost a product almost nothing at run time, on a 128 KiB Cortex-M as on an ESP32, and a product with *n* identical channels declares a channel once. |
 | Replaces | `StaticParameterSchema`, `ParameterState`, `ParameterCallbacks` and the per-parameter `onParameterChanged` in `commissioned_product.hpp`. The project is greenfield, so the old model is removed, not kept beside the new one. |
 | Motivating product | H8i8o milestone M6: 8 binary inputs and 8 outputs, about 200 parameters (h8i8o `docs/design/02-application-spec.md`). |
@@ -72,8 +72,8 @@ enum class Action : uint8_t { Nothing, On, Off, Toggle };
 
 // Option lists are named constants: several parameters share one, and the
 // exporter emits one ETS ParameterType for it.
-inline constexpr auto kActionOptions = parameterOptions<Action>(
-    {Action::Nothing, "Nothing"}, {Action::On, "On"}, {Action::Off, "Off"}, {Action::Toggle, "Toggle"});
+inline constexpr auto kActionOptions = params::options<Action>(
+    {{Action::Nothing, "Nothing"}, {Action::On, "On"}, {Action::Off, "Off"}, {Action::Toggle, "Toggle"}});
 
 enum class In : uint8_t { Function, DebounceMs, Rising, Falling, LongPressMs /* ... */ };
 
@@ -258,7 +258,8 @@ once the parameter part is measured.
 `StaticParameterSchema`, `ParameterDescriptor` in its present form, `ParameterState`,
 `ParameterCallbacks`, per-parameter `onParameterChanged`, the seven `wireParameterDataCallback`
 lambdas, `ApplicationProgramObject::_parameterData`, `kApplicationCodeSize`,
-`kMaxParameterOptions`. `endpoint::TransmitPolicyBinder` is rewritten to read a view.
+`kMaxParameterOptions`, and `endpoint::TransmitPolicyBinder`: it collected values that arrived one
+callback at a time, and a product now builds the whole policy from the view.
 
 ## 4. Evaluation
 
@@ -451,7 +452,7 @@ checksum, and reported the application program as loaded.
 Of the 2,864 B, about 1,070 B are not for the parameters: the stack now links the old path and the
 new one side by side. The same firmware *without* parameters grew by 1,064 B (94,916 to 95,980 B).
 
-**The size gate is over budget for the time being.** The `tp1-small` Cortex-M3 reference device
+**The size gate was over budget until P3 (see "P3 result").** The `tp1-small` Cortex-M3 reference device
 is at 88,514 B against a budget of 88,064 B (it was 87,446 B). The budget is not changed: step P3
 removes the old path (the program data vector, the separate 256-octet segment, the typed copy), and
 the figure is to be back under the budget then. The H8i8o device check of the gate still shows
@@ -496,6 +497,46 @@ Not done in P2:
   elements; that is fine for import but grows with the instance count.
 - **`knxprod2profile.py`** was not taught the blocks. The offset comparison is done on the JSON
   and the product file instead.
+
+### P3 result (17 November 2026)
+
+**Sections.** Habinari has 81 parameters under one id enum, on 12 ETS pages, with conditions
+across the pages. One block per page would have meant 12 id enums. So a block can now put
+parameters on pages of their own: `params::section({.name, .visible}, param..., param...)` inside
+`parameterBlock`. A section changes the pages, never the image, and its condition is declared
+once (the old model repeated it on every parameter of a group). `checkLayout` refuses a section
+whose controlling parameter is inside it.
+
+**Removed from KNstaX:**
+
+- The parameter schema: `StaticParameterSchema`, `ParameterDescriptor`, `parameterOptions`,
+  `parameter()`, `makeParameterSchema`, the typed `ParameterState` with its per-parameter decode,
+  `CommissionedParametersView`, per-parameter `onParameterChanged`, `applyCommissionedParameter`,
+  `expert::applyDemoParameterValue` and `expert::applyParameterDataBytes` (now
+  `expert::loadParameterImage`).
+- In the stack: the program data vector and the unused parameter data of
+  `ApplicationProgramObject`, the 256-octet segment of `DeviceModel`, `kApplicationCodeSize`, and
+  `memoryRegionWritten` with its "written" flag, which only existed to tell an unwritten segment
+  from zeros.
+- In the export: `ExportParameterDescriptor`, the flat `parameters` list in the JSON and in
+  `exporter.py`, and the parameter descriptors of the `knxprod2profile` generator.
+- `endpoint::TransmitPolicyBinder`.
+
+A product without parameters is `makeCommissionedProduct(endpoints)`: no image on the device, no
+code segment in the product file.
+
+**Migrated:** the thermostat example and the tests that used the schema. The flat-list exporter
+tests are replaced by `test_exporter_parameter_blocks.py` (17 cases, with sections and the load
+procedure). Habinari's firmware moved in its own repository.
+
+**Measured.** Host suite 163 of 163 (two tests of the old model went, one came). The size gate
+for `tp1-small` on Cortex-M3 passes again: 87,686 B against the budget of 88,064 B. It was
+87,446 B before the parameter work and 88,514 B while both models were linked, so the parameter
+image costs the reference device, which has no parameters, 240 B.
+
+Not done: the `KNX_PARAMETER_VALIDATION` profile option (the bounds check is always linked), and
+the size gate's `forbid_strings` entry for a parameter name (§3.5), because the gate's reference
+device declares no parameters.
 
 ## 9. Open questions
 

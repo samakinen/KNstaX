@@ -128,49 +128,6 @@ std::string exportDescriptorToJson(const DescT& d, std::string_view extraMembers
     }
     o << "]";
 
-    o << ",\"parameters\": [";
-    for (size_t i = 0; i < DescT::kParameterCount; ++i) {
-        const auto& p = d.parameters[i];
-        if (i) o << ",";
-        o << "{";
-        o << "\"id\":" << p.id << ",";
-        o << "\"key\":\"" << p.key << "\",";
-        o << "\"displayName\":\"" << p.displayName << "\",";
-        o << "\"valueKind\":" << static_cast<int>(p.valueKind) << ",";
-        o << "\"required\":" << p.required << ",";
-        // Enough digits for an exact float round-trip in the ETS default value.
-        o << "\"defaultValue\":" << std::setprecision(9) << p.defaultValue << std::setprecision(6);
-        if (p.optionCount > 0) {
-            o << ",\"options\":[";
-            for (size_t j = 0; j < p.optionCount; ++j) {
-                if (j) o << ",";
-                o << "{\"value\":" << p.options[j].value
-                  << ",\"label\":\"" << jsonEscape(p.options[j].label) << "\"}";
-            }
-            o << "]";
-        }
-        if (p.minValue != 0.0 || p.maxValue != 0.0) {
-            o << ",\"minValue\":" << std::setprecision(9) << p.minValue
-              << ",\"maxValue\":" << p.maxValue << std::setprecision(6);
-        }
-        if (!p.unit.empty()) {
-            o << ",\"unit\":\"" << jsonEscape(p.unit) << "\"";
-        }
-        if (!p.group.empty()) {
-            o << ",\"group\":\"" << jsonEscape(p.group) << "\"";
-        }
-        if (p.visibleWhenParameterId != 0xFFFFu) {
-            o << ",\"visibleWhenParameterId\":" << p.visibleWhenParameterId
-              << ",\"visibleWhenValue\":" << p.visibleWhenValue;
-        }
-        if (p.groupVisibleWhenParameterId != 0xFFFFu) {
-            o << ",\"groupVisibleWhenParameterId\":" << p.groupVisibleWhenParameterId
-              << ",\"groupVisibleWhenValue\":" << p.groupVisibleWhenValue;
-        }
-        o << "}";
-    }
-    o << "]";
-
     if (!extraMembers.empty()) {
         o << "," << extraMembers;
     }
@@ -257,18 +214,6 @@ std::string exportDescriptorToKaenxXml(const DescT& d)
     o << "      </CommunicationObject>\n";
   }
   o << "    </CommunicationObjects>\n";
-
-  o << "    <Parameters>\n";
-  for (size_t i = 0; i < DescT::kParameterCount; ++i) {
-    const auto& p = d.parameters[i];
-    o << "      <Parameter Id=\"" << p.id << "\">\n";
-    o << "        <Key>" << xmlEscape(p.key) << "</Key>\n";
-    o << "        <DisplayName>" << xmlEscape(p.displayName) << "</DisplayName>\n";
-    o << "        <ValueKind>" << static_cast<int>(p.valueKind) << "</ValueKind>\n";
-    o << "        <Required>" << (p.required ? "true" : "false") << "</Required>\n";
-    o << "      </Parameter>\n";
-  }
-  o << "    </Parameters>\n";
 
   o << "  </Product>\n";
   o << "</KNXProductExport>\n";

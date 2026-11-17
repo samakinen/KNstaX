@@ -208,7 +208,9 @@ def test_a_document_that_contradicts_itself_is_refused():
         raise AssertionError(f'a layout with a wrong {breaker} must not become a product file')
 
 
-def test_a_product_has_one_parameter_model():
+def test_a_flat_parameter_list_is_refused():
+    # The export of a KNstaX from before the parameter layout. Rendering a
+    # product without its parameters would look like a working file.
     document = _doc([_device_block()])
     document['parameters'] = [{'id': 0, 'key': 'a', 'displayName': 'A', 'valueKind': 3,
                                'defaultValue': 0, 'required': False}]
@@ -216,7 +218,94 @@ def test_a_product_has_one_parameter_model():
         export_product_json_to_knxprod(document)
     except SystemExit:
         return
-    raise AssertionError('both parameter models in one export must be refused')
+    raise AssertionError('a flat "parameters" list must be refused')
+
+
+def _sectioned_block():
+    """A block that appears once, with a switch on its own page and two sections."""
+    return {'index': 0, 'key': 'room', 'name': 'Room', 'count': 1, 'base': 0, 'stride': 4,
+            'sections': [{'index': 0, 'name': 'Heating'},
+                         {'index': 1, 'name': 'Cooling',
+                          'visible': {'block': 0, 'parameter': 0, 'op': 'anyOf', 'values': [1]}}],
+            'parameters': [
+                {'id': 0, 'key': 'cooling', 'name': 'Cooling', 'valueKind': KIND_BOOL, 'sizeInBit': 8,
+                 'offset': 0, 'default': 0},
+                {'id': 1, 'key': 'heat_gain', 'name': 'Gain', 'valueKind': KIND_U8, 'sizeInBit': 8,
+                 'offset': 1, 'default': 5, 'section': 0},
+                {'id': 2, 'key': 'cool_mode', 'name': 'Mode', 'valueKind': KIND_BOOL, 'sizeInBit': 8,
+                 'offset': 2, 'default': 0, 'section': 1},
+                {'id': 3, 'key': 'cool_gain', 'name': 'Gain', 'valueKind': KIND_U8, 'sizeInBit': 8,
+                 'offset': 3, 'default': 5, 'section': 1,
+                 'visible': {'block': 0, 'parameter': 2, 'op': 'anyOf', 'values': [1]}}]}
+
+
+def test_a_section_is_a_page_of_its_own():
+    root = _root([_sectioned_block()])
+    pages = _find(root, 'ParameterBlock')
+    assert [page.get('Text') for page in pages] == ['Room', 'Room: Heating', 'Room: Cooling']
+    assert [len(page.findall('.//k:ParameterRefRef', NS)) for page in pages] == [1, 1, 2]
+    # Sections change the pages, not the memory.
+    offsets = [int(m.get('Offset')) for m in root.findall('.//k:Parameter/k:Memory', NS)]
+    assert offsets == [0, 1, 2, 3]
+
+
+def test_a_section_condition_hides_its_page():
+    root = _root([_sectioned_block()])
+    assert _when_of(root, 'room_heat_gain') == []
+    assert _when_of(root, 'room_cool_mode') == [('room_cooling', '1')]
+    # The condition of a parameter inside the section still applies.
+    assert _when_of(root, 'room_cool_gain') == [('room_cooling', '1'), ('room_cool_mode', '1')]
+
+
+def test_a_block_of_sections_only_has_no_page_of_its_own():
+    block = _sectioned_block()
+    block['parameters'][0]['section'] = 0  # the switch moves into "Heating"
+    root = _root([block])
+    assert [page.get('Text') for page in _find(root, 'ParameterBlock')] == ['Heating', 'Cooling']
+
+
+def test_sections_of_a_repeated_block_repeat_with_it():
+    block = _sectioned_block()
+    block.update({'name': 'Zone {n}', 'count': 2})
+    root = _root([block])
+    assert [page.get('Text') for page in _find(root, 'ParameterBlock')] == [
+        'Zone 1', 'Zone 1: Heating', 'Zone 1: Cooling', 'Zone 2', 'Zone 2: Heating', 'Zone 2: Cooling']
+    assert _when_of(root, 'room2_cool_mode') == [('room2_cooling', '1')]
+
+
+def test_group_objects_are_not_nested_under_a_channel():
+    # A <Channel> is a node in the ETS group object tree, so every group address
+    # would sit one collapsed level deeper than on devices that declare none.
+    root = _root([_device_block()])
+    assert not _find(root, 'Channel')
+    top = root.find('.//k:Dynamic/k:ChannelIndependentBlock', NS)
+    assert top is not None, 'pages and object refs hang off a ChannelIndependentBlock'
+    assert top.findall('k:ComObjectRefRef', NS), 'group objects must sit at the top level'
+
+
+def test_load_procedure_drives_the_load_state_machine():
+    # Unload before allocation matters: the load state machine only accepts a
+    # segment allocation from Unloaded, so without it a second download of an
+    # already-commissioned device fails.
+    root = _root([_device_block()])
+    procedure = _find(root, 'LoadProcedure')[0]
+    steps = [child.tag.rsplit('}', 1)[-1] for child in procedure]
+    assert steps == ['LdCtrlConnect', 'LdCtrlUnload', 'LdCtrlRelSegment',
+                     'LdCtrlWriteRelMem', 'LdCtrlLoadCompleted', 'LdCtrlDisconnect'], steps
+    assert _find(root, 'LdCtrlWriteRelMem')[0].get('Verify') == '1', \
+        'the device answers writes with a read-back; use it'
+
+
+def test_a_product_without_parameters_has_no_segment_and_no_memory_steps():
+    # The device has no parameter image, so there is nothing to declare,
+    # allocate or write.
+    document = _doc([])
+    del document['parameterBlocks']
+    root = ET.fromstring(export_product_json_to_knxprod(document))
+    assert not _find(root, 'Code') and not _find(root, 'RelativeSegment')
+    assert not _find(root, 'Parameter') and not _find(root, 'ParameterBlock')
+    steps = [child.tag.rsplit('}', 1)[-1] for child in _find(root, 'LoadProcedure')[0]]
+    assert steps == ['LdCtrlConnect', 'LdCtrlUnload', 'LdCtrlLoadCompleted', 'LdCtrlDisconnect'], steps
 
 
 def main():

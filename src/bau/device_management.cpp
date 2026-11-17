@@ -416,10 +416,7 @@ util::Result<void> DeviceManagement::applyMasterReset(application::EraseCode era
     }
 
     if (resetParameters) {
-        // An empty block is not applied: the next boot finds nothing stored
-        // and keeps the firmware defaults, the same as a device that has
-        // never been downloaded.
-        _model.applicationProgram().setProgramData(std::span<const uint8_t>{});
+        _model.applicationProgram().resetParameterImage();
     }
 
     if (factoryReset) {

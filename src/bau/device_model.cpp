@@ -197,19 +197,15 @@ void DeviceModel::bind()
                                   objects::tableseg::kGroupObjectTableSize,
                                   application::MemoryAccessMode::ReadWrite, "GrOT"},
         std::span<uint8_t>(_groupObjectSegment));
-    // The application code segment is the product's parameter image when it
-    // bound one: a single buffer that ETS writes and the product reads.
-    std::span<uint8_t> applicationCode = _applicationProgram.parameterImage();
-    if (!_applicationProgram.hasParameterImage()) {
-        _applicationCodeSegment.assign(objects::tableseg::kApplicationCodeSize, 0u);
-        applicationCode = _applicationCodeSegment;
-    }
-    if (!applicationCode.empty()) {
+    // The application code segment is the product's parameter image: a
+    // single buffer that ETS writes and the product reads. A product without
+    // parameters has none.
+    if (const auto image = _applicationProgram.parameterImage(); !image.empty()) {
         (void)stackPort.registerMemoryRegion(
             application::MemoryRegion{MemoryAddress(objects::tableseg::kApplicationCodeBase),
-                                      static_cast<uint32_t>(applicationCode.size()),
+                                      static_cast<uint32_t>(image.size()),
                                       application::MemoryAccessMode::ReadWrite, "AppCode"},
-            applicationCode);
+            image);
     }
 
     stackPort.setPropertyDescriptionProvider(
@@ -582,48 +578,15 @@ void DeviceModel::applyLoadedTableSegment(InterfaceObjectType objectType)
         return;
     }
 
-    if (objectType == InterfaceObjectType::applicationProgram() && _applicationProgram.hasParameterImage()) {
+    if (objectType == InterfaceObjectType::applicationProgram()) {
         // ETS wrote into the parameter image itself. A download that wrote
         // nothing leaves the values the device already had. The image is
         // checked once here; the product then reads it without checks.
-        if (_applicationProgram.acceptParameterImage()) {
+        if (_applicationProgram.hasParameterImage() && _applicationProgram.acceptParameterImage()) {
             _applicationProgram.notifyProgramDataChanged();
             KNX_LOGI(TAG, "Parameter image of %zu octets taken into use",
                      _applicationProgram.parameterImage().size());
         }
-        return;
-    }
-
-    if (objectType == InterfaceObjectType::applicationProgram()) {
-        // The application-program code segment (RS-0000) is the ETS
-        // parameter memory: each knxprod <Parameter> carries a <Memory>
-        // location in this segment, and ETS memory-writes the values during
-        // download. Push the segment into the ApplicationProgramObject's
-        // program data — notifyProgramDataChanged() drives the
-        // wireParameterDataCallback → ParameterState::applyFromBytes chain,
-        // firing the product's onParameterChanged callbacks with the new
-        // values. Persistence is handled by the caller (saveToPersistence
-        // runs right after this on LoadCompleted).
-        // Only apply it if ETS actually downloaded it.  A segment nothing
-        // ever wrote reads as all zeros, and applying that silently
-        // replaces every firmware parameter default with 0 — a device
-        // commissioned with 0 °C setpoints and 0 PID gains that looks like
-        // a control bug much later.  ETS skips the parameter download
-        // whenever the product's load procedure declares no segment for the
-        // application program object, which is exactly what happened here.
-        if (_stackPort == nullptr
-            || !_stackPort->memoryRegionWritten(MemoryAddress(objects::tableseg::kApplicationCodeBase))) {
-            KNX_LOGW(TAG,
-                     "No parameter segment downloaded — keeping firmware defaults "
-                     "(ETS wrote no memory at 0x%04X)",
-                     static_cast<unsigned>(objects::tableseg::kApplicationCodeBase));
-            return;
-        }
-
-        const std::span<const uint8_t> segment(_applicationCodeSegment);
-        _applicationProgram.setProgramData(segment);
-        _applicationProgram.notifyProgramDataChanged();
-        KNX_LOGI(TAG, "Applied %zu-byte parameter segment from ETS download", segment.size());
         return;
     }
 

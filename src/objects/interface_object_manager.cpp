@@ -412,10 +412,12 @@ size_t InterfaceObjectManager::loadPersistedProperties(std::optional<InterfaceOb
             return;
         }
         if (objectType == InterfaceObjectType::applicationProgram()
-            && propertyId == static_cast<application::PropertyID>(AppProgramProperty::ProgramData)
-            && _applicationProgramPtr->hasParameterImage()) {
-            _applicationProgramPtr->restoreParameterImageRecord(data);
-            ++loaded;
+            && propertyId == static_cast<application::PropertyID>(AppProgramProperty::ProgramData)) {
+            // A product without parameters has nothing to restore into.
+            if (_applicationProgramPtr->hasParameterImage()) {
+                _applicationProgramPtr->restoreParameterImageRecord(data);
+                ++loaded;
+            }
             return;
         }
         const auto writeResult = writeProperty(objectType, instance, propertyId, 1, data);
@@ -686,17 +688,16 @@ util::Result<size_t> InterfaceObjectManager::saveToPersistence() {
                     return;
                 }
                 if (propertyId == static_cast<application::PropertyID>(AppProgramProperty::ProgramData)) {
-                    if (_applicationProgramPtr->hasParameterImage()) {
-                        // The parameter image is stored with its layout
-                        // fingerprint, not as the bare property value.
-                        saveProp(objectType, propertyId, [&](std::vector<uint8_t>& out) {
+                    // The parameter image is stored with its layout
+                    // fingerprint, not as the bare property value. A product
+                    // without parameters stores nothing, and the empty record
+                    // erases what an earlier firmware left.
+                    saveProp(objectType, propertyId, [&](std::vector<uint8_t>& out) {
+                        if (_applicationProgramPtr->hasParameterImage()) {
                             _applicationProgramPtr->appendParameterImageRecord(out);
-                            return true;
-                        });
-                        return;
-                    }
-                    savePropertyFromKernel(objectType, propertyId, *_applicationProgramPtr,
-                                           static_cast<uint16_t>(_applicationProgramPtr->getProgramData().size()));
+                        }
+                        return true;
+                    });
                     return;
                 }
             }

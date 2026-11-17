@@ -160,10 +160,6 @@ public:
     util::Result<void> registerMemoryRegion(const application::MemoryRegion& region,
                                             std::span<uint8_t> storage,
                                             application::MemoryWriteGuard writeGuard = {});
-    /// Whether a management client has ever written into the region starting
-    /// at @p regionStart. Distinguishes "downloaded all zeros" from "never
-    /// downloaded" — the backing buffer reads zero in both cases.
-    bool memoryRegionWritten(MemoryAddress regionStart) const;
     void setWorkAvailableCallback(WorkAvailableCallback callback);
     util::Result<void> sendGroupValueWrite(const GroupAddress& address, std::span<const uint8_t> data);
     util::Result<void> beginSendGroupValueWrite(const GroupAddress& address, std::span<const uint8_t> data);

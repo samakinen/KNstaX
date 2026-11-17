@@ -598,11 +598,7 @@ else()
         knx_add_test(test_knxprod_xsd_validation
             COMMAND ${Python3_EXECUTABLE} ${KNXPROD_EXPORTER_DIR}/test_validate_knxprod_xsd.py
             RUN_SERIAL ENVIRONMENT ${KNXPROD_EXPORTER_ENV})
-        # Parameter UX and load procedure (pure Python, no wrapper).
-        knx_add_test(test_exporter_parameter_ux
-            COMMAND ${Python3_EXECUTABLE} ${KNXPROD_EXPORTER_DIR}/test_exporter_parameter_ux.py
-            LABELS script)
-        # Parameter blocks of a product with a parameter layout (pure Python, no wrapper).
+        # Parameter pages, conditions and the load procedure (pure Python, no wrapper).
         knx_add_test(test_exporter_parameter_blocks
             COMMAND ${Python3_EXECUTABLE} ${KNXPROD_EXPORTER_DIR}/test_exporter_parameter_blocks.py
             LABELS script)
@@ -869,7 +865,6 @@ else()
                 knx_add_test(interop_pytest
                     COMMAND ${Python3_EXECUTABLE} -m pytest -q
                         ${CMAKE_CURRENT_SOURCE_DIR}/interop/python/tests
-                        ${CMAKE_CURRENT_SOURCE_DIR}/tools/test_knxprod2profile_param_test.py
                     ENVIRONMENT
                         KNSTAX_TUNNEL_PEER_BIN=${INTEROP_BIN_DIR}/knstax_tunnel_peer
                         KNSTAX_ROUTING_PEER_BIN=${INTEROP_BIN_DIR}/knstax_routing_peer

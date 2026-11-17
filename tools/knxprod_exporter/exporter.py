@@ -116,12 +116,8 @@ def _dpt_size_in_bit(dpt_main: int) -> int:
     return size_map.get(dpt_main, 8)
 
 
-# Parameter valueKind (ExportParameterValueKind in export_descriptor.hpp) →
-# serialised byte width in the device's ProgramData / RS-0000 code segment.
-# Must stay consistent with exportParameterValueByteWidth() in
-# endpoint_compiler.hpp and ParameterState::applyFromBytes (declaration order,
-# big-endian): that is the layout ETS memory-writes into RS-0000 and the device
-# decodes back into parameter values.
+# Parameter valueKind: ExportParameterValueKind in export_descriptor.hpp. The
+# width of a value is not derived from it here; the export carries sizeInBit.
 _PARAM_KIND_NONE = 0
 _PARAM_KIND_BOOLEAN = 1
 _PARAM_KIND_UNSIGNED8 = 2
@@ -131,81 +127,6 @@ _PARAM_KIND_ENUM = 5
 _PARAM_KIND_TEXT = 6
 _PARAM_KIND_FLOAT = 7
 _PARAM_KIND_FLOAT_DPT9 = 8
-
-_PARAM_KIND_WIDTH = {
-    _PARAM_KIND_BOOLEAN: 1,
-    _PARAM_KIND_UNSIGNED8: 1,
-    _PARAM_KIND_UNSIGNED16: 2,
-    _PARAM_KIND_SIGNED16: 2,
-    _PARAM_KIND_ENUM: 2,
-    _PARAM_KIND_FLOAT: 4,
-    _PARAM_KIND_FLOAT_DPT9: 2,
-}
-
-
-def _param_bounds(p):
-    """Return {'minInclusive','maxInclusive'} when the parameter declares real
-    bounds, else None.  Both-zero means "unset" on the C++ side, so an
-    all-zero pair is not a 0..0 range."""
-    lo = p.get('minValue')
-    hi = p.get('maxValue')
-    if lo is None or hi is None or (lo == 0 and hi == 0):
-        return None
-    fmt = lambda v: str(int(v)) if float(v) == int(v) else repr(float(v))
-    return {'minInclusive': fmt(lo), 'maxInclusive': fmt(hi)}
-
-
-def _enum_param_type(app_ref: str, param_id: int, width_bits: int, options):
-    """Build a per-parameter enumerated ParameterType.
-
-    ETS renders a <TypeRestriction> as a drop-down.  Without one an enum
-    parameter is a bare number box and the integrator has to be told out of
-    band that 2 means Standby, which is how a product ends up with labels like
-    "Mode (0=Auto,1=Comfort,2=Standby)".  Enumerations cannot be shared across
-    parameters the way plain numeric types are, so each gets its own id.
-    """
-    type_id = f'{app_ref}_PT-enum-{param_id}'
-    return type_id, 'TypeRestriction', {'Base': 'Value', 'SizeInBit': str(width_bits)}
-
-
-def _param_type_for_kind(app_ref: str, kind: int):
-    """Return (type_id, element_tag, element_attrs) for a ParameterType of the
-    given value kind. One shared ParameterType per kind keeps the XML small."""
-    if kind == _PARAM_KIND_FLOAT_DPT9:
-        # KNX-native 2-byte half-float. Bounds are integers on purpose: some
-        # tooling (Kaenx-Creator) round-trips these strings through a
-        # locale-sensitive parser, and separator-free integers parse
-        # identically under every locale. Full DPT9 range is ±670760.96.
-        return (f'{app_ref}_PT-dpt9',
-                'TypeFloat',
-                {'Encoding': 'DPT 9',
-                 'minInclusive': '-670760', 'maxInclusive': '670760'})
-    if kind == _PARAM_KIND_FLOAT:
-        return (f'{app_ref}_PT-float',
-                'TypeFloat',
-                {'Encoding': 'IEEE-754 Single',
-                 'minInclusive': '-3.40282e+38', 'maxInclusive': '3.40282e+38'})
-    if kind == _PARAM_KIND_BOOLEAN:
-        return (f'{app_ref}_PT-bool',
-                'TypeNumber',
-                {'SizeInBit': '8', 'Type': 'unsignedInt',
-                 'minInclusive': '0', 'maxInclusive': '1'})
-    if kind == _PARAM_KIND_UNSIGNED8:
-        return (f'{app_ref}_PT-u8',
-                'TypeNumber',
-                {'SizeInBit': '8', 'Type': 'unsignedInt',
-                 'minInclusive': '0', 'maxInclusive': '255'})
-    if kind == _PARAM_KIND_SIGNED16:
-        return (f'{app_ref}_PT-s16',
-                'TypeNumber',
-                {'SizeInBit': '16', 'Type': 'signedInt',
-                 'minInclusive': '-32768', 'maxInclusive': '32767'})
-    # Unsigned16 and Enum (serialised as u16) share the same numeric shape.
-    return (f'{app_ref}_PT-u16',
-            'TypeNumber',
-            {'SizeInBit': '16', 'Type': 'unsignedInt',
-             'minInclusive': '0', 'maxInclusive': '65535'})
-
 
 def _param_default_text(kind: int, value) -> str:
     """Format a parameter default for the knxprod Value attribute.
@@ -221,192 +142,6 @@ def _param_default_text(kind: int, value) -> str:
             return str(int(f))
         return repr(f)
     return str(int(round(float(value))))
-
-
-def _group_visibility_conditions(serialisable):
-    """Map group name -> (controlling parameter id, value) for groups whose ETS
-    section is shown or hidden as a whole.
-
-    A group qualifies when every one of its parameters declares the same
-    `groupVisibleWhen*` pair. Anything less is refused rather than guessed at:
-    a half-gated section would hide some of its parameters and leave the rest
-    under a heading that no longer describes them."""
-    declared = {}
-    members = {}
-    for p in serialisable:
-        key = p.get('group') or ''
-        controlling = p.get('groupVisibleWhenParameterId')
-        condition = (None if controlling is None
-                     else (int(controlling), int(p.get('groupVisibleWhenValue', 0))))
-        if key in declared:
-            if declared[key] != condition:
-                raise ValueError(
-                    f'parameter group {key!r} declares conflicting section visibility '
-                    f'conditions ({declared[key]} vs {condition}); every parameter of a '
-                    f'gated group must name the same controlling parameter and value')
-        else:
-            declared[key] = condition
-        members.setdefault(key, []).append(int(p.get('id', 0)))
-
-    conditions = {}
-    for key, condition in declared.items():
-        if condition is None:
-            continue
-        if condition[0] in members[key]:
-            # The switch would hide itself the moment it was turned off, and no
-            # ETS user could ever turn it back on.
-            raise ValueError(
-                f'parameter group {key!r} is gated on parameter {condition[0]}, which is a '
-                f'member of that same group; the controlling parameter must live outside '
-                f'the section it shows or hides')
-        conditions[key] = condition
-    return conditions
-
-
-def _emit_parameters(static_elem, dynamic_channel, app_ref: str, rs_ref: str, params):
-    """Fill ParameterTypes/Parameters/ParameterRefs and a Dynamic ParameterBlock
-    from the JSON `parameters` array. Sequential memory offsets in declaration
-    order mirror the device-side ParameterState/ProgramData byte layout, so an
-    ETS partial download memory-writes exactly the block the firmware decodes.
-    Non-serialisable kinds (Text, None) are skipped, matching applyFromBytes."""
-    serialisable = [p for p in params if int(p.get('valueKind', 0)) in _PARAM_KIND_WIDTH]
-    # Each of these containers requires at least one child when present, so a
-    # product without serialisable parameters must omit them entirely.
-    if not serialisable:
-        return 0
-
-    types_elem = ET.SubElement(static_elem, 'ParameterTypes')
-    params_elem = ET.SubElement(static_elem, 'Parameters')
-    refs_elem = ET.SubElement(static_elem, 'ParameterRefs')
-
-    # A group whose every parameter declares the same section-level condition is
-    # gated as a whole: ETS hides the section instead of showing a heading that
-    # opens onto nothing. An empty block reads as a broken product, and it gives
-    # the integrator no hint that some other parameter switches it on.
-    group_conditions = _group_visibility_conditions(serialisable)
-
-    # One ParameterBlock per declared group, in first-appearance order, so a
-    # product with thirty parameters presents as a handful of labelled sections
-    # instead of one flat list. Parameters without a group share a default
-    # block, which keeps simple products exactly as they were.
-    blocks = {}
-
-    def block_for(group_name):
-        key = group_name or ''
-        existing = blocks.get(key)
-        if existing is not None:
-            return existing
-        condition = group_conditions.get(key)
-        if condition is None:
-            parent = dynamic_channel
-        else:
-            # <choose> sits at channel level here, wrapping the whole block;
-            # the parameter-level form below wraps a single ParameterRefRef.
-            controlling_id, controlling_value = condition
-            choose = ET.SubElement(dynamic_channel, 'choose')
-            choose.set('ParamRefId', f'{app_ref}_P-{controlling_id}_R-{controlling_id}')
-            parent = ET.SubElement(choose, 'when')
-            parent.set('test', str(controlling_value))
-        element = ET.SubElement(parent, 'ParameterBlock')
-        element.set('Id', f'{app_ref}_PB-{len(blocks) + 1}')
-        element.set('Name', key or 'Settings')
-        element.set('Text', key or 'Settings')
-        blocks[key] = element
-        return element
-
-    emitted_types = {}
-    offset = 0
-    for p in serialisable:
-        kind = int(p.get('valueKind', 0))
-        width = _PARAM_KIND_WIDTH[kind]
-        raw_id = int(p.get('id', 0))
-        options = p.get('options') or []
-
-        if options:
-            # An enumerated parameter gets its own type carrying the value
-            # list, so ETS shows named choices instead of a raw number.
-            type_id, tag, attrs = _enum_param_type(app_ref, raw_id, width * 8, options)
-            if type_id not in emitted_types:
-                pt = ET.SubElement(types_elem, 'ParameterType')
-                pt.set('Id', type_id)
-                pt.set('Name', type_id.rsplit('_', 1)[-1])
-                restriction = ET.SubElement(pt, tag, attrs)
-                for index, opt in enumerate(options):
-                    enum = ET.SubElement(restriction, 'Enumeration')
-                    label = str(opt.get('label', opt.get('value', '')))
-                    value = int(opt.get('value', 0))
-                    enum.set('Text', label)
-                    enum.set('Value', str(value))
-                    # xs:ID, so it must be unique across the whole document and
-                    # start with a letter — hence the type id as the prefix.
-                    # The schema marks it required; ETS refuses to import a
-                    # TypeRestriction whose Enumerations have no Id.
-                    enum.set('Id', f'{type_id}_EN-{value}')
-                    # DisplayOrder keeps ETS from re-sorting the list; authors
-                    # order options meaningfully (Auto before Comfort, ...).
-                    enum.set('DisplayOrder', str(index))
-                emitted_types[type_id] = True
-        else:
-            type_id, tag, attrs = _param_type_for_kind(app_ref, kind)
-            # Author-supplied bounds narrow the shared numeric type, so they
-            # need a parameter-specific id; without them the shared one is
-            # reused and the XML stays small.
-            bounds = _param_bounds(p)
-            if bounds is not None:
-                attrs = dict(attrs)
-                attrs.update(bounds)
-                type_id = f'{type_id}-{raw_id}'
-            if type_id not in emitted_types:
-                pt = ET.SubElement(types_elem, 'ParameterType')
-                pt.set('Id', type_id)
-                pt.set('Name', type_id.rsplit('_', 1)[-1])
-                ET.SubElement(pt, tag, attrs)
-                emitted_types[type_id] = True
-
-        param_id = f'{app_ref}_P-{raw_id}'
-        pe = ET.SubElement(params_elem, 'Parameter')
-        pe.set('Id', param_id)
-        pe.set('Name', p.get('key', param_id))
-        pe.set('ParameterType', type_id)
-        pe.set('Text', p.get('displayName', p.get('key', '')))
-        pe.set('Value', _param_default_text(kind, p.get('defaultValue')))
-        unit = p.get('unit')
-        if unit:
-            pe.set('SuffixText', unit)
-        mem = ET.SubElement(pe, 'Memory')
-        mem.set('CodeSegment', rs_ref)
-        mem.set('Offset', str(offset))
-        mem.set('BitOffset', '0')
-        offset += width
-
-        ref_id = f'{param_id}_R-{int(p.get("id", 0))}'
-        pref = ET.SubElement(refs_elem, 'ParameterRef')
-        pref.set('Id', ref_id)
-        pref.set('RefId', param_id)
-
-        target_block = block_for(p.get('group'))
-
-        condition = p.get('visibleWhenParameterId')
-        if condition is not None:
-            # ETS renders <choose>/<when> as conditional visibility: the
-            # parameter appears only while the controlling parameter holds the
-            # given value. Showing settings that currently do nothing is a
-            # standing source of misconfiguration, so this is worth the extra
-            # nesting.
-            controlling_ref = f'{app_ref}_P-{int(condition)}_R-{int(condition)}'
-            choose = ET.SubElement(target_block, 'choose')
-            choose.set('ParamRefId', controlling_ref)
-            when = ET.SubElement(choose, 'when')
-            when.set('test', str(int(p.get('visibleWhenValue', 0))))
-            prefref = ET.SubElement(when, 'ParameterRefRef')
-        else:
-            prefref = ET.SubElement(target_block, 'ParameterRefRef')
-        prefref.set('RefId', ref_id)
-
-    # The accumulated offset is exactly the size of the memory block ETS must
-    # download, which the load procedure needs in order to allocate and write it.
-    return offset
-
 
 
 def _condition_tests(condition):
@@ -431,8 +166,16 @@ def _numeric_parameter_type(kind: int, size_in_bit: int, p):
     fmt = lambda v: str(int(v)) if float(v) == int(v) else repr(float(v))
     has_bounds = 'min' in p and 'max' in p
     if kind in (_PARAM_KIND_FLOAT, _PARAM_KIND_FLOAT_DPT9):
-        _, tag, attrs = _param_type_for_kind('', kind)
-        attrs = dict(attrs)
+        # Bounds are written without a decimal separator where they are whole:
+        # some tooling (Kaenx-Creator) parses these strings with the system
+        # locale, and separator-free integers read the same under every one.
+        # The full DPT 9 range is ±670760.96.
+        tag = 'TypeFloat'
+        if kind == _PARAM_KIND_FLOAT_DPT9:
+            attrs = {'Encoding': 'DPT 9', 'minInclusive': '-670760', 'maxInclusive': '670760'}
+        else:
+            attrs = {'Encoding': 'IEEE-754 Single',
+                     'minInclusive': '-3.40282e+38', 'maxInclusive': '3.40282e+38'}
         if has_bounds:
             attrs['minInclusive'] = fmt(p['min'])
             attrs['maxInclusive'] = fmt(p['max'])
@@ -457,8 +200,7 @@ def _numeric_parameter_type(kind: int, size_in_bit: int, p):
 
 def _emit_parameter_blocks(static_elem, dynamic_channel, app_ref: str, rs_ref: str, json_obj):
     """Fill ParameterTypes/Parameters/ParameterRefs and the Dynamic section from
-    the `parameterBlocks` of a product with a parameter layout
-    (docs/design/parameter-model.md).
+    the `parameterBlocks` of the product (docs/design/parameter-model.md).
 
     A block that repeats is written out once per instance: its parameters, and
     one ParameterBlock named after the instance. Every memory offset is
@@ -580,27 +322,48 @@ def _emit_parameter_blocks(static_elem, dynamic_channel, app_ref: str, rs_ref: s
             parent.set('test', test)
         return parent
 
-    # Pass 2: one ParameterBlock per block instance.
-    block_number = 0
+    # Pass 2: the pages. A block instance is one page; a section of the block
+    # is a page of its own after it. A block whose parameters are all in
+    # sections has no page of its own.
+    page_number = 0
     for block in blocks:
         block_index = int(block['index'])
         count = int(block['count'])
         name = block.get('name') or block.get('key') or 'Settings'
+        sections = sorted(block.get('sections') or [], key=lambda section: int(section['index']))
         for instance in range(count):
-            block_number += 1
             if '{n}' in name:
                 text = name.replace('{n}', str(instance + 1))
             else:
                 text = f'{name} {instance + 1}' if count > 1 else name
+            page_name = f"{block.get('key', 'block')}{instance + 1 if count > 1 else ''}"
             holder = under_condition(dynamic_channel, block.get('visible'), block_index, instance)
-            element = ET.SubElement(holder, 'ParameterBlock')
-            element.set('Id', f'{app_ref}_PB-{block_number}')
-            element.set('Name', f"{block.get('key', 'block')}{instance + 1 if count > 1 else ''}")
-            element.set('Text', text)
-            for parameter in block['parameters']:
-                target = under_condition(element, parameter.get('visible'), block_index, instance)
-                ET.SubElement(target, 'ParameterRefRef').set(
-                    'RefId', ref_ids[(block_index, instance, int(parameter['id']))])
+
+            def emit_page(parent, page_key, page_text, members):
+                nonlocal page_number
+                page_number += 1
+                element = ET.SubElement(parent, 'ParameterBlock')
+                element.set('Id', f'{app_ref}_PB-{page_number}')
+                element.set('Name', page_key)
+                element.set('Text', page_text)
+                for parameter in members:
+                    target = under_condition(element, parameter.get('visible'), block_index, instance)
+                    ET.SubElement(target, 'ParameterRefRef').set(
+                        'RefId', ref_ids[(block_index, instance, int(parameter['id']))])
+
+            own = [parameter for parameter in block['parameters'] if 'section' not in parameter]
+            if own or not sections:
+                emit_page(holder, page_name, text, own)
+            for section in sections:
+                members = [parameter for parameter in block['parameters']
+                           if parameter.get('section') == section['index']]
+                # A block that appears once and has no page of its own is
+                # only a container: its sections carry their own names.
+                section_text = section.get('name') or text
+                if count > 1 or own:
+                    section_text = f"{text}: {section_text}"
+                section_holder = under_condition(holder, section.get('visible'), block_index, instance)
+                emit_page(section_holder, f"{page_name}_s{int(section['index']) + 1}", section_text, members)
 
     return image_size
 
@@ -969,38 +732,37 @@ def export_product_json_to_knxprod(json_obj) -> str:
     static = ET.SubElement(app, 'Static')
 
     # The RelativeSegment is the ETS-visible parameter memory: Parameter
-    # <Memory> entries reference it, and the device maps it to the application
-    # program load segment it decodes into ParameterState on LoadCompleted.
-    code = ET.SubElement(static, 'Code')
+    # <Memory> entries reference it, and on the device it is the product's
+    # parameter image, exactly as long. A product without parameters has no
+    # image and declares no segment.
+    #
     # ETS parses a code segment id rather than treating it as opaque: it is
     # '<application program id>_RS-<load state machine:2 digits>-<offset:5
     # digits>', and a download of anything else fails with "ID '..._RS-0000' is
     # not a valid id ID". Build it from the same values the attributes carry so
     # the two cannot drift apart.
-    rs_load_state_machine = _LSM_APPLICATION_PROGRAM
-    rs_offset = 0
-    rs_ref = f'{app_ref}_RS-{rs_load_state_machine:02d}-{rs_offset:05d}'
-    rs = ET.SubElement(code, 'RelativeSegment')
-    rs.set('Id', rs_ref)
-    rs.set('Name', 'Parameters')
+    #
     # Load state machine index == the interface object INDEX of the loadable
     # part that owns the segment. This is not the object *type*: the
     # Application Program object's type is 3, but in the canonical System B
     # ordering its index is 4 (0=Device, 1=GA table, 2=Assoc table,
     # 3=GO table, 4=App program) — the same ordering bau.cpp binds and the same
     # index the load procedure below already uses for LsmIdx/ObjIdx.
-    # Declaring 3 here pointed the segment at the group object table's load
-    # state machine, so ETS never allocated a parameter segment.
-    rs.set('LoadStateMachine', str(rs_load_state_machine))
-    rs.set('Offset', str(rs_offset))
-    # A product with a parameter layout has a segment of exactly its image: the
-    # device's memory region ends where the image ends. One with a flat
-    # parameter list keeps the fixed 256 octets the device reserves for it.
+    if json_obj.get('parameters'):
+        raise SystemExit('the export carries a flat "parameters" list, which this exporter no longer '
+                         'reads; regenerate the JSON from a product with a parameter layout')
     parameter_blocks = json_obj.get('parameterBlocks') or []
-    if parameter_blocks and json_obj.get('parameters'):
-        raise SystemExit('the export carries both "parameters" and "parameterBlocks"; '
-                         'a product has one parameter model')
-    rs.set('Size', str(int(json_obj.get('parameterImage', {}).get('size', 0))) if parameter_blocks else '256')
+    rs_load_state_machine = _LSM_APPLICATION_PROGRAM
+    rs_offset = 0
+    rs_ref = f'{app_ref}_RS-{rs_load_state_machine:02d}-{rs_offset:05d}'
+    if parameter_blocks:
+        code = ET.SubElement(static, 'Code')
+        rs = ET.SubElement(code, 'RelativeSegment')
+        rs.set('Id', rs_ref)
+        rs.set('Name', 'Parameters')
+        rs.set('LoadStateMachine', str(rs_load_state_machine))
+        rs.set('Offset', str(rs_offset))
+        rs.set('Size', str(int(json_obj.get('parameterImage', {}).get('size', 0))))
 
     # Dynamic section is created before parameter emission so the parameter
     # blocks can be attached to it; XML sibling order within <ApplicationProgram>
@@ -1013,10 +775,7 @@ def export_product_json_to_knxprod(json_obj) -> str:
     dynamic = ET.SubElement(app, 'Dynamic')
     dyn_root = ET.SubElement(dynamic, 'ChannelIndependentBlock')
 
-    if parameter_blocks:
-        param_bytes = _emit_parameter_blocks(static, dyn_root, app_ref, rs_ref, json_obj)
-    else:
-        param_bytes = _emit_parameters(static, dyn_root, app_ref, rs_ref, json_obj.get('parameters', []))
+    param_bytes = _emit_parameter_blocks(static, dyn_root, app_ref, rs_ref, json_obj)
 
     com_objects_parent = ET.SubElement(static, 'ComObjectTable')
     com_refs_parent = ET.SubElement(static, 'ComObjectRefs')

@@ -40,7 +40,7 @@ def main():
             'using DeclarativeProfile = knx::product::internal::BasicProductProfile<',
             'ProductDefinition::kDefinition.datapoints[0].metadata.exportNumber',
             'knx::application::dptids::Switch',
-            'StaticExportDescriptor<ProductDefinition::kDefinition.kDatapointCount, 0>',
+            'StaticExportDescriptor<ProductDefinition::kDefinition.kDatapointCount>',
         ]
         for fragment in required_fragments:
             if fragment not in text:

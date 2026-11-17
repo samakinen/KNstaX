@@ -216,13 +216,6 @@ public:
         _management.setPropertyDescriptionProvider(std::move(provider));
     }
 
-    /// Whether any memory write has landed in the region starting at @p regionStart.
-    /// False means the management client never downloaded that segment, which is
-    /// not the same as downloading zeros.
-    bool memoryRegionWritten(MemoryAddress regionStart) const {
-        return _management.memoryRegionWritten(regionStart);
-    }
-
     /**
      * @brief Register a memory-mapped region backed by caller-owned storage.
      *

@@ -93,7 +93,6 @@ constexpr StaticExportDescriptor<2> kPilotA{
                 .persisted = true,
             },
         },
-    .parameters = {},
 };
 
 // Sub-type 0 on purpose: a product may name only the main type, and the
@@ -154,7 +153,6 @@ constexpr StaticExportDescriptor<2> kPilotB{
                 .persisted = true,
             },
         },
-    .parameters = {},
 };
 
 // ---------------------------------------------------------------------------
