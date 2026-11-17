@@ -271,6 +271,10 @@ void BusAccessUnit::flushPendingPersistence() {
     _model->flushPersistenceIfDirty();
 }
 
+void BusAccessUnit::markParameterImageChanged() {
+    _model->markPersistenceDirty();
+}
+
 BusAccessUnit::OwnerWorkHint BusAccessUnit::ownerWorkHint() const {
     return _groups->ownerWorkHint();
 }

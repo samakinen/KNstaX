@@ -10,6 +10,7 @@
 
 #include "knx/bau/bau.hpp"
 #include "knx/objects/application_program_object.hpp"
+#include "knx/objects/property_kernel.hpp"
 #include "knx/platform/platform.hpp"
 #include "knx/config.hpp"
 #if KNX_FEATURE_NETIP
@@ -24,6 +25,7 @@
 #include "knx/product/impl/compiler/endpoint_compiler.hpp"
 #include "knx/product/impl/model/port_table.hpp"
 #include "knx/product/impl/runtime/product_port_core.hpp"
+#include "knx/util/inplace_function.hpp"
 #include "knx/util/log.hpp"
 #include "knx/util/result.hpp"
 
@@ -573,6 +575,64 @@ public:
         }
     }
 
+    /// The product's parameter image (docs/design/parameter-model.md §3.4).
+    /// Before start(): the stack then lets ETS write into it, stores it with
+    /// its fingerprint and restores it.
+    void bindParameterImage(const objects::ParameterImageBinding& binding)
+    {
+        _parameterImage = binding;
+    }
+
+    /// Called after ETS completed a parameter download that passed the bounds
+    /// check, and after loadParameterImage(). Not called at start.
+    void onParameterImageChanged(util::InplaceFunction<void(), 16> callback)
+    {
+        if (!_bau) {
+            return;
+        }
+        _parameterImageChanged = std::move(callback);
+        _bau->applicationProgram().setOnProgramDataChanged([this](std::span<const uint8_t>) {
+            if (_parameterImageChanged) {
+                _parameterImageChanged();
+            }
+        });
+    }
+
+    /// The product changed a parameter itself: have the image stored.
+    void markParameterImageChanged()
+    {
+        if (_bau) {
+            _bau->markParameterImageChanged();
+        }
+    }
+
+    /// False while ETS has not completed a parameter download for this
+    /// layout: the image then holds the defaults or half of a download.
+    bool applicationProgramLoaded() const
+    {
+        return _bau && _bau->applicationProgram().loadState() == objects::loadstate::kLoaded;
+    }
+
+    /// For expert/test use: replace the whole parameter image the way a
+    /// completed ETS download does. False when the image was refused.
+    bool loadParameterImageForExpertUse(std::span<const uint8_t> image)
+    {
+        if (!_bau) {
+            return false;
+        }
+        auto& program = _bau->applicationProgram();
+        if (image.size() != program.parameterImage().size()) {
+            return false;
+        }
+        program.setProgramData(image);
+        if (!program.acceptParameterImage()) {
+            return false;
+        }
+        _bau->markParameterImageChanged();
+        program.notifyProgramDataChanged();
+        return true;
+    }
+
     /// For expert/test use: simulate ETS writing the application program data
     /// through the KNX management model (A_PropertyValue_Write → PID_PROGRAM_DATA).
     ///
@@ -847,6 +907,9 @@ public:
     // restore takes precedence over.
     void applyPreStartConfiguration()
     {
+        if (_parameterImage.defaults != nullptr) {
+            _bau->applicationProgram().bindParameterImage(_parameterImage);
+        }
 #if KNX_SECURE_ENABLED
         if (_factorySecurityModeEnabled) {
             _bau->securityObject().setSecurityMode(objects::SecurityMode::Enabled);
@@ -920,6 +983,8 @@ public:
     definition_type _definition;
     bindings_type _bindings;
     EndpointInstanceConfig _config{};
+    objects::ParameterImageBinding _parameterImage{};
+    util::InplaceFunction<void(), 16> _parameterImageChanged{};
     std::array<GroupAddress, definition_type::kPortCount> _configuredGroupAddresses{};
     std::array<PendingBusAction<port_id_type>, kPendingActionCapacity> _pendingActions{};
     ProductPortCore _core;

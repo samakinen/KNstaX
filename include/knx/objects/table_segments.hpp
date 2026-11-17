@@ -52,6 +52,9 @@ constexpr uint32_t kGroupObjectTableSize = 2u + 256u * 2u;
 // Code RelativeSegment RS-0000 (256 bytes, no parameters defined).
 constexpr uint32_t kApplicationCodeBase = 0x0100;
 constexpr uint32_t kApplicationCodeSize = 0x0100;
+// The most a product's parameter image can take: the address space up to the
+// group address segment.
+constexpr uint32_t kApplicationCodeMaxSize = kGroupAddressTableBase - kApplicationCodeBase;
 
 } // namespace tableseg
 } // namespace objects

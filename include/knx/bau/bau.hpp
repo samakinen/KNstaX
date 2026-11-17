@@ -267,6 +267,15 @@ public:
     void flushPendingPersistence();
 
     /**
+     * @brief The product changed its parameter image itself: store it
+     *
+     * Marks the persistent state dirty; loop() then stores the image with
+     * everything else. An ETS download does this on its own.
+     * @thread_safety NOT thread-safe - call from the BAU owner context only
+     */
+    void markParameterImageChanged();
+
+    /**
      * @brief Report currently pending owner-context work relevant to low-power scheduling.
      *
      * `pendingLoopWorkItems` are drained by `loop()`. `pendingDeferredWorkItems`

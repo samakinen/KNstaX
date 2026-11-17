@@ -21,7 +21,10 @@
 #include "knx/physical/tp1_mac_physical.hpp"
 #include "knx/physical/tp1_medium_backend.hpp"
 #include "knx/platform/platform.hpp"
+#include "knx/objects/application_program_object.hpp"
+#include "knx/objects/table_segments.hpp"
 #include "knx/product/endpoint.hpp"
+#include "knx/product/parameter_layout.hpp"
 #include "knx/util/inplace_function.hpp"
 #include "knx/util/log.hpp"
 #if KNX_FEATURE_COUPLER
@@ -634,6 +637,109 @@ private:
     ParameterCallbacks<schema_type> _callbacks{};
 };
 
+// ---------------------------------------------------------------------------
+// The parameter model of parameter_layout.hpp: one image, read through a view
+// ---------------------------------------------------------------------------
+
+template <typename SchemaT>
+inline constexpr bool kIsLayoutParameters = false;
+
+template <const auto& Layout>
+inline constexpr bool kIsLayoutParameters<params::LayoutParameters<Layout>> = true;
+
+/// The value type of a parameter of a layout-based product.
+template <typename SchemaT, auto ParameterId>
+using layout_parameter_value_t = params::value_type_in<typename SchemaT::layout_type, ParameterId>;
+
+/// ParameterValueType<Id> of a layout-based product definition.
+template <const auto& Layout>
+struct ParameterDescriptorFor<params::LayoutParameters<Layout>> {
+    template <auto ParameterId>
+    struct At {
+        struct type {
+            using value_type = layout_parameter_value_t<params::LayoutParameters<Layout>, ParameterId>;
+        };
+    };
+};
+
+template <const auto& Layout>
+struct ParameterCallbacks<params::LayoutParameters<Layout>> {
+    util::InplaceFunction<void(params::ViewFor<Layout>), 32> changed{};
+};
+
+/// Owns the product's parameter image: the one copy of the parameters.
+template <const auto& Layout>
+class ParameterState<params::LayoutParameters<Layout>> {
+public:
+    using schema_type = params::LayoutParameters<Layout>;
+    using layout_type = typename schema_type::layout_type;
+    using view_type = params::ViewFor<Layout>;
+
+    static_assert(layout_type::kSize >= 1u, "a parameter layout holds at least one parameter");
+    static_assert(layout_type::kSize <= objects::tableseg::kApplicationCodeMaxSize,
+                  "the parameter image does not fit the application code segment "
+                  "(objects::tableseg::kApplicationCodeMaxSize)");
+
+    explicit ParameterState(const schema_type& /*schema*/, ParameterCallbacks<schema_type>&& callbacks = {})
+        : _image(params::kDefaultImageOf<Layout>)
+        , _callbacks(std::move(callbacks))
+    {
+    }
+
+    [[nodiscard]] view_type view() const noexcept
+    {
+        return view_type(std::span<const uint8_t, layout_type::kSize>(_image));
+    }
+
+    /// What the stack needs to let ETS write the image, to store it and to
+    /// restore it.
+    [[nodiscard]] objects::ParameterImageBinding binding() noexcept
+    {
+        return objects::ParameterImageBinding{
+            .image = std::span<uint8_t>(_image),
+            .defaults = params::kDefaultImageOf<Layout>.data(),
+            .fingerprint = layout_type::kFingerprint,
+            .withinBounds = &withinBounds,
+        };
+    }
+
+    void notifyChanged()
+    {
+        if (_callbacks.changed) {
+            _callbacks.changed(view());
+        }
+    }
+
+    /// Write one parameter. A value outside the parameter's bounds, or an
+    /// instance the block does not have, changes nothing.
+    template <auto ParameterId>
+    auto set(size_t instance, params::value_type_in<layout_type, ParameterId> value) -> util::Result<void>
+    {
+        using Value = params::value_type_in<layout_type, ParameterId>;
+        if (instance >= layout_type::template kCount<decltype(ParameterId)>) {
+            return util::ErrorCode::OutOfRange;
+        }
+        uint8_t* const at = _image.data() + params::offsetInImage<layout_type, ParameterId>(instance);
+        std::array<uint8_t, params::kWidth<Value>> previous{};
+        std::copy_n(at, previous.size(), previous.begin());
+        params::store<layout_type, ParameterId>(std::span<uint8_t, layout_type::kSize>(_image), instance, value);
+        if (!withinBounds(_image)) {
+            std::copy_n(previous.begin(), previous.size(), at);
+            return util::ErrorCode::OutOfRange;
+        }
+        return util::Result<void>::ok();
+    }
+
+private:
+    static bool withinBounds(std::span<const uint8_t> image)
+    {
+        return params::imageWithinBounds(params::kBoundsOf<Layout>, image);
+    }
+
+    std::array<uint8_t, layout_type::kSize> _image;
+    ParameterCallbacks<schema_type> _callbacks{};
+};
+
 template <typename ProductDefinitionT>
 ResolvedKnxPersistenceIdentity resolveKnxPersistenceIdentity(const ProductDefinitionT& definition,
                                                             const KnxPersistenceIdentity& requested)
@@ -748,6 +854,28 @@ constexpr auto makeCommissionedProduct(EndpointDefinitionT endpointDefinition,
     };
 }
 
+/**
+ * @brief A product whose ETS parameters are the layout named as template argument
+ *
+ * @code
+ *   inline constexpr auto kParameters = params::parameterLayout(kDeviceBlock, params::repeat<8>(kInputBlock));
+ *   inline constexpr auto kProduct = makeCommissionedProduct<kParameters>(makeEndpointDefinition<...>(...));
+ * @endcode
+ *
+ * The runtime holds the parameter image (docs/design/parameter-model.md §3.4):
+ * `parameters()` is a view over it, `onParametersChanged` tells the product
+ * about a completed download.
+ */
+template <const auto& Layout, typename EndpointDefinitionT>
+constexpr auto makeCommissionedProduct(EndpointDefinitionT endpointDefinition)
+    -> CommissionedProductDefinition<std::remove_cvref_t<EndpointDefinitionT>, params::LayoutParameters<Layout>>
+{
+    return CommissionedProductDefinition<std::remove_cvref_t<EndpointDefinitionT>, params::LayoutParameters<Layout>>{
+        .endpointDefinition = std::move(endpointDefinition),
+        .parameterSchema = {},
+    };
+}
+
 #if KNX_SECURE_ENABLED
 /// The KNX Data Secure state this device has ex-factory.
 ///
@@ -798,6 +926,7 @@ enum class CommissionedTransportPath : uint8_t {
     IpRouting,           ///< IP routing — raw physical pointer (advanced manual)
     IpTunnelingManaged,  ///< IP tunneling via IpTunnelingOptions (functional, stack-managed)
     IpRoutingManaged,    ///< IP routing via IpRoutingOptions (functional, stack-managed)
+    CustomStackPort,     ///< A stack port the caller assembled (other media, simulated bus)
 #if KNX_FEATURE_COUPLER
     Tp1Coupler,          ///< Two TP1 ports with spec routing between them (product-grade)
 #endif
@@ -824,6 +953,7 @@ constexpr CommissionedSupportTier supportTierForTransportPath(CommissionedTransp
         case CommissionedTransportPath::Tp1MacPhysical:
         case CommissionedTransportPath::IpTunneling:
         case CommissionedTransportPath::IpRouting:
+        case CommissionedTransportPath::CustomStackPort:
         case CommissionedTransportPath::NotStarted:
             return CommissionedSupportTier::AdvancedManual;
     }
@@ -1096,6 +1226,34 @@ public:
     }
 
     /**
+     * Register the one parameter callback of a product built with
+     * makeCommissionedProduct<kParameters>(). It gets a view over the new
+     * values after ETS completed a parameter download and after
+     * setParameter(); the product reloads what it keeps decoded. It is not
+     * called at start: read parameters() once startCommissionedProduct()
+     * returned.
+     *
+     * @code
+     *   bindings.onParametersChanged([](params::ViewFor<kParameters> p) {
+     *       g_debounceMs = p.block<Dev>().get<Dev::DebounceMs>();
+     *   });
+     * @endcode
+     */
+    template <typename Callback>
+    auto& onParametersChanged(Callback&& callback) &
+    {
+        _parameterCallbacks.changed = std::forward<Callback>(callback);
+        return *this;
+    }
+
+    template <typename Callback>
+    auto onParametersChanged(Callback&& callback) && -> CommissionedBindingsBuilder&&
+    {
+        onParametersChanged(std::forward<Callback>(callback));
+        return std::move(*this);
+    }
+
+    /**
      * Register a callback that fires every time the device lifecycle state changes.
      *
      * Called at most once per loop() invocation, only on actual state transitions:
@@ -1138,6 +1296,14 @@ private:
     friend auto startCommissionedProduct(platform::Platform& platform,
                                          const DefinitionT& definition,
                                          CommissionedBindingsBuilder<DefinitionT, Cap>&& bindings,
+                                         CommissionedProductOptions options)
+        -> util::Result<CommissionedProductHandle<DefinitionT, Cap>>;
+
+    template <typename DefinitionT, size_t Cap>
+    friend auto startCommissionedProduct(platform::Platform& platform,
+                                         const DefinitionT& definition,
+                                         CommissionedBindingsBuilder<DefinitionT, Cap>&& bindings,
+                                         std::unique_ptr<bau::BusAccessStackPort> stackPort,
                                          CommissionedProductOptions options)
         -> util::Result<CommissionedProductHandle<DefinitionT, Cap>>;
 
@@ -1278,6 +1444,9 @@ public:
         , _secureOptions(options.secure)
 #endif
     {
+        if constexpr (detail::kIsLayoutParameters<parameter_schema_type>) {
+            _runtime.bindParameterImage(_parametersState.binding());
+        }
     }
 
     // Not copyable or movable: start() hands `this` to the parameter, endpoint
@@ -1304,9 +1473,37 @@ public:
 
         _transportPath = CommissionedTransportPath::Tp1MediumBackend;
 
-        _runtime.wireParameterDataCallback([this](std::span<const uint8_t> data) {
-            _parametersState.applyFromBytes(data);
-        });
+        wireParameters();
+
+        if (_startInProgrammingMode && !_runtime.isProgrammingModeActive()) {
+            _runtime.toggleProgrammingMode();
+        }
+
+        return util::Result<void>::ok();
+    }
+
+    /**
+     * @brief Start on a stack port the caller assembled.
+     *
+     * For a medium the overloads above do not cover, and for tests that run
+     * the product against a simulated bus.
+     */
+    auto start(platform::Platform& platform,
+               std::unique_ptr<bau::BusAccessStackPort> stackPort) -> util::Result<void>
+    {
+        if (!stackPort) {
+            return util::ErrorCode::InvalidParameter;
+        }
+
+        applySecureOptions();  // factory defaults: before init(), restore wins
+        auto startResult = _runtime.start(platform, std::move(stackPort));
+        if (startResult.isError()) {
+            return startResult.error();
+        }
+
+        _transportPath = CommissionedTransportPath::CustomStackPort;
+
+        wireParameters();
 
         if (_startInProgrammingMode && !_runtime.isProgrammingModeActive()) {
             _runtime.toggleProgrammingMode();
@@ -1357,9 +1554,7 @@ public:
             }
         }
 
-        _runtime.wireParameterDataCallback([this](std::span<const uint8_t> data) {
-            _parametersState.applyFromBytes(data);
-        });
+        wireParameters();
 
         if (_startInProgrammingMode && !_runtime.isProgrammingModeActive()) {
             _runtime.toggleProgrammingMode();
@@ -1386,9 +1581,7 @@ public:
 
         _transportPath = CommissionedTransportPath::Tp1MacPhysical;
 
-        _runtime.wireParameterDataCallback([this](std::span<const uint8_t> data) {
-            _parametersState.applyFromBytes(data);
-        });
+        wireParameters();
 
         if (_startInProgrammingMode && !_runtime.isProgrammingModeActive()) {
             _runtime.toggleProgrammingMode();
@@ -1414,9 +1607,7 @@ public:
 
         _transportPath = CommissionedTransportPath::IpTunneling;
 
-        _runtime.wireParameterDataCallback([this](std::span<const uint8_t> data) {
-            _parametersState.applyFromBytes(data);
-        });
+        wireParameters();
 
         if (_startInProgrammingMode && !_runtime.isProgrammingModeActive()) {
             _runtime.toggleProgrammingMode();
@@ -1442,9 +1633,7 @@ public:
 
         _transportPath = CommissionedTransportPath::IpRouting;
 
-        _runtime.wireParameterDataCallback([this](std::span<const uint8_t> data) {
-            _parametersState.applyFromBytes(data);
-        });
+        wireParameters();
 
         if (_startInProgrammingMode && !_runtime.isProgrammingModeActive()) {
             _runtime.toggleProgrammingMode();
@@ -1488,9 +1677,7 @@ public:
 
         _transportPath = CommissionedTransportPath::IpTunnelingManaged;
 
-        _runtime.wireParameterDataCallback([this](std::span<const uint8_t> data) {
-            _parametersState.applyFromBytes(data);
-        });
+        wireParameters();
 
         if (_startInProgrammingMode && !_runtime.isProgrammingModeActive()) {
             _runtime.toggleProgrammingMode();
@@ -1684,9 +1871,7 @@ public:
         (void)routing;
 #endif
 
-        _runtime.wireParameterDataCallback([this](std::span<const uint8_t> data) {
-            _parametersState.applyFromBytes(data);
-        });
+        wireParameters();
 
         if (_startInProgrammingMode && !_runtime.isProgrammingModeActive()) {
             _runtime.toggleProgrammingMode();
@@ -1952,15 +2137,55 @@ public:
     /// from a factory-programmed MAC).
     auto& deviceObject() { return _runtime.deviceObject(); }
 
-    auto parameters() -> CommissionedParametersView<product_definition_type>
+    /// The parameters: a view over the image for a product built with
+    /// makeCommissionedProduct<kParameters>(), a CommissionedParametersView
+    /// for one with a parameter schema.
+    auto parameters() const
     {
-        return CommissionedParametersView<product_definition_type>(&_parametersState);
+        if constexpr (detail::kIsLayoutParameters<parameter_schema_type>) {
+            return _parametersState.view();
+        } else {
+            return CommissionedParametersView<product_definition_type>(
+                const_cast<detail::ParameterState<parameter_schema_type>*>(&_parametersState));
+        }
     }
 
-    auto parameters() const -> CommissionedParametersView<product_definition_type>
+    /**
+     * Change one parameter from the device itself (a local menu, a learned
+     * value). The image is stored with the next coalesced save, which needs
+     * a clock (setTimeSource()), and onParametersChanged fires. A value
+     * outside the parameter's declared bounds is refused.
+     *
+     * `instance` is the 0-based instance of a repeated block.
+     */
+    template <auto ParameterId>
+    auto setParameter(size_t instance, typename product_definition_type::template ParameterValueType<ParameterId> value)
+        -> util::Result<void>
     {
-        return CommissionedParametersView<product_definition_type>(
-            const_cast<detail::ParameterState<parameter_schema_type>*>(&_parametersState));
+        const auto result = _parametersState.template set<ParameterId>(instance, value);
+        if (!result.isError()) {
+            _runtime.markParameterImageChanged();
+            _parametersState.notifyChanged();
+        }
+        return result;
+    }
+
+    template <auto ParameterId>
+    auto setParameter(typename product_definition_type::template ParameterValueType<ParameterId> value)
+        -> util::Result<void>
+    {
+        return setParameter<ParameterId>(size_t{0}, value);
+    }
+
+    /// False when the parameters are not a completed download: during an ETS
+    /// download, after one that was refused or interrupted, after ETS unloaded
+    /// the application, and after a firmware update that changed the parameter
+    /// layout. The parameters then read as their defaults, or as half of a
+    /// download. A device that was never downloaded reads its defaults and is
+    /// loaded, like the tables.
+    bool parametersLoaded() const
+    {
+        return _runtime.applicationProgramLoaded();
     }
 
     auto individualAddress() const -> IndividualAddress
@@ -2175,7 +2400,22 @@ private:
         // write chain (wireParameterDataCallback → APO.notifyProgramDataChanged →
         // ParameterState::applyFromBytes) is exercised.  This is the same path ETS
         // uses when it downloads program data over the KNX bus.
-        _runtime.simulateEtsProgramDataWriteForExpertUse(data);
+        if constexpr (detail::kIsLayoutParameters<parameter_schema_type>) {
+            (void)_runtime.loadParameterImageForExpertUse(data);
+        } else {
+            _runtime.simulateEtsProgramDataWriteForExpertUse(data);
+        }
+    }
+
+    void wireParameters()
+    {
+        if constexpr (detail::kIsLayoutParameters<parameter_schema_type>) {
+            _runtime.onParameterImageChanged([this]() { _parametersState.notifyChanged(); });
+        } else {
+            _runtime.wireParameterDataCallback([this](std::span<const uint8_t> data) {
+                _parametersState.applyFromBytes(data);
+            });
+        }
     }
 
     product_definition_type _definition;
@@ -2353,6 +2593,32 @@ auto startCommissionedProduct(platform::Platform& platform,
     return runtime;
 }
 #endif  // KNX_FEATURE_COUPLER
+
+/// Overload: start on a stack port the caller assembled (another medium, or a
+/// simulated bus in a test). `options.mediumBackend` is not used.
+template <typename ProductDefinitionT, size_t BindingCapacity>
+auto startCommissionedProduct(platform::Platform& platform,
+                              const ProductDefinitionT& definition,
+                              CommissionedBindingsBuilder<ProductDefinitionT, BindingCapacity>&& bindings,
+                              std::unique_ptr<bau::BusAccessStackPort> stackPort,
+                              CommissionedProductOptions options)
+    -> util::Result<CommissionedProductHandle<ProductDefinitionT, BindingCapacity>>
+{
+    options.mediumBackend = nullptr;
+    auto runtime = std::make_unique<CommissionedProductRuntime<ProductDefinitionT, BindingCapacity>>(
+        definition,
+        std::move(bindings)._endpointBindings,
+        std::move(bindings)._parameterCallbacks,
+        std::move(bindings)._lifecycleCallback,
+        std::move(options));
+
+    auto startResult = runtime->start(platform, std::move(stackPort));
+    if (startResult.isError()) {
+        return startResult.error();
+    }
+
+    return runtime;
+}
 
 #if KNX_SECURE_ENABLED
 /// Overload: assemble with a TP1 MAC physical layer (the bit-bang backend),

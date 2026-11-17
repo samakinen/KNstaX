@@ -4,9 +4,10 @@
  * @file parameter_layout.hpp
  * @brief ETS parameters as a byte image with a compile-time layout
  *
- * Prototype (step P0) of docs/design/parameter-model.md. It stands beside the
- * StaticParameterSchema of commissioned_product.hpp and is not yet wired into
- * the runtime or the exporter.
+ * The parameter model of docs/design/parameter-model.md. Until the old model
+ * is removed it stands beside the StaticParameterSchema of
+ * commissioned_product.hpp. A product takes it with
+ * makeCommissionedProduct<kParameters>(...); the exporter does not read it yet.
  *
  * A product declares parameter blocks, each with its own id enum, and a layout
  * that lists the blocks and how often each repeats:
@@ -772,6 +773,42 @@ private:
 /// `params::ViewFor<kParameters> view(image);`
 template <const auto& Layout>
 using ViewFor = ParameterView<std::remove_cvref_t<decltype(Layout)>>;
+
+/// Offset in the image of parameter Id in instance `instance` of its block.
+/// The block is the one whose id enum is the type of Id.
+template <typename LayoutT, auto Id>
+[[nodiscard]] constexpr size_t offsetInImage(size_t instance = 0) noexcept
+{
+    using IdEnum = decltype(Id);
+    using BlockT = typename LayoutT::template block_type<IdEnum>;
+    return LayoutT::template kBase<IdEnum> + instance * BlockT::kStride + BlockT::template kOffset<Id>;
+}
+
+/// The value type of parameter Id in a layout.
+template <typename LayoutT, auto Id>
+using value_type_in = typename LayoutT::template block_type<decltype(Id)>::template value_type_of<Id>;
+
+/// Write one parameter into an image. The instance must exist.
+template <typename LayoutT, auto Id>
+constexpr void store(std::span<uint8_t, LayoutT::kSize> image, size_t instance,
+                     value_type_in<LayoutT, Id> value) noexcept
+{
+    detail::encode(value, image.data() + offsetInImage<LayoutT, Id>(instance));
+}
+
+/**
+ * @brief Names a layout as the parameters of a product
+ *
+ * `makeCommissionedProduct<kParameters>(...)` puts this type, and nothing of
+ * the layout object, into the product definition: the runtime reaches the
+ * default image, the bounds and the fingerprint through the template argument.
+ */
+template <const auto& Layout>
+struct LayoutParameters {
+    using layout_type = std::remove_cvref_t<decltype(Layout)>;
+    using view_type = ParameterView<layout_type>;
+    static constexpr size_t kImageSize = layout_type::kSize;
+};
 
 // ---------------------------------------------------------------------------
 // Export: walking a layout (host tools and tests; not for firmware)

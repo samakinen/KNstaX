@@ -248,6 +248,22 @@ util::Result<void> writeProgramData(
         return util::Result<void>::err(util::ErrorCode::OutOfRange);
     }
 
+    if (domain->hasParameterImage()) {
+        // The image has a fixed size: a write lands in it or is refused.
+        const auto image = domain->parameterImage();
+        if (offset + count > image.size()) {
+            return util::Result<void>::err(util::ErrorCode::OutOfRange);
+        }
+        auto res = in.readBytes(image.subspan(offset, count));
+        if (res.isError()) {
+            return res;
+        }
+        if (domain->acceptParameterImage()) {
+            domain->notifyProgramDataChanged();
+        }
+        return util::Result<void>::ok();
+    }
+
     std::vector<uint8_t> chunk(count, 0);
     auto res = in.readBytes(chunk);
     if (res.isError()) {
@@ -505,6 +521,75 @@ KernelBinding ApplicationProgramObject::kernelBinding() const {
     binding.handlerCount = kAppProgramHandlerCount;
     binding.context = PropertyContext{const_cast<ApplicationProgramObject*>(this), _validationPolicy};
     return binding;
+}
+
+// === Parameter image ===
+
+void ApplicationProgramObject::setProgramData(std::span<const uint8_t> data) {
+    if (!hasParameterImage()) {
+        _programData.assign(data.begin(), data.end());
+        return;
+    }
+    if (data.empty()) {
+        resetParameterImage();
+        return;
+    }
+    const size_t count = std::min(data.size(), _image.image.size());
+    std::copy_n(data.begin(), count, _image.image.begin());
+}
+
+void ApplicationProgramObject::bindParameterImage(const ParameterImageBinding& binding) {
+    _image = binding;
+    _programData.clear();
+    resetParameterImage();
+}
+
+void ApplicationProgramObject::resetParameterImage() {
+    if (hasParameterImage()) {
+        std::copy_n(_image.defaults, _image.image.size(), _image.image.begin());
+    }
+}
+
+bool ApplicationProgramObject::acceptParameterImage() {
+    if (parameterImageWithinBounds()) {
+        return true;
+    }
+    KNX_LOGE("KNX.AppProgram", "Parameter image holds a value outside its bounds: refused, defaults in use");
+    resetParameterImage();
+    _loadState = loadstate::kError;
+    return false;
+}
+
+void ApplicationProgramObject::appendParameterImageRecord(std::vector<uint8_t>& out) const {
+    if (_loadState != loadstate::kLoaded) {
+        // Not loaded: the next start must not take the defaults, or half of a
+        // download, for a loaded application.
+        out.push_back(0u);
+        return;
+    }
+    for (unsigned shift = 32u; shift != 0u; shift -= 8u) {
+        out.push_back(static_cast<uint8_t>(_image.fingerprint >> (shift - 8u)));
+    }
+    out.insert(out.end(), _image.image.begin(), _image.image.end());
+}
+
+void ApplicationProgramObject::restoreParameterImageRecord(std::span<const uint8_t> record) {
+    const auto stored = record.size() >= kParameterImageRecordOverhead
+                            ? (static_cast<uint32_t>(record[0]) << 24u) | (static_cast<uint32_t>(record[1]) << 16u)
+                                  | (static_cast<uint32_t>(record[2]) << 8u) | record[3]
+                            : 0u;
+    const bool sameLayout = record.size() == kParameterImageRecordOverhead + _image.image.size()
+                            && stored == _image.fingerprint;
+    if (sameLayout) {
+        std::copy(record.begin() + kParameterImageRecordOverhead, record.end(), _image.image.begin());
+        if (parameterImageWithinBounds()) {
+            return;
+        }
+    }
+    KNX_LOGW("KNX.AppProgram", "Stored parameters are %s: defaults in use, application program unloaded",
+             record.size() == 1u ? "marked not loaded" : sameLayout ? "outside their bounds" : "of another layout");
+    resetParameterImage();
+    _loadState = loadstate::kUnloaded;
 }
 
 // === Validation ===

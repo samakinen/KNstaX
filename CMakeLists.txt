@@ -950,6 +950,8 @@ else()
         endif()
         # Started product runtime
         knx_add_test(test_product_runtime NEEDS DPT_FLOAT SOURCES test/integration/test_product_runtime.cpp LABELS integration)
+        knx_add_test(test_parameter_image_download SOURCES test/integration/test_parameter_image_download.cpp
+            LABELS integration)
         # The same binary, the table-segment capacity group (runs at every capacity)
         knx_add_test(test_ets_connected_session_capacity NEEDS SECURITY COMMAND $<TARGET_FILE:test_ets_connected_session>
             ARGS capacity TIMEOUT 30 LABELS integration)

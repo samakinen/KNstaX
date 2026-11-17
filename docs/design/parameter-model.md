@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | **Proposed**, 16 November 2026. Step P0 (§8) is built and measured, see "P0 result"; it passed its decision point. Nothing else is built: the prototype is not wired into the runtime or the exporter, and the old model is still in place. |
+| Status | **In progress**, 17 November 2026. Steps P0 and P1 (§8) are built and tested, see "P0 result" and "P1 result": a product can take the new model with `makeCommissionedProduct<kParameters>()`, and ETS downloads, storage and restore work through the stack. Not built: the exporter (P2), so no `.knxprod` comes from the new model yet; the old model is still in place beside it (P3). |
 | Goal | ETS parameters cost a product almost nothing at run time, on a 128 KiB Cortex-M as on an ESP32, and a product with *n* identical channels declares a channel once. |
 | Replaces | `StaticParameterSchema`, `ParameterState`, `ParameterCallbacks` and the per-parameter `onParameterChanged` in `commissioned_product.hpp`. The project is greenfield, so the old model is removed, not kept beside the new one. |
 | Motivating product | H8i8o milestone M6: 8 binary inputs and 8 outputs, about 200 parameters (h8i8o `docs/design/02-application-spec.md`). |
@@ -119,15 +119,28 @@ inline constexpr auto kParameters = parameterLayout(
 
 ### 3.4 Run time
 
-**One buffer.** `DeviceModel` owns the image, sized from the product. ETS memory writes land in it,
-`ApplicationProgramObject` exposes it, the view reads it. The `std::vector` copy and
-`ParameterState` go away.
+**One buffer.** The product runtime owns the image, an array of exactly the layout's size, and
+binds it into the stack before start (`objects::ParameterImageBinding`: the image, the default
+image, the fingerprint, the bounds check). ETS memory writes land in it,
+`ApplicationProgramObject` exposes it as its program data, the view reads it. The `std::vector`
+copy and the typed copy in `ParameterState` go away. *As built in P1; the first draft put the
+buffer in `DeviceModel`, which is not a template and could only have sized it by a ceiling.*
 
-**Start-up.** The buffer is the stored image if its fingerprint matches, otherwise the default
-image. A fingerprint mismatch (new firmware, different layout) also sets the application program
-to *unloaded*, so ETS and the product both see that a download is needed. This replaces Habinari's
-hand-made version parameter, and it removes today's special case "a segment nobody wrote reads as
-zeros".
+**Storage.** The image is stored as one record: the fingerprint, then the image. While the
+application program is not loaded the record is a single zero octet, so a restart cannot turn
+defaults, or half of a download, into a loaded application.
+
+**Start-up.**
+
+| What is stored | Image at start | Application program |
+|---|---|---|
+| Nothing (a device never downloaded) | Defaults | Loaded, as the tables are |
+| A record of this layout, every value inside its bounds | The stored image | Loaded |
+| A record of another layout (new firmware), a value outside its bounds, or the zero octet | Defaults | **Unloaded** |
+
+The third row replaces Habinari's hand-made version parameter: ETS and the product
+(`parametersLoaded()`) both see that a download is needed. Today's special case "a segment nobody
+wrote reads as zeros" is gone, because a download that writes nothing leaves the image as it was.
 
 **Reading.**
 
@@ -143,20 +156,31 @@ uint16_t ms     = in.get<In::LongPressMs>();  // two byte loads
 A block view is one pointer. `get` has no table and no search: the offset is a compile-time
 constant, and the channel logic that calls it is compiled once for all channels.
 
-**Change notification.** One callback, `onParametersChanged()`, after a completed download and
-after a run-time `set`. Products reload what they keep decoded. Between `Unload` and
-`LoadCompleted` the application program is not loaded; the product is told through the existing
-lifecycle and must not act on parameters then. *To check in the prototype: what the lifecycle
-reports during a download today.*
+**Change notification.** One callback, `onParametersChanged(view)`, after a completed download
+that passed the bounds check and after a run-time `setParameter`. It gets the view, so it needs no
+handle to the product. Products reload what they keep decoded. It is not called at start: the
+product reads `parameters()` once `startCommissionedProduct()` has returned.
 
-**Writing from the device** (today's `applyCommissionedParameter`): `params.set<Id>(value)` encodes
-into the buffer, stores the image and fires the callback.
+**During a download.** ETS writes into the live image, so between `StartLoading` and
+`LoadCompleted` the image is half old and half new. `parametersLoaded()` is false for that time,
+and after a download that was refused or never completed. A product that reads parameters
+continuously, not only in `onParametersChanged`, checks it. The lifecycle state does not change:
+it reports programming mode and the individual address only. If a download never completes, the
+restart brings back the last completed one, because the image is stored only at `LoadCompleted`.
+
+**Writing from the device** (today's `applyCommissionedParameter`):
+`product.setParameter<Id>(value)`, or `setParameter<Id>(instance, value)` for a repeated block. It
+checks the value against the parameter's bounds, encodes it into the image, has the image stored
+with the next coalesced save and fires the callback. The coalesced save needs the product's clock
+(`setTimeSource`); without one the image is stored only when ETS restarts the device.
 
 **Validation at load.** ETS enforces ranges, but a device should not trust its memory blindly. A
 compact bounds table (offset, width, minimum, maximum; about 6 B per *declared* parameter, not per
-instance) is checked once when an image is taken into use. An image that fails is rejected as a
-whole: default image, application unloaded. After that, `get` trusts the buffer. The table is a
-profile option (`KNX_PARAMETER_VALIDATION`, default on).
+instance) is checked once when an image is taken into use: at `LoadCompleted` and at restore. An
+image that fails is rejected as a whole: default image, load state *Error* (which ETS reads back
+as a failed download), unloaded after the next restart. After that, `get` trusts the buffer.
+Making the table a profile option (`KNX_PARAMETER_VALIDATION`) is left for P3; in P1 it is always
+linked.
 
 ### 3.5 What the firmware links
 
@@ -391,15 +415,66 @@ argument (`ViewFor<kParameters>`, `kDefaultImageOf<kParameters>`, `kBoundsOf<kPa
 as a run-time reference. The header says so, and the size gate's string check (§3.5) is what will
 enforce it.
 
+### P1 result (17 November 2026)
+
+Built:
+
+- **Stack.** `ApplicationProgramObject` takes an `objects::ParameterImageBinding`; with one bound,
+  its program data is the image. `DeviceModel` registers the image as the application code segment,
+  so ETS writes straight into it, and checks it at `LoadCompleted`. `InterfaceObjectManager` stores
+  and restores the record with the fingerprint. A product without a binding keeps the old path.
+- **Product API.** `makeCommissionedProduct<kParameters>(endpoints)`, `parameters()` returning the
+  view, `onParametersChanged(view)`, `setParameter<Id>()`, `parametersLoaded()`. The product
+  definition carries the layout as a type only (`params::LayoutParameters<kParameters>`).
+- **A start overload for a caller-assembled stack port**, `startCommissionedProduct(platform,
+  product, bindings, stackPort, options)`. The test needed it to run a product on a simulated bus;
+  it is also the way to a medium the other overloads do not cover.
+- **Test** `test_parameter_image_download` (integration, 7 cases): a product on the real stack over
+  the mock TP1 physical layer, with the test playing ETS on a transport connection (StartLoading,
+  `A_Memory_Write`, `A_Memory_Read`, LoadCompleted, `A_Restart`). It covers the defaults, the
+  download, the restart, a refused image, an interrupted download, an image of another layout and
+  `setParameter`. The host suite is 163 of 163.
+
+Measured on the H8i8o firmware with 68 objects and the 200 parameters of the P0 probe, now through
+`makeCommissionedProduct<kParameters>()`:
+
+| | P0 (image in a probe buffer) | P1 (through the runtime) |
+|---|---:|---:|
+| Whole firmware | 96,724 B | 98,480 B |
+| Flash against the same firmware without parameters (95,616 B) | 1,108 B | 2,864 B |
+| Heap high water on the board (12,072 B without parameters) | not measured | 12,220 B |
+| Parameter names or option labels in the image | none | none |
+
+On the board the firmware started, read all 200 defaults through `parameters()` with the expected
+checksum, and reported the application program as loaded.
+
+Of the 2,864 B, about 1,070 B are not for the parameters: the stack now links the old path and the
+new one side by side. The same firmware *without* parameters grew by 1,064 B (94,916 to 95,980 B).
+
+**The size gate is over budget for the time being.** The `tp1-small` Cortex-M3 reference device
+is at 88,514 B against a budget of 88,064 B (it was 87,446 B). The budget is not changed: step P3
+removes the old path (the program data vector, the separate 256-octet segment, the typed copy), and
+the figure is to be back under the budget then. The H8i8o device check of the gate still shows
+10,915 B of flash headroom. This branch should not be merged before P3 for that reason.
+
+Not covered by P1: an ETS6 download of a product with the new model, which needs the exporter (P2).
+
 ## 9. Open questions
 
 1. **Tables inside a block.** The H8i8o output has "up to 8 scene entries" per channel. Either 16
    flat parameters, or one level of `repeat` inside a block. Decide in P0.
-2. **Lifecycle during a download** (§3.4): confirm what products see between `Unload` and
-   `LoadCompleted`, and whether a partial ETS download ever skips `Unload`.
+2. ~~**Lifecycle during a download.**~~ Settled in P1 (§3.4 "During a download"): the lifecycle
+   does not change, `parametersLoaded()` reports it. Still to see with ETS6 on the board (P2):
+   whether a partial download writes only the changed octets. The single image handles that case;
+   the old separate segment did not.
 3. **Fingerprint and the application version.** Should a changed fingerprint with an unchanged
    `applicationVersion` be a build error against a recorded value, so that a layout change cannot
    ship under an old version by accident?
 4. **Name text for instances.** "Input {n}" is fixed text. ETS can show a parameter's value in a
    channel name ("Input 3: Kitchen"); that needs a text parameter type, which the model does not
    have.
+5. **A device that was never downloaded reports "loaded".** It does so for the tables too, and P1
+   keeps the parameters consistent with them. Should a new device report its application program
+   as unloaded instead?
+6. **A default clock for the coalesced save.** Without `setTimeSource` the stack stores state only
+   at an ETS restart. Should the product runtime take the platform's millisecond clock by default?

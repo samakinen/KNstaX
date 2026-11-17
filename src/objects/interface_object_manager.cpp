@@ -295,7 +295,10 @@ util::Result<void> InterfaceObjectManager::init(bool enablePersistence,
         _activeBank = readActivePersistenceBank();
 
         _persistenceManager = std::make_unique<PersistenceManager>(*_persistence);
-        _recordScratch.reserve(kRecordScratchBytes);
+        // The parameter image is a record too, and may be the largest one.
+        const size_t imageRecord = _applicationProgramPtr->parameterImage().size()
+                                   + ApplicationProgramObject::kParameterImageRecordOverhead;
+        _recordScratch.reserve(std::max(kRecordScratchBytes, imageRecord));
         KNX_LOGD(TAG, "Persistence enabled");
     }
     
@@ -406,6 +409,13 @@ size_t InterfaceObjectManager::loadPersistedProperties(std::optional<InterfaceOb
         }
         if (res.isError()) {
             KNX_LOGW(TAG, "Failed to load keyId=0x%04x: %s", keyId, util::errorCodeToString(res.error()));
+            return;
+        }
+        if (objectType == InterfaceObjectType::applicationProgram()
+            && propertyId == static_cast<application::PropertyID>(AppProgramProperty::ProgramData)
+            && _applicationProgramPtr->hasParameterImage()) {
+            _applicationProgramPtr->restoreParameterImageRecord(data);
+            ++loaded;
             return;
         }
         const auto writeResult = writeProperty(objectType, instance, propertyId, 1, data);
@@ -676,6 +686,15 @@ util::Result<size_t> InterfaceObjectManager::saveToPersistence() {
                     return;
                 }
                 if (propertyId == static_cast<application::PropertyID>(AppProgramProperty::ProgramData)) {
+                    if (_applicationProgramPtr->hasParameterImage()) {
+                        // The parameter image is stored with its layout
+                        // fingerprint, not as the bare property value.
+                        saveProp(objectType, propertyId, [&](std::vector<uint8_t>& out) {
+                            _applicationProgramPtr->appendParameterImageRecord(out);
+                            return true;
+                        });
+                        return;
+                    }
                     savePropertyFromKernel(objectType, propertyId, *_applicationProgramPtr,
                                            static_cast<uint16_t>(_applicationProgramPtr->getProgramData().size()));
                     return;

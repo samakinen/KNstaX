@@ -197,11 +197,20 @@ void DeviceModel::bind()
                                   objects::tableseg::kGroupObjectTableSize,
                                   application::MemoryAccessMode::ReadWrite, "GrOT"},
         std::span<uint8_t>(_groupObjectSegment));
-    (void)stackPort.registerMemoryRegion(
-        application::MemoryRegion{MemoryAddress(objects::tableseg::kApplicationCodeBase),
-                                  objects::tableseg::kApplicationCodeSize,
-                                  application::MemoryAccessMode::ReadWrite, "AppCode"},
-        std::span<uint8_t>(_applicationCodeSegment));
+    // The application code segment is the product's parameter image when it
+    // bound one: a single buffer that ETS writes and the product reads.
+    std::span<uint8_t> applicationCode = _applicationProgram.parameterImage();
+    if (!_applicationProgram.hasParameterImage()) {
+        _applicationCodeSegment.assign(objects::tableseg::kApplicationCodeSize, 0u);
+        applicationCode = _applicationCodeSegment;
+    }
+    if (!applicationCode.empty()) {
+        (void)stackPort.registerMemoryRegion(
+            application::MemoryRegion{MemoryAddress(objects::tableseg::kApplicationCodeBase),
+                                      static_cast<uint32_t>(applicationCode.size()),
+                                      application::MemoryAccessMode::ReadWrite, "AppCode"},
+            applicationCode);
+    }
 
     stackPort.setPropertyDescriptionProvider(
         [this](const IndividualAddress& /*source*/, InterfaceObjectIndex objectIndex, application::PropertyID propertyId, PropertyIndex propertyIndex)
@@ -570,6 +579,18 @@ void DeviceModel::applyLoadedTableSegment(InterfaceObjectType objectType)
                 objects::AssociationEntry(AddressTableIndex(tsap), GroupObjectIndex(asap)));
         }
         KNX_LOGI(TAG, "Applied %u associations from load segment", count);
+        return;
+    }
+
+    if (objectType == InterfaceObjectType::applicationProgram() && _applicationProgram.hasParameterImage()) {
+        // ETS wrote into the parameter image itself. A download that wrote
+        // nothing leaves the values the device already had. The image is
+        // checked once here; the product then reads it without checks.
+        if (_applicationProgram.acceptParameterImage()) {
+            _applicationProgram.notifyProgramDataChanged();
+            KNX_LOGI(TAG, "Parameter image of %zu octets taken into use",
+                     _applicationProgram.parameterImage().size());
+        }
         return;
     }
 

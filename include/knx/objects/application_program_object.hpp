@@ -68,6 +68,26 @@ enum class ProgramControl : uint8_t {
 };
 
 /**
+ * @brief The product's parameter image (docs/design/parameter-model.md §3.4)
+ *
+ * The one buffer the ETS parameters live in. The product runtime owns it and
+ * binds it before BusAccessUnit::init(). ETS memory writes land in it, the
+ * product reads it through a view, and it is stored with its layout
+ * fingerprint, so an image written for another layout is not taken into use.
+ */
+struct ParameterImageBinding {
+    /// The image, in RAM. Outlives the BusAccessUnit.
+    std::span<uint8_t> image{};
+    /// The image with every parameter at its default: image.size() octets.
+    const uint8_t* defaults{nullptr};
+    /// Identifies the layout the image is read with.
+    uint32_t fingerprint{0};
+    /// True when every parameter of the image is inside its bounds. Null: the
+    /// image is not checked.
+    bool (*withinBounds)(std::span<const uint8_t> image){nullptr};
+};
+
+/**
  * @brief Application Program Object - Interface Object Type 3
  * 
  * Stores application program identification, version, and configuration.
@@ -163,9 +183,42 @@ public:
 
     // === Program Data ===
 
-    // PID_PROGRAM_DATA (22) - Application-specific program data
-    void setProgramData(std::span<const uint8_t> data) { _programData.assign(data.begin(), data.end()); }
-    std::span<const uint8_t> getProgramData() const { return _programData; }
+    // PID_PROGRAM_DATA (22) - Application-specific program data. With a
+    // parameter image bound this is the image: a write is cut to its size and
+    // an empty write returns it to the defaults.
+    void setProgramData(std::span<const uint8_t> data);
+    std::span<const uint8_t> getProgramData() const
+    {
+        return hasParameterImage() ? std::span<const uint8_t>(_image.image) : std::span<const uint8_t>(_programData);
+    }
+
+    // === Parameter image ===
+
+    /// Bind the product's parameter image and fill it with the defaults.
+    /// Before BusAccessUnit::init(); the restore then replaces the defaults
+    /// with a stored image of the same layout.
+    void bindParameterImage(const ParameterImageBinding& binding);
+    bool hasParameterImage() const { return _image.defaults != nullptr; }
+    std::span<uint8_t> parameterImage() { return _image.image; }
+    std::span<const uint8_t> parameterImage() const { return _image.image; }
+    void resetParameterImage();
+    /// False when the image holds a value outside its bounds.
+    bool parameterImageWithinBounds() const
+    {
+        return _image.withinBounds == nullptr || _image.withinBounds(_image.image);
+    }
+    /// Take a just-written image into use: checked against the bounds; one
+    /// that fails is replaced by the defaults and the load state becomes
+    /// Error. Returns whether the image was accepted.
+    bool acceptParameterImage();
+    /// What is stored for the image: fingerprint and image while the
+    /// application program is loaded, one zero octet otherwise.
+    void appendParameterImageRecord(std::vector<uint8_t>& out) const;
+    static constexpr size_t kParameterImageRecordOverhead = 4;
+    /// Take a stored record into use. Anything but a record of this layout
+    /// with every value inside its bounds leaves the defaults in place and
+    /// the application program unloaded.
+    void restoreParameterImageRecord(std::span<const uint8_t> record);
 
     /// Register a callback that is invoked whenever the KNX management model
     /// (e.g. ETS over TP1 or KNXnet/IP) writes new program data to this object.
@@ -179,7 +232,7 @@ public:
     void notifyProgramDataChanged() const
     {
         if (_onProgramDataChanged) {
-            _onProgramDataChanged(_programData);
+            _onProgramDataChanged(getProgramData());
         }
     }
 
@@ -222,6 +275,7 @@ private:
 
     // Program data
     std::vector<uint8_t> _programData;
+    ParameterImageBinding _image{};
     ProgramDataChangedCallback _onProgramDataChanged;
 
     ValidationPolicy _validationPolicy{ValidationPolicy::OnWrite};
