@@ -135,7 +135,10 @@ inline float decodeDpt9(uint16_t raw) noexcept
         mantissa -= 2048;
     }
     const uint32_t exponent = (raw >> 11u) & 0x0Fu;
-    return 0.01f * static_cast<float>(mantissa * (int32_t{1} << exponent));
+    // Divided by 100, not multiplied by 0.01f: the division is correctly
+    // rounded, so a value with two decimals reads back as the same float the
+    // literal in the source gives (0.3 as 0.3f, not one bit below it).
+    return static_cast<float>(mantissa * (int32_t{1} << exponent)) / 100.0f;
 }
 
 template <ParameterValue V>
