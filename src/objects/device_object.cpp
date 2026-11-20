@@ -573,23 +573,53 @@ static const ScalarPropertyData<DeviceObject, uint16_t> kVersionData{ &getVersio
 // objects, elements 1..n their types in ascending object-index order. ETS
 // reads it to enumerate the objects; without it ETS probes PID_OBJECT_TYPE of
 // one index after another.
-util::Result<uint16_t> getIoListEntry(const DeviceObject& domain, DomainIndex index) {
-    const auto type = domain.interfaceObjectTypeAt(index.value);
-    if (type.isError()) {
-        return util::Result<uint16_t>(type.error());
+// A plain read handler rather than VariableTableProperty: the list is
+// read-only, and the template's write path and the indirection through its
+// data are code a small target pays for.
+static util::Result<void> readIoList(
+    const PropertyContext& context,
+    DomainIndex startIndex,
+    uint16_t elementCount,
+    util::ByteWriter& out,
+    const void* /*userData*/)
+{
+    const auto* domain = static_cast<const DeviceObject*>(context.domain);
+    if (!domain) {
+        return util::Result<void>::err(util::ErrorCode::InvalidParameter);
     }
-    return type.value().value();
+    for (uint16_t i = 0; i < elementCount; ++i) {
+        const auto type = domain->interfaceObjectTypeAt(static_cast<uint16_t>(startIndex.value + i));
+        if (type.isError()) {
+            return util::Result<void>::err(type.error());
+        }
+        auto res = out.u16be(type.value().value());
+        if (res.isError()) {
+            return res;
+        }
+    }
+    return util::Result<void>::ok();
 }
 
-util::Result<uint16_t> countIoListEntries(const DeviceObject& domain) {
-    return domain.interfaceObjectCount();
+static util::Result<uint16_t> countIoList(const PropertyContext& context, const void* /*userData*/)
+{
+    const auto* domain = static_cast<const DeviceObject*>(context.domain);
+    if (!domain) {
+        return util::Result<uint16_t>(util::ErrorCode::InvalidParameter);
+    }
+    return domain->interfaceObjectCount();
 }
 
-static const VariableTablePropertyData<DeviceObject, uint16_t> kIoListData{
-    &getIoListEntry,
+static const PropertyHandler kIoListHandler{
+    static_cast<application::PropertyID>(DeviceProperty::IoList),
+    application::PropertyDataType::UnsignedInt,
+    PropertyCapability::ReadOnly,
+    kMaxIoListEntries,
+    0,
+    &readIoList,
     nullptr,
     nullptr,
-    &countIoListEntries
+    &countIoList,
+    nullptr,
 };
 
 static const PropertyHandler kDeviceHandlers[] = {
@@ -633,11 +663,7 @@ static const PropertyHandler kDeviceHandlers[] = {
         PropertyCapability::ReadOnly,
         &kMaxApduData),
 
-    VariableTableProperty<DeviceObject, uint16_t, kMaxIoListEntries>::make(
-        static_cast<application::PropertyID>(DeviceProperty::IoList),
-        application::PropertyDataType::UnsignedInt,
-        PropertyCapability::ReadOnly,
-        &kIoListData),
+    kIoListHandler,
 
     ScalarProperty<DeviceObject, uint8_t>::make(
         static_cast<application::PropertyID>(DeviceProperty::SubnetAddress),
