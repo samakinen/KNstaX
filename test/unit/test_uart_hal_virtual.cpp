@@ -250,7 +250,9 @@ void test_virtual_refuses_invalid_config(void)
 
     const knx_uart_hal_config_t zeroBaud{0u, KNX_UART_HAL_PARITY_EVEN};
     TEST_ASSERT_FALSE(knx_uart_hal_open(&hal, &zeroBaud, &recordRx, &log));
-    const knx_uart_hal_config_t badParity{19200u, static_cast<knx_uart_hal_parity_t>(7)};
+    // 3: within the enum's range (its enumerators are 0..2), so the value is
+    // defined in C++, but not a parity. 7 was outside it: UBSan refuses the load.
+    const knx_uart_hal_config_t badParity{19200u, static_cast<knx_uart_hal_parity_t>(3)};
     TEST_ASSERT_FALSE(knx_uart_hal_open(&hal, &badParity, &recordRx, &log));
     TEST_ASSERT_FALSE(uart.isOpen());
 }

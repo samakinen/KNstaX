@@ -95,7 +95,7 @@ void injectFromEts(std::span<const uint8_t> tpdu) {
     frame.hopCount = 6;
     frame.tpdu.assign(tpdu);
 
-    std::array<uint8_t, datalink::LDataFrame::MAX_FRAME_SIZE> buffer{};
+    std::array<uint8_t, datalink::LDataFrame::MAX_FRAME_SIZE + 8u> buffer{};  // TPDU capacity + header + checksum
     auto encoded = datalink::FrameCodec::encodeFrame(frame, buffer);
     TEST_ASSERT_TRUE(encoded.isOk());
     gPhysical->injectFrame(std::vector<uint8_t>(buffer.begin(), buffer.begin() + encoded.value()));
@@ -382,7 +382,7 @@ void injectTpdu(IndividualAddress source,
     frame.hopCount = 6;
     frame.tpdu.assign(tpdu);
 
-    std::array<uint8_t, datalink::LDataFrame::MAX_FRAME_SIZE> buffer{};
+    std::array<uint8_t, datalink::LDataFrame::MAX_FRAME_SIZE + 8u> buffer{};  // TPDU capacity + header + checksum
     auto encoded = datalink::FrameCodec::encodeFrame(frame, buffer);
     TEST_ASSERT_TRUE(encoded.isOk());
     gPhysical->injectFrame(std::vector<uint8_t>(buffer.begin(), buffer.begin() + encoded.value()));

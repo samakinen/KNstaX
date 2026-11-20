@@ -340,6 +340,7 @@ void test_product_runtime_keeps_configuration_set_before_start(void)
             .restoreKnxStateOnBoot = true,
         });
 
+#if KNX_SECURE_ENABLED
     const std::array<uint8_t, 16> factoryKey{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
                                              0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10};
     const auto notReady = static_cast<int>(util::ErrorCode::OperationNotReady);
@@ -347,16 +348,19 @@ void test_product_runtime_keeps_configuration_set_before_start(void)
     TEST_ASSERT_EQUAL_INT(notReady, static_cast<int>(runtime.enableSecurityMode().error()));
 
     TEST_ASSERT_TRUE(runtime.setFactorySecurityDefaults(true, factoryKey).isOk());
+#endif
     runtime.toggleProgrammingMode();
     TEST_ASSERT_TRUE(programmingMode);
 
     TEST_ASSERT_TRUE(runtime.start(*gPlatform, std::move(stackPort)).isOk());
+    TEST_ASSERT_TRUE(runtime.isProgrammingModeActive());
+#if KNX_SECURE_ENABLED
     TEST_ASSERT_TRUE(runtime.isSecurityEnabled());
     TEST_ASSERT_TRUE(runtime.toolKeyMatches(factoryKey));
-    TEST_ASSERT_TRUE(runtime.isProgrammingModeActive());
     TEST_ASSERT_EQUAL_INT(static_cast<int>(util::ErrorCode::AlreadyInitialized),
                           static_cast<int>(runtime.setFactorySecurityDefaults(false, std::nullopt).error()));
     TEST_ASSERT_TRUE(runtime.applyToolKey(factoryKey).isOk());
+#endif
 
     runtime.stop();
     std::error_code error;

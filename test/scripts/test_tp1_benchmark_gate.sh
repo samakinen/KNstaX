@@ -11,12 +11,15 @@ if [[ ! -f "$SCRIPT" ]]; then
   exit 1
 fi
 
-if [[ ! -x "$ROOT_DIR/build/benchmark_tp1" ]]; then
-  echo "TP1 benchmark executable not found for gate test: $ROOT_DIR/build/benchmark_tp1" >&2
+# The benchmark executable: the first argument (CTest passes the one it
+# built), else build/benchmark_tp1 for a run by hand.
+BENCHMARK="${1:-$ROOT_DIR/build/benchmark_tp1}"
+if [[ ! -x "$BENCHMARK" ]]; then
+  echo "TP1 benchmark executable not found for gate test: $BENCHMARK" >&2
   exit 1
 fi
 
-bash "$SCRIPT" --benchmark "$ROOT_DIR/build/benchmark_tp1"
+bash "$SCRIPT" --benchmark "$BENCHMARK"
 
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT

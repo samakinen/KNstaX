@@ -48,13 +48,16 @@ constexpr auto kSecurityIaTable = static_cast<PropertyID>(54); // PID_SECURITY_I
 constexpr auto kParameterStart = static_cast<PropertyID>(18);  // Application Program, RW, PDT_UNSIGNED_INT
 
 /// The core objects at the indices the BAU gives them (bau.cpp).
-const std::array<InterfaceObjectType, 6> kCoreObjects = {
+/// The Security Interface Object only with KNX Secure.
+const std::array<InterfaceObjectType, KNX_SECURE_ENABLED ? 6 : 5> kCoreObjects = {
     InterfaceObjectType::device(),
     InterfaceObjectType::addressTable(),
     InterfaceObjectType::associationTable(),
     InterfaceObjectType::groupObjectTable(),
     InterfaceObjectType::applicationProgram(),
+#if KNX_SECURE_ENABLED
     InterfaceObjectType::security(),
+#endif
 };
 
 struct ClassicDescription {
@@ -467,6 +470,7 @@ void test_PropertyExtValue_WriteToReadOnlyIsAccessReadOnly(void) {
 // is what answered ETS's "clear the Security Individual Address Table"
 // (nr_of_elem = 1, start_index = 0, data = 0000) with
 // E_LENGTH_EXCEEDS_MAX_APDU_LENGTH instead of performing it.
+#if KNX_SECURE_ENABLED
 void test_PropertyExtValue_ElementCountWriteIsNotSizedLikeAnElement(void) {
     Fixture f;
     auto request = makeValueRequest(kSecurityObjectType, 1, kSecurityIaTable, 1, 0);
@@ -477,6 +481,7 @@ void test_PropertyExtValue_ElementCountWriteIsNotSizedLikeAnElement(void) {
     TEST_ASSERT_TRUE(f.valueResponseSeen);
     TEST_ASSERT_EQUAL(0x00, static_cast<int>(f.valueResponse.returnCode));
 }
+#endif  // KNX_SECURE_ENABLED
 
 void test_PropertyExtValue_TruncatedWriteIsRejected(void) {
     Fixture f;
@@ -769,7 +774,9 @@ int main(void) {
     RUN_TEST(test_PropertyExtValue_WriteUnConNeverAnswers);
     RUN_TEST(test_PropertyExtValue_WriteToReadOnlyIsAccessReadOnly);
     RUN_TEST(test_PropertyExtValue_TruncatedWriteIsRejected);
+#if KNX_SECURE_ENABLED
     RUN_TEST(test_PropertyExtValue_ElementCountWriteIsNotSizedLikeAnElement);
+#endif
 
     RUN_TEST(test_PropertyExtDescription_ReadByIdReportsAccessLimitsAndIndex);
     RUN_TEST(test_PropertyExtDescription_ReadOnlyPropertyIsNotWriteEnabled);

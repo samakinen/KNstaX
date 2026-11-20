@@ -905,8 +905,10 @@ static std::vector<uint8_t> extDescription(uint16_t objectType, uint16_t pid, ui
 // family reports that index (03/03/07 §3.4.3.1, §3.4.3.2).
 void test_e2e_classic_and_extended_descriptions_agree(void) {
     // Canonical SystemB layout: index → object type.
+    // Index 5, the Security Interface Object, exists only with KNX Secure.
     const uint16_t kTypes[] = {0, 1, 2, 9, 3, 17};
-    for (uint8_t object = 0; object < 6; ++object) {
+    constexpr uint8_t kObjects = KNX_SECURE_ENABLED ? 6 : 5;
+    for (uint8_t object = 0; object < kObjects; ++object) {
         uint8_t index = 0;
         for (; index < 64; ++index) {
             const auto classic = classicDescription(object, 0, index);

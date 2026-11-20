@@ -100,6 +100,7 @@ void test_InterfaceObjectManager_Persistence_SaveLoadRoundtrip(void) {
                   mgr.writeProperty(InterfaceObjectType::applicationProgram(), InterfaceObjectInstance(1),
                                             static_cast<knx::application::PropertyID>(AppProgramProperty::ApplicationId), 1, appId).error());
 
+#if KNX_SECURE_ENABLED
         // Security
         std::vector<uint8_t> secMode = {static_cast<uint8_t>(SecurityMode::Enabled)};
         TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
@@ -110,6 +111,7 @@ void test_InterfaceObjectManager_Persistence_SaveLoadRoundtrip(void) {
         TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
                   mgr.writeProperty(InterfaceObjectType::security(), InterfaceObjectInstance(1),
                                             static_cast<knx::application::PropertyID>(SecurityProperty::ToolKey), 1, toolKey).error());
+#endif
 
         const size_t saved = mgr.saveToPersistence().value();
         TEST_ASSERT_TRUE(saved > 0);
@@ -145,7 +147,9 @@ void test_InterfaceObjectManager_Persistence_SaveLoadRoundtrip(void) {
         TEST_ASSERT_TRUE(hasProperty(InterfaceObjectType::addressTable(), AddressTableProperty::TableData));
         TEST_ASSERT_TRUE(hasProperty(InterfaceObjectType::associationTable(), AssociationTableProperty::TableData));
         TEST_ASSERT_TRUE(hasProperty(InterfaceObjectType::applicationProgram(), AppProgramProperty::ProgramVersion));
+#if KNX_SECURE_ENABLED
         TEST_ASSERT_TRUE(hasProperty(InterfaceObjectType::security(), SecurityProperty::SecurityMode));
+#endif
 
         p->close();
     }
@@ -215,6 +219,7 @@ void test_InterfaceObjectManager_Persistence_SaveLoadRoundtrip(void) {
         TEST_ASSERT_EQUAL_UINT8(0xBE, out[0]);
         TEST_ASSERT_EQUAL_UINT8(0xEF, out[1]);
 
+#if KNX_SECURE_ENABLED
         // Verify security
         TEST_ASSERT_EQUAL(knx::util::ErrorCode::Success,
                   mgr.readProperty(InterfaceObjectType::security(), InterfaceObjectInstance(1),
@@ -229,6 +234,7 @@ void test_InterfaceObjectManager_Persistence_SaveLoadRoundtrip(void) {
         for (uint8_t b : out) {
             TEST_ASSERT_EQUAL_UINT8(0xAA, b);
         }
+#endif
     }
 }
 

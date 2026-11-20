@@ -150,7 +150,9 @@ void inject(std::span<const uint8_t> tpdu)
     frame.hopCount = 6;
     frame.tpdu.assign(tpdu);
 
-    std::array<uint8_t, datalink::LDataFrame::MAX_FRAME_SIZE> buffer{};
+    // MAX_FRAME_SIZE is the TPDU capacity; the encoded frame adds the header
+    // (7 octets at most, extended frame) and the checksum.
+    std::array<uint8_t, datalink::LDataFrame::MAX_FRAME_SIZE + 8u> buffer{};
     auto encoded = datalink::FrameCodec::encodeFrame(frame, buffer);
     TEST_ASSERT_TRUE(encoded.isOk());
     gPhysical->injectFrame(std::vector<uint8_t>(buffer.begin(), buffer.begin() + encoded.value()));
@@ -230,36 +232,60 @@ public:
     /// PID_LOAD_STATE_CONTROL (5) of the application program.
     void loadControl(uint8_t event)
     {
-        const auto sent = request(_seq++, application::APCIService::PropertyValueWrite, 0,
+        const auto sent = request(nextSeq(), application::APCIService::PropertyValueWrite, 0,
                                   {kApplicationProgramIndex, 0x05, 0x10, 0x01, event});
         TEST_ASSERT_NOT_NULL(findResponse(
             sent, kFullMask, static_cast<uint16_t>(application::APCIService::PropertyValueResponse)));
     }
 
+    /// In pieces that fit the device's APDU, as ETS sends them: the APDU
+    /// carries the APCI/count octet and the address besides the data.
+    static constexpr size_t kChunk = config::MAX_APDU_LENGTH - 3u;
+
     void memoryWrite(uint16_t address, std::span<const uint8_t> data)
     {
-        std::vector<uint8_t> payload{static_cast<uint8_t>(address >> 8), static_cast<uint8_t>(address & 0xFFu)};
-        payload.insert(payload.end(), data.begin(), data.end());
-        (void)request(_seq++, application::APCIService::MemoryWrite, static_cast<uint8_t>(data.size()), payload);
+        for (size_t at = 0; at < data.size(); at += kChunk) {
+            const auto piece = data.subspan(at, std::min(kChunk, data.size() - at));
+            const auto pieceAddress = static_cast<uint16_t>(address + at);
+            std::vector<uint8_t> payload{static_cast<uint8_t>(pieceAddress >> 8),
+                                         static_cast<uint8_t>(pieceAddress & 0xFFu)};
+            payload.insert(payload.end(), piece.begin(), piece.end());
+            (void)request(nextSeq(), application::APCIService::MemoryWrite, static_cast<uint8_t>(piece.size()), payload);
+        }
     }
 
-    /// The octets the device answers with; empty when it refuses.
+    /// The octets the device answers with; empty when it refuses any piece.
     std::vector<uint8_t> memoryRead(uint16_t address, uint8_t count)
     {
-        const auto sent = request(_seq++, application::APCIService::MemoryRead, count,
-                                  {static_cast<uint8_t>(address >> 8), static_cast<uint8_t>(address & 0xFFu)});
-        const auto* answer =
-            findResponse(sent, kGroupMask, static_cast<uint16_t>(application::APCIService::MemoryResponse));
-        if (answer == nullptr || answer->payload.size() < 2u) {
-            return {};
+        std::vector<uint8_t> octets;
+        for (size_t at = 0; at < count; at += kChunk) {
+            const auto pieceCount = static_cast<uint8_t>(std::min<size_t>(kChunk, count - at));
+            const auto pieceAddress = static_cast<uint16_t>(address + at);
+            const auto sent = request(nextSeq(), application::APCIService::MemoryRead, pieceCount,
+                                      {static_cast<uint8_t>(pieceAddress >> 8),
+                                       static_cast<uint8_t>(pieceAddress & 0xFFu)});
+            const auto* answer =
+                findResponse(sent, kGroupMask, static_cast<uint16_t>(application::APCIService::MemoryResponse));
+            if (answer == nullptr || answer->payload.size() < 2u + pieceCount) {
+                return {};
+            }
+            octets.insert(octets.end(), answer->payload.begin() + 2, answer->payload.end());
         }
-        return std::vector<uint8_t>(answer->payload.begin() + 2, answer->payload.end());
+        return octets;
     }
 
     /// A_Restart: ends every download, and makes the device store its state.
-    void restart() { (void)request(_seq++, application::APCIService::Restart, 0); }
+    void restart() { (void)request(nextSeq(), application::APCIService::Restart, 0); }
 
 private:
+    /// The transport layer's sequence number counts modulo 16.
+    uint8_t nextSeq()
+    {
+        const uint8_t seq = _seq;
+        _seq = static_cast<uint8_t>((_seq + 1u) & 0x0Fu);
+        return seq;
+    }
+
     uint8_t _seq{0};
 };
 
