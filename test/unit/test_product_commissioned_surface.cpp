@@ -4,6 +4,7 @@
 #include "unity.h"
 
 #include "knx/bau/bau.hpp"
+#include "knx/datalink/frame_codec.hpp"
 #include "knx/objects/object_persistence.hpp"
 #include "knx/objects/security_interface_object.hpp"
 #include "knx/physical/null_tp1_medium_backend.hpp"
@@ -12,7 +13,9 @@
 #include "knx/product/commissioned_product.hpp"
 #include "knx/product/commissioned_product_export.hpp"
 
+#include <array>
 #include <filesystem>
+#include <vector>
 #include <memory>
 #include <string>
 
@@ -63,6 +66,50 @@ std::unique_ptr<physical::Tp1MediumBackend> makeNullBackend()
 {
     return std::unique_ptr<physical::Tp1MediumBackend>(new physical::NullTp1MediumBackend());
 }
+
+/// Keeps every frame it is asked to send and confirms it at once, as a
+/// transceiver that got an acknowledge would.
+class RecordingTp1Backend final : public physical::Tp1MediumBackend {
+public:
+    explicit RecordingTp1Backend(std::vector<std::vector<uint8_t>>& sent) : _sent(sent) {}
+    util::Result<void> init(const physical::Tp1MediumConfig&) override
+    {
+        _state = physical::Tp1MediumState::Idle;
+        return util::Result<void>::ok();
+    }
+    void close() override { _state = physical::Tp1MediumState::Uninitialized; }
+    util::Result<size_t> sendFrame(std::span<const uint8_t> frame) override
+    {
+        _sent.emplace_back(frame.begin(), frame.end());
+        physical::Tp1RxEvent event;
+        event.type = physical::Tp1RxEventType::TxAckResponse;
+        event.ackClass = physical::Tp1AckClass::Ack;
+        if (_callback) {
+            _callback(event, _context);
+        }
+        return frame.size();
+    }
+    void setEventCallback(physical::Tp1EventCallback callback, void* context) override
+    {
+        _callback = std::move(callback);
+        _context = context;
+    }
+    physical::Tp1MediumState getState() const override { return _state; }
+    physical::Tp1CapabilityProfile getCapabilities() const override
+    {
+        physical::Tp1CapabilityProfile caps;
+        caps.supportsDetailedTxConfirm = true;
+        return caps;
+    }
+    util::Result<void> setBusMonitorMode(bool) override { return util::Result<void>::ok(); }
+    util::Result<void> service() override { return util::Result<void>::ok(); }
+
+private:
+    std::vector<std::vector<uint8_t>>& _sent;
+    physical::Tp1MediumState _state{physical::Tp1MediumState::Uninitialized};
+    physical::Tp1EventCallback _callback{};
+    void* _context{nullptr};
+};
 
 } // namespace
 
@@ -222,6 +269,44 @@ void test_product_commissioned_serial_number_comes_from_the_platform(void)
     };
     TEST_ASSERT_EQUAL_UINT32(6u, serial.size());
     TEST_ASSERT_EQUAL_MEMORY(expected, serial.data(), 6);
+}
+
+// link() hands firmware the raw data link: the frame reaches the medium as the
+// caller built it, with no transport or application layer in between, and
+// sendFrame() returns once the medium has confirmed it.
+void test_product_commissioned_link_sends_a_raw_frame_to_the_medium(void)
+{
+    platform::LinuxPlatform platform;
+    std::vector<std::vector<uint8_t>> sent;
+    auto result = startCommissionedProduct(
+        platform,
+        kCommissionedSurfaceProduct,
+        makeCommissionedBindings(kCommissionedSurfaceProduct),
+        std::unique_ptr<physical::Tp1MediumBackend>(new RecordingTp1Backend(sent)));
+    TEST_ASSERT_TRUE(result.isOk());
+    auto runtime = std::move(result.value());
+    sent.clear();  // whatever the start-up sent
+
+    datalink::LDataFrame frame;
+    frame.source = IndividualAddress(1, 1, 4);
+    frame.destination = GroupAddress(IndividualAddress(1, 1, 3).raw);
+    frame.destinationType = AddressType::Individual;
+    frame.priority = Priority::System;
+    frame.hopCount = 6;
+    const std::array<uint8_t, 2> deviceDescriptorRead{0x03, 0x00};
+    frame.tpdu.assign(deviceDescriptorRead);
+
+    TEST_ASSERT_TRUE(runtime->link().sendFrame(frame).isOk());
+
+    TEST_ASSERT_EQUAL_UINT32(1u, sent.size());
+    datalink::LDataFrame decoded;
+    TEST_ASSERT_TRUE(datalink::FrameCodec::decodeFrame(sent[0], decoded).isOk());
+    TEST_ASSERT_EQUAL_HEX16(IndividualAddress(1, 1, 4).raw, decoded.source.raw);
+    TEST_ASSERT_EQUAL_HEX16(IndividualAddress(1, 1, 3).raw, decoded.destination.raw);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(AddressType::Individual), static_cast<int>(decoded.destinationType));
+    TEST_ASSERT_EQUAL_UINT32(2u, decoded.tpdu.size());
+    TEST_ASSERT_EQUAL_HEX8(0x03, decoded.tpdu[0]);
+    TEST_ASSERT_EQUAL_HEX8(0x00, decoded.tpdu[1]);
 }
 
 void test_product_commissioned_surface_forwards_owner_work_hint_and_notification(void)
@@ -739,6 +824,7 @@ int main(void)
     RUN_TEST(test_product_commissioned_surface_honors_storage_namespace_override);
     RUN_TEST(test_product_commissioned_surface_starts_via_tp1_mac_physical);
     RUN_TEST(test_product_commissioned_serial_number_comes_from_the_platform);
+    RUN_TEST(test_product_commissioned_link_sends_a_raw_frame_to_the_medium);
     RUN_TEST(test_product_commissioned_surface_forwards_owner_work_hint_and_notification);
     RUN_TEST(test_product_commissioned_export_includes_parameters);
     RUN_TEST(test_product_commissioned_security_off_by_default);

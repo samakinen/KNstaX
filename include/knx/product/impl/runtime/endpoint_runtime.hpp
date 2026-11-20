@@ -315,6 +315,13 @@ public:
         return _bau ? _bau->link().diagnostics() : bau::LinkDiagnostics{};
     }
 
+    /// Raw data-link access; see bau::LinkAccess and the commissioned
+    /// runtime's link().
+    bau::LinkAccess link()
+    {
+        return _bau ? _bau->link() : bau::LinkAccess(nullptr);
+    }
+
     void stop()
     {
         if (_bau) {

@@ -1467,6 +1467,21 @@ public:
         return _runtime.linkDiagnostics();
     }
 
+    /**
+     * @brief Raw data-link access, for on-wire tests and bus tools.
+     *
+     * A frame sent here goes straight to the data link layer: no transport
+     * connection, no application layer, no security, and the caller fills in
+     * every field, the source address included. `sendFrame()` blocks until the
+     * medium confirms the frame. Device behaviour belongs in the bindings;
+     * this is for firmware that exercises the bus, such as a test generator.
+     * Before start() the returned facet refuses every send.
+     */
+    bau::LinkAccess link()
+    {
+        return _runtime.link();
+    }
+
 #if KNX_FEATURE_COUPLER
     /**
      * @brief The coupler, when the product was started with `CouplerOptions`.
