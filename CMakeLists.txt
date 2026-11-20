@@ -695,9 +695,14 @@ else()
             COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/test/scripts/test_tp1_ctest_regression.sh
             ARGS ${CMAKE_CURRENT_BINARY_DIR}
             LABELS tp1 script)
-        knx_add_test(test_tp1_benchmark_gate_script
-            COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/test/scripts/test_tp1_benchmark_gate.sh
-            LABELS tp1 script benchmark)
+        # The benchmark lives in whichever build directory this is, not in
+        # build/: the profile jobs build into build_<profile>.
+        if(KNX_FEATURE_TP1)  # benchmark_tp1 is defined further down, under the same condition
+            knx_add_test(test_tp1_benchmark_gate_script
+                COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/test/scripts/test_tp1_benchmark_gate.sh
+                ARGS $<TARGET_FILE:benchmark_tp1>
+                LABELS tp1 script benchmark)
+        endif()
 
         knx_add_test(test_ets_roundtrip SOURCES test/integration/test_ets_roundtrip.cpp LABELS integration)
         knx_add_test(test_knxprog_importer SOURCES test/integration/test_knxprog_importer.cpp LABELS integration)
@@ -854,6 +859,9 @@ else()
                 RUNTIME_OUTPUT_DIRECTORY ${INTEROP_BIN_DIR})
             set_target_properties(knstax_interface_peer PROPERTIES
                 RUNTIME_OUTPUT_DIRECTORY ${INTEROP_BIN_DIR})
+            # Everything interop_pytest runs; CI builds this one target.
+            add_custom_target(interop_peers
+                DEPENDS knstax_tunnel_peer knstax_routing_peer knstax_interface_peer)
 
             # Detect whether pytest is available in the selected Python interpreter.
             execute_process(COMMAND ${Python3_EXECUTABLE} -m pytest --version
@@ -979,6 +987,18 @@ else()
         if(KNX_PLATFORM STREQUAL "linux")
             knx_add_test(test_linux_platform SOURCES test/unit/test_linux_platform.cpp LABELS unit)
         endif()
+        # The KNXnet/IP tests, and the few others that open the platform's
+        # network, bind UDP 3671 (with SO_REUSEPORT) and join the KNX multicast
+        # group. Run in parallel they take each other's datagrams: a unicast
+        # datagram reaches only one of the sockets on the port. They failed at
+        # random on a runner with many cores. One lock for all of them: they
+        # take well under a second each.
+        get_property(_knx_all_tests DIRECTORY PROPERTY TESTS)
+        foreach(_knx_test IN LISTS _knx_all_tests)
+            if(_knx_test MATCHES "^(test_(ip|netip|knxnetip|tp1_ip|tp1_to_ip)_|(interop_pytest|test_product_commissioned_surface|test_linux_platform|test_cooperative_platform|test_decoder_robustness)$)")
+                set_tests_properties(${_knx_test} PROPERTIES RESOURCE_LOCK knxnetip_udp)
+            endif()
+        endforeach()
     endif()  # BUILD_TESTS: end of the test-only section
 
     if(KNX_BUILD_EXAMPLES)

@@ -14,8 +14,15 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore: ['**.md', 'docs/**']
   pull_request:
+    paths-ignore: ['**.md', 'docs/**']
   workflow_dispatch:
+
+# A newer push to the same branch or pull request makes the older run moot.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   host:
@@ -261,7 +268,7 @@ jobs:
           -DPython3_EXECUTABLE="$PWD/.venv/bin/python"
 
       - name: Build
-        run: cmake --build build_interop -j"$(nproc)" --target knstax_tunnel_peer knstax_routing_peer
+        run: cmake --build build_interop -j"$(nproc)" --target interop_peers
 
       - name: Interop suite
         run: ctest --test-dir build_interop -R interop_pytest --output-on-failure
