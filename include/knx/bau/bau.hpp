@@ -267,6 +267,20 @@ public:
     void flushPendingPersistence();
 
     /**
+     * @brief The bus power has failed: save the Data Secure replay state now
+     *
+     * Call it when the board signals a power failure (STKNX KNX_OK going
+     * inactive, a TP-UART SAVE pin, a supply voltage detector), then wake the
+     * context that runs loop(). The next loop() writes the partner and Tool
+     * Access sequence numbers if they changed since the last checkpoint, before
+     * anything else and without a full save. Without Data Secure it does
+     * nothing. See docs/design/data-secure-sequence-persistence.md §3.3.
+     *
+     * @thread_safety Only sets a flag: safe from any task or an interrupt
+     */
+    void requestPowerFailSave();
+
+    /**
      * @brief The product changed its parameter image itself: store it
      *
      * Marks the persistent state dirty; loop() then stores the image with

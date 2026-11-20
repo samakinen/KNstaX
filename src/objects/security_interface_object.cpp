@@ -163,9 +163,81 @@ void SecurityInterfaceObject::applyDownloadedDeviceKeys(KeyMap resolved, bool ta
 
 // === Sequence Number Management ===
 
-uint64_t SecurityInterfaceObject::incrementSendingSequence() {
+util::Result<uint64_t> SecurityInterfaceObject::incrementSendingSequence() {
     platform::LocalLock<platform::LocalMutex> lock(_sequenceMutex);
-    return ++_sendingSequence;
+    const uint64_t next = _sendingSequence + 1u;
+    if (_sendingReserveWriter != nullptr) {
+        if (next > _sendingCeiling) {
+            // Nothing reserved for this number (the first send after a start-up,
+            // or a background top-up that has not succeeded): store a ceiling
+            // first. The writer touches only persistence, never this object, so
+            // calling it under the lock cannot deadlock, and it keeps two
+            // senders from taking numbers past a ceiling that is not stored yet.
+            if (!storeSendingCeilingLocked(_sendingSequence + _sendingReserveWindow)) {
+                KNX_LOGE("KNX.Security", "Sending sequence %llu not reserved: refusing the secured send",
+                         (unsigned long long)next);
+                return util::ErrorCode::ResourceUnavailable;
+            }
+        }
+        if (_sendingCeiling - next < _sendingReserveWindow / 2u) {
+            _sendingReserveLow = true;
+        }
+    }
+    _sendingSequence = next;
+    return next;
+}
+
+bool SecurityInterfaceObject::storeSendingCeilingLocked(uint64_t ceiling) {
+    if (!_sendingReserveWriter(_sendingReserveContext, ceiling)) {
+        return false;
+    }
+    _sendingCeiling = ceiling;
+    _sendingReserveLow = false;
+    KNX_LOGD("KNX.Security", "Sending sequence reserved up to %llu", (unsigned long long)ceiling);
+    return true;
+}
+
+void SecurityInterfaceObject::setSendingReserveWriter(SendingReserveWriter writer, void* context,
+                                                      uint64_t window) {
+    platform::LocalLock<platform::LocalMutex> lock(_sequenceMutex);
+    _sendingReserveWriter = writer;
+    _sendingReserveContext = context;
+    _sendingReserveWindow = window < 2u ? 2u : window;
+}
+
+uint64_t SecurityInterfaceObject::sendingReserveCeiling() const {
+    platform::LocalLock<platform::LocalMutex> lock(_sequenceMutex);
+    return _sendingCeiling;
+}
+
+void SecurityInterfaceObject::restoreSendingReserveCeiling(uint64_t ceiling) {
+    platform::LocalLock<platform::LocalMutex> lock(_sequenceMutex);
+    if (ceiling > _sendingSequence) {
+        _sendingSequence = ceiling;
+    }
+    // Everything up to the counter may have been used before the reset, so
+    // nothing above it is reserved yet.
+    _sendingCeiling = _sendingSequence;
+    _sendingReserveLow = false;
+}
+
+bool SecurityInterfaceObject::sendingReserveLow() const {
+    platform::LocalLock<platform::LocalMutex> lock(_sequenceMutex);
+    return _sendingReserveLow;
+}
+
+bool SecurityInterfaceObject::topUpSendingReserve() {
+    platform::LocalLock<platform::LocalMutex> lock(_sequenceMutex);
+    if (_sendingReserveWriter == nullptr) {
+        _sendingReserveLow = false;
+        return true;
+    }
+    const uint64_t ceiling = _sendingSequence + _sendingReserveWindow;
+    if (ceiling <= _sendingCeiling) {
+        _sendingReserveLow = false;
+        return true;
+    }
+    return storeSendingCeilingLocked(ceiling);
 }
 
 uint64_t SecurityInterfaceObject::getSendingSequenceThreadSafe() const {
@@ -216,7 +288,7 @@ void SecurityInterfaceObject::setToolAccessSequence(uint64_t seq) {
         return;
     }
     _toolAccessSequence = seq;
-    _sequenceStateDirty = true;
+    _toolAccessSequenceDirty = true;
 }
 
 uint64_t SecurityInterfaceObject::getPeerSequence(const IndividualAddress& address) const {
@@ -232,7 +304,7 @@ void SecurityInterfaceObject::setPeerSequence(const IndividualAddress& address, 
         return;
     }
     stored = seq;
-    _sequenceStateDirty = true;
+    _peerSequencesDirty = true;
 
     // Write through to the array property. §6.3.8.4: after decrypting an
     // S-A_Data-PDU the device "shall update the field Last Valid SeqNr for that
@@ -272,12 +344,47 @@ void SecurityInterfaceObject::syncSequencesFromAddressTable() {
 
 bool SecurityInterfaceObject::sequenceStateDirty() const {
     platform::LocalLock<platform::LocalMutex> lock(_sequenceMutex);
-    return _sequenceStateDirty;
+    return _peerSequencesDirty || _toolAccessSequenceDirty;
 }
 
 void SecurityInterfaceObject::clearSequenceStateDirty() {
     platform::LocalLock<platform::LocalMutex> lock(_sequenceMutex);
-    _sequenceStateDirty = false;
+    _peerSequencesDirty = false;
+    _toolAccessSequenceDirty = false;
+}
+
+bool SecurityInterfaceObject::peerSequencesDirty() const {
+    platform::LocalLock<platform::LocalMutex> lock(_sequenceMutex);
+    return _peerSequencesDirty;
+}
+
+bool SecurityInterfaceObject::toolAccessSequenceDirty() const {
+    platform::LocalLock<platform::LocalMutex> lock(_sequenceMutex);
+    return _toolAccessSequenceDirty;
+}
+
+bool SecurityInterfaceObject::takePeerSequencesDirty() {
+    platform::LocalLock<platform::LocalMutex> lock(_sequenceMutex);
+    const bool dirty = _peerSequencesDirty;
+    _peerSequencesDirty = false;
+    return dirty;
+}
+
+bool SecurityInterfaceObject::takeToolAccessSequenceDirty() {
+    platform::LocalLock<platform::LocalMutex> lock(_sequenceMutex);
+    const bool dirty = _toolAccessSequenceDirty;
+    _toolAccessSequenceDirty = false;
+    return dirty;
+}
+
+void SecurityInterfaceObject::markPeerSequencesDirty() {
+    platform::LocalLock<platform::LocalMutex> lock(_sequenceMutex);
+    _peerSequencesDirty = true;
+}
+
+void SecurityInterfaceObject::markToolAccessSequenceDirty() {
+    platform::LocalLock<platform::LocalMutex> lock(_sequenceMutex);
+    _toolAccessSequenceDirty = true;
 }
 
 // === Security Failures ===

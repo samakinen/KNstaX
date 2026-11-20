@@ -324,6 +324,7 @@ This means the standards/configuration plane is no longer only implied by lower-
 ## Security and IP scope
 
 - Data Secure is fully wired through the Security Interface Object and runtime transport/application flow; key provisioning is manual (inherent to the KNX commissioning model).
+- Data Secure sequence numbers survive resets with few writes: the sending number through a stored ceiling a window ahead (`KNX_SECURE_SEQ_RESERVE`), the partners' numbers through a checkpoint written only when changed (`KNX_SECURE_REPLAY_CHECKPOINT_S`) and on `requestPowerFailSave()`. See [docs/design/data-secure-sequence-persistence.md](docs/design/data-secure-sequence-persistence.md).
 - IP Secure Tunneling is supported through a dedicated physical adapter with ECDH session management, gated by `KNX_SECURE_IP_TUNNELING` so a routing-only device does not compile the session machinery it cannot use.
 - Secure Routing is wired in `IpRoutingPhysical` and applied from a `PID_BACKBONE_KEY` download at runtime, which is how ETS enables it; it is not the default routing configuration.
 

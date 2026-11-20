@@ -890,9 +890,12 @@ forwards to it.
 
 - **Save path.** Products register a small save routine that writes a few records into
   `FlashLogPersistence`'s pre-erased space, with no erase allowed on this path.
-- **Data Secure.** The sending sequence number checkpoint (today at most once a minute) should
-  also be written here. That closes the "replayable once until the next S-A_Sync" exposure
-  documented in the conformance status for devices that have this signal.
+- **Data Secure.** The save routine calls `BusAccessUnit::requestPowerFailSave()`, which writes
+  the partner and Tool Access sequence numbers at the next `loop()` if they changed. That
+  closes the "replayable once until the next S-A_Sync" exposure documented in the conformance
+  status for devices that have this signal. The sending number owes nothing here: its ceiling is
+  stored before any number below it is used
+  ([data-secure-sequence-persistence.md](data-secure-sequence-persistence.md)).
 
 ## 13. Documentation and conformance updates when items land
 

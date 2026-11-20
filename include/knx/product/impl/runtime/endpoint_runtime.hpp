@@ -352,6 +352,14 @@ public:
     /// from a factory-programmed MAC).
     objects::DeviceObject& deviceObject() { return _bau->deviceObject(); }
 
+    /// See bau::BusAccessUnit::requestPowerFailSave(). Safe from any context.
+    void requestPowerFailSave()
+    {
+        if (_bau) {
+            _bau->requestPowerFailSave();
+        }
+    }
+
     OwnerWorkHint ownerWorkHint() const
     {
         OwnerWorkHint hint = _bau ? _bau->ownerWorkHint() : OwnerWorkHint{};

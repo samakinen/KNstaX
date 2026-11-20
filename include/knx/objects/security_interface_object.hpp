@@ -222,11 +222,49 @@ public:
     uint64_t getReceivingSequence() const { return _receivingSequence; }
     
     /**
-     * @brief Increment sending sequence (thread-safe)
-     * @return New sequence number
+     * @brief Take the next sending sequence number (thread-safe)
+     *
+     * With a reserve writer installed (setSendingReserveWriter()), a number
+     * above the stored ceiling is taken only after a new ceiling has been
+     * written. When that write fails the number is not taken and the result is
+     * ResourceUnavailable: the caller must not send, since a number that was
+     * never reserved could be sent again after a reset.
+     *
+     * @return The number to send with
      */
-    uint64_t incrementSendingSequence();
-    
+    util::Result<uint64_t> incrementSendingSequence();
+
+    // === Sending sequence reserve ===
+    //
+    // A Data Secure sending number must never be used twice, across any reset.
+    // Rather than storing the counter with every telegram, the device stores a
+    // ceiling `window` numbers ahead and uses the numbers up to it freely
+    // (docs/design/data-secure-sequence-persistence.md §3.1). With no writer
+    // installed (no persistence) there is no ceiling and the counter is
+    // unlimited, as before.
+
+    /// Stores @p ceiling persistently; false when it could not.
+    using SendingReserveWriter = bool (*)(void* context, uint64_t ceiling);
+
+    /// Install the writer and the window (at least 2). Pass nullptr to remove.
+    void setSendingReserveWriter(SendingReserveWriter writer, void* context, uint64_t window);
+
+    /// The ceiling up to which numbers may be used without another write.
+    uint64_t sendingReserveCeiling() const;
+
+    /// Adopt the ceiling stored before the last reset: every number up to it
+    /// may have been used, so the counter moves up to it and nothing beyond it
+    /// counts as reserved. The first send then stores a new ceiling.
+    void restoreSendingReserveCeiling(uint64_t ceiling);
+
+    /// True once a send has left fewer than half of the window: the BAU then
+    /// stores a new ceiling in the background, before the window runs out.
+    bool sendingReserveLow() const;
+
+    /// Store a new ceiling (counter + window) now. True when stored, or when
+    /// there is nothing to do; false when the write failed.
+    bool topUpSendingReserve();
+
     /**
      * @brief Update receiving sequence if valid (thread-safe)
      * @param seq Received sequence number
@@ -281,12 +319,23 @@ public:
 
     /// True when an accepted telegram has moved a sequence number since the
     /// last checkpoint. §6.3.8.4 requires the Last Valid SeqNr values to "be
-    /// saved in full at power-down and be restored in full at power-up"; with
-    /// no power-fail signal to hand, the BAU checkpoints them periodically and
-    /// on the restart path, and uses this flag to skip the write when nothing
-    /// secured has been received.
+    /// saved in full at power-down and be restored in full at power-up"; the
+    /// BAU checkpoints them periodically, on the restart path and when the
+    /// product reports a power failure, and uses these flags to skip the write
+    /// when nothing secured has been received.
     bool sequenceStateDirty() const;
     void clearSequenceStateDirty();
+
+    /// The two records of the checkpoint, apart: the Security Individual
+    /// Address Table (partner numbers) and the Sequence Number for Tool Access.
+    /// take*() reads and clears in one step, so a number accepted while the
+    /// record is being written marks it again; a failed write marks it back.
+    bool peerSequencesDirty() const;
+    bool toolAccessSequenceDirty() const;
+    bool takePeerSequencesDirty();
+    bool takeToolAccessSequenceDirty();
+    void markPeerSequencesDirty();
+    void markToolAccessSequenceDirty();
 
     // === Security Failures ===
     
@@ -366,7 +415,16 @@ private:
     uint64_t _receivingSequence;
     uint64_t _toolAccessSequence{0};
     std::map<uint16_t, uint64_t> _peerSequences;  // source IA -> last valid SeqNr
-    bool _sequenceStateDirty{false};              // a checkpoint is owed
+    bool _peerSequencesDirty{false};              // the partner table is owed a checkpoint
+    bool _toolAccessSequenceDirty{false};         // the Tool Access record is owed one
+
+    // Sending reserve (see setSendingReserveWriter()).
+    SendingReserveWriter _sendingReserveWriter{nullptr};
+    void* _sendingReserveContext{nullptr};
+    uint64_t _sendingReserveWindow{0};
+    uint64_t _sendingCeiling{0};       // numbers up to this one are reserved
+    bool _sendingReserveLow{false};    // less than half of the window left
+    bool storeSendingCeilingLocked(uint64_t ceiling);
     
     // Security failures
     SecurityFailure _lastFailure;

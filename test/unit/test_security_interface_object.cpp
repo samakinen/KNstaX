@@ -93,8 +93,10 @@ void test_SecurityInterfaceObject_GroupKeys() {
 void test_SecurityInterfaceObject_Sequences() {
     SecurityInterfaceObject sec;
     
-    uint64_t seq = sec.incrementSendingSequence();
-    TEST_ASSERT_TRUE(seq == 1);
+    // No reserve writer (no persistence): the counter is unlimited.
+    const auto seq = sec.incrementSendingSequence();
+    TEST_ASSERT_TRUE(seq.isOk());
+    TEST_ASSERT_TRUE(seq.value() == 1);
     TEST_ASSERT_TRUE(sec.getSendingSequence() == 1);
     
     auto ok = sec.updateReceivingSequence(100);
@@ -330,6 +332,152 @@ void test_SecurityInterfaceObject_SequenceSyncNeverMovesBackwards() {
     TEST_ASSERT_EQUAL_HEX8(0xF4, (*stored)[7]);
 }
 
+// --- Sending sequence reserve (docs/design/data-secure-sequence-persistence.md)
+
+namespace {
+
+struct CeilingStore {
+    std::vector<uint64_t> writes;
+    bool fail{false};
+
+    static bool write(void* context, uint64_t ceiling)
+    {
+        auto* self = static_cast<CeilingStore*>(context);
+        if (self->fail) {
+            return false;
+        }
+        self->writes.push_back(ceiling);
+        return true;
+    }
+};
+
+}  // namespace
+
+// The first send stores a ceiling a window ahead; the numbers below it need no
+// further write, and a new ceiling is due once half of the window is used.
+void test_SecurityInterfaceObject_SendingReserveWritesOncePerWindow() {
+    SecurityInterfaceObject sec;
+    CeilingStore store;
+    sec.setSendingReserveWriter(&CeilingStore::write, &store, 16u);
+
+    auto first = sec.incrementSendingSequence();
+    TEST_ASSERT_TRUE(first.isOk());
+    TEST_ASSERT_TRUE(first.value() == 1u);
+    TEST_ASSERT_EQUAL_UINT32(1u, store.writes.size());
+    TEST_ASSERT_TRUE(store.writes[0] == 16u);
+    TEST_ASSERT_TRUE(sec.sendingReserveCeiling() == 16u);
+
+    // Up to 8 the remaining window is at least half: no top-up owed.
+    for (uint64_t expected = 2u; expected <= 8u; ++expected) {
+        auto next = sec.incrementSendingSequence();
+        TEST_ASSERT_TRUE(next.isOk());
+        TEST_ASSERT_TRUE(next.value() == expected);
+    }
+    TEST_ASSERT_FALSE(sec.sendingReserveLow());
+    TEST_ASSERT_EQUAL_UINT32(1u, store.writes.size());
+
+    // 9 leaves 7 of 16: the background top-up is now owed, but the send itself
+    // does not write.
+    TEST_ASSERT_TRUE(sec.incrementSendingSequence().isOk());
+    TEST_ASSERT_TRUE(sec.sendingReserveLow());
+    TEST_ASSERT_EQUAL_UINT32(1u, store.writes.size());
+
+    TEST_ASSERT_TRUE(sec.topUpSendingReserve());
+    TEST_ASSERT_FALSE(sec.sendingReserveLow());
+    TEST_ASSERT_EQUAL_UINT32(2u, store.writes.size());
+    TEST_ASSERT_TRUE(store.writes[1] == 9u + 16u);
+
+    // A top-up with nothing to gain writes nothing.
+    TEST_ASSERT_TRUE(sec.topUpSendingReserve());
+    TEST_ASSERT_EQUAL_UINT32(2u, store.writes.size());
+}
+
+// Without a top-up the window runs out: the send that needs a number above the
+// ceiling stores a new one itself.
+void test_SecurityInterfaceObject_SendingReserveExhaustedWritesBeforeSending() {
+    SecurityInterfaceObject sec;
+    CeilingStore store;
+    sec.setSendingReserveWriter(&CeilingStore::write, &store, 4u);
+
+    for (uint64_t expected = 1u; expected <= 4u; ++expected) {
+        TEST_ASSERT_TRUE(sec.incrementSendingSequence().value() == expected);
+    }
+    TEST_ASSERT_EQUAL_UINT32(1u, store.writes.size());
+
+    TEST_ASSERT_TRUE(sec.incrementSendingSequence().value() == 5u);
+    TEST_ASSERT_EQUAL_UINT32(2u, store.writes.size());
+    TEST_ASSERT_TRUE(store.writes[1] == 4u + 4u);
+}
+
+// A number that could not be reserved is not taken, and the counter does not
+// move: the caller refuses the send and a later attempt gets the same number.
+void test_SecurityInterfaceObject_SendingReserveFailureRefusesTheNumber() {
+    SecurityInterfaceObject sec;
+    CeilingStore store;
+    store.fail = true;
+    sec.setSendingReserveWriter(&CeilingStore::write, &store, 64u);
+
+    const auto refused = sec.incrementSendingSequence();
+    TEST_ASSERT_TRUE(refused.isError());
+    TEST_ASSERT_TRUE(refused.error() == util::ErrorCode::ResourceUnavailable);
+    TEST_ASSERT_TRUE(sec.getSendingSequence() == 0u);
+    TEST_ASSERT_FALSE(sec.topUpSendingReserve());
+
+    store.fail = false;
+    const auto taken = sec.incrementSendingSequence();
+    TEST_ASSERT_TRUE(taken.isOk());
+    TEST_ASSERT_TRUE(taken.value() == 1u);
+}
+
+// After a reset every number up to the stored ceiling may have been used: the
+// counter moves up to it, and the first send reserves a new window. Restoring
+// writes nothing, so a device that never sends secured never writes.
+void test_SecurityInterfaceObject_RestoredCeilingRaisesTheCounter() {
+    SecurityInterfaceObject sec;
+    CeilingStore store;
+    sec.setSendingSequenceSilent(100u);  // the property from the last full save
+    sec.setSendingReserveWriter(&CeilingStore::write, &store, 1000u);
+
+    sec.restoreSendingReserveCeiling(5000u);
+    TEST_ASSERT_TRUE(sec.getSendingSequence() == 5000u);
+    TEST_ASSERT_FALSE(sec.sendingReserveLow());
+    TEST_ASSERT_EQUAL_UINT32(0u, store.writes.size());
+
+    const auto next = sec.incrementSendingSequence();
+    TEST_ASSERT_TRUE(next.value() == 5001u);
+    TEST_ASSERT_EQUAL_UINT32(1u, store.writes.size());
+    TEST_ASSERT_TRUE(store.writes[0] == 6000u);
+
+    // A ceiling behind the counter (a newer full save) never moves it back.
+    SecurityInterfaceObject ahead;
+    ahead.setSendingSequenceSilent(7000u);
+    ahead.restoreSendingReserveCeiling(5000u);
+    TEST_ASSERT_TRUE(ahead.getSendingSequence() == 7000u);
+}
+
+// The two checkpoint records have their own flags: Tool Access moves only while
+// ETS talks to the device, so the partner table alone is written otherwise.
+void test_SecurityInterfaceObject_CheckpointRecordsHaveSeparateFlags() {
+    SecurityInterfaceObject sec;
+    sec.setPeerSequence(IndividualAddress(1, 1, 7), 10u);
+    TEST_ASSERT_TRUE(sec.peerSequencesDirty());
+    TEST_ASSERT_FALSE(sec.toolAccessSequenceDirty());
+
+    TEST_ASSERT_TRUE(sec.takePeerSequencesDirty());
+    TEST_ASSERT_FALSE(sec.peerSequencesDirty());
+    TEST_ASSERT_FALSE(sec.sequenceStateDirty());
+
+    sec.setToolAccessSequence(3u);
+    TEST_ASSERT_TRUE(sec.toolAccessSequenceDirty());
+    TEST_ASSERT_FALSE(sec.peerSequencesDirty());
+    TEST_ASSERT_TRUE(sec.sequenceStateDirty());
+
+    // A failed write marks the record back.
+    TEST_ASSERT_TRUE(sec.takeToolAccessSequenceDirty());
+    sec.markToolAccessSequenceDirty();
+    TEST_ASSERT_TRUE(sec.toolAccessSequenceDirty());
+}
+
 int main(int argc, char **argv) {
     UNITY_BEGIN();
 
@@ -347,6 +495,11 @@ int main(int argc, char **argv) {
     RUN_TEST(test_SecurityInterfaceObject_AdoptsLastValidSeqNrFromAddressTable);
     RUN_TEST(test_SecurityInterfaceObject_AcceptedSeqNrIsWrittenIntoAddressTable);
     RUN_TEST(test_SecurityInterfaceObject_SequenceSyncNeverMovesBackwards);
-    
+    RUN_TEST(test_SecurityInterfaceObject_SendingReserveWritesOncePerWindow);
+    RUN_TEST(test_SecurityInterfaceObject_SendingReserveExhaustedWritesBeforeSending);
+    RUN_TEST(test_SecurityInterfaceObject_SendingReserveFailureRefusesTheNumber);
+    RUN_TEST(test_SecurityInterfaceObject_RestoredCeilingRaisesTheCounter);
+    RUN_TEST(test_SecurityInterfaceObject_CheckpointRecordsHaveSeparateFlags);
+
     return UNITY_END();
 }

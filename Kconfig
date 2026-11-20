@@ -372,6 +372,40 @@ menu "KNX Stack Configuration"
 
                 With it off the Security Interface Object is not compiled, not
                 registered and not exposed: ETS finds no object 17.
+
+        config KNX_SECURE_SEQ_RESERVE
+            int "Sending sequence numbers reserved per write"
+            depends on KNX_ENABLE_SECURITY
+            default 8192
+            range 64 16777216
+            help
+                Data Secure must never send a sequence number twice. Rather
+                than storing the counter with every secured telegram, the
+                device stores a ceiling this many numbers ahead and uses the
+                numbers below it without writing again. A new ceiling is
+                stored once half of the window is used, so this costs one
+                write per (value / 2) secured sends. An unexpected reset skips
+                at most this many numbers, which the 48-bit counter can afford.
+
+                Larger values mean fewer writes. See
+                docs/design/data-secure-sequence-persistence.md.
+
+        config KNX_SECURE_REPLAY_CHECKPOINT_S
+            int "Replay state checkpoint interval (s)"
+            depends on KNX_ENABLE_SECURITY
+            default 900
+            range 10 86400
+            help
+                The last valid sequence number of each partner (and the one
+                for Tool Access) moves with every secured telegram received.
+                It is written at most once per this interval, only when it
+                changed, and always before a planned restart and when the
+                product reports a power failure (requestPowerFailSave()).
+
+                What a crash or a power loss without warning can lose is the
+                numbers accepted since the last write: those telegrams could
+                be replayed once. A shorter interval narrows that window and
+                costs more writes.
     endmenu
 
     menu "Optional Features"

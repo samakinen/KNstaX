@@ -11,6 +11,7 @@
 #include "knx/objects/property_kernel.hpp"
 #include "knx/util/hex.hpp"
 #include "knx/util/log.hpp"
+#include <array>
 #include <iterator>
 #include <optional>
 #include <utility>
@@ -742,55 +743,91 @@ util::Result<size_t> InterfaceObjectManager::saveToPersistence() {
 }
 
 #if KNX_SECURE_ENABLED
+namespace {
+
+std::array<uint8_t, 6> encodeSequence48(uint64_t value)
+{
+    std::array<uint8_t, 6> encoded{};
+    for (size_t i = 0; i < encoded.size(); ++i) {
+        encoded[i] = static_cast<uint8_t>((value >> (8u * (encoded.size() - 1u - i))) & 0xFFu);
+    }
+    return encoded;
+}
+
+std::optional<uint64_t> decodeSequence48(const std::vector<uint8_t>& stored)
+{
+    if (stored.size() != 6u) {
+        return std::nullopt;
+    }
+    uint64_t value = 0;
+    for (const uint8_t octet : stored) {
+        value = (value << 8) | octet;
+    }
+    return value;
+}
+
+}  // namespace
+
 size_t InterfaceObjectManager::saveSecuritySequenceState() {
     if (!_persistenceEnabled || !_persistenceManager || _securityObjectPtr == nullptr) {
         return 0;
     }
 
     size_t saved = 0;
-    bool allSaved = true;
+
+    // Each record is written only when it changed. The flag is taken (read and
+    // cleared) before the write, so a number accepted meanwhile marks it again
+    // for the next checkpoint, and a failed write marks it back.
 
     // The per-partner numbers live in the array property itself (the Security
     // Interface Object writes them through on every accepted telegram), so
     // storing that one blob stores all of them.
     // Written in place in the active bank: it is the same property the last
     // full save stored, only with newer sequence numbers.
-    const uint16_t tableKeyId = bankedKeyId(
-        makePersistenceKeyId(InterfaceObjectType::security(),
-                             static_cast<application::PropertyID>(SecurityProperty::SecurityIndividualAddressTable)),
-        _activeBank);
-    if (const auto* blob = _securityObjectPtr->findExtraProperty(
-            SecurityProperty::SecurityIndividualAddressTable);
-        blob != nullptr && !blob->empty()) {
-        if (const auto res = _persistence->saveById(tableKeyId, *blob); res.isOk()) {
-            ++saved;
-        } else {
-            KNX_LOGW(TAG, "Failed to checkpoint the Security Individual Address Table: %s",
-                     util::errorCodeToString(res.error()));
-            allSaved = false;
+    if (_securityObjectPtr->takePeerSequencesDirty()) {
+        const uint16_t tableKeyId = bankedKeyId(
+            makePersistenceKeyId(InterfaceObjectType::security(),
+                                 static_cast<application::PropertyID>(SecurityProperty::SecurityIndividualAddressTable)),
+            _activeBank);
+        if (const auto* blob = _securityObjectPtr->findExtraProperty(
+                SecurityProperty::SecurityIndividualAddressTable);
+            blob != nullptr && !blob->empty()) {
+            if (const auto res = _persistence->saveById(tableKeyId, *blob); res.isOk()) {
+                ++saved;
+            } else {
+                KNX_LOGW(TAG, "Failed to checkpoint the Security Individual Address Table: %s",
+                         util::errorCodeToString(res.error()));
+                _securityObjectPtr->markPeerSequencesDirty();
+            }
         }
     }
 
-    const uint64_t toolSequence = _securityObjectPtr->getToolAccessSequence();
-    std::array<uint8_t, 6> encoded{};
-    for (size_t i = 0; i < encoded.size(); ++i) {
-        encoded[i] = static_cast<uint8_t>((toolSequence >> (8u * (encoded.size() - 1u - i))) & 0xFFu);
-    }
-    if (const auto res = _persistence->saveById(kToolAccessSequenceKeyId, encoded); res.isOk()) {
-        ++saved;
-    } else {
-        KNX_LOGW(TAG, "Failed to checkpoint the Sequence Number for Tool Access: %s",
-                 util::errorCodeToString(res.error()));
-        allSaved = false;
+    if (_securityObjectPtr->takeToolAccessSequenceDirty()) {
+        const auto encoded = encodeSequence48(_securityObjectPtr->getToolAccessSequence());
+        if (const auto res = _persistence->saveById(kToolAccessSequenceKeyId, encoded); res.isOk()) {
+            ++saved;
+        } else {
+            KNX_LOGW(TAG, "Failed to checkpoint the Sequence Number for Tool Access: %s",
+                     util::errorCodeToString(res.error()));
+            _securityObjectPtr->markToolAccessSequenceDirty();
+        }
     }
 
-    // Left dirty after a failure, so the next checkpoint tries again rather
-    // than the replay window silently living in RAM only.
-    if (allSaved) {
-        _securityObjectPtr->clearSequenceStateDirty();
-    }
     KNX_LOGD(TAG, "Checkpointed Data Secure sequence state (%zu record(s))", saved);
     return saved;
+}
+
+util::Result<void> InterfaceObjectManager::saveSendingSequenceCeiling(uint64_t ceiling) {
+    if (!_persistenceEnabled || !_persistenceManager) {
+        return util::ErrorCode::NotInitialized;
+    }
+    const auto encoded = encodeSequence48(ceiling);
+    const auto res = _persistence->saveById(kSendingSequenceCeilingKeyId, encoded);
+    if (res.isError()) {
+        KNX_LOGW(TAG, "Failed to store the sending sequence ceiling: %s",
+                 util::errorCodeToString(res.error()));
+    }
+    return res;
 }
 
 bool InterfaceObjectManager::loadSecuritySequenceState() {
@@ -798,23 +835,35 @@ bool InterfaceObjectManager::loadSecuritySequenceState() {
         return false;
     }
 
+    bool found = false;
     std::vector<uint8_t> stored;
-    if (_persistence->loadById(kToolAccessSequenceKeyId, stored).isError() ||
-        stored.size() != 6u) {
-        return false;
+
+    if (_persistence->loadById(kToolAccessSequenceKeyId, stored).isOk()) {
+        if (const auto sequence = decodeSequence48(stored)) {
+            // Never move the window backwards: a value already accepted this
+            // session outranks whatever the last checkpoint managed to store.
+            if (*sequence > _securityObjectPtr->getToolAccessSequence()) {
+                _securityObjectPtr->setToolAccessSequence(*sequence);
+            }
+            // What was just loaded is what is stored: nothing is owed.
+            (void)_securityObjectPtr->takeToolAccessSequenceDirty();
+            found = true;
+        }
     }
 
-    uint64_t sequence = 0;
-    for (const uint8_t octet : stored) {
-        sequence = (sequence << 8) | octet;
+    stored.clear();
+    if (_persistence->loadById(kSendingSequenceCeilingKeyId, stored).isOk()) {
+        if (const auto ceiling = decodeSequence48(stored)) {
+            _securityObjectPtr->restoreSendingReserveCeiling(*ceiling);
+            found = true;
+        }
+    } else {
+        // No ceiling stored (a device that never sent secured, or state from a
+        // firmware before the record existed): reserve from the restored
+        // counter on the first send.
+        _securityObjectPtr->restoreSendingReserveCeiling(0u);
     }
-    // Never move the window backwards: a value already accepted this session
-    // outranks whatever the last checkpoint managed to store.
-    if (sequence > _securityObjectPtr->getToolAccessSequence()) {
-        _securityObjectPtr->setToolAccessSequence(sequence);
-    }
-    _securityObjectPtr->clearSequenceStateDirty();
-    return true;
+    return found;
 }
 #endif  // KNX_SECURE_ENABLED
 

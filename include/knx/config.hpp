@@ -226,6 +226,23 @@ constexpr uint16_t RESTART_PROCESS_TIME_S = CONFIG_KNX_RESTART_PROCESS_TIME_S;
     constexpr uint32_t NETIP_TUNNELING_KEEPALIVE_INTERVAL_MS = 60000;
 #endif
 
+// Data Secure sequence state in persistent storage
+// (docs/design/data-secure-sequence-persistence.md). Both symbols depend on
+// KNX_ENABLE_SECURITY, so a build without it takes the fallback, unused.
+#ifdef CONFIG_KNX_SECURE_SEQ_RESERVE
+    constexpr uint64_t SECURE_SEQ_RESERVE = CONFIG_KNX_SECURE_SEQ_RESERVE;
+#else
+    constexpr uint64_t SECURE_SEQ_RESERVE = 8192;
+#endif
+    static_assert(SECURE_SEQ_RESERVE >= 2, "the sending window must leave room for a top-up at half");
+
+#ifdef CONFIG_KNX_SECURE_REPLAY_CHECKPOINT_S
+    constexpr uint32_t SECURE_REPLAY_CHECKPOINT_MS =
+        static_cast<uint32_t>(CONFIG_KNX_SECURE_REPLAY_CHECKPOINT_S) * 1000u;
+#else
+    constexpr uint32_t SECURE_REPLAY_CHECKPOINT_MS = 900000u;
+#endif
+
 // ============================================================================
 // Feature Flags
 // ============================================================================

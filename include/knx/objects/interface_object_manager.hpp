@@ -123,6 +123,14 @@ public:
     /// paths while sharing the same key space.
     static constexpr uint16_t kToolAccessSequenceKeyId = 0x11F0u;
 
+    /// Reserved persistence key holding the Data Secure sending ceiling: no
+    /// sending sequence number above it has been used, and every number up to
+    /// it may have been (docs/design/data-secure-sequence-persistence.md).
+    /// Not a property, so outside every PID of object type 17 like the key
+    /// above, and not banked: a master reset does not influence the Sequence
+    /// Number Sending (03/03/07 §5).
+    static constexpr uint16_t kSendingSequenceCeilingKeyId = 0x11F1u;
+
     /// Reserved persistence key holding the A_Authorize / A_Key_Write key
     /// table (03/03/07 §3.5.8, Figure 88).
     ///
@@ -239,18 +247,26 @@ public:
      * cycle, and §6.2 the same for the Sequence Number for Tool Access. They
      * move on *every* secured telegram, so routing them through
      * saveToPersistence() would rewrite all ~23 persisted blobs at bus rate.
-     * This writes the two records that actually changed.
+     * This writes only the records that changed: the partner table and the
+     * Tool Access number each have their own dirty flag.
      *
-     * @return Number of records written. When a write fails the state stays
+     * @return Number of records written. When a write fails that record stays
      *         dirty, so the next checkpoint tries again.
      */
     size_t saveSecuritySequenceState();
 
     /// Restore the Sequence Number for Tool Access written by the last
-    /// checkpoint. The per-partner numbers ride along inside
+    /// checkpoint and the sending ceiling (kSendingSequenceCeilingKeyId), each
+    /// on its own. The per-partner numbers ride along inside
     /// PID_SECURITY_INDIVIDUAL_ADDRESS_TABLE and need no separate step.
-    /// @return true when a stored value was found and adopted.
+    /// @return true when at least one stored value was found and adopted.
     bool loadSecuritySequenceState();
+
+    /// Store the sending ceiling (SecurityInterfaceObject's reserve writer).
+    util::Result<void> saveSendingSequenceCeiling(uint64_t ceiling);
+
+    /// True when commissioned state is written to persistent storage at all.
+    bool persistenceEnabled() const { return _persistenceEnabled && _persistenceManager; }
 #endif
 
     /// Store the authorisation key table, as serialised by the application

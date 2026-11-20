@@ -1509,6 +1509,177 @@ void test_bau_security_sequence_numbers_survive_restart(void) {
     clearPersistenceStore();
 }
 
+namespace {
+
+// One device on the shared persistence store. The platform outlives the BAU.
+struct PersistentTestDevice {
+    std::unique_ptr<knx::platform::LinuxPlatform> platform;
+    std::unique_ptr<knx::bau::BusAccessUnit> bau;
+};
+
+PersistentTestDevice startPersistentTestDevice()
+{
+    PersistentTestDevice device;
+    device.platform = std::make_unique<knx::platform::LinuxPlatform>();
+    auto stackPort = knx::test::createTp1TestStackPort(*device.platform, std::make_unique<MockPhysicalLayer>());
+    device.bau = std::make_unique<knx::bau::BusAccessUnit>(*device.platform, std::move(stackPort));
+    TEST_ASSERT_TRUE(device.bau->init(IndividualAddress(1, 1, 3)).isOk());
+    return device;
+}
+
+std::vector<uint8_t> securityIaTableWith(const IndividualAddress& peer)
+{
+    // PID_SECURITY_INDIVIDUAL_ADDRESS_TABLE: IA(2) + Last Valid SeqNr(6).
+    std::vector<uint8_t> table;
+    table.push_back(static_cast<uint8_t>(peer.raw >> 8));
+    table.push_back(static_cast<uint8_t>(peer.raw & 0xFFu));
+    table.insert(table.end(), 6, 0x00);
+    return table;
+}
+
+void downloadSecurityIaTable(knx::bau::BusAccessUnit& bau, const std::vector<uint8_t>& table)
+{
+    TEST_ASSERT_TRUE(bau.writeProperty(
+        InterfaceObjectType::security(),
+        InterfaceObjectInstance(1),
+        static_cast<application::PropertyID>(knx::objects::SecurityProperty::SecurityIndividualAddressTable),
+        1,
+        table).isOk());
+    bau.flushPendingPersistence();
+}
+
+}  // namespace
+
+// A Data Secure sending number must never be used twice. The counter used to be
+// stored only with a full save, so a device that lost power resumed from its
+// last download and sent numbers it had already sent: partners dropped them as
+// replays, and the same number under the same key repeats the CCM nonce. Now a
+// ceiling a window ahead is stored before any number below it is used, so a
+// power cut with no flush at all still resumes above every number sent.
+void test_bau_secure_sending_sequence_never_reused_after_power_cut(void) {
+    clearPersistenceStore();
+    uint64_t lastUsed = 0;
+
+    {
+        auto device = startPersistentTestDevice();
+        for (int i = 0; i < 10; ++i) {
+            const auto next = device.bau->securityObject().incrementSendingSequence();
+            TEST_ASSERT_TRUE(next.isOk());
+            lastUsed = next.value();
+        }
+        device.bau->close();  // power cut: no flush, no restart path
+    }
+
+    {
+        auto device = startPersistentTestDevice();
+        auto& security = device.bau->securityObject();
+        const auto first = security.incrementSendingSequence();
+        TEST_ASSERT_TRUE(first.isOk());
+        TEST_ASSERT_TRUE(first.value() > lastUsed);
+        lastUsed = first.value();
+
+        // Past half of the window loop() stores the next ceiling itself, so
+        // that the sends after it do not wait for a write.
+        const uint64_t halfWindow = knx::config::SECURE_SEQ_RESERVE / 2u;
+        for (uint64_t i = 0; i < halfWindow + 1u; ++i) {
+            const auto next = security.incrementSendingSequence();
+            TEST_ASSERT_TRUE(next.isOk());
+            lastUsed = next.value();
+        }
+        TEST_ASSERT_TRUE(security.sendingReserveLow());
+        device.bau->loop();
+        TEST_ASSERT_FALSE(security.sendingReserveLow());
+        TEST_ASSERT_TRUE(security.sendingReserveCeiling() >= lastUsed + halfWindow);
+        device.bau->close();
+    }
+
+    {
+        auto device = startPersistentTestDevice();
+        const auto next = device.bau->securityObject().incrementSendingSequence();
+        TEST_ASSERT_TRUE(next.isOk());
+        TEST_ASSERT_TRUE(next.value() > lastUsed);
+        device.bau->close();
+    }
+    clearPersistenceStore();
+}
+
+// The partner numbers are written at most once per checkpoint interval, so a
+// power cut inside the interval loses them; once the interval has passed they
+// are stored.
+void test_bau_replay_checkpoint_waits_for_its_interval(void) {
+    clearPersistenceStore();
+    const IndividualAddress peer(1, 1, 7);
+    const uint32_t interval = knx::config::SECURE_REPLAY_CHECKPOINT_MS;
+    uint32_t nowMs = 1000u;
+
+    {
+        auto device = startPersistentTestDevice();
+        device.bau->setTimeSource([&nowMs]() { return nowMs; });
+        downloadSecurityIaTable(*device.bau, securityIaTableWith(peer));
+        device.bau->loop();  // quiet: the interval starts now
+
+        device.bau->securityObject().setPeerSequence(peer, 5u);
+        nowMs += interval - 1u;
+        device.bau->loop();
+        device.bau->close();  // power cut one millisecond early
+    }
+
+    {
+        auto device = startPersistentTestDevice();
+        TEST_ASSERT_TRUE(device.bau->securityObject().getPeerSequence(peer) == 0u);
+
+        device.bau->setTimeSource([&nowMs]() { return nowMs; });
+        device.bau->loop();
+        device.bau->securityObject().setPeerSequence(peer, 6u);
+        nowMs += interval;
+        device.bau->loop();
+        device.bau->close();
+    }
+
+    {
+        auto device = startPersistentTestDevice();
+        TEST_ASSERT_TRUE(device.bau->securityObject().getPeerSequence(peer) == 6u);
+        device.bau->close();
+    }
+    clearPersistenceStore();
+}
+
+// A reported power failure saves the replay state at the next loop(), however
+// long the checkpoint interval still has to run.
+void test_bau_power_fail_request_saves_replay_state(void) {
+    clearPersistenceStore();
+    const IndividualAddress peer(1, 1, 7);
+    constexpr uint64_t kPeerSequence = 0x0000000012345ull;
+    constexpr uint64_t kToolSequence = 0x00000000ABCDEull;
+    uint32_t nowMs = 1000u;
+
+    {
+        auto device = startPersistentTestDevice();
+        device.bau->setTimeSource([&nowMs]() { return nowMs; });
+        downloadSecurityIaTable(*device.bau, securityIaTableWith(peer));
+        device.bau->loop();
+
+        device.bau->securityObject().setPeerSequence(peer, kPeerSequence);
+        device.bau->securityObject().setToolAccessSequence(kToolSequence);
+        nowMs += 1000u;
+        device.bau->loop();
+        TEST_ASSERT_TRUE(device.bau->securityObject().sequenceStateDirty());
+
+        device.bau->requestPowerFailSave();
+        device.bau->loop();
+        TEST_ASSERT_FALSE(device.bau->securityObject().sequenceStateDirty());
+        device.bau->close();  // the supply runs out: no flush
+    }
+
+    {
+        auto device = startPersistentTestDevice();
+        TEST_ASSERT_TRUE(device.bau->securityObject().getPeerSequence(peer) == kPeerSequence);
+        TEST_ASSERT_TRUE(device.bau->securityObject().getToolAccessSequence() == kToolSequence);
+        device.bau->close();
+    }
+    clearPersistenceStore();
+}
+
 
 // ETS opens a secure Download All by telling the device which KNXnet/IP service
 // families need encrypting — PID_SECURED_SERVICE_FAMILIES on the KNXnet/IP
@@ -1922,6 +2093,9 @@ int main(void) {
     RUN_TEST(test_bau_failed_persistence_save_is_retried);
     RUN_TEST(test_bau_group_key_table_survives_restart);
     RUN_TEST(test_bau_security_sequence_numbers_survive_restart);
+    RUN_TEST(test_bau_secure_sending_sequence_never_reused_after_power_cut);
+    RUN_TEST(test_bau_replay_checkpoint_waits_for_its_interval);
+    RUN_TEST(test_bau_power_fail_request_saves_replay_state);
     RUN_TEST(test_bau_incoming_group_value_write_decodes_to_service_and_payload);
     RUN_TEST(test_bau_incoming_group_value_write_reaches_seventeen_objects_on_one_address);
     RUN_TEST(test_bau_send_for_unlinked_object_is_silent_no_op);

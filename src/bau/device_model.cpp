@@ -78,6 +78,14 @@ util::Result<void> DeviceModel::init(std::string_view persistenceNamespace, uint
         if (initRes.isError()) {
             return initRes;
         }
+#if KNX_SECURE_ENABLED
+        // Without persistence there is nowhere to keep a ceiling, and the
+        // counter stays unlimited as before.
+        if (_interfaceObjectManager->persistenceEnabled()) {
+            _securityObject.setSendingReserveWriter(&DeviceModel::storeSendingCeiling, this,
+                                                    config::SECURE_SEQ_RESERVE);
+        }
+#endif
     }
 
     instantiateReferenceObjects();
@@ -717,8 +725,37 @@ void DeviceModel::checkpointSecuritySequenceState()
     (void)_interfaceObjectManager->saveSecuritySequenceState();
 }
 
+bool DeviceModel::storeSendingCeiling(void* context, uint64_t ceiling)
+{
+    auto* self = static_cast<DeviceModel*>(context);
+    return self != nullptr && self->_interfaceObjectManager
+        && self->_interfaceObjectManager->saveSendingSequenceCeiling(ceiling).isOk();
+}
+
 void DeviceModel::pumpSecuritySequenceCheckpoint(uint32_t nowMs)
 {
+    // A reported power failure goes first: the hold-up time is short. Only the
+    // replay state is written. The sending ceiling is always stored before a
+    // number below it is used, so it owes nothing, and a full save of the
+    // commissioned state would not fit a hold-up window.
+    if (_powerFailSaveRequested.exchange(false, std::memory_order_relaxed)) {
+        if (_securityObject.sequenceStateDirty()) {
+            checkpointSecuritySequenceState();
+            KNX_LOGW(TAG, "Power failure reported: Data Secure replay state saved");
+        }
+        _sequenceCheckpointDueMs = nowMs + kSequenceCheckpointMs;
+    }
+
+    // Store a new sending ceiling before the reserved window runs out, so that
+    // a send waits for a write only after a start-up.
+    if (_securityObject.sendingReserveLow()
+        && (!_sendingTopUpRetryPending || static_cast<int32_t>(nowMs - _sendingTopUpRetryDueMs) >= 0)) {
+        _sendingTopUpRetryPending = !_securityObject.topUpSendingReserve();
+        if (_sendingTopUpRetryPending) {
+            _sendingTopUpRetryDueMs = nowMs + kPersistRetryMs;
+        }
+    }
+
     if (!_securityObject.sequenceStateDirty()) {
         _sequenceCheckpointDueMs = nowMs + kSequenceCheckpointMs;
         return;

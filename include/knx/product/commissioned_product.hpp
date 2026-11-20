@@ -1527,6 +1527,17 @@ public:
         return _runtime.ownerWorkHint();
     }
 
+    /**
+     * The bus power has failed: the next loop() saves the Data Secure replay
+     * state before anything else (bau::BusAccessUnit::requestPowerFailSave()).
+     * Only sets a flag, so it is safe from an interrupt or another task; wake
+     * the task that calls loop() afterwards.
+     */
+    void requestPowerFailSave()
+    {
+        _runtime.requestPowerFailSave();
+    }
+
     void setWorkAvailableCallback(WorkAvailableCallback callback)
     {
         _runtime.setWorkAvailableCallback(std::move(callback));

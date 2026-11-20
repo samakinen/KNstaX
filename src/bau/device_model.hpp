@@ -27,6 +27,7 @@
 #include "knx/objects/table_segments.hpp"
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -174,11 +175,19 @@ public:
 
     bool loadSecuritySequenceState();
 
-    /// Checkpoint at most every kSequenceCheckpointMs, so sustained secure
-    /// traffic costs two NVS records a minute rather than two per telegram.
-    /// The window that an unexpected power loss can reopen is bounded by that
-    /// interval; a planned restart flushes through flushPersistenceIfDirty().
+    /// Checkpoint at most every kSequenceCheckpointMs
+    /// (CONFIG_KNX_SECURE_REPLAY_CHECKPOINT_S), and only the records that
+    /// changed, so sustained secure traffic costs one or two records per
+    /// interval rather than per telegram. The window that an unexpected reset
+    /// can reopen is bounded by that interval; a planned restart flushes
+    /// through flushPersistenceIfDirty() and a power failure through
+    /// requestPowerFailSave(). Also stores a new sending ceiling once half of
+    /// the reserved window is used.
     void pumpSecuritySequenceCheckpoint(uint32_t nowMs);
+
+    /// Ask the next pump to write the checkpoint at once (if anything is
+    /// owed). Only sets a flag: safe from an interrupt or another task.
+    void requestPowerFailSave() { _powerFailSaveRequested.store(true, std::memory_order_relaxed); }
 #endif
 
     /// Store the A_Key_Write key table now; a failure is logged.
@@ -225,6 +234,8 @@ private:
     void instantiateReferenceObjects();
 #if KNX_SECURE_ENABLED
     void checkpointSecuritySequenceState();
+    /// SecurityInterfaceObject::SendingReserveWriter: stores the ceiling.
+    static bool storeSendingCeiling(void* context, uint64_t ceiling);
 #endif
     util::Result<void> writeProperty(const application::PropertyValueWriteRequest& request);
     void afterReferenceObjectWrite(InterfaceObjectType objectType, application::PropertyID propertyId);
@@ -279,11 +290,16 @@ private:
     uint32_t _lastPumpMs{0};
 
     // Data Secure replay-state checkpoint interval. Long on purpose: it trades
-    // a bounded window of replayable history after an *unexpected* power loss
-    // against flash wear, and every orderly restart flushes anyway.
+    // a bounded window of replayable history after an *unexpected* reset
+    // against flash wear, and every orderly restart and reported power failure
+    // saves anyway.
 #if KNX_SECURE_ENABLED
-    static constexpr uint32_t kSequenceCheckpointMs = 60000;
+    static constexpr uint32_t kSequenceCheckpointMs = config::SECURE_REPLAY_CHECKPOINT_MS;
     uint32_t _sequenceCheckpointDueMs{kSequenceCheckpointMs};
+    // A failed sending-ceiling top-up is retried no faster than a failed save.
+    uint32_t _sendingTopUpRetryDueMs{0};
+    bool _sendingTopUpRetryPending{false};
+    std::atomic<bool> _powerFailSaveRequested{false};
 #endif
 
     // Backing storage for the memory-mapped table load segments (registered

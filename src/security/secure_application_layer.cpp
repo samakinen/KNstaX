@@ -593,7 +593,13 @@ util::Result<size_t> SecureApplicationLayer::processOutgoing(const SecureFrameIn
     scf.toolAccess = toolAccess;
     scf.service = SecureService::Data;
 
-    const uint64_t seq = _securityObject.incrementSendingSequence();
+    // A number that could not be reserved is not taken: the send fails rather
+    // than risk the same number again after a reset.
+    const auto sequence = _securityObject.incrementSendingSequence();
+    if (sequence.isError()) {
+        return sequence.error();
+    }
+    const uint64_t seq = sequence.value();
     std::array<uint8_t, 6> nonce{};
     writeSecureU48BE(std::span<uint8_t, 6>(nonce), seq);
 

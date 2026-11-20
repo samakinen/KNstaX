@@ -271,6 +271,12 @@ void BusAccessUnit::flushPendingPersistence() {
     _model->flushPersistenceIfDirty();
 }
 
+void BusAccessUnit::requestPowerFailSave() {
+#if KNX_SECURE_ENABLED
+    _model->requestPowerFailSave();
+#endif
+}
+
 void BusAccessUnit::markParameterImageChanged() {
     _model->markPersistenceDirty();
 }
