@@ -251,19 +251,30 @@ consteval size_t entryOf(std::array<bool, N> match)
 }
 
 /// Stands for the block whose id enum is IdEnum, where a type cannot be
-/// stored (conditions in constexpr data): the enum's name as the compiler
-/// spells it in this function's signature. A name rather than the address of
-/// a tag variable, because GCC does not fold a comparison of two variables'
-/// addresses in a constant expression when the sanitizers are on.
+/// stored (conditions in constexpr data): a 64-bit FNV-1a hash of the enum's
+/// name as the compiler spells it in this function's signature, computed once
+/// per enum (kBlockTag). Not the address of a tag variable: GCC does not fold
+/// a comparison of two variables' addresses in a constant expression when the
+/// sanitizers are on. Not the name itself: comparing names for every
+/// parameter and condition of a large layout exceeds the compiler's limit on
+/// constant evaluation.
 template <typename IdEnum>
-constexpr std::string_view blockTag()
+constexpr uint64_t blockTagOf()
 {
 #if defined(_MSC_VER) && !defined(__clang__)
-    return __FUNCSIG__;
+    const std::string_view name = __FUNCSIG__;
 #else
-    return __PRETTY_FUNCTION__;
+    const std::string_view name = __PRETTY_FUNCTION__;
 #endif
+    uint64_t hash = 0xCBF29CE484222325ull;
+    for (const char c : name) {
+        hash = (hash ^ static_cast<uint8_t>(c)) * 0x100000001B3ull;
+    }
+    return hash;
 }
+
+template <typename IdEnum>
+inline constexpr uint64_t kBlockTag = blockTagOf<IdEnum>();
 
 } // namespace detail
 
@@ -311,8 +322,8 @@ inline constexpr size_t kMaxConditionValues = 8;
 /// the device never evaluates it, and a hidden parameter keeps its value.
 struct Condition {
     ConditionOp op{ConditionOp::Always};
-    /// Block of the controlling parameter (detail::blockTag()).
-    std::string_view block{};
+    /// Block of the controlling parameter (detail::kBlockTag).
+    uint64_t block{0};
     uint16_t parameterId{0};
     std::array<int32_t, kMaxConditionValues> values{};
     uint8_t valueCount{0};
@@ -322,7 +333,7 @@ template <auto Id, typename... Vs>
     requires(sizeof...(Vs) >= 1u && sizeof...(Vs) <= kMaxConditionValues)
 constexpr Condition whenAny(Vs... values)
 {
-    Condition condition{ConditionOp::AnyOf, detail::blockTag<decltype(Id)>(),
+    Condition condition{ConditionOp::AnyOf, detail::kBlockTag<decltype(Id)>,
                         static_cast<uint16_t>(detail::toInteger(Id))};
     size_t at = 0;
     ((condition.values[at++] = detail::toInteger(values)), ...);
@@ -892,7 +903,7 @@ struct ParameterInfo {
     std::string_view blockName{};
     Condition blockVisible{};
     /// Tag of the block (compare with Condition::block).
-    std::string_view block{};
+    uint64_t block{0};
     size_t blockBase{0};
     size_t blockStride{0};
     size_t blockCount{0};
@@ -1096,7 +1107,7 @@ constexpr void forEachParameter(const ParameterLayout<Rs...>& layout, Visitor&& 
                     info.blockKey = repeated.block.spec.key;
                     info.blockName = repeated.block.spec.name;
                     info.blockVisible = repeated.block.spec.visible;
-                    info.block = detail::blockTag<typename BlockT::id_type>();
+                    info.block = detail::kBlockTag<typename BlockT::id_type>;
                     info.blockBase = base;
                     info.blockStride = BlockT::kStride;
                     info.blockCount = repeated.kCount;

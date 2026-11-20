@@ -37,7 +37,7 @@ namespace knx::product {
 namespace detail {
 
 inline void writeConditionJson(std::ostringstream& o, const params::Condition& condition,
-                               const std::vector<std::string_view>& blocks)
+                               const std::vector<uint64_t>& blocks)
 {
     size_t block = 0;
     while (block < blocks.size() && blocks[block] != condition.block) {
@@ -67,7 +67,7 @@ std::string parameterLayoutToJson(const params::ParameterLayout<Rs...>& layout)
     params::forEachParameter(layout, [&](const params::ParameterInfo& info) { parameters.push_back(info); });
 
     // Blocks in image order, and each option list once per width it is used at.
-    std::vector<std::string_view> blocks;
+    std::vector<uint64_t> blocks;
     struct OptionType {
         std::span<const params::Option> options;
         size_t width;
