@@ -513,6 +513,15 @@ util::Result<size_t> TpUartMediumBackend::sendFrame(std::span<const uint8_t> fra
 
     std::copy(frame.begin(), frame.end(), _txFrame.begin());
     _txLength = frame.size();
+    // Bits 1..0 of the control field are 0 on the TP1 wire (03/02/02 §2.2.2).
+    // The frame codec carries the ack-request and confirm flags there for the
+    // bit-bang MAC, and the TP-UART2 refuses such a frame as a protocol error
+    // and resets. The chip does its own acknowledging, so clear them, and the
+    // same bits of the checksum, which is an inverted XOR over the frame.
+    if (const uint8_t flags = static_cast<uint8_t>(_txFrame[0] & 0x03u); flags != 0u) {
+        _txFrame[0] ^= flags;
+        _txFrame[_txLength - 1u] ^= flags;
+    }
     _txPosition = 0u;
     _txStartMs = util::nowMs(&_timing);
     setTxPhase(TxPhase::Feeding);

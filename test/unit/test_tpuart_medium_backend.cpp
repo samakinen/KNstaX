@@ -459,6 +459,35 @@ void test_frame_is_fed_as_u_l_data_pairs_a_few_octets_at_a_time(void)
                            f.chip.hostOctets[2u * (frame.size() - 1u)]);
 }
 
+// LDataFrame defaults to ackRequested, which the codec writes into control bit
+// 1 for the bit-bang MAC. The TP-UART2 answers a control field with bits 1..0
+// set with a protocol error and a reset, so the backend clears them, and keeps
+// the checksum right.
+void test_control_bits_1_0_are_cleared_before_the_chip_sees_the_frame(void)
+{
+    Fixture f;
+    TEST_ASSERT_TRUE(f.init().isOk());
+    f.chip.pump();
+    f.chip.confirm = ScriptedChip::Confirm::None;
+
+    LDataFrame frame = individualRead(OWN_ADDRESS, PEER_ADDRESS);
+    frame.priority = Priority::System;
+    frame.ackRequested = true;
+    const auto encoded = encode(frame);
+    TEST_ASSERT_EQUAL_HEX8(0xB2u, encoded[0]);  // what the codec produces
+
+    TEST_ASSERT_TRUE(f.backend->sendFrame(encoded).isOk());
+    for (int i = 0; i < 20 && f.chip.frames.empty(); ++i) {
+        f.chip.pump(2);
+        TEST_ASSERT_TRUE(f.backend->service().isOk());
+    }
+    TEST_ASSERT_EQUAL_UINT32(1u, f.chip.frames.size());
+    const auto& wire = f.chip.frames[0];
+    TEST_ASSERT_EQUAL_HEX8(0xB0u, wire[0]);
+    TEST_ASSERT_TRUE(datalink::FrameCodec::verifyChecksum(std::span<const uint8_t>(wire)).isOk());
+    TEST_ASSERT_EQUAL_MEMORY(encoded.data() + 1, wire.data() + 1, encoded.size() - 2u);
+}
+
 void test_positive_and_negative_confirmations_become_tx_outcomes(void)
 {
     Fixture f;
@@ -1099,6 +1128,7 @@ int main(void)
     RUN_TEST(test_init_pulses_the_reset_pin_when_the_board_wires_it);
     RUN_TEST(test_init_refuses_an_incomplete_hal);
     RUN_TEST(test_frame_is_fed_as_u_l_data_pairs_a_few_octets_at_a_time);
+    RUN_TEST(test_control_bits_1_0_are_cleared_before_the_chip_sees_the_frame);
     RUN_TEST(test_positive_and_negative_confirmations_become_tx_outcomes);
     RUN_TEST(test_send_is_refused_while_a_frame_is_outstanding_or_malformed);
     RUN_TEST(test_missing_confirmation_is_a_deadline_miss_and_resets_the_chip);
