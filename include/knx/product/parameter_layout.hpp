@@ -250,10 +250,20 @@ consteval size_t entryOf(std::array<bool, N> match)
     return found;
 }
 
-/// Its address stands for the block whose id enum is IdEnum, where a type
-/// cannot be stored (conditions in constexpr data).
+/// Stands for the block whose id enum is IdEnum, where a type cannot be
+/// stored (conditions in constexpr data): the enum's name as the compiler
+/// spells it in this function's signature. A name rather than the address of
+/// a tag variable, because GCC does not fold a comparison of two variables'
+/// addresses in a constant expression when the sanitizers are on.
 template <typename IdEnum>
-inline constexpr char kBlockTag{};
+constexpr std::string_view blockTag()
+{
+#if defined(_MSC_VER) && !defined(__clang__)
+    return __FUNCSIG__;
+#else
+    return __PRETTY_FUNCTION__;
+#endif
+}
 
 } // namespace detail
 
@@ -301,8 +311,8 @@ inline constexpr size_t kMaxConditionValues = 8;
 /// the device never evaluates it, and a hidden parameter keeps its value.
 struct Condition {
     ConditionOp op{ConditionOp::Always};
-    /// Block of the controlling parameter (address of its tag).
-    const void* block{nullptr};
+    /// Block of the controlling parameter (detail::blockTag()).
+    std::string_view block{};
     uint16_t parameterId{0};
     std::array<int32_t, kMaxConditionValues> values{};
     uint8_t valueCount{0};
@@ -312,7 +322,7 @@ template <auto Id, typename... Vs>
     requires(sizeof...(Vs) >= 1u && sizeof...(Vs) <= kMaxConditionValues)
 constexpr Condition whenAny(Vs... values)
 {
-    Condition condition{ConditionOp::AnyOf, &detail::kBlockTag<decltype(Id)>,
+    Condition condition{ConditionOp::AnyOf, detail::blockTag<decltype(Id)>(),
                         static_cast<uint16_t>(detail::toInteger(Id))};
     size_t at = 0;
     ((condition.values[at++] = detail::toInteger(values)), ...);
@@ -882,7 +892,7 @@ struct ParameterInfo {
     std::string_view blockName{};
     Condition blockVisible{};
     /// Tag of the block (compare with Condition::block).
-    const void* block{nullptr};
+    std::string_view block{};
     size_t blockBase{0};
     size_t blockStride{0};
     size_t blockCount{0};
@@ -1086,7 +1096,7 @@ constexpr void forEachParameter(const ParameterLayout<Rs...>& layout, Visitor&& 
                     info.blockKey = repeated.block.spec.key;
                     info.blockName = repeated.block.spec.name;
                     info.blockVisible = repeated.block.spec.visible;
-                    info.block = &detail::kBlockTag<typename BlockT::id_type>;
+                    info.block = detail::blockTag<typename BlockT::id_type>();
                     info.blockBase = base;
                     info.blockStride = BlockT::kStride;
                     info.blockCount = repeated.kCount;
