@@ -568,6 +568,30 @@ util::Result<uint16_t> getVersion(const DeviceObject& domain) {
 
 static const ScalarPropertyData<DeviceObject, uint16_t> kVersionData{ &getVersion, nullptr };
 
+// PID_IO_LIST (03/05/01 §4.3.22): read-only PDT_UNSIGNED_INT[], mandatory
+// with the extended property services. Element 0 is the number of interface
+// objects, elements 1..n their types in ascending object-index order. ETS
+// reads it to enumerate the objects; without it ETS probes PID_OBJECT_TYPE of
+// one index after another.
+util::Result<uint16_t> getIoListEntry(const DeviceObject& domain, DomainIndex index) {
+    const auto type = domain.interfaceObjectTypeAt(index.value);
+    if (type.isError()) {
+        return util::Result<uint16_t>(type.error());
+    }
+    return type.value().value();
+}
+
+util::Result<uint16_t> countIoListEntries(const DeviceObject& domain) {
+    return domain.interfaceObjectCount();
+}
+
+static const VariableTablePropertyData<DeviceObject, uint16_t> kIoListData{
+    &getIoListEntry,
+    nullptr,
+    nullptr,
+    &countIoListEntries
+};
+
 static const PropertyHandler kDeviceHandlers[] = {
     kSerialNumberHandler,
     kHardwareTypeHandler,
@@ -608,6 +632,12 @@ static const PropertyHandler kDeviceHandlers[] = {
         application::PropertyDataType::UnsignedInt,
         PropertyCapability::ReadOnly,
         &kMaxApduData),
+
+    VariableTableProperty<DeviceObject, uint16_t, kMaxIoListEntries>::make(
+        static_cast<application::PropertyID>(DeviceProperty::IoList),
+        application::PropertyDataType::UnsignedInt,
+        PropertyCapability::ReadOnly,
+        &kIoListData),
 
     ScalarProperty<DeviceObject, uint8_t>::make(
         static_cast<application::PropertyID>(DeviceProperty::SubnetAddress),

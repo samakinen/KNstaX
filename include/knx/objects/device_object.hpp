@@ -16,6 +16,7 @@
 #include "knx/types.hpp"
 #include "knx/util/fixed_vector.hpp"
 #include "knx/util/result.hpp"
+#include <algorithm>
 #include <cstdint>
 #include <string>
 #include <functional>
@@ -101,8 +102,13 @@ enum class DeviceProperty : uint8_t {
     RoutingCount = 51,        // PID_ROUTING_COUNT
     MaxRetryCount = 52,       // PID_MAX_RETRY_COUNT
     ErrorFlags = 53,          // PID_ERROR_FLAGS
+    IoList = 71,              // PID_IO_LIST
     HardwareType = 78         // PID_HARDWARE_TYPE
 };
+
+/// PID_IO_LIST capacity: the most interface objects the management server
+/// records (ManagementServer::kMaxInterfaceObjects).
+inline constexpr uint16_t kMaxIoListEntries = 32;
 
 /**
  * @brief Callback for load state changes
@@ -166,6 +172,24 @@ public:
     void setSerialNumber(std::span<const uint8_t> serial);
     std::span<const uint8_t> getSerialNumber() const { return _serialNumber; }
     void registerSerialNumberCallback(SerialNumberCallback callback);
+
+    // PID_IO_LIST (71), 03/05/01 §4.3.22: the type of every interface object
+    // in object-index order. The device model owns the list and hands it over
+    // once it has given the objects their indices; until then, and if it is
+    // cleared again, the list is empty.
+    void setInterfaceObjectList(const std::vector<InterfaceObjectType>* types) { _interfaceObjectTypes = types; }
+    uint16_t interfaceObjectCount() const {
+        return _interfaceObjectTypes
+            ? static_cast<uint16_t>(std::min<size_t>(_interfaceObjectTypes->size(), kMaxIoListEntries))
+            : 0u;
+    }
+    /// Type of the object at @p objectIndex (0 = this device object).
+    util::Result<InterfaceObjectType> interfaceObjectTypeAt(uint16_t objectIndex) const {
+        if (objectIndex >= interfaceObjectCount()) {
+            return util::Result<InterfaceObjectType>(util::ErrorCode::InvalidParameter);
+        }
+        return (*_interfaceObjectTypes)[objectIndex];
+    }
 
     // PID_ORDER_INFO (15)
     void setOrderInfo(const std::string& order) { _orderInfo = order; }
@@ -305,6 +329,7 @@ private:
     std::string _orderInfo;
     std::string _description;
     uint16_t _version{0};
+    const std::vector<InterfaceObjectType>* _interfaceObjectTypes{nullptr};  // PID_IO_LIST, owned by the device model
 
     // Addressing
     IndividualAddress _individualAddress;

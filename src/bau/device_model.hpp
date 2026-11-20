@@ -54,6 +54,8 @@ public:
     DeviceModel& operator=(const DeviceModel&) = delete;
     DeviceModel(DeviceModel&&) = delete;
     DeviceModel& operator=(DeviceModel&&) = delete;
+    // The device object may outlive the model; PID_IO_LIST points into it.
+    ~DeviceModel() { _deviceObject.setInterfaceObjectList(nullptr); }
 
     objects::DeviceObject& deviceObject() { return _deviceObject; }
     const objects::DeviceObject& deviceObject() const { return _deviceObject; }

@@ -147,6 +147,9 @@ void DeviceModel::bind()
         stackPort.registerPropertyObject(object->objectType(), objectIndex);
         _indexToTypeMap.push_back(object->objectType());
     }
+    // PID_IO_LIST answers from the same list, so it cannot disagree with the
+    // indices the property services resolve.
+    _deviceObject.setInterfaceObjectList(&_indexToTypeMap);
 
     stackPort.setPropertyReadProvider(
         [this](const IndividualAddress& /*source*/, const application::PropertyValueReadRequest& request, std::span<uint8_t> out)

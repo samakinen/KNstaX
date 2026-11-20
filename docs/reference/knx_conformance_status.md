@@ -50,7 +50,7 @@ function property services use E_EXCEED_MAX_APDU_LENGTH, the classic function pr
 | A_PropertyDescription_Read / _Response | 0x3D8 / 0x3D9 | |
 | A_FunctionPropertyCommand | 0x2C7 | PDT_FUNCTION properties; used for PID_SECURITY_MODE and PID_ROUTETABLE_CONTROL |
 | A_FunctionPropertyState_Read / _Response | 0x2C8 / 0x2C9 | State_Read is side-effect free |
-| A_PropertyExtValue_Read / _Response | 0x1CC / 0x1CD | 12-bit object instance and property ID; start_index 0 answers the element count |
+| A_PropertyExtValue_Read / _Response | 0x1CC / 0x1CD | 12-bit object instance and property ID; start_index 0 answers the element count. The Device Object's PID_IO_LIST (71), mandatory with these services (03/05/01 §4.3.22), lists the interface object types in object-index order |
 | A_PropertyExtValue_WriteCon / _WriteConRes | 0x1CE / 0x1CF | Confirmed write; answers with a return code even on refusal |
 | A_PropertyExtValue_WriteUnCon | 0x1D0 | Unconfirmed; never answers, not even on failure |
 | A_PropertyExtDescription_Read / _Response | 0x1D2 / 0x1D3 | Description type zero; DPT main/sub reported as 0 (not tracked per property) |

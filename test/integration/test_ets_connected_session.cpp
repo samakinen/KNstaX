@@ -257,6 +257,83 @@ void test_lost_ack_does_not_freeze_send_sequence(void) {
     }
 }
 
+namespace {
+/// A_PropertyValue_Read over the open connection; answers the payload of the
+/// A_PropertyValue_Response (object index, PID, NoE/start, data) and T_ACKs it.
+std::vector<uint8_t> readPropertyConnected(uint8_t& seq, uint8_t objectIndex, uint8_t pid,
+                                           uint8_t elements, uint16_t start) {
+    const std::array<uint8_t, 4> request{objectIndex, pid,
+                                         static_cast<uint8_t>((elements << 4) | ((start >> 8) & 0x0F)),
+                                         static_cast<uint8_t>(start & 0xFF)};
+    injectFromEts(numberedRequest(seq, application::APCIService::PropertyValueRead, request));
+    seq = static_cast<uint8_t>((seq + 1) & 0x0F);
+    const auto sent = pumpAndCollect();
+    for (auto it = sent.rbegin(); it != sent.rend(); ++it) {
+        if (it->tpci == protocol::TPCI::NumberedData) {
+            injectFromEts(ackFromEts(it->sequenceNumber));
+            (void)pumpAndCollect(50);
+            return it->payload;
+        }
+    }
+    TEST_FAIL_MESSAGE("no A_PropertyValue_Response");
+    return {};
+}
+
+uint16_t be16(const std::vector<uint8_t>& payload, size_t at) {
+    return static_cast<uint16_t>((payload[at] << 8) | payload[at + 1]);
+}
+} // namespace
+
+// PID_IO_LIST (03/05/01 §4.3.22): element 0 is the number of interface
+// objects, element n the type of the object at index n-1, which is what
+// PID_OBJECT_TYPE of that object answers. ETS enumerates a device's objects
+// with it; a read past the end is refused.
+void test_io_list_names_every_interface_object_in_index_order(void) {
+    constexpr uint8_t kPidObjectType = 1;
+    constexpr uint8_t kPidIoList = 71;
+    injectFromEts(std::vector<uint8_t>{0x80});  // T_Connect
+    (void)pumpAndCollect();
+    uint8_t seq = 0;
+
+    const auto countAnswer = readPropertyConnected(seq, 0, kPidIoList, 1, 0);
+    TEST_ASSERT_EQUAL_UINT32(6, countAnswer.size());
+    TEST_ASSERT_EQUAL_HEX8(0x10, countAnswer[2]);  // one element, start 0
+    const uint16_t count = be16(countAnswer, 4);
+    TEST_ASSERT_TRUE(count >= 5u);  // device, address, association, group object tables, program
+
+    for (uint16_t element = 1; element <= count; ++element) {
+        const auto entry = readPropertyConnected(seq, 0, kPidIoList, 1, element);
+        TEST_ASSERT_EQUAL_UINT32(6, entry.size());
+        const auto objectType = readPropertyConnected(seq, static_cast<uint8_t>(element - 1), kPidObjectType, 1, 1);
+        TEST_ASSERT_EQUAL_UINT32(6, objectType.size());
+        TEST_ASSERT_EQUAL_UINT16(be16(objectType, 4), be16(entry, 4));
+    }
+    TEST_ASSERT_EQUAL_UINT16(0u, be16(readPropertyConnected(seq, 0, kPidIoList, 1, 1), 4));  // the device object
+
+    // Several elements in one read, as ETS asks for them.
+    const auto firstThree = readPropertyConnected(seq, 0, kPidIoList, 3, 1);
+    TEST_ASSERT_EQUAL_UINT32(4u + 6u, firstThree.size());
+    TEST_ASSERT_EQUAL_UINT16(1u, be16(firstThree, 6));  // group address table
+    TEST_ASSERT_EQUAL_UINT16(2u, be16(firstThree, 8));  // association table
+
+    // Past the end: a negative response, no elements and no data.
+    const auto pastEnd = readPropertyConnected(seq, 0, kPidIoList, 1, static_cast<uint16_t>(count + 1));
+    TEST_ASSERT_EQUAL_UINT32(4, pastEnd.size());
+    TEST_ASSERT_EQUAL_HEX8(0x00, static_cast<uint8_t>(pastEnd[2] & 0xF0));
+
+    // Read-only: a write is refused and the list is unchanged.
+    const std::array<uint8_t, 6> write{0, kPidIoList, 0x10, 0x01, 0x12, 0x34};
+    injectFromEts(numberedRequest(seq, application::APCIService::PropertyValueWrite, write));
+    seq = static_cast<uint8_t>((seq + 1) & 0x0F);
+    for (const auto& frame : pumpAndCollect()) {
+        if (frame.tpci == protocol::TPCI::NumberedData) {
+            injectFromEts(ackFromEts(frame.sequenceNumber));
+        }
+    }
+    (void)pumpAndCollect(50);
+    TEST_ASSERT_EQUAL_UINT16(0u, be16(readPropertyConnected(seq, 0, kPidIoList, 1, 1), 4));
+}
+
 // The device's receive side is unaffected: each request is still T_ACKed with
 // the sequence number it carried, whether or not our own answers get through.
 void test_requests_are_acked_with_their_own_sequence_number(void) {
@@ -1235,6 +1312,7 @@ int main(int argc, char** argv) {
     const bool all = group == "all";
     UNITY_BEGIN();
     if (all || group == "session") {
+        RUN_TEST(test_io_list_names_every_interface_object_in_index_order);
         RUN_TEST(test_full_ets_commissioning_sequence_without_verify_mode);
         RUN_TEST(test_full_ets_commissioning_sequence_with_verify_mode);
         RUN_TEST(test_group_address_filter_follows_the_address_table);
