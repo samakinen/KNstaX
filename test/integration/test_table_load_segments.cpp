@@ -3,17 +3,16 @@
 
 /**
  * @file test_table_load_segments.cpp
- * @brief The address and association tables, loaded the way ETS does it
+ * @brief The table load segments, loaded in the order ETS loads them
  *
  * A product runs on the real stack over a mock TP1 physical layer. The test
- * plays ETS on a transport connection: StartLoading on a table object,
- * A_Memory_Write into its load segment, a read-back, LoadCompleted. It checks
- * the load state and what a memory read of the segment answers.
- *
- * With KNX_SHARED_LOAD_SEGMENT (tp1-small, host-minimal) the three segments
- * share one staging buffer, and the shared-segment tests check what that
- * changes: a write outside a load is refused, a segment outside a load reads
- * from its table, and a load that loses the buffer to another table fails.
+ * plays ETS on a transport connection, in the order of the mask 07B0 load
+ * procedures of the ETS6 master data (knx_master.xml, "all", "grp" and
+ * "par,grp"): Unload of the tables, StartLoading of all three, the segments
+ * by A_Memory_Write with a read-back each, then LoadCompleted of all three.
+ * All three segments are staged at once, so each needs its own staging
+ * (an ETS6 download failed on a device that shared one buffer between them).
+ * A table loaded on its own is also checked.
  *
  * CTest label: "integration"
  */
@@ -37,6 +36,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <initializer_list>
 #include <memory>
 #include <span>
 #include <thread>
@@ -85,6 +85,8 @@ constexpr auto kGroupObjectBase = static_cast<uint16_t>(objects::tableseg::kGrou
 // Two group addresses, 1/0/1 and 1/0/2, and an association of each with object 0.
 constexpr std::array<uint8_t, 6> kAddresses{0x00, 0x02, 0x08, 0x01, 0x08, 0x02};
 constexpr std::array<uint8_t, 10> kAssociations{0x00, 0x02, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00};
+// One group object descriptor (the segment is accepted and not applied).
+constexpr std::array<uint8_t, 4> kGroupObjects{0x00, 0x01, 0x00, 0x44};
 
 std::unique_ptr<knx::platform::LinuxPlatform> gPlatform;
 MockPhysicalLayer* gPhysical = nullptr;
@@ -241,14 +243,20 @@ public:
         return octets;
     }
 
-    /// StartLoading, the segment, a read-back of it, LoadCompleted.
-    void loadTable(uint8_t objectIndex, uint16_t base, std::span<const uint8_t> content)
+    /// The segment, then a read-back of it (ETS's Verify="true").
+    void writeVerified(uint16_t base, std::span<const uint8_t> content)
     {
-        loadControl(objectIndex, objects::loadstate::kEventStartLoading);
         memoryWrite(base, content);
         const auto readBack = memoryRead(base, static_cast<uint8_t>(content.size()));
         TEST_ASSERT_EQUAL_UINT(content.size(), readBack.size());
         TEST_ASSERT_EQUAL_MEMORY(content.data(), readBack.data(), content.size());
+    }
+
+    /// StartLoading, the segment, a read-back of it, LoadCompleted.
+    void loadTable(uint8_t objectIndex, uint16_t base, std::span<const uint8_t> content)
+    {
+        loadControl(objectIndex, objects::loadstate::kEventStartLoading);
+        writeVerified(base, content);
         loadControl(objectIndex, objects::loadstate::kEventLoadCompleted);
     }
 
@@ -294,8 +302,40 @@ void tearDown(void)
     gPlatform.reset();
 }
 
-// Both tables load, read back what was written while loading, and end Loaded.
-void test_the_tables_load_like_ets_loads_them(void)
+// ETS6's order (mask 07B0, "grp"): every table starts loading before any is
+// written, and none completes before all are written.
+void test_the_tables_load_in_the_order_ets_loads_them(void)
+{
+    auto product = startProduct();
+    {
+        EtsSession ets;
+        for (const uint8_t index : {kGroupObjectTableIndex, kAssociationTableIndex, kAddressTableIndex}) {
+            ets.loadControl(index, objects::loadstate::kEventUnload);
+        }
+        for (const uint8_t index : {kGroupObjectTableIndex, kAddressTableIndex, kAssociationTableIndex}) {
+            ets.loadControl(index, objects::loadstate::kEventStartLoading);
+        }
+        ets.writeVerified(kGroupObjectBase, kGroupObjects);
+        ets.writeVerified(kAssociationBase, kAssociations);
+        ets.writeVerified(kAddressBase, kAddresses);
+        for (const uint8_t index : {kGroupObjectTableIndex, kAssociationTableIndex, kAddressTableIndex}) {
+            ets.loadControl(index, objects::loadstate::kEventLoadCompleted);
+        }
+        TEST_ASSERT_EQUAL_UINT8(objects::loadstate::kLoaded, ets.loadState(kAddressTableIndex));
+        TEST_ASSERT_EQUAL_UINT8(objects::loadstate::kLoaded, ets.loadState(kAssociationTableIndex));
+        TEST_ASSERT_EQUAL_UINT8(objects::loadstate::kLoaded, ets.loadState(kGroupObjectTableIndex));
+
+        // The segments still read as written.
+        const auto addresses = ets.memoryRead(kAddressBase, static_cast<uint8_t>(kAddresses.size()));
+        TEST_ASSERT_EQUAL_MEMORY(kAddresses.data(), addresses.data(), kAddresses.size());
+        const auto associations = ets.memoryRead(kAssociationBase, static_cast<uint8_t>(kAssociations.size()));
+        TEST_ASSERT_EQUAL_MEMORY(kAssociations.data(), associations.data(), kAssociations.size());
+    }
+    product.reset();
+}
+
+// One table at a time also loads.
+void test_the_tables_load_one_at_a_time(void)
 {
     auto product = startProduct();
     {
@@ -308,84 +348,10 @@ void test_the_tables_load_like_ets_loads_them(void)
     product.reset();
 }
 
-#if KNX_SHARED_LOAD_SEGMENT
-
-// After the load the buffer is free; the segments read as their tables.
-void test_a_loaded_segment_reads_from_its_table(void)
-{
-    auto product = startProduct();
-    EtsSession ets;
-    ets.loadTable(kAddressTableIndex, kAddressBase, kAddresses);
-    ets.loadTable(kAssociationTableIndex, kAssociationBase, kAssociations);
-
-    const auto addresses = ets.memoryRead(kAddressBase, static_cast<uint8_t>(kAddresses.size()));
-    TEST_ASSERT_EQUAL_UINT(kAddresses.size(), addresses.size());
-    TEST_ASSERT_EQUAL_MEMORY(kAddresses.data(), addresses.data(), kAddresses.size());
-    const auto associations = ets.memoryRead(kAssociationBase, static_cast<uint8_t>(kAssociations.size()));
-    TEST_ASSERT_EQUAL_UINT(kAssociations.size(), associations.size());
-    TEST_ASSERT_EQUAL_MEMORY(kAssociations.data(), associations.data(), kAssociations.size());
-    // The group object table has no table behind it: zeros.
-    const auto groupObjects = ets.memoryRead(kGroupObjectBase, 4u);
-    TEST_ASSERT_EQUAL_UINT(4u, groupObjects.size());
-    const std::array<uint8_t, 4> zeros{};
-    TEST_ASSERT_EQUAL_MEMORY(zeros.data(), groupObjects.data(), zeros.size());
-}
-
-// A write into a segment whose table is not loading is refused: the segment
-// still reads as the table.
-void test_a_write_outside_a_load_is_refused(void)
-{
-    auto product = startProduct();
-    EtsSession ets;
-    ets.loadTable(kAddressTableIndex, kAddressBase, kAddresses);
-
-    const std::array<uint8_t, 4> stray{0x00, 0x01, 0x09, 0x09};
-    ets.memoryWrite(kAddressBase, stray);
-    const auto addresses = ets.memoryRead(kAddressBase, static_cast<uint8_t>(kAddresses.size()));
-    TEST_ASSERT_EQUAL_MEMORY(kAddresses.data(), addresses.data(), kAddresses.size());
-    TEST_ASSERT_EQUAL_UINT8(objects::loadstate::kLoaded, ets.loadState(kAddressTableIndex));
-}
-
-// Two tables loading at once: the second StartLoading takes the buffer, the
-// second load completes, and the first fails rather than loading nothing.
-void test_a_load_that_loses_the_buffer_fails(void)
-{
-    auto product = startProduct();
-    EtsSession ets;
-    ets.loadControl(kAddressTableIndex, objects::loadstate::kEventStartLoading);
-    ets.memoryWrite(kAddressBase, kAddresses);
-    ets.loadTable(kAssociationTableIndex, kAssociationBase, kAssociations);
-    ets.loadControl(kAddressTableIndex, objects::loadstate::kEventLoadCompleted);
-
-    TEST_ASSERT_EQUAL_UINT8(objects::loadstate::kError, ets.loadState(kAddressTableIndex));
-    TEST_ASSERT_EQUAL_UINT8(objects::loadstate::kLoaded, ets.loadState(kAssociationTableIndex));
-}
-
-// An abandoned load does not block the next one: StartLoading takes the buffer.
-void test_an_abandoned_load_does_not_block_the_next(void)
-{
-    auto product = startProduct();
-    EtsSession ets;
-    ets.loadControl(kAssociationTableIndex, objects::loadstate::kEventStartLoading);
-    ets.memoryWrite(kAssociationBase, kAssociations);
-    // ETS gives up here and starts again with the address table.
-    ets.loadTable(kAddressTableIndex, kAddressBase, kAddresses);
-    ets.loadTable(kAssociationTableIndex, kAssociationBase, kAssociations);
-    TEST_ASSERT_EQUAL_UINT8(objects::loadstate::kLoaded, ets.loadState(kAddressTableIndex));
-    TEST_ASSERT_EQUAL_UINT8(objects::loadstate::kLoaded, ets.loadState(kAssociationTableIndex));
-}
-
-#endif
-
 int main(void)
 {
     UNITY_BEGIN();
-    RUN_TEST(test_the_tables_load_like_ets_loads_them);
-#if KNX_SHARED_LOAD_SEGMENT
-    RUN_TEST(test_a_loaded_segment_reads_from_its_table);
-    RUN_TEST(test_a_write_outside_a_load_is_refused);
-    RUN_TEST(test_a_load_that_loses_the_buffer_fails);
-    RUN_TEST(test_an_abandoned_load_does_not_block_the_next);
-#endif
+    RUN_TEST(test_the_tables_load_in_the_order_ets_loads_them);
+    RUN_TEST(test_the_tables_load_one_at_a_time);
     return UNITY_END();
 }

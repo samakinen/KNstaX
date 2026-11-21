@@ -273,9 +273,9 @@ For the service-by-service inventory, including what is missing and why, see
 
   | Reference device | KNstaX flash | KNstaX RAM (static + heap) |
   |---|---:|---:|
-  | `tp1-small`, Cortex-M3 | 89.1 KB | 12.7 KB |
-  | `tp1-small`, Cortex-M0+ | 92.4 KB | 1.6 KB static (linked, not run) |
-  | `tp1-standard`, Cortex-M4 | 107.3 KB | 21.0 KB |
+  | `tp1-small`, Cortex-M3 | 88.7 KB | 13.3 KB |
+  | `tp1-small`, Cortex-M0+ | 91.9 KB | 1.6 KB static (linked, not run) |
+  | `tp1-standard`, Cortex-M4 | 107.2 KB | 20.9 KB |
 
   The H8i8o module firmware built on `tp1-small` is a 99.5 KB image with
   5.7 KB of static RAM and about 10.5 KB of heap.

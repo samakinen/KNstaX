@@ -429,7 +429,7 @@ data only. The CI job is `size-gate` in
 | S3 | Interface object property storage | — | **Done: see S3/S4 status** |
 | S4 | Allocation policy | K7.8 | **Done: `init_only`, the heap is locked after start-up in the gate; see S3/S4 status** |
 | P1 | Reference STM32F1 port, run on the H8i8o board | — | **Done on hardware** (the H8i8o firmware, ETS6 download on a live bus); the generic part moves into `ports/gd32f1/` (§12, decision 3) |
-| L1 | One staging buffer for the table load segments (§12, decision 4) | — | About 1 KB less heap in `tp1-small`; ETS6 download on hardware |
+| L1 | One staging buffer for the table load segments (§12, decision 4) | rejected | ETS stages all three tables at once; see step 3 |
 
 The TP-UART backend and its simulator (K2–K4), flash persistence (K5) and the H8i8o's M2
 bring-up do not depend on this work and proceed in parallel. They are needed for P1 in any case.
@@ -945,7 +945,7 @@ and the flush at A_Restart.
 | Before (S3/S4 step 2; the traffic had no download) | 79780 B | 1456 B | 12500 B | (12500 B) | 13956 B |
 | 1. A full ETS download in the traffic | 79780 B | 1456 B | 12500 B | 12500 B | 13956 B |
 | 2. One copy of the group address list | 79890 B | 1456 B | 12004 B | 12004 B | **13460 B** |
-| 3. Load segments: one staging buffer (21 November 2026, §12 decision 4) | 89089 B | 1608 B | 11080 B | 11080 B | **12688 B** |
+| 3. Load segments | not done, see below | | | | |
 
 **Step 1: the download.** `traffic.hpp` builds the session from `downloadLikeEts` of
 `test_ets_connected_session.cpp`: T_Connect; for the address table (index 1), association table (2)
@@ -983,12 +983,7 @@ in the table is no longer accepted or acknowledged. The old lists only grew, so 
 download with fewer addresses the device went on acknowledging the old ones until the next restart
 (test: `test_group_address_filter_follows_the_address_table`).
 
-**Step 3: the load segments.** Done as the option `KNX_SHARED_LOAD_SEGMENT` (§12, decision 4), on in
-`tp1-small`: heap 11724 B to 11080 B (644 B; the three segment buffers of 1414 B became one of 642 B,
-less the read providers the shared regions register), flash +431 B. The H8i8o device RAM headroom
-the gate reports went from 1100 B to 1744 B. The `tp1-small` Cortex-M3 RAM budget is lowered to 13056 B.
-`tp1-standard`, with the option off, pays 148 B of flash and 128 B of heap for the read provider
-in every memory region binding. The analysis that led to it, as it stood before:
+**Step 3: the load segments, rejected.** What the code does:
 - Tables are canonical; the segment is staging. A_Memory_Write lands in the segment; at LoadCompleted
   `applyLoadedTableSegment` parses it into the table (address and association table; the application
   code segment goes to `ApplicationProgramObject::setProgramData`; the group object table segment is
@@ -1009,12 +1004,15 @@ in every memory region binding. The analysis that led to it, as it stood before:
   one); the group object table segment has no table behind it and would read as zeros once the buffer
   is taken. (c) It needs a read hook on a memory region (the management server only has a write
   guard and a fixed storage span today).
-- Whether ETS ever interleaves the loads or reads a segment back after LoadCompleted is not known
-  from this repository (the sequence ETS makes in `test_ets_connected_session.cpp` is sequential, with
-  the read-back before LoadCompleted). It should be confirmed with an ETS6 download on the H8i8o
-  before any of this is built. As a build option (`tp1-small` only, off elsewhere) the deployed
-  ESP32 devices would keep today's behaviour exactly. Persistence format and power-cut recovery do
-  not depend on any of it.
+- ETS does stage the tables at the same time, so (a) rules the shared buffer out. The load
+  procedures of mask 07B0 in the ETS6 master data (`knx_master.xml`; "all", "grp" and "par,grp")
+  unload every load state machine, then start loading the group object table, the address table
+  and the association table (objects 3, 1, 2), then write the three segments (3, 2, 1, each
+  verified), and only then send LoadCompleted to all of them. Built as an option, the shared
+  buffer refused ETS6's first write on the H8i8o ("non-existing memory block"), and the change was
+  reverted. The three tables need their own staging until LoadCompleted; what remains to save is
+  the application code segment and a smaller worst case per table, not the sharing.
+  `test_table_load_segments.cpp` and the size gate's download now follow the master data order.
 
 **Step 4: `tp1-standard`.** `run_gate.sh` runs the Cortex-M4 reference device on `mps2-an386`
 with the same traffic and the heap locked. Flash 98264 B, static RAM 1609 B, heap 18304 B at start-up
@@ -1166,14 +1164,11 @@ heap locked: flash 78.0 KiB (79890 B), static RAM 1456 B, heap 12004 B (start-up
   has almost none: 364 B for anything the reservations do not name (Data Secure's 1.5 KiB RAM
   stretch does not fit; group objects are inside the KNstaX figure here, so the board's separate
   2 KiB line is not additional).
-- **What is left, in order of size.** The load segments (1670 B; about 1020 B recoverable with one
-  shared staging buffer, at the cost described under step 3 of the follow-up, which needs the
-  owner's decision and an ETS check); `CommissionedProductRuntime` 2224 B; the data link layer's
+- **What is left, in order of size.** The load segments (1670 B; one shared staging buffer would
+  have saved about 1020 B, but ETS stages all three tables at once, step 3 of the follow-up); `CommissionedProductRuntime` 2224 B; the data link layer's
   frame pool (576 B); the management server's memory segment bindings (392 B); the association
   table's by-address index (320 B).
-- **Against 10240 B and 12288 B.** 3220 B over the first, 1172 B over the second. With the shared
-  staging buffer the figure would be near 12.4 KB: still above 12288 B by about 150 B, with the
-  device headroom near 1.4 KB.
+- **Against 10240 B and 12288 B.** 3220 B over the first, 1172 B over the second.
 - **`tp1-standard`** (no Secure yet) measures 19913 B under the lock with zero allocations: the
   `init_only` policy stands for it.
 
@@ -1205,12 +1200,7 @@ The open questions of this document are closed as follows.
    `knx_gd32f1_port()` and configures it with a `gd32f1_port_config.h`, or copies it; products
    keep their application, pin map and product file. Its README is the porting guide §8 asked
    for.
-4. **The load segments share one staging buffer** (the follow-up's step 3), as the option
-   `KNX_SHARED_LOAD_SEGMENT`, on in `tp1-small` (and `host-minimal`, so the host suite runs it).
-   StartLoading claims the buffer; a table that loses it to another StartLoading fails at its
-   LoadCompleted, which ETS reports, and an abandoned load never blocks the next. A memory read
-   of the address or association table segment outside its load is answered from the table, the
-   group object table segment reads as zeros. `test_table_load_segments` covers each case. It is
-   confirmed with an ETS6 download on the H8i8o before the option is relied on: whether ETS ever
-   stages two tables at once or reads a segment back after LoadCompleted is not known from this
-   repository.
+4. **The load segments do not share one staging buffer** (the follow-up's step 3). ETS starts
+   loading all three tables before it writes any of them (step 3 gives the procedure), so one
+   buffer refuses its first write; an ETS6 download on the H8i8o failed that way. Each table keeps
+   its own segment.

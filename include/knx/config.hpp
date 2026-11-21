@@ -322,12 +322,6 @@ constexpr uint16_t RESTART_PROCESS_TIME_S = CONFIG_KNX_RESTART_PROCESS_TIME_S;
 #else
 #  define KNX_FEATURE_GO_DIAGNOSTICS 0
 #endif
-// One staging buffer for the table load segments (Kconfig KNX_SHARED_LOAD_SEGMENT).
-#if defined(CONFIG_KNX_SHARED_LOAD_SEGMENT)
-#  define KNX_SHARED_LOAD_SEGMENT 1
-#else
-#  define KNX_SHARED_LOAD_SEGMENT 0
-#endif
 #if defined(CONFIG_KNX_DPT_FLOAT)
 #  define KNX_FEATURE_DPT_FLOAT 1
 #else

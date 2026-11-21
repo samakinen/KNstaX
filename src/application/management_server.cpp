@@ -157,8 +157,7 @@ void ManagementServer::registerPropertyObject(InterfaceObjectType objectType,
 
 util::Result<void> ManagementServer::registerMemoryRegion(const MemoryRegion& region,
                                                           std::span<uint8_t> storage,
-                                                          MemoryWriteGuard writeGuard,
-                                                          MemoryReadProvider readProvider)
+                                                          MemoryWriteGuard writeGuard)
 {
     if (!_addressSpace || !_memoryService) {
         return util::Result<void>::err(util::ErrorCode::NotInitialized);
@@ -171,8 +170,7 @@ util::Result<void> ManagementServer::registerMemoryRegion(const MemoryRegion& re
     if (addRes.isError()) {
         return addRes;
     }
-    if (!_memorySegments.push_back(
-            MemorySegmentBinding{region, storage, std::move(writeGuard), std::move(readProvider)})) {
+    if (!_memorySegments.push_back(MemorySegmentBinding{region, storage, std::move(writeGuard)})) {
         return util::Result<void>::err(util::ErrorCode::ResourceUnavailable);
     }
 
@@ -184,11 +182,7 @@ util::Result<void> ManagementServer::registerMemoryRegion(const MemoryRegion& re
                 if (segment.region.containsRange(address, length)) {
                     const uint32_t offset = static_cast<uint32_t>(address.raw)
                                           - static_cast<uint32_t>(segment.region.startAddress.raw);
-                    if (segment.readProvider) {
-                        segment.readProvider(offset, out.first(length));
-                    } else {
-                        std::copy_n(segment.storage.data() + offset, length, out.data());
-                    }
+                    std::copy_n(segment.storage.data() + offset, length, out.data());
                     return util::Result<void>::ok();
                 }
             }

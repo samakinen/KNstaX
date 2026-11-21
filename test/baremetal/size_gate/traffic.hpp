@@ -36,6 +36,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 #include <span>
 
 namespace size_gate::traffic {
@@ -239,12 +240,14 @@ inline constexpr uint16_t kRepublishAtLoop = 450;
 
 // ── The ETS download ────────────────────────────────────────────────────────
 //
-// What ETS does to a device with the SystemB (mask 07B0) procedure, as the
-// session tests do it (test_ets_connected_session.cpp, downloadLikeEts): for
-// the address table, the association table and the group object table in turn,
-// PID_LOAD_STATE_CONTROL (5) Unload, StartLoading, the table segment by
-// A_Memory_Write (12 octets per frame, the most a 15-octet APDU carries), one
-// A_Memory_Read to check it, LoadCompleted; then A_Restart. The reference device
+// What ETS does to a device with the SystemB (mask 07B0) procedure, in the
+// order of the "grp" load procedure in the ETS6 master data (knx_master.xml):
+// PID_LOAD_STATE_CONTROL (5) Unload of the group object table, the association
+// table and the address table (objects 3, 2, 1), StartLoading of all three
+// (3, 1, 2), then each table segment by A_Memory_Write (12 octets per frame,
+// the most a 15-octet APDU carries) with one A_Memory_Read to check it (3, 2,
+// 1), then LoadCompleted of all three (3, 2, 1); then A_Restart. All three
+// segments are staged at once. The reference device
 // has no parameters, so there is no application code segment to write. Verify
 // Mode is off, as it is for most downloads: the writes are not answered.
 //
@@ -379,9 +382,7 @@ struct ScriptBuilder {
         loop = static_cast<uint16_t>(loop + kEtsFrameGap);
     }
 
-    constexpr void table(uint8_t object, uint16_t base, const Segment& segment) {
-        loadEvent(object, 0x04);  // Unload
-        loadEvent(object, 0x01);  // StartLoading
+    constexpr void writeSegment(uint16_t base, const Segment& segment) {
         for (size_t offset = 0; offset < segment.length; offset += kSegmentChunk) {
             const size_t count = segment.length - offset < kSegmentChunk ? segment.length - offset : kSegmentChunk;
             uint8_t data[2 + kSegmentChunk]{};
@@ -393,7 +394,6 @@ struct ScriptBuilder {
         }
         const uint8_t verify[] = {static_cast<uint8_t>(base >> 8), static_cast<uint8_t>(base & 0xFFu)};
         connected(0x02, static_cast<uint8_t>(0x00u | kSegmentChunk), verify, 2);  // A_Memory_Read of the first chunk
-        loadEvent(object, 0x02);  // LoadCompleted
     }
 };
 
@@ -403,9 +403,12 @@ constexpr Script makeScript() {
 
     b.loop = kEtsStartLoop;
     b.unnumbered(0x80);  // T_Connect
-    b.table(1, kAddressSegmentBase, makeAddressSegment());
-    b.table(2, kAssociationSegmentBase, makeAssociationSegment());
-    b.table(3, kGroupObjectSegmentBase, makeGroupObjectSegment());
+    for (const uint8_t object : {3, 2, 1}) b.loadEvent(object, 0x04);  // Unload
+    for (const uint8_t object : {3, 1, 2}) b.loadEvent(object, 0x01);  // StartLoading
+    b.writeSegment(kGroupObjectSegmentBase, makeGroupObjectSegment());
+    b.writeSegment(kAssociationSegmentBase, makeAssociationSegment());
+    b.writeSegment(kAddressSegmentBase, makeAddressSegment());
+    for (const uint8_t object : {3, 2, 1}) b.loadEvent(object, 0x02);  // LoadCompleted
     b.script.downloadDoneLoop = static_cast<uint16_t>(b.loop - kEtsFrameGap);
 
     // Group traffic on the downloaded addresses, while the tables are still unsaved. Each

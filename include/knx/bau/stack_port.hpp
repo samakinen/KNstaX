@@ -159,8 +159,7 @@ public:
     /// the ETS SystemB download: table segments transferred via A_Memory_Write).
     util::Result<void> registerMemoryRegion(const application::MemoryRegion& region,
                                             std::span<uint8_t> storage,
-                                            application::MemoryWriteGuard writeGuard = {},
-                                            application::MemoryReadProvider readProvider = {});
+                                            application::MemoryWriteGuard writeGuard = {});
     void setWorkAvailableCallback(WorkAvailableCallback callback);
     util::Result<void> sendGroupValueWrite(const GroupAddress& address, std::span<const uint8_t> data);
     util::Result<void> beginSendGroupValueWrite(const GroupAddress& address, std::span<const uint8_t> data);

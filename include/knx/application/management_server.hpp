@@ -155,8 +155,7 @@ public:
     void setPropertyWriteProvider(PropertyWriteProvider provider);
     void setPropertyDescriptionProvider(PropertyDescriptionProvider provider);
     util::Result<void> registerMemoryRegion(const MemoryRegion& region, std::span<uint8_t> storage,
-                                            MemoryWriteGuard writeGuard = {},
-                                            MemoryReadProvider readProvider = {});
+                                            MemoryWriteGuard writeGuard = {});
 
     DeviceDescriptorService& deviceDescriptorService() { return *_deviceDescriptorService; }
     PropertyServices& propertyServices() { return *_propertyServices; }
@@ -262,8 +261,6 @@ private:
         std::span<uint8_t> storage;
         /// Refuses writes while it returns false (see MemoryWriteGuard).
         MemoryWriteGuard writeGuard{};
-        /// Answers reads instead of the storage when set (see MemoryReadProvider).
-        MemoryReadProvider readProvider{};
     };
     static constexpr size_t kMaxMemorySegments = 8;
     util::FixedVector<MemorySegmentBinding, kMaxMemorySegments> _memorySegments;

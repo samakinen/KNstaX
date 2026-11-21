@@ -682,27 +682,6 @@ menu "KNX Stack Configuration"
                     the policy first.
         endchoice
 
-        config KNX_SHARED_LOAD_SEGMENT
-            bool "One staging buffer for the table load segments"
-            default n
-            help
-                ETS writes the group address, association and group object
-                tables into memory-mapped load segments with A_Memory_Write
-                and ends each load with LoadCompleted, when the segment is
-                parsed into its table. By default each segment has its own
-                buffer. With this option the three share one buffer, the size
-                of the largest (about 800 B less RAM in tp1-small).
-
-                What changes: StartLoading of a table claims the buffer until
-                its LoadCompleted or Unload, and only that table's segment
-                accepts writes. If another table starts loading meanwhile, it
-                takes the buffer and the first load fails at its LoadCompleted
-                (ETS reports it); an abandoned load never blocks the next one.
-                A memory read of a segment that holds no staged load is
-                answered from the table itself (address and association table)
-                or with zeros (group object table, whose content is
-                firmware-defined). The persistence format does not change.
-
     endmenu
 
     menu "Logging"

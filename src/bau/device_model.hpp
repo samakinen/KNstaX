@@ -26,7 +26,6 @@
 #include "knx/objects/interface_object_manager.hpp"
 #include "knx/objects/table_segments.hpp"
 
-#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -305,27 +304,9 @@ private:
 
     // Backing storage for the memory-mapped table load segments (registered
     // with the application layer's memory service in bind()).
-#if KNX_SHARED_LOAD_SEGMENT
-    // One staging buffer for the three segments (Kconfig KNX_SHARED_LOAD_SEGMENT).
-    // StartLoading of a table claims it, LoadCompleted (after the parse) and
-    // Unload release it; only the claiming table's segment accepts writes, and
-    // the other segments are read from their tables.
-    enum class StagedTable : uint8_t { None, GroupAddress, Association, GroupObject };
-    static constexpr size_t kStagingBytes = std::max({objects::tableseg::kGroupAddressTableSize,
-                                                      objects::tableseg::kAssociationTableSize,
-                                                      objects::tableseg::kGroupObjectTableSize});
-    static StagedTable stagedTableFor(InterfaceObjectType objectType);
-    void readSegment(StagedTable table, uint32_t offset, std::span<uint8_t> out) const;
-    std::array<uint8_t, kStagingBytes> _staging{};
-    StagedTable _staged{StagedTable::None};
-#else
     std::array<uint8_t, objects::tableseg::kGroupAddressTableSize> _groupAddressSegment{};
     std::array<uint8_t, objects::tableseg::kAssociationTableSize> _associationSegment{};
     std::array<uint8_t, objects::tableseg::kGroupObjectTableSize> _groupObjectSegment{};
-#endif
-    /// The staged content of @p objectType's segment; empty when it holds none
-    /// (only with the shared load segment).
-    std::span<const uint8_t> loadedSegment(InterfaceObjectType objectType) const;
 };
 
 } // namespace bau
