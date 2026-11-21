@@ -896,6 +896,12 @@ forwards to it.
   status for devices that have this signal. The sending number owes nothing here: its ceiling is
   stored before any number below it is used
   ([data-secure-sequence-persistence.md](data-secure-sequence-persistence.md)).
+- **Size.** The SAVE path and the Data Secure sequence reserve add about 2.2 KiB of flash on
+  the tp1-small Cortex-M3 reference device. The flash budgets of the three reference
+  configurations were raised to the measured figures: Cortex-M4 107,170 B (budget 109,568 B),
+  Cortex-M3 88,658 B (90,624 B), Cortex-M0+ 91,899 B (93,952 B). The H8i8o device flash is
+  120,301 / 131,072 B. The edge trampoline runs from RAM where `KNX_ISR_IN_RAM` is set, so the
+  `uart_hal.h` helpers it calls are forced inline: an out-of-line call would need a veneer.
 
 ## 13. Documentation and conformance updates when items land
 
