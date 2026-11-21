@@ -323,7 +323,6 @@ public:
         , _config(config)
         , _txMutex(platform)
     {
-        std::fill(std::begin(_frameInUse), std::end(_frameInUse), false);
     }
     virtual ~Tp1DataLinkLayer();
     
@@ -470,7 +469,10 @@ public:
     struct Statistics {
         uint32_t rxFrames{0};          // Successfully received frames
         uint32_t txFrames{0};          // Successfully transmitted frames
-        uint32_t rxDropped{0};         // Frames dropped (frame pool exhausted)
+        // Frames dropped for want of a receive buffer. Always 0 now: a frame
+        // is decoded into the layer's one receive frame and released before
+        // the next is read. Kept for the diagnostics interface.
+        uint32_t rxDropped{0};
         uint32_t decodeFailed{0};      // Frame decode failures
         uint32_t filterDropped{0};     // Frames dropped by address filter
         uint32_t duplicatesDropped{0}; // L2 repetitions suppressed (duplication prevention)
@@ -484,7 +486,6 @@ public:
         Statistics out;
         out.rxFrames = _stats.rxFrames.load(std::memory_order_relaxed);
         out.txFrames = _stats.txFrames.load(std::memory_order_relaxed);
-        out.rxDropped = _stats.rxDropped.load(std::memory_order_relaxed);
         out.decodeFailed = _stats.decodeFailed.load(std::memory_order_relaxed);
         out.filterDropped = _stats.filterDropped.load(std::memory_order_relaxed);
         out.duplicatesDropped = _stats.duplicatesDropped.load(std::memory_order_relaxed);
@@ -637,8 +638,6 @@ private:
         };
     }
 
-    static constexpr size_t FRAME_POOL_SIZE = 16;
-
     /// Push the current group-address list down to the physical layer's
     /// ISR-side L_ACK matcher (no-op for media without that capability).
     void publishAckGroupAddresses();
@@ -676,7 +675,6 @@ private:
     struct AtomicStatistics {
         std::atomic<uint32_t> rxFrames{0};
         std::atomic<uint32_t> txFrames{0};
-        std::atomic<uint32_t> rxDropped{0};
         std::atomic<uint32_t> decodeFailed{0};
         std::atomic<uint32_t> filterDropped{0};
         std::atomic<uint32_t> duplicatesDropped{0};
@@ -743,20 +741,24 @@ private:
         uint32_t firstReadTimeoutMs{0};
         uint32_t readIndex{0};
         size_t deliveredCount{0};
-        LDataFrame* currentFrame{nullptr};
     };
     RxOperationState _rxOperation{};
     size_t _lastRxProgressDeliveredCount{0};
 
-    // Frame pool to avoid heap allocation in RX path
-    LDataFrame _framePool[FRAME_POOL_SIZE];
-    bool _frameInUse[FRAME_POOL_SIZE] = {false};
+    // The one received frame, decoded from the physical layer's buffer and
+    // lent to the receive callback. A pass takes the frames one at a time and
+    // is done with each before reading the next, and passes never overlap
+    // (_rxProcessing), so one frame is all the receive path ever holds: the
+    // 16-frame pool this replaces never had more than one in use (measured
+    // under the size gate's ETS download and group traffic). Kept as a member
+    // rather than on the stack because it is about 270 octets at the full APDU length.
+    LDataFrame _rxFrame;
+    /// Set while _rxFrame is lent to the receive callback. A pollReceive()
+    /// made from inside the callback answers Busy instead of decoding over it.
+    bool _rxFrameLent{false};
 
     // Guard against re-entrant RX callback processing (important for test/mocked physical layers).
     std::atomic<bool> _rxProcessing{false};
-
-    LDataFrame* allocateFrame();
-    void releaseFrame(LDataFrame* frame);
 
     void finishTxOperation();
     /// Whether the frame in the TX buffer has a group (or broadcast) destination.

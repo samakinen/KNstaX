@@ -113,7 +113,8 @@ struct LinkDiagnostics {
     /// here with none in rxFrames means the bus is live and the address filter
     /// is not matching.
     uint32_t rxFilterDropped{0};
-    /// Data link: frames lost because the frame pool was exhausted.
+    /// Data link: frames lost for want of a receive buffer. Always 0 since the
+    /// data link layer decodes into one receive frame (no pool to exhaust).
     uint32_t rxPoolDropped{0};
     /// Data link: frames that failed to decode.
     uint32_t rxDecodeFailed{0};

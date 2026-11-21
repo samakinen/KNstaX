@@ -48,33 +48,6 @@ static constexpr uint32_t kRxTaskIdleDelayMs = 1u;
 namespace knx {
 namespace datalink {
 
-namespace {
-
-// Minimal header peek used only for drop diagnostics.
-struct RawRxHeader {
-    bool valid{false};
-    GroupAddress destination{0};
-    AddressType destinationType{AddressType::Individual};
-};
-
-RawRxHeader parseRawRxHeader(std::span<const uint8_t> buffer) {
-    RawRxHeader header{};
-    if (buffer.size() <= LENGTH_POS) {
-        return header;
-    }
-
-    header.valid = true;
-    const uint16_t destRaw = static_cast<uint16_t>((buffer[DEST_ADDR_HI_POS] << 8)
-                                                   | buffer[DEST_ADDR_LO_POS]);
-    header.destination = GroupAddress(destRaw);
-    header.destinationType = (buffer[LENGTH_POS] & DEST_ADDR_TYPE) != 0
-        ? AddressType::Group
-        : AddressType::Individual;
-    return header;
-}
-
-} // namespace
-
 Tp1DataLinkLayer::~Tp1DataLinkLayer() {
     close();
 }
@@ -193,10 +166,6 @@ void Tp1DataLinkLayer::finishTxOperation() {
 }
 
 void Tp1DataLinkLayer::finishRxOperation() {
-    if (_rxOperation.currentFrame) {
-        releaseFrame(_rxOperation.currentFrame);
-        _rxOperation.currentFrame = nullptr;
-    }
     // Latch the delivered count only while the operation is live: this method
     // may run twice on a completion path (from pollReceive and again from the
     // caller), and the second run must not clobber the count with the reset 0.
@@ -469,6 +438,12 @@ util::Result<Tp1DataLinkLayer::RxProgressState> Tp1DataLinkLayer::pollReceive() 
     if (!_rxOperation.active) {
         return util::ErrorCode::OperationNotReady;
     }
+    // Called from inside the receive callback: the pass that called it still
+    // has its frame in _rxFrame and goes on with the queue once the callback
+    // returns, so nothing is read here.
+    if (_rxFrameLent) {
+        return util::ErrorCode::Busy;
+    }
 
     // Note on acknowledgment: the TP1 short acknowledge (single ACK/NAK/BUSY
     // character, 15 bit times after the frame — 03_02_02 §2.2.7) is generated
@@ -515,16 +490,8 @@ util::Result<Tp1DataLinkLayer::RxProgressState> Tp1DataLinkLayer::pollReceive() 
             }
         }
 
-        LDataFrame* frame = allocateFrame();
-        if (!frame) {
-            const RawRxHeader rawHeader = parseRawRxHeader(buffer);
-            KNX_LOGW(TAG, "Datalink frame pool exhausted, dropping received frame dst=0x%04X type=%s",
-                     static_cast<uint16_t>(rawHeader.destination.raw),
-                     rawHeader.destinationType == AddressType::Group ? "Group" : "Individual");
-            _stats.rxDropped.fetch_add(1, std::memory_order_relaxed);
-            ++_rxOperation.readIndex;
-            continue;
-        }
+        LDataFrame* const frame = &_rxFrame;
+        frame->tpdu.clear();
 
         auto decodeResult = FrameCodec::decodeFrame(buffer, *frame);
         if (decodeResult.isOk()) {
@@ -551,7 +518,6 @@ util::Result<Tp1DataLinkLayer::RxProgressState> Tp1DataLinkLayer::pollReceive() 
                 KNX_LOGD(TAG, "RX repetition of previous frame suppressed (src=0x%04X dst=0x%04X)",
                          frame->source.raw, frame->destination.raw);
                 _stats.duplicatesDropped.fetch_add(1, std::memory_order_relaxed);
-                releaseFrame(frame);
                 ++_rxOperation.readIndex;
                 continue;
             }
@@ -569,13 +535,15 @@ util::Result<Tp1DataLinkLayer::RxProgressState> Tp1DataLinkLayer::pollReceive() 
 
             if (addressed) {
                 const auto* cb = _rxCallback.load(std::memory_order_acquire);
-                if (cb) { (*cb)(*frame); }
+                if (cb) {
+                    _rxFrameLent = true;
+                    (*cb)(*frame);
+                    _rxFrameLent = false;
+                }
 
-                releaseFrame(frame);
                 _stats.rxFrames.fetch_add(1, std::memory_order_relaxed);
                 ++_rxOperation.deliveredCount;
             } else {
-                releaseFrame(frame);
                 _stats.filterDropped.fetch_add(1, std::memory_order_relaxed);
             }
         } else {
@@ -591,7 +559,6 @@ util::Result<Tp1DataLinkLayer::RxProgressState> Tp1DataLinkLayer::pollReceive() 
                          util::errorCodeToString(decodeResult.error()));
             }
             _stats.decodeFailed.fetch_add(1, std::memory_order_relaxed);
-            releaseFrame(frame);
         }
 
         ++_rxOperation.readIndex;
@@ -747,30 +714,6 @@ util::Result<void> Tp1DataLinkLayer::setAdditionalIndividualAddresses(std::span<
 void Tp1DataLinkLayer::setPromiscuousMode(PromiscuousMode mode) {
     _promiscuousMode = (mode == PromiscuousMode::Enable);
     KNX_LOGI(TAG, "Promiscuous mode: %s", _promiscuousMode ? "enabled" : "disabled");
-}
-
-LDataFrame* Tp1DataLinkLayer::allocateFrame() {
-    for (size_t i = 0; i < FRAME_POOL_SIZE; ++i) {
-        if (!_frameInUse[i]) {
-            _frameInUse[i] = true;
-            // Reset dynamic fields
-            _framePool[i].tpdu.clear();
-            return &_framePool[i];
-        }
-    }
-    KNX_LOGW(TAG, "Frame pool exhausted");
-    return nullptr;
-}
-
-void Tp1DataLinkLayer::releaseFrame(LDataFrame* frame) {
-    if (!frame) return;
-    for (size_t i = 0; i < FRAME_POOL_SIZE; ++i) {
-        if (&_framePool[i] == frame) {
-            _frameInUse[i] = false;
-            frame->tpdu.clear();
-            return;
-        }
-    }
 }
 
 // Duplication prevention (03_02_02 §2.3): a frame whose wire r-bit marks it

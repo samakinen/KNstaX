@@ -294,12 +294,12 @@ void test_hop_count_variations(void) {
     TEST_ASSERT_EQUAL_UINT32(8, stats.txFrames);
 }
 
-// Test 10: Frame pool should not exhaust during steady RX
+// Test 10: Steady RX through the layer's one receive frame loses nothing
 void test_rx_does_not_exhaust_frame_pool(void) {
     dlLayer->setPromiscuousMode(knx::datalink::PromiscuousMode::Enable);
 
-    // Build and inject many frames. If the DL forgets to release pooled frames,
-    // rxDropped will start increasing once the pool is exhausted.
+    // Build and inject many frames. Each is decoded into the same receive
+    // frame; none may be dropped or left undelivered.
     constexpr int kFramesToInject = 100;
     for (int i = 0; i < kFramesToInject; ++i) {
         datalink::LDataFrame frame;

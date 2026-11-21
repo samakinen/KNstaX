@@ -204,8 +204,9 @@ give the cooperative platform a hook for it if it has none.
 ### Already proposed elsewhere, still open
 
 From small-target-profile.md §10, they also pay for Data Secure: a shared staging buffer for the
-load segments (about 1 KiB), the data link layer's frame pool (576 B), the memory segment bindings
-(392 B), the association table's by-address index (320 B), `CommissionedProductRuntime` (2 224 B).
+load segments (about 1 KiB), the memory segment bindings (392 B), the association table's
+by-address index (320 B), `CommissionedProductRuntime` (2 224 B). The data link layer's frame pool
+(576 B) is gone (memory-reductions.md R6).
 
 ## 6. Projected cost after D1–D8 (est.)
 
