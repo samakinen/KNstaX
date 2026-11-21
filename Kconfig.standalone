@@ -112,6 +112,11 @@ menu "Standalone build (not seen by ESP-IDF)"
         bool
         default n
 
+    # ESP-IDF's target name; empty marks a standalone build.
+    config IDF_TARGET
+        string
+        default ""
+
     # Second definitions of two symbols from `Kconfig`: same type, visible in a
     # standalone build whatever KNX_MEDIUM says.
     config KNX_ENABLE_COUPLER

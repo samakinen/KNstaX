@@ -376,6 +376,7 @@ menu "KNX Stack Configuration"
         choice KNX_AES_BACKEND
             prompt "AES-128 implementation"
             depends on KNX_ENABLE_SECURITY
+            default KNX_AES_BACKEND_MBEDTLS if IDF_TARGET != "" && !MBEDTLS_VER_4_X_SUPPORT
             default KNX_AES_BACKEND_ESP_HW if SOC_AES_SUPPORTED
             default KNX_AES_BACKEND_SOFTWARE
             help
