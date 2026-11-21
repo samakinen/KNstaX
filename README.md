@@ -1,7 +1,8 @@
 # KNstaX
 
 A KNX System-7 protocol stack in C++23 for building ETS-commissionable devices
-on ESP32, with a host build for development and testing.
+on ESP32 and on bare-metal Cortex-M, with a host build for development and
+testing.
 
 You declare your device once — its communication objects, their datapoint
 types, its ETS parameters — as a `constexpr` definition. That single
@@ -15,16 +16,24 @@ Target profile: **mask version 07B0 (System B, TP1)**.
 
 Read this before you plan around it.
 
-**This stack is incomplete and only partly validated.** What has been proven on
-real hardware is TP1 over the **bit-bang** backend: ETS6 discovery,
-individual-address assignment, application download, group communication — and,
-with KNX Data Secure enabled, a secure download and secure group communication.
+**This stack is incomplete and only partly validated.** Two paths have been
+proven on real hardware against ETS6:
+
+- **TP1 over the bit-bang backend on ESP32**: discovery, individual-address
+  assignment, application download, group communication, and, with KNX Data
+  Secure enabled, a secure download and secure group communication.
+- **TP1 over a Siemens TP-UART2 on bare-metal Cortex-M** (a GD32F103 with
+  128 KiB of flash and 20 KiB of RAM, in an 8-input, 8-output module): product
+  import, individual-address assignment, application and parameter download,
+  group communication, and configuration kept in flash across restarts and
+  power cuts. Data Secure is not yet available on bare metal (see the support
+  matrix).
 
 Everything else is implemented and covered by host tests but has never been run
 against real ETS, a real gateway, or real transceiver hardware — KNXnet/IP
 tunnelling and routing, the coupler routing actions, and the
 IP-side secure paths (Secure Tunnelling and Secure Routing). Assume anything
-outside the proven path needs debugging on first contact; the support matrix
+outside the proven paths needs debugging on first contact; the support matrix
 splits it row by row.
 
 **Not certified, and not verified against the official test suite.** No run of
@@ -75,8 +84,13 @@ about every gap between the current state and a certifiable device.
   sub-type per signal — a contact reported as 1.001 instead of 1.019 works on
   the wire but shows up in ETS as a switch.
 - **TP1 over a timer-ISR software bit-bang backend** behind a medium-neutral
-  MAC engine. A TP-UART2 backend over a board UART exists for bare-metal
-  builds; it is host-tested only and has not yet run against a real chip.
+  MAC engine, or over a **TP-UART2 transceiver** through a small C UART HAL that
+  a board implements in a few hundred lines. A host-side TP-UART2 simulator runs
+  the backend's tests without a chip.
+- **Small targets.** Kconfig profiles select features and size every table
+  and queue. The `tp1-small` profile fits a 60-object device into a
+  128 KiB / 20 KiB Cortex-M3 with room for the application, and a size gate in
+  CI keeps it there.
 - **KNXnet/IP** tunnelling and routing, compiled out entirely on a TP1-only
   build — CI proves the gate by failing if a gated-out medium so much as
   compiles.
@@ -202,19 +216,30 @@ more than the feature list.
 
 | Area | Implemented | Validated against hardware / ETS |
 |---|---|---|
-| TP1 (timer-ISR bit-bang) | Yes, beta quality | **Yes** — ETS6 download and group communication on a real bus |
+| TP1 (timer-ISR bit-bang, ESP32) | Yes, beta quality | **Yes** — ETS6 download and group communication on a real bus |
+| TP1 over TP-UART2 (bare-metal Cortex-M) | Yes | **Yes** — ETS6 download and group communication on a real bus, on a GD32F103 |
+| TP1 over NCN5120 / NCN5130 | No — the TP-UART backend is structured for the family, the differences are not coded | — |
+| Bus power-fail warning (TP-UART `SAVE`) | Yes, debounced like the bit-bang backend's `KNX_OK` | **Partly** — the pin was read and timed on hardware; the stack's save on power failure is host-tested only |
+| Flash persistence (`FlashLogPersistence`) | Yes | **Yes** — power cut at random moments on a GD32F103, every record whole |
 | KNXnet/IP tunnelling (unicast) | Yes | **No** — host interop against `xknx` only, never a real ETS connection or gateway |
 | KNXnet/IP routing (multicast) | Yes | **No** — same |
-| KNX Data Secure | Yes; manual key provisioning | **Yes** — ETS secure download and secure group communication exercised on hardware |
+| KNX Data Secure | Yes, on ESP32; manual key provisioning. Not on bare metal yet: it needs mbedTLS until the planned portable AES backend lands | **Yes** on ESP32 — ETS secure download and secure group communication exercised on hardware |
 | KNXnet/IP Secure Tunnelling | Yes, ECDH + `.knxkeys` import | **No** |
 | KNX Secure Routing | Yes, opt-in; needs a pre-provisioned backbone key | **No** |
 | Couplers / Router Object | Yes, opt-in via `configureRouterRole()` | **No** — the routing actions are untested; layer-2 ACK is computed but not enforced on TP1 |
 | Serial-number commissioning | Yes | **No** |
 | RF, Powerline | No, and not planned | — |
 
-Two rows have hardware evidence behind them: bit-bang TP1 and Data Secure over
-it. Every other row should be read as "written against the specification and
-covered by host tests" — a real claim, but a much weaker one.
+The rows marked "Yes" have hardware evidence behind them: bit-bang TP1 and Data
+Secure over it on ESP32, and TP-UART2 with flash persistence on Cortex-M. Every
+other row should be read as "written against the specification and covered by
+host tests" — a real claim, but a much weaker one.
+
+| Platform | Status |
+|---|---|
+| ESP-IDF 5.3+ (ESP32 family) | Validated on hardware with the bit-bang backend |
+| Bare-metal Cortex-M, single-threaded (`CooperativePlatform`) | Validated on a GD32F103 (Cortex-M3) with TP-UART2; Cortex-M0+ and M4 are built and size-checked in CI |
+| Linux / macOS / Windows host | Development and tests; not a product target |
 
 Key provisioning is manual across every secure path. That is inherent to the
 KNX commissioning model — ETS distributes keys to devices; the stack provides
@@ -225,32 +250,43 @@ For the service-by-service inventory, including what is missing and why, see
 
 ## Footprint and capacity
 
-- `scripts/ci/knstax_size_budget.py` checks a linker map against a flash
-  budget (300 KB for the TP1-only switch example) and fails if a gated-out
-  KNXnet/IP symbol reaches the link at all. CI does not run it at present: the
-  ESP-IDF build is exercised by the firmware that embeds the stack, not here.
-- Each communication object costs about **288 bytes**, dominated by two payload
-  buffers of `MAX_GROUP_OBJECT_PAYLOAD_BYTES` (16 by default — current value,
-  and last transmitted value for send-on-change). RAM is what actually bounds a
-  device on an MCU.
-- The CO table is sized at compile time by the number of ports in the product
-  definition, so overflowing it is impossible by construction. That number is
-  the practical limit for any one product.
+- **The size gate** (`test/baremetal/size_gate/`) runs in CI for three
+  reference devices: `tp1-small` on Cortex-M3 and M0+, and `tp1-standard` on
+  Cortex-M4. Each is a 60-object TP1 end device. CI links it with LTO, runs it
+  under QEMU through an ETS download and group traffic with the heap locked
+  after start-up, and fails if flash or RAM goes over the budget files in
+  `budgets/`. The budgets only move down, unless an increase is justified; a
+  pull request shows the change against its base. The Cortex-M3 file also
+  checks the whole device: KNstaX plus the stack, application, board support and
+  persistence reservations must fit a 128 KiB / 20 KiB part.
 
-Table capacity comes from the memory segment map in
-`include/knx/objects/table_segments.hpp`:
+  | Reference device | KNstaX flash | KNstaX RAM (static + heap) |
+  |---|---:|---:|
+  | `tp1-small`, Cortex-M3 | 88.7 KB | 13.3 KB |
+  | `tp1-small`, Cortex-M0+ | 91.9 KB | 1.6 KB static (linked, not run) |
+  | `tp1-standard`, Cortex-M4 | 107.2 KB | 20.9 KB |
 
-| Table | Entries |
-|---|---|
-| Group address (address table) | 256 |
-| Association | 512 |
-| Group object | 256 |
+  The H8i8o module firmware built on `tp1-small` is a 99.5 KB image with
+  5.7 KB of static RAM and about 10.5 KB of heap.
+- A group object costs **16 bytes** plus its value in a shared pool, about
+  20 bytes in all. Callbacks bound to ports are stored inline with a capture of
+  `KNX_CALLBACK_CAPTURE_BYTES`.
+- The object table is sized at compile time by the number of ports in the
+  product definition, so overflowing it is impossible by construction.
+- `scripts/ci/knstax_size_budget.py` checks an ESP-IDF linker map against a
+  flash budget and fails if a gated-out KNXnet/IP symbol reaches the link. CI
+  does not run it: no ESP-IDF build runs here.
 
-These are this stack's segment sizes, **not** KNX protocol ceilings — the
-standard's own limits are higher, and the segment map is a handful of
-`constexpr` values. Raising them is a local edit plus a RAM budget, so if a
-product needs more, the constraint to check is the device's memory, not the
-specification.
+Table capacities are Kconfig options, set per profile:
+
+| Table | `tp1-small` | `tp1-standard` | `full` and host |
+|---|---:|---:|---:|
+| Group address (address table) | 128 | 255 | 256 |
+| Association | 160 | 400 | 512 |
+
+These are this stack's sizes, **not** KNX protocol ceilings. A product
+overrides them in its own defconfig fragment; the constraint to check is the
+device's memory, not the specification.
 
 The ISR core and the TP1 wire path are allocation-free.
 
@@ -289,11 +325,15 @@ runtime and commissioning flows. On top of it:
 - a **wire-level interop harness** drives the stack with real KNXnet/IP frames
   using `xknx` as an independent spec-following peer
   ([interop/README.md](interop/README.md));
+- a **TP-UART2 chip simulator** on the virtual bus runs the TP-UART backend's
+  tests, including the acknowledge deadline, without a chip;
 - **CI** (`.github/workflows/ci.yml`) runs the host suite with KNX Secure on
-  and off, runs it again under AddressSanitizer and UndefinedBehaviorSanitizer,
-  builds the library alone in the TP1-only, KNXnet/IP-only and knxip
-  (routing + Secure, no tunnelling client) shapes with warnings as errors, and
-  runs the interop suite. It does not build for ESP-IDF; the examples under
+  and off and in the `host-small` and `host-minimal` profiles, runs it again
+  under AddressSanitizer and UndefinedBehaviorSanitizer, builds the library
+  alone in the TP1-only, KNXnet/IP-only and knxip (routing + Secure, no
+  tunnelling client) shapes with warnings as errors, runs the interop suite,
+  and runs the bare-metal size gate for Cortex-M0+, M3 and M4. It does not
+  build for ESP-IDF; the examples under
   `examples/esp_idf_*` are built by hand, so check both an xtensa and a RISC-V
   target after touching the bit-bang backend (the two SoC families declare
   its GPIO registers differently).
@@ -336,7 +376,7 @@ the `tp1-small` feature set; tests that need an absent feature are not registere
 - GCC 13+, Clang 17+, AppleClang 16+ or MSVC 19.38+ (C++23)
 - CMake 3.21+
 - ESP-IDF 5.3+ for ESP32 targets
-- Cortex-M without an RTOS: `-DKNX_PLATFORM=baremetal` builds and links (see ARCHITECTURE.md, "Cooperative mode"). It has not run on hardware, and the reference device does not yet fit a 128 KiB / 20 KiB part; see `docs/design/cortex-m-tpuart2-support.md` §9.1.
+- Cortex-M without an RTOS: `-DKNX_PLATFORM=baremetal` with `cmake/toolchains/arm-none-eabi.cmake` and GCC 13+ for `arm-none-eabi` (see ARCHITECTURE.md, "Cooperative mode"). The board provides three C interfaces: a UART (`include/knx/physical/uart_hal.h`), flash for persistence, and a millisecond tick. See [docs/design/cortex-m-tpuart2-support.md](docs/design/cortex-m-tpuart2-support.md).
 
 ### Installing as an ESP-IDF component
 
@@ -363,6 +403,8 @@ before importing.
 | [Troubleshooting](docs/reference/troubleshooting.md) | ETS commissioning and bus-level failures, by symptom |
 | [Conformance status](docs/reference/knx_conformance_status.md) | Service-by-service inventory; what is missing and why |
 | [Architecture](ARCHITECTURE.md) | Internal structure and invariants |
+| [Cortex-M and TP-UART2](docs/design/cortex-m-tpuart2-support.md) | The bare-metal platform, the UART and flash HALs, TP-UART2 behaviour seen on a real chip |
+| [Small-target profile](docs/design/small-target-profile.md) | Kconfig profiles, capacities, the size gate and its figures |
 | [Development guidelines](DEVELOPMENT_GUIDELINES.md) | Contributing |
 
 ## Contributing
