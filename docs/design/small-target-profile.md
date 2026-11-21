@@ -421,14 +421,15 @@ data only. The CI job is `size-gate` in
 | Order | Item | Replaces | Gate after it |
 |---|---|---|---|
 | C1 | Kconfig for standalone builds: vendored Kconfiglib, `autoconf.h`, `knx_configure()`, profiles, `config.hpp` without defaults | — | Host suite unchanged; `full` profile builds identical to today |
-| C2 | Capacities as options (§4.2), including `KNX_MAX_APDU_LENGTH`, with a full-capacity test per table | K7.5 | **Measure `tp1-small`** |
+| C2 | Capacities as options (§4.2), including `KNX_MAX_APDU_LENGTH`, with a full-capacity test per table | K7.5 | **Done: see C2 status** |
 | C3 | Feature gates (§4.1): coupler, Security Interface Object, GO diagnostics, optional management services, DPT families | K7.1–K7.3 | **Done: tp1-small flash 134995 to 99907 B, see C3 status** |
 | C4 | Size gate in CI, per profile, with ratcheting budgets | K7.7 | **Done: see C4 status** |
 | S1 | Table-driven product runtime | — | **Done: tp1-small flash 108275 to 79925 B, heap 40980 to 31108 B; decision point reached, see S1 status and §10** |
-| S2 | Compact group objects | K7.4 | Measure |
-| S3 | Interface object property storage | — | Measure |
-| S4 | Allocation policy | K7.8 | Measure; `tp1-small` budget enforced |
-| P1 | Reference STM32F1 port, run on the H8i8o board | — | First image on hardware |
+| S2 | Compact group objects | K7.4 | **Done: a group object is 16 B; tp1-small heap to 13.5 KB, see S2 status** |
+| S3 | Interface object property storage | — | **Done: see S3/S4 status** |
+| S4 | Allocation policy | K7.8 | **Done: `init_only`, the heap is locked after start-up in the gate; see S3/S4 status** |
+| P1 | Reference STM32F1 port, run on the H8i8o board | — | **Done on hardware** (the H8i8o firmware, ETS6 download on a live bus); the generic part moves into `ports/gd32f1/` (§12, decision 3) |
+| L1 | One staging buffer for the table load segments (§12, decision 4) | — | About 1 KB less heap in `tp1-small`; ETS6 download on hardware |
 
 The TP-UART backend and its simulator (K2–K4), flash persistence (K5) and the H8i8o's M2
 bring-up do not depend on this work and proceed in parallel. They are needed for P1 in any case.
@@ -1182,10 +1183,24 @@ heap locked: flash 78.0 KiB (79890 B), static RAM 1456 B, heap 12004 B (start-up
 | Capacity limits cause silent misbehaviour | Rule 2 in §3.3: errors, negative responses and a test per capacity |
 | The projection is wrong | The gate measures every step; the decision point in §10 |
 
-## 12. Open questions
+## 12. Decisions (21 November 2026)
 
-1. Should `tp1-small` drop the A_send pipeline's queueing entirely and send synchronously?
-   That is simpler and smaller, but changes the timing contract for the product.
-2. Is `KNX_HEAP_POLICY=arena` worth the extra mode, or is `init_only` enough?
-3. Where should the reference STM32 port live: in KNstaX (`ports/`) or in a separate repository
-   that depends on it?
+The open questions of this document are closed as follows.
+
+1. **`tp1-small` keeps the A_send pipeline.** Its queue is already 2 entries deep in this
+   profile, so sending synchronously would save tens of bytes, change the timing contract for
+   products, and add a code path that exists in one profile only. Not done.
+2. **No `arena` heap policy.** `init_only` gives what mattered: nothing allocates after
+   start-up, the high-water mark is measured, and the gate enforces both. An arena only helps a
+   target without `malloc`, and none exists. Reopened if a port needs it.
+3. **The reference port lives in KNstaX**, in `ports/gd32f1/` (GD32F103, register-compatible with
+   STM32F103 for the peripherals used), and CI builds it. It is an example products copy, not a
+   BSP library: start-up, linker script, system calls, the UART HAL over a USART,
+   the flash HAL over the FMC and an RTT console. Products keep their application, pin
+   map and product file.
+4. **The load segments share one staging buffer** (the follow-up's step 3), as an option that is
+   on in `tp1-small` only. A memory read of the address or association table segment is answered
+   from the table; a second table that starts loading while another is staged is refused, and
+   ETS reports the failed load. It is confirmed with an ETS6 download on the H8i8o before the
+   option is relied on: whether ETS ever stages two tables at once or reads a segment back after
+   LoadCompleted is not known from this repository.
