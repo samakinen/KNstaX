@@ -113,7 +113,8 @@ target. That file is not an illustration — it is the definition the
   fails with `QueueFull`.
 
   The communication objects are one table, allocated once at start from the port
-  table: 16 bytes per port on a 32-bit target plus the datapoint's value bytes.
+  table: 12 bytes per port on a 32-bit target plus the datapoint's value bytes.
+  Their datapoint types are read from the port table in flash.
   The product API does not change. In a profile that sets
   `KNX_CALLBACK_CAPTURE_BYTES` (8 in `tp1-small` and `tp1-standard`), the stack's
   own callbacks keep only that many bytes of capture; the bindings you register

@@ -764,6 +764,51 @@ void test_GroupObjectTable_FullWorkflow() {
     TEST_ASSERT_EQUAL_UINT16(0, table.objectCount());
 }
 
+// The datapoint types of a product's objects come from its port table in
+// flash. An object that does not match the table keeps its own type, and
+// removing one of the table's objects moves every type into the store.
+void test_GroupObjectTable_StaticDatapointTypes() {
+    struct Port {
+        uint16_t id;
+        DptId dpt;
+    };
+    static const Port kPorts[] = {{1, dptids::Switch}, {2, dptids::Percent}, {3, dptids::Switch}};
+
+    GroupObjectTableObject table;
+    table.store().setStaticDpts(&kPorts[0].dpt, sizeof(Port), 3);
+    table.reserve(4, 4);
+
+    GroupObjectConfig config{};
+    config.address = GroupAddress(1, 1, 1);
+    config.dpt = dptids::Switch;
+    TEST_ASSERT_EQUAL_UINT16(0u, table.addGroupObject(config).value());
+    config.dpt = dptids::Percent;
+    TEST_ASSERT_EQUAL_UINT16(1u, table.addGroupObject(config).value());
+    config.dpt = dptids::Percent;  // not the table's type for slot 2
+    TEST_ASSERT_EQUAL_UINT16(2u, table.addGroupObject(config).value());
+    config.dpt = dptids::Switch;  // past the table
+    TEST_ASSERT_EQUAL_UINT16(3u, table.addGroupObject(config).value());
+
+    const DptId expected[] = {dptids::Switch, dptids::Percent, dptids::Percent, dptids::Switch};
+    for (uint16_t i = 0; i < 4; ++i) {
+        TEST_ASSERT_TRUE(table.getGroupObject(GroupObjectIndex(i))->dptId() == expected[i]);
+    }
+    TEST_ASSERT_TRUE(table.getGroupObject(GroupObjectIndex(1))->setValue(uint8_t{128}).isOk());
+    TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(table.getGroupObject(GroupObjectIndex(1))->getRawValue().size()));
+
+    TEST_ASSERT_TRUE(table.removeObject(GroupObjectIndex(0)).isOk());
+    const DptId afterErase[] = {dptids::Percent, dptids::Percent, dptids::Switch};
+    for (uint16_t i = 0; i < 3; ++i) {
+        TEST_ASSERT_TRUE(table.getGroupObject(GroupObjectIndex(i))->dptId() == afterErase[i]);
+    }
+    TEST_ASSERT_EQUAL_UINT8(128u, table.getGroupObject(GroupObjectIndex(0))->asUint8());
+
+    // An object on its own keeps its type in its private store.
+    config.dpt = dptids::Percent;
+    GroupObject solo(config);
+    TEST_ASSERT_TRUE(solo.dptId() == dptids::Percent);
+}
+
 // === Main Test Runner ===
 
 int main(int argc, char **argv) {
@@ -815,6 +860,7 @@ int main(int argc, char **argv) {
     
     // Integration
     RUN_TEST(test_GroupObjectTable_FullWorkflow);
+    RUN_TEST(test_GroupObjectTable_StaticDatapointTypes);
     
     return UNITY_END();
 }

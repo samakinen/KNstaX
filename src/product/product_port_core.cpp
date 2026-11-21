@@ -92,11 +92,14 @@ bool ProductPortCore::isPortLinked(uint16_t slot) const
 
 Result<void> ProductPortCore::registerGroupObjects()
 {
-    // One allocation for all objects and one for all values, sized from the ports.
+    // One allocation for all objects and one for all values, sized from the
+    // ports. The datapoint types stay in the port table (rodata): the objects
+    // are appended in slot order with the ports' types, so none keeps its own.
     size_t valueBytes = 0;
     for (uint16_t slot = 0; slot < _portCount; ++slot) {
         valueBytes += application::groupObjectValueBytes(_ports[slot].dpt);
     }
+    _bau->groupObjectTable().store().setStaticDpts(&_ports[0].dpt, sizeof(PortDescriptor), _portCount);
     _bau->groupObjectTable().reserve(_portCount, valueBytes);
 
     for (uint16_t slot = 0; slot < _portCount; ++slot) {

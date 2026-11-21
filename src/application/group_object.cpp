@@ -36,6 +36,10 @@ GroupObjectStore::~GroupObjectStore() = default;
 
 void GroupObjectStore::reserve(uint16_t objects, size_t valueBytes)
 {
+    // Types are kept for the objects the static table does not cover.
+    if (objects > _staticTableCount && objects - _staticTableCount > _dpts.capacity()) {
+        _dpts.reserve(objects - _staticTableCount);
+    }
     if (objects > _capacity) {
         std::unique_ptr<GroupObject[]> grown(new GroupObject[objects]);
         for (uint16_t i = 0; i < _count; ++i) {
@@ -47,6 +51,65 @@ void GroupObjectStore::reserve(uint16_t objects, size_t valueBytes)
     if (valueBytes > _pool.capacity()) {
         _pool.reserve(valueBytes);
     }
+}
+
+void GroupObjectStore::setStaticDpts(const DptId* first, size_t stride, uint16_t count) noexcept
+{
+    if (_count != 0u || first == nullptr || stride > 0xFFFFu) {
+        return;
+    }
+    _staticDpts = reinterpret_cast<const unsigned char*>(first);
+    _staticStride = static_cast<uint16_t>(stride);
+    _staticTableCount = count;
+    _staticCount = 0u;
+}
+
+DptId GroupObjectStore::staticDpt(uint16_t index) const noexcept
+{
+    // The table is an array of structures with a DptId member (the port table);
+    // the stride steps from one element's member to the next.
+    return *reinterpret_cast<const DptId*>(_staticDpts + static_cast<size_t>(index) * _staticStride);
+}
+
+DptId GroupObjectStore::dptOf(const GroupObject* object) const noexcept
+{
+    const uint16_t index = indexOf(object);
+    if (index == kNoIndex) {
+        // An object on its own (GroupObject(config)): its private store holds its type.
+        return _dpts.empty() ? DptId{} : _dpts.front();
+    }
+    if (index < _staticCount) {
+        return staticDpt(index);
+    }
+    return _dpts[index - _staticCount];
+}
+
+void GroupObjectStore::recordDpt(DptId dpt)
+{
+    if (_count == _staticCount && _count < _staticTableCount && staticDpt(_count) == dpt) {
+        ++_staticCount;
+        return;
+    }
+    if (_dpts.capacity() == _dpts.size()) {
+        _dpts.reserve(_dpts.size() + 1u);  // exact, like the value pool
+    }
+    _dpts.push_back(dpt);
+}
+
+void GroupObjectStore::detachStaticDpts()
+{
+    if (_staticCount == 0u) {
+        return;
+    }
+    std::vector<DptId> all;
+    all.reserve(_count);
+    for (uint16_t i = 0; i < _staticCount; ++i) {
+        all.push_back(staticDpt(i));
+    }
+    all.insert(all.end(), _dpts.begin(), _dpts.end());
+    _dpts = std::move(all);
+    _staticCount = 0u;
+    _staticTableCount = 0u;
 }
 
 uint16_t GroupObjectStore::allocateValue(size_t bytes)
@@ -76,7 +139,7 @@ uint8_t GroupObjectStore::policySlot(GroupObject& object)
         return GroupObject::kNoPolicy;
     }
     PolicyState state{};
-    state.lastSentOffset = allocateValue(groupObjectValueBytes(object._dpt));
+    state.lastSentOffset = allocateValue(groupObjectValueBytes(object.dptId()));
     if (_policies.capacity() == _policies.size()) {
         _policies.reserve(_policies.size() + 1u);
     }
@@ -93,9 +156,12 @@ GroupObject* GroupObjectStore::append(const GroupObjectConfig& config)
     if (_count == _capacity) {
         reserve(static_cast<uint16_t>(std::min<size_t>(kMaxObjects, _capacity + 8u)), 0u);
     }
+    // The type is recorded and the object counted first: init() may already
+    // need the type (a transmit policy allocates its value copy by it).
     GroupObject* object = &_entries[_count];
-    object->init(this, config);
+    recordDpt(config.dpt);
     ++_count;
+    object->init(this, config);
     return object;
 }
 
@@ -136,6 +202,10 @@ bool GroupObjectStore::erase(uint16_t index)
     if (index >= _count) {
         return false;
     }
+    if (index < _staticCount) {
+        detachStaticDpts();  // the objects after it no longer match the table
+    }
+    _dpts.erase(_dpts.begin() + (index - _staticCount));
     for (uint16_t i = index; i + 1u < _count; ++i) {
         _entries[i].copyFrom(_entries[i + 1u]);
     }
@@ -146,6 +216,8 @@ bool GroupObjectStore::erase(uint16_t index)
 void GroupObjectStore::clear()
 {
     _count = 0;
+    _staticCount = 0;
+    _dpts.clear();
     _pool.clear();
     _policies.clear();
 }
@@ -155,7 +227,6 @@ void GroupObjectStore::clear()
 void GroupObject::init(GroupObjectStore* store, const GroupObjectConfig& config)
 {
     _store = store;
-    _dpt = config.dpt;
     _address = config.address;
     _bits = 0;
     _policy = kNoPolicy;
@@ -170,7 +241,6 @@ void GroupObject::init(GroupObjectStore* store, const GroupObjectConfig& config)
 void GroupObject::copyFrom(const GroupObject& other) noexcept
 {
     _store = other._store;
-    _dpt = other._dpt;
     _address = other._address;
     _bits = static_cast<uint16_t>(other._bits & ~(1u << kBitOwnsStore));
     _valueOffset = other._valueOffset;
@@ -181,6 +251,7 @@ void GroupObject::copyFrom(const GroupObject& other) noexcept
 GroupObject::GroupObject(const GroupObjectConfig& config)
 {
     auto* store = new GroupObjectStore();
+    store->_dpts.push_back(config.dpt);  // the one type of the store's one object
     init(store, config);
     setBit(kBitOwnsStore, true);
 }
@@ -205,6 +276,11 @@ void GroupObject::setFlags(const GroupObjectFlags& flags) noexcept
         | (flags.update ? (1u << kBitUpdate) : 0u)
         | (flags.readOnInit ? (1u << kBitReadOnInit) : 0u)
         | ((static_cast<unsigned>(flags.priority) & 3u) << kPrioShift));
+}
+
+DptId GroupObject::dptId() const noexcept
+{
+    return _store->dptOf(this);
 }
 
 GroupObjectIndex GroupObject::index() const noexcept
@@ -269,7 +345,7 @@ util::Result<void> GroupObject::setValue(const DptValue& value) {
     // buffer only to copy at most 16 bytes out of it wastes half a kilobyte of
     // stack on every setValue() call.
     std::array<uint8_t, config::MAX_GROUP_OBJECT_PAYLOAD_BYTES> buffer{};
-    auto encodeResult = encodeDptValue(_dpt, value, std::span<uint8_t>(buffer));
+    auto encodeResult = encodeDptValue(dptId(), value, std::span<uint8_t>(buffer));
     if (encodeResult.isError()) {
         return encodeResult.error();
     }
@@ -279,7 +355,7 @@ util::Result<void> GroupObject::setValue(const DptValue& value) {
 util::Result<void> GroupObject::storeValue(std::span<const uint8_t> data)
 {
     // The object owns exactly the bytes its datapoint type needs.
-    if (data.size() > groupObjectValueBytes(_dpt)) {
+    if (data.size() > groupObjectValueBytes(dptId())) {
         return util::ErrorCode::BufferTooSmall;
     }
     std::copy(data.begin(), data.end(), _store->_pool.begin() + _valueOffset);
@@ -297,11 +373,11 @@ util::Result<DptValue> GroupObject::value() const {
         return util::ErrorCode::NotInitialized;
     }
 
-    return decodeDptValue(_dpt, getRawValue());
+    return decodeDptValue(dptId(), getRawValue());
 }
 
 uint8_t GroupObject::valueFieldType() const noexcept {
-    const uint16_t bits = dptPayloadBits(_dpt);
+    const uint16_t bits = dptPayloadBits(dptId());
     if (bits == 0) {
         // Unknown DPT: fall back to the width actually being carried, so a
         // raw-payload object still produces a descriptor ETS can parse.
@@ -396,8 +472,8 @@ bool GroupObject::changedSignificantly(const PolicyState& state) const {
     // Numeric DPTs: compare decoded engineering magnitudes against the threshold.
     // Non-numeric types (or a decode failure) fall back to "changed" since the
     // raw bytes already differ.
-    auto cur = decodeDptValue(_dpt, current);
-    auto prev = decodeDptValue(_dpt, last);
+    auto cur = decodeDptValue(dptId(), current);
+    auto prev = decodeDptValue(dptId(), last);
     if (cur.isError() || prev.isError()) {
         return true;
     }
@@ -417,8 +493,8 @@ bool GroupObject::changedSignificantly(const PolicyState& state) const {
     // Integer DPTs: compare the decoded values against the integer threshold.
     // Anything else (or a decode failure) counts as changed, since the raw
     // bytes already differ.
-    auto cur = decodeDptValue(_dpt, current);
-    auto prev = decodeDptValue(_dpt, last);
+    auto cur = decodeDptValue(dptId(), current);
+    auto prev = decodeDptValue(dptId(), last);
     if (cur.isError() || prev.isError()) {
         return true;
     }

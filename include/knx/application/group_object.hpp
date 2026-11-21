@@ -242,11 +242,13 @@ class GroupObjectStore;
  *
  * Represents a KNX group data point with value storage and communication flags.
  *
- * A group object is 16 bytes of state (on a 32-bit target): address, datapoint
- * type, packed flags, and the offset and length of its value in the owning
- * GroupObjectStore's value pool. Values, the transmit-policy state of the few
- * objects that have a policy, and the callbacks live in the store, once for the
- * whole table. Objects of a table are reached through the table
+ * A group object is 12 bytes of state (on a 32-bit target): address, packed
+ * flags, and the offset and length of its value in the owning
+ * GroupObjectStore's value pool. What never changes at run time, the datapoint
+ * type, is the store's: read from a table in flash for the objects a product
+ * declares (GroupObjectStore::setStaticDpts), kept beside the objects for any
+ * other. Values, the transmit-policy state of the few objects that have a
+ * policy, and the callbacks live in the store, once for the whole table. Objects of a table are reached through the table
  * (GroupObjectTableObject::getGroupObject, BusAccessUnit::groupObject) and stay
  * valid until the table grows past the capacity it reserved; a product that
  * registers its objects up front never sees that.
@@ -266,7 +268,7 @@ public:
     GroupObject(const GroupObject&) = delete;
     GroupObject& operator=(const GroupObject&) = delete;
 
-    DptId dptId() const noexcept { return _dpt; }
+    DptId dptId() const noexcept;
 
     /// Full KNX communication-flag set (C/R/W/T/U/I + priority).
     GroupObjectFlags flags() const noexcept {
@@ -456,7 +458,6 @@ private:
     bool changedSignificantly(const PolicyState& state) const;
 
     GroupObjectStore* _store{nullptr};
-    DptId _dpt{};
     GroupAddress _address{};
     uint16_t _bits{0};        // flags C/R/W/T/U/I, priority, valid, pending, owns-store
     uint16_t _valueOffset{0}; // into the store's value pool
@@ -465,7 +466,7 @@ private:
 };
 
 #if INTPTR_MAX == INT32_MAX
-static_assert(sizeof(GroupObject) <= 16, "GroupObject must stay at 16 bytes on a 32-bit target");
+static_assert(sizeof(GroupObject) <= 12, "GroupObject must stay at 12 bytes on a 32-bit target");
 #endif
 
 /// Transmit-policy state of one object: the policy, and the last transmitted value and time.
@@ -496,6 +497,18 @@ public:
     /// non-empty store are invalidated when this grows it.
     void reserve(uint16_t objects, size_t valueBytes);
 
+    /**
+     * @brief Read the datapoint types of the first `count` objects from a table that outlives the store.
+     *
+     * Element i is at `reinterpret_cast<const unsigned char*>(first) + i * stride`,
+     * so a product's port table (rodata) serves as it is. Objects appended in
+     * that order with those types keep no type of their own; any other object
+     * (a different type, one past the table, or all of them once one in the
+     * table is erased) keeps its type in the store, as without a table. Only
+     * for an empty store; ignored otherwise.
+     */
+    void setStaticDpts(const DptId* first, size_t stride, uint16_t count) noexcept;
+
     /// Append an object; nullptr when `maxObjects` are present.
     GroupObject* append(const GroupObjectConfig& config);
     /// Append a copy of `source` (config, value, policy state).
@@ -519,10 +532,23 @@ private:
     uint16_t allocateValue(size_t bytes);
     uint8_t policySlot(GroupObject& object);
     uint16_t indexOf(const GroupObject* object) const noexcept;
+    DptId dptOf(const GroupObject* object) const noexcept;
+    DptId staticDpt(uint16_t index) const noexcept;
+    /// The type of the object about to be appended at index _count.
+    void recordDpt(DptId dpt);
+    /// Every object's type in _dpts; the static table is no longer used.
+    void detachStaticDpts();
 
     std::unique_ptr<GroupObject[]> _entries;
     uint16_t _count{0};
     uint16_t _capacity{0};
+    // Datapoint types: objects [0, _staticCount) from the static table, the
+    // rest (or an object on its own: element 0) from _dpts, in order.
+    const unsigned char* _staticDpts{nullptr};
+    uint16_t _staticStride{0};
+    uint16_t _staticTableCount{0};
+    uint16_t _staticCount{0};
+    std::vector<DptId> _dpts;
     std::vector<uint8_t> _pool;
     std::vector<PolicyState> _policies;
     GroupObjectCallback _onValue;
