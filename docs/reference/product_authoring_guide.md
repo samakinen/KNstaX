@@ -69,10 +69,12 @@ target. That file is not an illustration — it is the definition the
   `onCommand`, `onStateWrite`, `provideState`, `onParametersChanged`,
   `onProgrammingModeChanged`, `onLifecycleChanged`, `onFault`.
 
-  A binding is stored as a three-word entry, and only for the ports that can
-  use it: command and state-write handlers for ports that accept bus writes,
-  state providers for readable ports. Registering a handler a port cannot use
-  (`onCommand` on a read-only state port, `provideState` on a port that is not
+  A binding is stored as a two-word entry, and only for the ports that can
+  use it: command handlers for ports that accept bus writes, state-write
+  handlers for those that also have a state (readable ports that accept
+  writes, such as a state in/out port), state providers for readable ports.
+  Registering a handler a port cannot use (`onCommand` on a read-only state
+  port, `onStateWrite` on a command port, `provideState` on a port that is not
   readable) is a compile-time error.
 
   A callable that is trivially copyable and no larger than a pointer (a

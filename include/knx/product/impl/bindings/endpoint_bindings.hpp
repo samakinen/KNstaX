@@ -8,12 +8,13 @@
  * A binding connects a port to the product's own code: a command handler
  * (bus write to a command port), a state-write handler (bus write to a
  * writable state port) or a state provider (answers a bus read). Bindings are
- * type-erased into three-word entries, `{ thunk, manage, ctx }`:
+ * type-erased into two-word entries, `{ thunk, ctx }`:
  *
  *  - A callable that is trivially copyable and fits in a pointer (a captureless
  *    lambda, a function pointer, a lambda capturing one pointer, reference or
  *    integer) is stored in `ctx` itself. One thunk exists per callable type.
- *  - Anything larger or non-trivial goes to the heap, and `manage` frees it.
+ *  - Anything larger or non-trivial goes to the heap. Its thunk also frees it
+ *    when called without a value, so no third word is needed to say how.
  *    That is the default (`BindingCapacity == 0`), which keeps a product with
  *    fat capture lists (a std::string, a shared_ptr, several references)
  *    working unchanged.
@@ -24,9 +25,10 @@
  *    is sizeof(void*) or any larger number as a plain "no heap" switch.
  *
  * Entries exist only for the ports that can use them, indexed by the ranks of
- * the port table (port_table.hpp): receive entries for ports that accept bus
- * writes, state providers for readable ports. Registering a binding a port
- * cannot use is a compile-time error.
+ * the port table (port_table.hpp): command entries for ports that accept bus
+ * writes, state-write entries only for those of them that also have a state
+ * (they are readable), state providers for readable ports. Registering a
+ * binding a port cannot use is a compile-time error.
  */
 
 #pragma once
@@ -58,19 +60,20 @@ static constexpr size_t kDefaultBindingCapacity = 0;
 namespace detail {
 
 /// Handles a bus write; false when the value is not of the port's type.
-using ReceiveThunk = bool (*)(void* self, const application::DptValue& value);
+/// Called with nullptr, it releases the callable instead (see BindingEntry).
+using ReceiveThunk = bool (*)(void* self, const application::DptValue* value);
 /// Produces the port's current state; false when it cannot.
-using ProvideThunk = bool (*)(void* self, application::DptValue& out);
-/// Destroys the callable behind `ctx` (heap entries only).
-using ManageThunk = void (*)(void* self);
+/// Called with nullptr, it releases the callable instead (see BindingEntry).
+using ProvideThunk = bool (*)(void* self, application::DptValue* out);
 
 /// One type-erased binding. `self` for every thunk is `&ctx`: an inline
 /// callable lives in `ctx` itself (so a mutable lambda keeps its state), a
-/// heap callable is the pointer stored there.
+/// heap callable is the pointer stored there. The thunk called without a value
+/// releases the callable: it deletes a heap callable and does nothing for an
+/// inline one, which is trivially copyable. That keeps an entry at two words.
 template <typename ThunkT>
 struct BindingEntry {
     ThunkT invoke{nullptr};
-    ManageThunk manage{nullptr};
     void* ctx{nullptr};
 
     explicit operator bool() const { return invoke != nullptr; }
@@ -84,8 +87,8 @@ using StateBinding = BindingEntry<ProvideThunk>;
 template <typename EntryT>
 void releaseBinding(EntryT& entry)
 {
-    if (entry.manage != nullptr) {
-        entry.manage(entry.self());
+    if (entry.invoke != nullptr) {
+        (void)entry.invoke(entry.self(), nullptr);
     }
     entry = EntryT{};
 }
@@ -116,16 +119,16 @@ F& heapCallable(void* self)
     return **static_cast<F**>(self);
 }
 
-template <typename F>
-void destroyHeapCallable(void* self)
-{
-    delete *static_cast<F**>(self);
-}
-
 template <typename F, typename ValueT, bool Inline>
-bool receiveThunk(void* self, const application::DptValue& value)
+bool receiveThunk(void* self, const application::DptValue* value)
 {
-    const ValueT* typed = value.template tryGet<ValueT>();
+    if (value == nullptr) {
+        if constexpr (!Inline) {
+            delete *static_cast<F**>(self);
+        }
+        return false;
+    }
+    const ValueT* typed = value->template tryGet<ValueT>();
     if (typed == nullptr) {
         return false;
     }
@@ -138,12 +141,18 @@ bool receiveThunk(void* self, const application::DptValue& value)
 }
 
 template <typename F, typename ValueT, bool Inline>
-bool provideThunk(void* self, application::DptValue& out)
+bool provideThunk(void* self, application::DptValue* out)
 {
+    if (out == nullptr) {
+        if constexpr (!Inline) {
+            delete *static_cast<F**>(self);
+        }
+        return false;
+    }
     if constexpr (Inline) {
-        out = application::DptValue(static_cast<ValueT>(std::invoke(inlineCallable<F>(self))));
+        *out = application::DptValue(static_cast<ValueT>(std::invoke(inlineCallable<F>(self))));
     } else {
-        out = application::DptValue(static_cast<ValueT>(std::invoke(heapCallable<F>(self))));
+        *out = application::DptValue(static_cast<ValueT>(std::invoke(heapCallable<F>(self))));
     }
     return true;
 }
@@ -157,6 +166,7 @@ public:
     using port_id_type = typename definition_type::port_id_type;
 
     static constexpr size_t kReceiveEntryCount = kReceivePortCount<definition_type>;
+    static constexpr size_t kStateWriteEntryCount = kStateWritePortCount<definition_type>;
     static constexpr size_t kStateEntryCount = kStatePortCount<definition_type>;
 
     EndpointBindings() = default;
@@ -217,9 +227,10 @@ public:
         requires std::invocable<Fn&, port_value_t<definition_type, LogicalId>>
     EndpointBindings& onStateWrite(Fn&& fn) &
     {
-        constexpr uint16_t rank = receiveRank<LogicalId>();
+        constexpr uint16_t rank = stateWriteRank<LogicalId>();
         static_assert(rank != kNoBindingRank,
-                      "onStateWrite: this port cannot receive a write from the bus (it is neither writable nor receivable)");
+                      "onStateWrite: this port has no state a bus write could change (it is not readable, or it is "
+                      "neither writable nor receivable); a write to a command port is bound with onCommand");
         assignReceive<port_value_t<definition_type, LogicalId>>(_stateWrites[rank], std::forward<Fn>(fn));
         return *this;
     }
@@ -300,7 +311,7 @@ public:
     template <auto LogicalId>
     bool hasStateWriteBinding() const
     {
-        constexpr uint16_t rank = receiveRank<LogicalId>();
+        constexpr uint16_t rank = stateWriteRank<LogicalId>();
         if constexpr (rank == kNoBindingRank) {
             return false;
         } else {
@@ -322,7 +333,7 @@ public:
     template <auto LogicalId>
     bool dispatchStateWrite(port_value_t<definition_type, LogicalId> value)
     {
-        constexpr uint16_t rank = receiveRank<LogicalId>();
+        constexpr uint16_t rank = stateWriteRank<LogicalId>();
         if constexpr (rank == kNoBindingRank) {
             return false;
         } else {
@@ -340,7 +351,7 @@ public:
         } else {
             const auto& entry = _providers[rank];
             application::DptValue produced;
-            if (!entry || !entry.invoke(entry.self(), produced)) {
+            if (!entry || !entry.invoke(entry.self(), &produced)) {
                 return std::nullopt;
             }
             if (const auto* typed = produced.template tryGet<value_type>(); typed != nullptr) {
@@ -365,7 +376,8 @@ public:
     }
 
     // What the runtime core dispatches through: the entry arrays, indexed by
-    // the ranks of the port table.
+    // the ranks of the port table (the state writes by the receive rank, which
+    // is below kStateWriteEntryCount for exactly the ports that have one).
     detail::ReceiveBinding* commandEntries() { return _commands.data(); }
     detail::ReceiveBinding* stateWriteEntries() { return _stateWrites.data(); }
     detail::StateBinding* stateProviderEntries() { return _providers.data(); }
@@ -375,6 +387,14 @@ private:
     static consteval uint16_t receiveRank()
     {
         return kPortTable<definition_type>[port_index_v<definition_type, LogicalId>].receiveRank;
+    }
+
+    /// The receive rank of a port that takes state writes, else kNoBindingRank.
+    template <auto LogicalId>
+    static consteval uint16_t stateWriteRank()
+    {
+        constexpr PortDescriptor port = kPortTable<definition_type>[port_index_v<definition_type, LogicalId>];
+        return port.acceptsStateWrites() ? port.receiveRank : kNoBindingRank;
     }
 
     template <auto LogicalId>
@@ -400,7 +420,6 @@ private:
                           "to your state, or use the default BindingCapacity of 0");
             entry.ctx = new F(std::forward<Fn>(fn));
             entry.invoke = &detail::receiveThunk<F, ValueT, false>;
-            entry.manage = &detail::destroyHeapCallable<F>;
         }
     }
 
@@ -421,14 +440,14 @@ private:
                           "to your state, or use the default BindingCapacity of 0");
             entry.ctx = new F(std::forward<Fn>(fn));
             entry.invoke = &detail::provideThunk<F, ValueT, false>;
-            entry.manage = &detail::destroyHeapCallable<F>;
         }
     }
 
     template <typename ValueT>
     static bool dispatchEntry(detail::ReceiveBinding& entry, const ValueT& value)
     {
-        return entry && entry.invoke(entry.self(), application::DptValue(value));
+        const application::DptValue boxed(value);
+        return entry && entry.invoke(entry.self(), &boxed);
     }
 
     void releaseAll()
@@ -447,7 +466,7 @@ private:
     }
 
     std::array<detail::ReceiveBinding, kReceiveEntryCount> _commands{};
-    std::array<detail::ReceiveBinding, kReceiveEntryCount> _stateWrites{};
+    std::array<detail::ReceiveBinding, kStateWriteEntryCount> _stateWrites{};
     std::array<detail::StateBinding, kStateEntryCount> _providers{};
     ProgModeCallback _progModeCallback;
     FaultCallback _faultCallback;

@@ -52,9 +52,12 @@ inline constexpr uint16_t kNoBindingRank = 0xFFFFu;
  * @brief One port as the runtime sees it. 14 bytes, no pointers.
  *
  * receiveRank and stateRank index the binding entry arrays of the product's
- * EndpointBindings: receive entries (command and state-write handlers) exist
- * only for ports that can receive a write, state providers only for readable
- * ports, so a product pays for the entries it can use.
+ * EndpointBindings: command entries exist only for ports that can receive a
+ * write, state providers only for readable ports, so a product pays for the
+ * entries it can use. State-write entries exist only for the ports that have
+ * a state to write, those that are readable and receive writes: they take the
+ * first receive ranks (kStateWritePortCount of them), so the receive rank
+ * indexes them too and the descriptor needs no third rank.
  */
 struct PortDescriptor {
     uint16_t logicalId{0};
@@ -74,6 +77,9 @@ struct PortDescriptor {
     constexpr bool readOnInit() const { return (flags & port_flags::kReadOnInit) != 0u; }
     /// A write from the bus can reach this port's handlers.
     constexpr bool acceptsWrites() const { return receivable() || writable(); }
+    /// A write from the bus changes a state the port also reports: it can take
+    /// a state-write handler (onStateWrite) as well as a command handler.
+    constexpr bool acceptsStateWrites() const { return acceptsWrites() && readable(); }
 };
 
 /// The strings of one port. Only the exporter and tests read these.
@@ -118,12 +124,21 @@ struct PortTableOf<std::tuple<Ports...>> {
     static constexpr std::array<PortDescriptor, kCount> makeTable()
     {
         std::array<PortDescriptor, kCount> table{makePortDescriptor<Ports>()...};
+        // Receive ranks: the ports that take state writes first, so that the
+        // (smaller) state-write array is indexed by the same rank.
         uint16_t receive = 0u;
-        uint16_t state = 0u;
         for (auto& entry : table) {
-            if (entry.acceptsWrites()) {
+            if (entry.acceptsStateWrites()) {
                 entry.receiveRank = receive++;
             }
+        }
+        for (auto& entry : table) {
+            if (entry.acceptsWrites() && !entry.acceptsStateWrites()) {
+                entry.receiveRank = receive++;
+            }
+        }
+        uint16_t state = 0u;
+        for (auto& entry : table) {
             if (entry.readable()) {
                 entry.stateRank = state++;
             }
@@ -154,10 +169,20 @@ struct PortTableOf<std::tuple<Ports...>> {
         return count;
     }
 
+    static constexpr size_t countStateWrite()
+    {
+        size_t count = 0u;
+        for (const auto& entry : makeTable()) {
+            count += entry.acceptsStateWrites() ? 1u : 0u;
+        }
+        return count;
+    }
+
     static constexpr std::array<PortDescriptor, kCount> table = makeTable();
     static constexpr std::array<PortNames, kCount> names = makeNames();
     static constexpr size_t receiveCount = countReceive();
     static constexpr size_t stateCount = countState();
+    static constexpr size_t stateWriteCount = countStateWrite();
 };
 
 } // namespace detail
@@ -177,6 +202,12 @@ inline constexpr const auto& kPortNames =
 template <typename DefinitionT>
 inline constexpr size_t kReceivePortCount =
     detail::PortTableOf<typename std::remove_cvref_t<DefinitionT>::ports_tuple>::receiveCount;
+
+/// Ports that are readable and receive writes (state-write entries needed).
+/// They hold receive ranks 0 .. kStateWritePortCount - 1.
+template <typename DefinitionT>
+inline constexpr size_t kStateWritePortCount =
+    detail::PortTableOf<typename std::remove_cvref_t<DefinitionT>::ports_tuple>::stateWriteCount;
 
 /// Readable ports (state provider entries needed).
 template <typename DefinitionT>

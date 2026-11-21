@@ -102,7 +102,8 @@ public:
                 static_cast<uint16_t>(_pendingActions.size()),
                 PortBindingTables{_bindings.commandEntries(),
                                   _bindings.stateWriteEntries(),
-                                  _bindings.stateProviderEntries()},
+                                  _bindings.stateProviderEntries(),
+                                  static_cast<uint16_t>(bindings_type::kStateWriteEntryCount)},
                 config.defaultIndividualAddress)
     {
     }

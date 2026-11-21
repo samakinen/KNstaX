@@ -225,18 +225,18 @@ void test_product_bindings_store_small_callables_inline_and_large_ones_on_the_he
         TEST_ASSERT_TRUE(bindings.dispatchCommand<SwitchPort::RelayCommand>(true));
         TEST_ASSERT_EQUAL_INT(2, sum);  // the mutable capture's state survived the first call
 
-        bindings.onStateWrite<SwitchPort::RelayCommand>([tracker](bool) { ++*tracker; });
+        bindings.onCommand<SwitchPort::RelayCommand>([tracker](bool) { ++*tracker; });  // replaces the inline one
         TEST_ASSERT_EQUAL_INT(2, static_cast<int>(tracker.use_count()));
-        TEST_ASSERT_TRUE(bindings.dispatchStateWrite<SwitchPort::RelayCommand>(true));
+        TEST_ASSERT_TRUE(bindings.dispatchCommand<SwitchPort::RelayCommand>(true));
         TEST_ASSERT_EQUAL_INT(1, *tracker);
 
         Bindings moved(std::move(bindings));  // ownership of the heap callable moves with the entries
         TEST_ASSERT_EQUAL_INT(2, static_cast<int>(tracker.use_count()));
-        TEST_ASSERT_TRUE(moved.dispatchStateWrite<SwitchPort::RelayCommand>(true));
+        TEST_ASSERT_TRUE(moved.dispatchCommand<SwitchPort::RelayCommand>(true));
         TEST_ASSERT_EQUAL_INT(2, *tracker);
-        TEST_ASSERT_FALSE(bindings.hasStateWriteBinding<SwitchPort::RelayCommand>());  // NOLINT: moved-from is empty
+        TEST_ASSERT_FALSE(bindings.hasCommandBinding<SwitchPort::RelayCommand>());  // NOLINT: moved-from is empty
 
-        moved.onStateWrite<SwitchPort::RelayCommand>([](bool) {});  // rebinding releases the old callable
+        moved.onCommand<SwitchPort::RelayCommand>([](bool) {});  // rebinding releases the old callable
         TEST_ASSERT_EQUAL_INT(1, static_cast<int>(tracker.use_count()));
     }
     TEST_ASSERT_EQUAL_INT(1, static_cast<int>(tracker.use_count()));
@@ -257,6 +257,12 @@ void test_product_bindings_report_none_for_ports_without_entries_and_support_bou
     TEST_ASSERT_FALSE(bounded.hasCommandBinding<SwitchPort::RelayState>());
     TEST_ASSERT_FALSE(bounded.dispatchCommand<SwitchPort::RelayState>(true));
     TEST_ASSERT_FALSE(bounded.readState<SwitchPort::RelayCommand>().has_value());
+
+    // A command port has no state, so no state-write entry: the switch product
+    // has none at all, the thermostat one per state in/out port.
+    TEST_ASSERT_FALSE(bounded.hasStateWriteBinding<SwitchPort::RelayCommand>());
+    static_assert(decltype(bounded)::kStateWriteEntryCount == 0u);
+    static_assert(EndpointBindings<decltype(kThermostatDefinition)>::kStateWriteEntryCount == 2u);
 }
 
 int main(void)

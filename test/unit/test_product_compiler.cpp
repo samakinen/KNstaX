@@ -209,6 +209,8 @@ void test_port_table_is_the_source_of_slots_ranks_and_names(void)
     TEST_ASSERT_EQUAL_UINT16(3u, table[3].stateRank);
     TEST_ASSERT_EQUAL_UINT(2u, kReceivePortCount<decltype(kCompilerThermostatDefinition)>);
     TEST_ASSERT_EQUAL_UINT(4u, kStatePortCount<decltype(kCompilerThermostatDefinition)>);
+    // Both receiving ports are state in/out: they hold the first receive ranks.
+    TEST_ASSERT_EQUAL_UINT(2u, kStateWritePortCount<decltype(kCompilerThermostatDefinition)>);
     TEST_ASSERT_TRUE(table[2].valueType == DptValue::Type::HvacMode);
     TEST_ASSERT_EQUAL_UINT16(2u, findPortSlot(table.data(), table.size(), 90u));
     TEST_ASSERT_EQUAL_UINT16(kNoSlot, findPortSlot(table.data(), table.size(), 91u));

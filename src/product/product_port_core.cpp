@@ -309,13 +309,19 @@ Result<void> ProductPortCore::dispatchValue(uint16_t slot, const DptValue& value
         return ErrorCode::AccessDenied;
     }
 
+    // The command handler first, then the state-write handler; only ports with
+    // a state (the first stateWriteCount receive ranks) have the second.
     bool handled = false;
-    for (detail::ReceiveBinding* entries : {_bindings.commands, _bindings.stateWrites}) {
-        detail::ReceiveBinding& entry = entries[port.receiveRank];
-        if (!entry) {
+    const uint16_t rank = port.receiveRank;
+    detail::ReceiveBinding* const entries[2] = {
+        &_bindings.commands[rank],
+        rank < _bindings.stateWriteCount ? &_bindings.stateWrites[rank] : nullptr,
+    };
+    for (detail::ReceiveBinding* entry : entries) {
+        if (entry == nullptr || !*entry) {
             continue;
         }
-        if (!entry.invoke(entry.self(), value)) {
+        if (!entry->invoke(entry->self(), &value)) {
             return ErrorCode::DecodeFailed;
         }
         handled = true;
@@ -330,7 +336,7 @@ Result<void> ProductPortCore::dispatchValue(uint16_t slot, const DptValue& value
 bool ProductPortCore::readState(const PortDescriptor& port, DptValue& out) const
 {
     const detail::StateBinding& entry = _bindings.providers[port.stateRank];
-    return entry && entry.invoke(entry.self(), out);
+    return entry && entry.invoke(entry.self(), &out);
 }
 
 Result<void> ProductPortCore::prepareRead(GroupObjectIndex slot)

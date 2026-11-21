@@ -55,11 +55,13 @@ struct PendingPortAction {
 };
 
 /// Where the core finds the product's bindings: the entry arrays of its
-/// EndpointBindings, indexed by the ranks in the port table.
+/// EndpointBindings, indexed by the ranks in the port table. State writes are
+/// indexed by the receive rank and exist for ranks below stateWriteCount.
 struct PortBindingTables {
     detail::ReceiveBinding* commands{nullptr};
     detail::ReceiveBinding* stateWrites{nullptr};
     detail::StateBinding* providers{nullptr};
+    uint16_t stateWriteCount{0};
 };
 
 class ProductPortCore {
