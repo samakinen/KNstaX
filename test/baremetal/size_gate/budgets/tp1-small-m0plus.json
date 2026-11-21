@@ -2,8 +2,8 @@
   "profile": "tp1-small",
   "cpu": "cortex-m0plus",
   "margin_percent": 2,
-  "flash": {"budget": 93952, "target": 90112},
-  "ram": {"budget": 1632, "target": 10240, "includes_heap": false},
+  "flash": {"budget": 91392, "target": 90112},
+  "ram": {"budget": 512, "target": 10240, "includes_heap": false},
   "runtime_flash": {"budget": 8192, "target": 8192},
   "forbid_strings": ["sw_in_1", "sw_state_16", "sw_io_8", "value_in_1", "dim_in_4", "scene_ctl_1", "scene_num_4"],
   "forbid": [

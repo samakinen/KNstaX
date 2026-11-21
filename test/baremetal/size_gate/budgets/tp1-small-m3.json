@@ -2,8 +2,8 @@
   "profile": "tp1-small",
   "cpu": "cortex-m3",
   "margin_percent": 2,
-  "flash": {"budget": 90624, "target": 90112},
-  "ram": {"budget": 13856, "target": 10240, "includes_heap": true,
+  "flash": {"budget": 88576, "target": 90112},
+  "ram": {"budget": 7936, "target": 10240, "includes_heap": true,
           "target_note": "design target of the H8i8o budget (KNstaX 10 KiB, group objects counted apart); the device check below is the binding constraint"},
   "runtime_flash": {"budget": 7424, "target": 8192},
   "device": {

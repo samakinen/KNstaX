@@ -198,6 +198,40 @@ CI runs the full Linux suites, the interop tests and the gates on the pull reque
 
 ## 9. Status
 
+### Integrated result, P1–P5, 21 November 2026
+
+All five packages on one branch, measured together (size gate, LTO, Arm GNU Toolchain 13.2.Rel1;
+every run: download applied, 15 of 15 routed values observed, zero allocations after the lock):
+
+| | Before (`eb54dfa`) | After | Change |
+|---|---:|---:|---:|
+| `tp1-small` M3: KNstaX flash | 88 709 B | 86 651 B | −2 058 B |
+| `tp1-small` M3: static RAM + heap | 1 608 + 11 724 = 13 332 B | 290 + 7 484 = **7 774 B** | **−5 558 B (−42 %)** |
+| `tp1-small` M3: C/C++ runtime flash | 4 935 B | 2 678 B | −2 257 B (no printf) |
+| `tp1-small` M3: device RAM headroom (H8i8o reservations) | 1 100 B | 6 658 B | |
+| `tp1-standard` M4: KNstaX flash | 107 221 B | 104 761 B | −2 460 B |
+| `tp1-standard` M4: static RAM + heap | 20 855 B | **12 361 B** | **−8 494 B (−41 %)** |
+| `tp1-small` M0+: KNstaX flash / static RAM | 91 709 / 1 608 B | 89 581 / 290 B | |
+
+`tp1-small` is now below the 10 240 B KNstaX RAM target that §10 of small-target-profile.md had
+judged out of reach. The H8i8o firmware built against this branch: flash 97 404 → 93 360 B, static
+RAM 5 720 → 4 392 B, product code unchanged.
+
+Budgets lowered to the measured figures plus the gate's 2 % margin: flash and RAM of all three
+reference devices. The C/C++ runtime budgets are left as they were: that figure depends on the
+toolchain's C library (CI's Ubuntu newlib measured about 2.1 KiB more than the Arm toolchain used
+here at the same commit), so lowering them from these figures would fail CI.
+
+Native host tests (MinGW GCC 16, the virtual-bus-free profiles of §8.3): 42 programs on the minimal
+profile, 63 on a full-capacity profile and 56 with the DPT families, all passing. The two
+`test_knxprod_*` programs fail on Windows on `main` as well; two `needs-full-capacity` programs fail
+on the small-capacity profile as on `main` and pass on the full-capacity one.
+
+Not done in P1–P5, carried to P6: R5 (direct calls), R8 (pending actions; the queue semantics are
+part of the product contract, so it waits for F2's smaller `DptValue`), R9, R10, F2, and the
+transport receive queue that a device never fills (about 2 KiB on `full`).
+
+
 ### P3 Group tables (R2), 21 November 2026
 
 Each loaded table now exists once (ARCHITECTURE.md, "The group tables and their load segments"):
