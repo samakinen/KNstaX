@@ -111,7 +111,7 @@ gate decides the final `tp1-small` values.
 | `KNX_MEDIUM_TP1`, `KNX_MEDIUM_IP` | Media (exists) | TP1 | TP1 | both |
 | `KNX_TP1_BITBANG`, `KNX_TP1_TPUART` | TP1 backend (choice; TP-UART is K3) | TP-UART | TP-UART | bit-bang |
 | `KNX_ENABLE_COUPLER` | The whole router role: Router object, filter and routing tables, coupler routing, two-port coupler, `CouplerOptions`, the layer-2 group acknowledge hook. Depends on function properties. | n | n | y |
-| `KNX_ENABLE_SECURITY` | Data Secure and the Security Interface Object (object 17, absent when off). Selects `KNX_ENABLE_PROPERTY_EXT` and `KNX_ENABLE_FUNCTION_PROPERTIES`. | n | y once K6 provides AES on bare metal; n until then | y |
+| `KNX_ENABLE_SECURITY` | Data Secure and the Security Interface Object (object 17, absent when off). Selects `KNX_ENABLE_PROPERTY_EXT` and `KNX_ENABLE_FUNCTION_PROPERTIES`. | n | n until the Security Interface Object has fixed capacities (data-secure-small-target.md D3–D5); the AES (K6) is in, as the software backend | y |
 | `KNX_ENABLE_GO_DIAGNOSTICS` | Group object diagnostics function property (PID 66 of the group object table; not advertised when off). Depends on function properties. | n | y | y |
 | `KNX_ENABLE_MEMORY_EXT` | `A_MemoryExtended_*` services | n | y | y |
 | `KNX_ENABLE_PROPERTY_EXT` | `A_PropertyExt*` services (needed with Secure) | n | y | y |

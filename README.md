@@ -26,8 +26,8 @@ proven on real hardware against ETS6:
   128 KiB of flash and 20 KiB of RAM, in an 8-input, 8-output module): product
   import, individual-address assignment, application and parameter download,
   group communication, and configuration kept in flash across restarts and
-  power cuts. Data Secure is not yet available on bare metal (see the support
-  matrix).
+  power cuts. Data Secure builds for bare metal with the portable AES and is
+  in the size gate, but has not run on the board (see the support matrix).
 
 Everything else is implemented and covered by host tests but has never been run
 against real ETS, a real gateway, or real transceiver hardware — KNXnet/IP
@@ -96,8 +96,11 @@ about every gap between the current state and a certifiable device.
   compiles.
 - **KNX Secure**: Data Secure through the Security Interface Object with
   `PID_SECURITY_MODE` driven by `A_FunctionPropertyCommand` (the way ETS does
-  it), KNXnet/IP Secure Tunnelling with ECDH, and opt-in Secure Routing. Crypto
-  is mbedTLS.
+  it), KNXnet/IP Secure Tunnelling with ECDH, and opt-in Secure Routing. The
+  AES block is a configuration choice: a portable software AES-128 (no
+  library, the bare-metal default), mbedTLS or the ESP32's AES peripheral.
+  Data Secure needs no crypto library; IP Secure sessions take X25519 and
+  PBKDF2 from mbedTLS.
 - **Couplers**: the routing algorithm of 03/03/03 §2.4.2.4 in full, built
   through the same call as an end device.
 
@@ -234,7 +237,7 @@ more than the feature list.
 | Flash persistence (`FlashLogPersistence`) | Yes | **Yes** — power cut at random moments on a GD32F103, every record whole |
 | KNXnet/IP tunnelling (unicast) | Yes | **No** — host interop against `xknx` only, never a real ETS connection or gateway |
 | KNXnet/IP routing (multicast) | Yes | **No** — same |
-| KNX Data Secure | Yes, on ESP32; manual key provisioning. Not on bare metal yet: it needs mbedTLS until the planned portable AES backend lands | **Yes** on ESP32 — ETS secure download and secure group communication exercised on hardware |
+| KNX Data Secure | Yes, on ESP32; manual key provisioning. On bare metal it builds with the portable AES and passes the size gate's plain download with the heap locked; a secure download still allocates in the Security Interface Object (fixed-capacity tables are planned) | **Yes** on ESP32 — ETS secure download and secure group communication exercised on hardware |
 | KNXnet/IP Secure Tunnelling | Yes, ECDH + `.knxkeys` import | **No** |
 | KNX Secure Routing | Yes, opt-in; needs a pre-provisioned backbone key | **No** |
 | Couplers / Router Object | Yes, opt-in via `configureRouterRole()` | **No** — the routing actions are untested; layer-2 ACK is computed but not enforced on TP1 |
@@ -261,21 +264,25 @@ For the service-by-service inventory, including what is missing and why, see
 
 ## Footprint and capacity
 
-- **The size gate** (`test/baremetal/size_gate/`) runs in CI for three
-  reference devices: `tp1-small` on Cortex-M3 and M0+, and `tp1-standard` on
-  Cortex-M4. Each is a 60-object TP1 end device. CI links it with LTO, runs it
+- **The size gate** (`test/baremetal/size_gate/`) runs in CI for four
+  reference devices: `tp1-small` on Cortex-M3 and M0+, `tp1-standard` on
+  Cortex-M4, and `tp1-small` with Data Secure (software AES, APDUs of 55
+  octets) on Cortex-M3. Each is a 60-object TP1 end device. CI links it with LTO, runs it
   under QEMU through an ETS download and group traffic with the heap locked
   after start-up, and fails if flash or RAM goes over the budget files in
   `budgets/`. The budgets only move down, unless an increase is justified; a
   pull request shows the change against its base. The Cortex-M3 file also
   checks the whole device: KNstaX plus the stack, application, board support and
-  persistence reservations must fit a 128 KiB / 20 KiB part.
+  persistence reservations must fit a 128 KiB / 20 KiB part. The Data Secure
+  device does not yet fit those reservations (2.4 KB of flash over), so its
+  file has no device check.
 
   | Reference device | KNstaX flash | KNstaX RAM (static + heap) |
   |---|---:|---:|
   | `tp1-small`, Cortex-M3 | 86.7 KB | 7.8 KB |
   | `tp1-small`, Cortex-M0+ | 89.6 KB | 0.3 KB static (linked, not run) |
   | `tp1-standard`, Cortex-M4 | 104.8 KB | 12.4 KB |
+  | `tp1-small` + Data Secure, Cortex-M3 | 105.8 KB | 9.4 KB |
 
   The memory reductions of
   [memory-reductions.md](docs/design/memory-reductions.md) took 4.0 KB of flash
@@ -346,7 +353,8 @@ runtime and commissioning flows. On top of it:
   under AddressSanitizer and UndefinedBehaviorSanitizer, builds the library
   alone in the TP1-only, KNXnet/IP-only and knxip (routing + Secure, no
   tunnelling client) shapes with warnings as errors, runs the interop suite,
-  runs the bare-metal size gate for Cortex-M0+, M3 and M4, and builds the
+  runs the bare-metal size gate for Cortex-M0+, M3 and M4 (and M3 with Data
+  Secure), and builds the
   GD32F1 reference port. It does not
   build for ESP-IDF; the examples under
   `examples/esp_idf_*` are built by hand, so check both an xtensa and a RISC-V

@@ -6,9 +6,11 @@ CONFIG_KNX_BUILD_TP1=y
 CONFIG_KNX_BUILD_NETIP=n
 CONFIG_KNX_ENABLE_TUNNELING=n
 CONFIG_KNX_ENABLE_COUPLER=n
-# Data Secure is meant to be on in this profile, but a bare-metal build has no
-# AES backend until the portable one (K6) lands: the standalone build requires
-# mbedTLS for Secure. Switch it on with K6.
+# Data Secure is meant to be on in this profile. It builds with the software
+# AES (the size gate measures it on tp1-small, variant secure), but the
+# Security Interface Object still allocates during a secure download, which the
+# locked heap of this profile refuses: switch it on with the fixed-capacity
+# tables (data-secure-small-target.md D3-D5).
 # CONFIG_KNX_ENABLE_SECURITY is not set
 CONFIG_KNX_BUILD_VIRTUAL_BUS=n
 CONFIG_KNX_BUILD_ETS_TOOLING=n

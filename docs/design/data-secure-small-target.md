@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | **Proposed**, 21 November 2026. Analysis only: nothing here is built. Every figure marked "est." is an estimate from the source and `sizeof` reasoning, not a size gate run. |
+| Status | **In progress**, 22 November 2026. D1 (the AES part) and D2 are done and the size gate measures the device (§9); D3–D7 and D9 are open. Figures marked "est." are estimates from the source and `sizeof` reasoning, not a size gate run. |
 | Goal | Data Secure (03/03/07 §5, the Security Interface Object) on a TP1 end device with 128 KiB of flash and 20 KiB of RAM, with the heap locked after start-up. |
 | Motivating product | H8i8o (GD32F103CB + TP-UART2). Its board-side plan is in the h8i8o repository, `docs/data-secure.md`. |
 | Builds on | [cortex-m-tpuart2-support.md](cortex-m-tpuart2-support.md) §8 (K6, software AES) and [small-target-profile.md](small-target-profile.md) (profiles, capacities, `init_only`, the size gate). |
@@ -116,12 +116,18 @@ Each item is generic; none is specific to the H8i8o.
 
 ### D1. Portable AES-128 (K6)
 
+**AES done** (the software backend; software-aes.md §7). The in-place CCM is part of D7.
+
 Designed and measured in [software-aes.md](software-aes.md): one portable, encrypt-only AES-128
 (32-bit columns, round key on the fly) on every platform, and an in-place KNX CCM. Measured on a
 Cortex-M3: 794 B + 538 B of flash, a 16-octet context, no static RAM, about 1 500 instructions per
 block and 5 000–12 000 per secured telegram (0.1–0.4 ms at 48 MHz, est.), off the acknowledge path.
 
 ### D2. Split the build requirements
+
+**Done.** Standalone CMake as below. The backend is a Kconfig choice after all
+(`KNX_AES_BACKEND`), because the mbedTLS and ESP backends were kept; bare metal defaults to the
+software one.
 
 - Standalone CMake: Data Secure needs no library; mbedTLS is required only when
   `KNX_SOURCES_SECURE_IP_CRYPTO` is compiled (Secure Tunnelling, `.knxkeys` import). Append
@@ -245,3 +251,34 @@ what proves §3.3 closed. Without it, a device with Secure on has never run with
    `requestPowerFailSave()` from its power-fail warning.
 6. Conformance status and the product authoring guide updated as each item lands
    (DEVELOPMENT_GUIDELINES.md, "Which documents to update").
+
+## 9. Status and measurements
+
+Steps 1 and 2 of §8 are done, step 2 with a narrower traffic script than §7 asks for.
+
+**Size gate variant.** `test/baremetal/size_gate/variants/secure.defconfig` over `tp1-small`:
+Secure on, `KNX_AES_BACKEND_SOFTWARE`, the extended property services, `KNX_MAX_APDU_LENGTH=55`.
+Budget `budgets/tp1-small-secure-m3.json`, in CI as `tp1-small-secure-m3`. Its traffic is the
+plain gate's: the ETS-order download of the three tables and the parameters, then group traffic.
+No secured telegram, no key table download.
+
+Measured on QEMU `mps2-an385`, LTO, Arm GNU Toolchain 13.2.Rel1, against plain `tp1-small` (and a
+one-off run with only `KNX_MAX_APDU_LENGTH=55`, to separate the two):
+
+| | Flash | RAM: static + heap |
+|---|---:|---:|
+| `tp1-small` | 86 651 B | 7 774 B (290 + 7 484) |
+| `tp1-small`, APDU 55 only | 86 681 B (+30) | 8 654 B (+880) |
+| `tp1-small` + Data Secure (variant `secure`) | 105 814 B (+19 163) | 9 374 B (290 + 9 084; +1 600) |
+| of which Data Secure without the APDU change | +19 133 | +720 |
+| of which the software AES | 780 | 0 |
+
+- The flash estimate of §6 (13–19 KiB) holds at its top end. The APDU estimate of §4 (about
+  1 000 B) measured 880 B.
+- 15 values routed, the download applied, **no allocation after `heap::lock()`** during the plain
+  download: with no security tables downloaded the key maps stay empty and nothing in §3.3 runs.
+  The allocations of §3.3 need the secure traffic of §7 to show, which the gate does not script
+  yet; D3–D5 are still needed.
+- The H8i8o device check (the `tp1-small` M3 budget's `device` section) is not applied to this
+  variant, because it fails: flash 133 510 of 131 072 B with the application (12 KiB), BSP (4 KiB)
+  and persistence (8 KiB) reservations, **2 438 B over**. RAM fits: 15 422 of 20 480 B.
