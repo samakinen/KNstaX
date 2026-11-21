@@ -373,6 +373,42 @@ menu "KNX Stack Configuration"
                 With it off the Security Interface Object is not compiled, not
                 registered and not exposed: ETS finds no object 17.
 
+        choice KNX_AES_BACKEND
+            prompt "AES-128 implementation"
+            depends on KNX_ENABLE_SECURITY
+            default KNX_AES_BACKEND_ESP_HW if SOC_AES_SUPPORTED
+            default KNX_AES_BACKEND_SOFTWARE
+            help
+                Who encrypts an AES block for Data Secure and the KNXnet/IP
+                Secure framing. Only the block cipher is chosen here; CCM is
+                the stack's own on every backend. X25519, SHA-256 and PBKDF2
+                (IP Secure sessions) come from mbedTLS whatever this says.
+
+            config KNX_AES_BACKEND_SOFTWARE
+                bool "Portable software AES"
+                help
+                    KNstaX's own encrypt-only AES-128 (aes128_soft.hpp): about
+                    0.8 KiB of flash, no RAM outside the stack, no library.
+                    Works on every target. Its S-box lookups are indexed by
+                    secret data, which takes constant time on parts without a
+                    data cache (Cortex-M0+/M3/M4) but not on cached CPUs.
+
+            config KNX_AES_BACKEND_MBEDTLS
+                bool "mbedTLS (mbedtls/aes.h)"
+                depends on !MBEDTLS_VER_4_X_SUPPORT
+                help
+                    The block API of Mbed TLS 2.x/3.x. Mbed TLS 4 (ESP-IDF 6)
+                    no longer has it. A standalone build needs the mbedTLS
+                    headers and libraries.
+
+            config KNX_AES_BACKEND_ESP_HW
+                bool "ESP32 AES peripheral (esp_aes)"
+                depends on SOC_AES_SUPPORTED
+                help
+                    ESP-IDF's driver of the AES block. Not on chips without
+                    one (ESP32-C2); not in a standalone build.
+        endchoice
+
         config KNX_SECURE_SEQ_RESERVE
             int "Sending sequence numbers reserved per write"
             depends on KNX_ENABLE_SECURITY

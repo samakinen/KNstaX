@@ -105,6 +105,13 @@ menu "Standalone build (not seen by ESP-IDF)"
         bool
         default n
 
+    # The ESP-IDF soc component defines this one on chips with an AES
+    # peripheral. A standalone build has none, so KNX_AES_BACKEND_ESP_HW
+    # cannot be chosen there.
+    config SOC_AES_SUPPORTED
+        bool
+        default n
+
     # Second definitions of two symbols from `Kconfig`: same type, visible in a
     # standalone build whatever KNX_MEDIUM says.
     config KNX_ENABLE_COUPLER

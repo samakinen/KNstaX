@@ -5,42 +5,38 @@
 
 /**
  * @file aes_block.hpp
- * @brief Single-block AES-128 encryption, abstracted over the available backend.
+ * @brief Single-block AES-128 encryption over the configured backend.
  *
  * The KNX Data Secure primitives (CCM: AES-CBC-MAC for authentication,
  * AES-CTR for confidentiality) only ever need "encrypt one 16-octet block".
- * Which library provides that differs per build:
+ * The configuration chooses who provides it (Kconfig KNX_AES_BACKEND):
  *
- *  - Mbed TLS 2.x/3.x exposes the legacy `mbedtls/aes.h` block API.
- *  - Mbed TLS 4.x (ESP-IDF v6.x) removed it in favour of PSA Crypto, but
- *    ESP-IDF still ships the hardware-accelerated `aes/esp_aes.h` port with the
- *    same shape.
+ *  - SOFTWARE: the portable Aes128Soft (aes128_soft.hpp). No library, every
+ *    platform; the default on bare metal and on an ESP32 without the AES block.
+ *  - MBEDTLS: the legacy `mbedtls/aes.h` block API of Mbed TLS 2.x/3.x
+ *    (Mbed TLS 4 removed it). The host test profiles use it.
+ *  - ESP_HW: ESP-IDF's `aes/esp_aes.h` driver of the AES peripheral; the
+ *    default on an ESP32 that has one.
  *
  * Keeping the choice here means the CCM code stays backend-agnostic, and CTR is
  * built from block encryption rather than from a backend-specific CTR helper.
  */
 
+#include "knx/config.hpp"
 #include "knx/util/result.hpp"
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 
-#if defined(__has_include)
-#  if __has_include(<mbedtls/aes.h>)
-#    define KNX_AES_BACKEND_MBEDTLS 1
-#  elif __has_include(<aes/esp_aes.h>)
-#    define KNX_AES_BACKEND_ESP 1
-#  endif
-#else
-#  define KNX_AES_BACKEND_MBEDTLS 1
-#endif
-
-#if defined(KNX_AES_BACKEND_MBEDTLS)
+#if defined(CONFIG_KNX_AES_BACKEND_SOFTWARE)
+#  include "knx/security/aes128_soft.hpp"
+#elif defined(CONFIG_KNX_AES_BACKEND_MBEDTLS)
 #  include <mbedtls/aes.h>
-#elif defined(KNX_AES_BACKEND_ESP)
+#elif defined(CONFIG_KNX_AES_BACKEND_ESP_HW)
 #  include <aes/esp_aes.h>
 #else
-#  error "KNX Secure requires an AES backend: mbedtls/aes.h or aes/esp_aes.h"
+#  error "KNX Secure: no AES backend configured (Kconfig KNX_AES_BACKEND: SOFTWARE, MBEDTLS or ESP_HW)"
 #endif
 
 namespace knx {
@@ -53,51 +49,59 @@ public:
     using Block = std::array<uint8_t, kBlockSize>;
     using Key = std::array<uint8_t, 16>;
 
-    Aes128BlockCipher() {
-#if defined(KNX_AES_BACKEND_MBEDTLS)
-        mbedtls_aes_init(&_ctx);
+#if defined(CONFIG_KNX_AES_BACKEND_SOFTWARE)
+    Aes128BlockCipher() = default;
+    ~Aes128BlockCipher() = default;
+#elif defined(CONFIG_KNX_AES_BACKEND_MBEDTLS)
+    Aes128BlockCipher() { mbedtls_aes_init(&_ctx); }
+    ~Aes128BlockCipher() { mbedtls_aes_free(&_ctx); }
 #else
-        esp_aes_init(&_ctx);
+    Aes128BlockCipher() { esp_aes_init(&_ctx); }
+    ~Aes128BlockCipher() { esp_aes_free(&_ctx); }
 #endif
-    }
-
-    ~Aes128BlockCipher() {
-#if defined(KNX_AES_BACKEND_MBEDTLS)
-        mbedtls_aes_free(&_ctx);
-#else
-        esp_aes_free(&_ctx);
-#endif
-    }
 
     Aes128BlockCipher(const Aes128BlockCipher&) = delete;
     Aes128BlockCipher& operator=(const Aes128BlockCipher&) = delete;
 
+    /// The software backend cannot fail; the library backends report their errors.
     util::Result<void> setKey(const Key& key) {
-#if defined(KNX_AES_BACKEND_MBEDTLS)
-        const int ret = mbedtls_aes_setkey_enc(&_ctx, key.data(), 128);
+#if defined(CONFIG_KNX_AES_BACKEND_SOFTWARE)
+        _ctx.setKey(key);
+        return util::Result<void>::ok();
 #else
+#  if defined(CONFIG_KNX_AES_BACKEND_MBEDTLS)
+        const int ret = mbedtls_aes_setkey_enc(&_ctx, key.data(), 128);
+#  else
         const int ret = esp_aes_setkey(&_ctx, key.data(), 128);
-#endif
+#  endif
         if (ret != 0) {
             return util::ErrorCode::OperationFailed;
         }
         return util::Result<void>::ok();
+#endif
     }
 
     util::Result<void> encryptBlock(const uint8_t* input, uint8_t* output) {
-#if defined(KNX_AES_BACKEND_MBEDTLS)
-        const int ret = mbedtls_aes_crypt_ecb(&_ctx, MBEDTLS_AES_ENCRYPT, input, output);
+#if defined(CONFIG_KNX_AES_BACKEND_SOFTWARE)
+        _ctx.encrypt(input, output);
+        return util::Result<void>::ok();
 #else
+#  if defined(CONFIG_KNX_AES_BACKEND_MBEDTLS)
+        const int ret = mbedtls_aes_crypt_ecb(&_ctx, MBEDTLS_AES_ENCRYPT, input, output);
+#  else
         const int ret = esp_aes_crypt_ecb(&_ctx, ESP_AES_ENCRYPT, input, output);
-#endif
+#  endif
         if (ret != 0) {
             return util::ErrorCode::OperationFailed;
         }
         return util::Result<void>::ok();
+#endif
     }
 
 private:
-#if defined(KNX_AES_BACKEND_MBEDTLS)
+#if defined(CONFIG_KNX_AES_BACKEND_SOFTWARE)
+    Aes128Soft _ctx;
+#elif defined(CONFIG_KNX_AES_BACKEND_MBEDTLS)
     mbedtls_aes_context _ctx{};
 #else
     esp_aes_context _ctx{};
