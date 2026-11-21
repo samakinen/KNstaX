@@ -15,11 +15,11 @@
 #include "knx/objects/interface_object.hpp"
 #include "knx/types.hpp"
 #include "knx/util/fixed_vector.hpp"
+#include "knx/util/inplace_function.hpp"
 #include "knx/util/result.hpp"
 #include <algorithm>
 #include <cstdint>
 #include <string>
-#include <functional>
 #include <vector>
 #include <span>
 
@@ -110,22 +110,35 @@ enum class DeviceProperty : uint8_t {
 /// records (ManagementServer::kMaxInterfaceObjects).
 inline constexpr uint16_t kMaxIoListEntries = 32;
 
+// The Device Object's observers are installed once, by the stack (capturing
+// `this`) or by firmware (capturing a reference or two), so they are
+// InplaceFunctions rather than std::function: no heap, and a capture that does
+// not fit is a compile error naming the capacity. 16 bytes holds `this` plus a
+// reference on a 64-bit host; KNX_CALLBACK_CAPTURE_BYTES lowers it on small
+// targets. Captures are pointers and references, so the storage is aligned for
+// a pointer rather than for std::max_align_t: on a 32-bit target that keeps
+// each of the ten slots at 12 bytes instead of 16, and a capture that needs
+// more alignment is a compile error, not a misaligned object.
+inline constexpr size_t kDeviceCallbackCaptureBytes = ::knx::config::callbackBytes(16);
+template <typename Signature>
+using DeviceCallback = util::InplaceFunction<Signature, kDeviceCallbackCaptureBytes, alignof(void*)>;
+
 /**
  * @brief Callback for load state changes
  */
-using LoadStateCallback = std::function<void(LoadState oldState, LoadState newState)>;
+using LoadStateCallback = DeviceCallback<void(LoadState oldState, LoadState newState)>;
 
 /**
  * @brief Callback for programming mode changes
  */
-    using ProgModeCallback = std::function<void(Toggle mode)>;
+using ProgModeCallback = DeviceCallback<void(Toggle mode)>;
 
 /**
  * @brief Callback for individual address changes
  */
-using IndividualAddressCallback = std::function<void(const IndividualAddress& address)>;
+using IndividualAddressCallback = DeviceCallback<void(const IndividualAddress& address)>;
 
-using SerialNumberCallback = std::function<void(std::span<const uint8_t> serialNumber)>;
+using SerialNumberCallback = DeviceCallback<void(std::span<const uint8_t> serialNumber)>;
 
 /**
  * @brief Device Object - Interface Object Type 0
@@ -285,13 +298,16 @@ public:
     void setProgModeTimeout(uint32_t timeoutMs) { _progModeTimeoutMs = timeoutMs; }
     uint32_t getProgModeTimeout() const { return _progModeTimeoutMs; }
     
-    // Timer callback for platform integration (e.g., FreeRTOS, Linux timer)
-    using TimerCallback = std::function<void(uint32_t durationMs, std::function<void()> callback)>;
-    void setTimerCallback(TimerCallback callback) { _timerCallback = callback; }
+    // Timer callback for platform integration (e.g., FreeRTOS, Linux timer).
+    // The handler it is given captures only the Device Object; it converts to
+    // a std::function<void()> where a platform timer API wants one.
+    using ProgModeTimeoutHandler = util::InplaceFunction<void(), sizeof(void*), alignof(void*)>;
+    using TimerCallback = DeviceCallback<void(uint32_t durationMs, ProgModeTimeoutHandler callback)>;
+    void setTimerCallback(TimerCallback callback) { _timerCallback = std::move(callback); }
     
     // LED callback for visual indication
-    using LedCallback = std::function<void(Toggle ledState)>;
-    void setLedCallback(LedCallback callback) { _ledCallback = callback; }
+    using LedCallback = DeviceCallback<void(Toggle ledState)>;
+    void setLedCallback(LedCallback callback) { _ledCallback = std::move(callback); }
     
     // Individual address write via the KNX A_IndividualAddress_Write MANAGEMENT
     // service — requires programming mode (KNX 03/06/03 §3.5).

@@ -728,6 +728,27 @@ void test_DeviceObject_PropertyAccess_Version() {
                              DeviceObject::packVersion(32, 32, 64));
 }
 
+// Every observer of programming mode is told, the appended ones and the
+// internal slot alike, and each only once per change.
+void test_DeviceObject_ProgMode_NotifiesAppendedAndInternalObservers() {
+    DeviceObject local;
+    int first = 0;
+    int second = 0;
+    int internal = 0;
+    local.registerProgModeCallback([&first](knx::Toggle) { ++first; });
+    local.registerProgModeCallback([&second](knx::Toggle) { ++second; });
+    local.setInternalProgModeCallback([&internal](knx::Toggle) { ++internal; });
+    // Replacing the internal slot leaves one internal observer, not two.
+    local.setInternalProgModeCallback([&internal](knx::Toggle) { ++internal; });
+
+    local.setProgMode(knx::Toggle::Enable);
+    local.setProgMode(knx::Toggle::Disable);
+
+    TEST_ASSERT_EQUAL(2, first);
+    TEST_ASSERT_EQUAL(2, second);
+    TEST_ASSERT_EQUAL(2, internal);
+}
+
 // The handler tables of the fixed interface objects are constant-initialised
 // (they live in read-only memory and need no start-up code), which needs every
 // kernel helper that builds or checks a handler to be usable in a constant
@@ -811,6 +832,7 @@ int main(int argc, char** argv) {
     RUN_TEST(test_DeviceObject_ProgMode_Enable);
     RUN_TEST(test_DeviceObject_ProgMode_Callback);
     RUN_TEST(test_DeviceObject_ProgMode_NoCallbackIfNoChange);
+    RUN_TEST(test_DeviceObject_ProgMode_NotifiesAppendedAndInternalObservers);
     RUN_TEST(test_PropertyKernel_ConstantTableIsUsable);
     
     // Property access
