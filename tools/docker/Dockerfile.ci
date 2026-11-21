@@ -1,0 +1,25 @@
+# The packages of every job in .github/workflows/ci.yml on the runner's Ubuntu,
+# so that any CI job can be repeated locally:
+#
+#   docker build -t knstax-ci -f tools/docker/Dockerfile.ci tools/docker
+#   docker run --rm -v "$PWD":/src -w /src knstax-ci ./build.sh test
+#   docker run --rm -v "$PWD":/src -w /src knstax-ci \
+#       sh test/baremetal/size_gate/run_gate.sh /tmp/gate tp1-small cortex-m3
+#
+# On Git Bash for Windows, prefix docker run with MSYS_NO_PATHCONV=1.
+# Keep the package list in step with ci.yml.
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive LC_ALL=C.UTF-8 LANG=C.UTF-8
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        g++ cmake ninja-build git ca-certificates \
+        libmbedtls-dev zlib1g-dev \
+        python3 python3-xmlschema python3-venv python3-pip \
+        gcc-arm-none-eabi libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib \
+        qemu-system-arm \
+ && rm -rf /var/lib/apt/lists/*
+
+# The source tree is mounted from the host, owned by another user.
+RUN git config --system --add safe.directory '*'

@@ -341,6 +341,15 @@ runtime and commissioning flows. On top of it:
 Virtual and host results do not substitute for HIL electrical and timing
 validation on real transceivers.
 
+To repeat a CI job locally, including the size gate with its QEMU run, use the
+image with the CI runner's packages:
+
+```bash
+docker build -t knstax-ci -f tools/docker/Dockerfile.ci tools/docker
+docker run --rm -v "$PWD":/src -w /src knstax-ci \
+    sh test/baremetal/size_gate/run_gate.sh /tmp/gate tp1-small cortex-m3
+```
+
 ### Choosing what is built (standalone CMake)
 
 What a standalone build contains is a **profile**: a defconfig fragment under
