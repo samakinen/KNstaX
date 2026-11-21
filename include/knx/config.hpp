@@ -82,6 +82,12 @@ namespace config {
 #ifndef CONFIG_KNX_ADDITIONAL_INDIVIDUAL_ADDRESSES
 #   error "CONFIG_KNX_ADDITIONAL_INDIVIDUAL_ADDRESSES is not defined: build with the KNstaX configuration (ESP-IDF Kconfig, or knx_configure() in CMake)"
 #endif
+#ifndef CONFIG_KNX_MEMORY_REGIONS
+#   error "CONFIG_KNX_MEMORY_REGIONS is not defined: build with the KNstaX configuration (ESP-IDF Kconfig, or knx_configure() in CMake)"
+#endif
+#ifndef CONFIG_KNX_AUTHORIZED_PARTNERS
+#   error "CONFIG_KNX_AUTHORIZED_PARTNERS is not defined: build with the KNstaX configuration (ESP-IDF Kconfig, or knx_configure() in CMake)"
+#endif
 #ifndef CONFIG_KNX_SEND_PIPELINE_DEPTH
 #   error "CONFIG_KNX_SEND_PIPELINE_DEPTH is not defined: build with the KNstaX configuration (ESP-IDF Kconfig, or knx_configure() in CMake)"
 #endif
@@ -128,6 +134,13 @@ constexpr size_t ASSOCIATION_TABLE_ENTRIES = CONFIG_KNX_ASSOCIATION_TABLE_ENTRIE
 static_assert(ASSOCIATION_TABLE_ENTRIES >= 1, "KNX_ASSOCIATION_TABLE_ENTRIES must be at least 1");
 /// Individual addresses the data link layer answers to besides its own (may be 0).
 constexpr size_t ADDITIONAL_INDIVIDUAL_ADDRESSES = CONFIG_KNX_ADDITIONAL_INDIVIDUAL_ADDRESSES;
+/// Memory-mapped regions A_Memory_* reaches (AddressSpace). The stack's own
+/// need is checked where it registers them (bau_stack_port.cpp).
+constexpr size_t MEMORY_REGIONS = CONFIG_KNX_MEMORY_REGIONS;
+static_assert(MEMORY_REGIONS >= 1, "KNX_MEMORY_REGIONS must be at least 1");
+/// Partners whose A_Authorize access level the device holds at once.
+constexpr size_t AUTHORIZED_PARTNERS = CONFIG_KNX_AUTHORIZED_PARTNERS;
+static_assert(AUTHORIZED_PARTNERS >= 1, "KNX_AUTHORIZED_PARTNERS must be at least 1");
 /// Send outcomes the application layer holds for the application to collect.
 constexpr size_t SEND_PIPELINE_DEPTH = CONFIG_KNX_SEND_PIPELINE_DEPTH;
 static_assert(SEND_PIPELINE_DEPTH >= 1, "KNX_SEND_PIPELINE_DEPTH must be at least 1");

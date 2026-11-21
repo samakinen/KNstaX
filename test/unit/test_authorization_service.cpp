@@ -175,15 +175,20 @@ void test_oldest_authorisation_is_evicted_when_full(void)
     uint32_t tick = 1;
     service.setTimeSource([&]() { return tick; });
 
-    for (uint16_t device = 1; device <= 16; ++device) {
+    // The capacity is KNX_AUTHORIZED_PARTNERS: 16 in full, 1 on an end device.
+    constexpr auto capacity = static_cast<uint8_t>(AuthorizationService::kMaxAuthorizedPartners);
+    for (uint8_t device = 1; device <= capacity; ++device) {
         service.handleRequest(knx::IndividualAddress(1, 1, device), kMaxKey);
         ++tick;
     }
-    service.handleRequest(knx::IndividualAddress(1, 1, 17), kMaxKey);
+    const knx::IndividualAddress newest(1, 1, static_cast<uint8_t>(capacity + 1u));
+    service.handleRequest(newest, kMaxKey);
 
     TEST_ASSERT_EQUAL_UINT8(3u, service.currentAccessLevel(knx::IndividualAddress(1, 1, 1)));
-    TEST_ASSERT_EQUAL_UINT8(0u, service.currentAccessLevel(knx::IndividualAddress(1, 1, 16)));
-    TEST_ASSERT_EQUAL_UINT8(0u, service.currentAccessLevel(knx::IndividualAddress(1, 1, 17)));
+    if (capacity > 1u) {
+        TEST_ASSERT_EQUAL_UINT8(0u, service.currentAccessLevel(knx::IndividualAddress(1, 1, capacity)));
+    }
+    TEST_ASSERT_EQUAL_UINT8(0u, service.currentAccessLevel(newest));
 }
 
 // ============================================================================

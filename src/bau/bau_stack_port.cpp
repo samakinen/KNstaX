@@ -23,6 +23,7 @@
 #include "knx/testing/mock_tp1_physical.hpp"
 #endif
 #include "knx/network/network_layer.hpp"
+#include "knx/objects/interface_object_manager.hpp"
 #include "knx/security/data_secure.hpp"
 #include "knx/security/secure_application_layer.hpp"
 #if KNX_FEATURE_COUPLER
@@ -908,6 +909,19 @@ void BusAccessStackPort::setWorkAvailableCallback(WorkAvailableCallback callback
 // ---------------------------------------------------------------------------
 // Property and memory access
 // ---------------------------------------------------------------------------
+
+// Every interface object the device model announces must find a slot in the
+// management server, or the property services would answer it as absent.
+static_assert(application::ManagementServer::kMaxInterfaceObjects
+                  == objects::InterfaceObjectManager::kMaxInterfaceObjects,
+              "ManagementServer::kMaxInterfaceObjects must match the interface objects a device can have");
+
+// The regions the stack maps itself: the group address, association and group
+// object table segments and the application's parameter image (DeviceModel),
+// and with the coupler role the Filter Table (DeviceManagement).
+inline constexpr size_t kStackMemoryRegions = 4u + (KNX_FEATURE_COUPLER ? 1u : 0u);
+static_assert(config::MEMORY_REGIONS >= kStackMemoryRegions,
+              "KNX_MEMORY_REGIONS is below the regions the stack maps: 4, or 5 with KNX_ENABLE_COUPLER");
 
 void BusAccessStackPort::registerPropertyObject(InterfaceObjectType objectType,
                                                 InterfaceObjectIndex objectIndex)

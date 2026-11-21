@@ -17,6 +17,12 @@
 
 static const char* TAG = "KNX.App.Layer";
 
+// An access level lasts until its connection is released (03/03/07 §3.5.7) and
+// A_Authorize is only accepted on a connection, so the authorisation table never
+// needs more room than the transport layer has connections.
+static_assert(knx::config::AUTHORIZED_PARTNERS >= knx::transport::ConnectionTable::kDefaultMaxConnections,
+              "KNX_AUTHORIZED_PARTNERS must cover the transport connections open at once");
+
 namespace knx {
 namespace application {
 

@@ -138,6 +138,8 @@ on hardware before its `tp1-small` default is fixed at `n`.
 | `KNX_ADDRESS_TABLE_ENTRIES` | `AddressTableObject::kMaxEntries` (256) and `Tp1DataLinkLayer::MAX_GROUP_ADDRESSES` (256) | 128 | 255 | 256 |
 | `KNX_ASSOCIATION_TABLE_ENTRIES` | `AssociationTableObject::kMaxEntries` (512) | 160 | 400 | 512 |
 | `KNX_ADDITIONAL_INDIVIDUAL_ADDRESSES` | `MAX_ADDITIONAL_INDIVIDUAL_ADDRESSES` (16) | 0 | 4 | 16 |
+| `KNX_MEMORY_REGIONS` | `AddressSpace::MAX_REGIONS` (16) and the management server's 8 memory segment bindings, now one table; at least 4 (5 with the coupler) | 4 | 4 | 8 |
+| `KNX_AUTHORIZED_PARTNERS` | `AuthorizationService::MAX_AUTHORIZED_DEVICES` (16); a level lasts only as long as its connection | 1 | 1 | 16 |
 | `KNX_MAX_GROUP_OBJECT_PAYLOAD_BYTES` | (exists) | 14 | 14 | 16 |
 | `KNX_SEND_PIPELINE_DEPTH` | A_send pipeline queue | 2 | 4 | 8 |
 | `KNX_PENDING_ACTION_CAPACITY` | Product runtime queue of publishes made before start (2 × port count; 0 keeps that) | 8 | 16 | 0 |

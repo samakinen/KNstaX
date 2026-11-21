@@ -589,6 +589,31 @@ menu "KNX Stack Configuration"
                 own (the tunnel addresses of a KNXnet/IP interface). 0 for an end
                 device. Setting more is refused with an error.
 
+        config KNX_MEMORY_REGIONS
+            int "Memory-mapped regions"
+            default 8
+            range 4 16
+            help
+                Regions of the device's memory that A_Memory_* and
+                A_MemoryExtended_* reach: the group address, association and
+                group object table segments and the application's parameter
+                image (4 on an end device), and a coupler's Filter Table (5).
+                A smaller number fails to compile. Registering one more than
+                this is refused with ResourceUnavailable; the device then
+                answers an access to it as to any unmapped address.
+
+        config KNX_AUTHORIZED_PARTNERS
+            int "Authorised management partners"
+            default 16
+            range 1 16
+            help
+                Partners whose A_Authorize access level the device holds at
+                once. A level lasts until its transport connection is released
+                (03/03/07 section 3.5.7), and the device accepts one connection
+                at a time, so 1 is enough. When the table is full the oldest
+                authorisation is dropped and that partner is back at the free
+                access level.
+
         config KNX_SEND_PIPELINE_DEPTH
             int "Send outcome queue depth"
             default 8

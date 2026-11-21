@@ -169,45 +169,33 @@ util::Result<void> ManagementServer::registerMemoryRegion(const MemoryRegion& re
         return util::Result<void>::err(util::ErrorCode::InvalidParameter);
     }
 
-    auto addRes = _addressSpace->addRegion(region);
+    // The address space keeps the region together with its storage, so the
+    // region A_Memory_* is validated against and the RAM it reaches cannot
+    // disagree, and a region that does not fit is not half-registered.
+    auto addRes = _addressSpace->addRegion(region, storage, std::move(writeGuard));
     if (addRes.isError()) {
         return addRes;
     }
-    if (!_memorySegments.push_back(MemorySegmentBinding{region, storage, std::move(writeGuard)})) {
-        return util::Result<void>::err(util::ErrorCode::ResourceUnavailable);
-    }
 
-    // (Re)wire the storage router. Idempotent: the callbacks iterate the
-    // registered segment list at call time.
+    // (Re)wire the storage router. Idempotent: the callbacks look the region
+    // up in the address space at call time.
     _memoryService->setReadCallback(
         [this](MemoryAddress address, uint8_t length, std::span<uint8_t> out) -> util::Result<void> {
-            for (const auto& segment : _memorySegments) {
-                if (segment.region.containsRange(address, length)) {
-                    const uint32_t offset = static_cast<uint32_t>(address.raw)
-                                          - static_cast<uint32_t>(segment.region.startAddress.raw);
-                    std::copy_n(segment.storage.data() + offset, length, out.data());
-                    return util::Result<void>::ok();
-                }
+            if (out.size() < length) {
+                return util::Result<void>::err(util::ErrorCode::BufferTooSmall);
             }
-            return util::Result<void>::err(util::ErrorCode::InvalidAddress);
+            return _addressSpace->read(address, out.first(length));
         });
     _memoryService->setWriteCallback(
         [this](MemoryAddress address, std::span<const uint8_t> data) -> util::Result<void> {
-            for (auto& segment : _memorySegments) {
-                if (segment.region.containsRange(address, static_cast<uint8_t>(data.size()))) {
-                    if (segment.writeGuard && !segment.writeGuard()) {
-                        KNX_LOGW(TAG, "Write into %s at 0x%04X refused in its current load state",
-                                 segment.region.name != nullptr ? segment.region.name : "region",
-                                 static_cast<unsigned>(address.raw));
-                        return util::Result<void>::err(util::ErrorCode::AccessDenied);
-                    }
-                    const uint32_t offset = static_cast<uint32_t>(address.raw)
-                                          - static_cast<uint32_t>(segment.region.startAddress.raw);
-                    std::copy(data.begin(), data.end(), segment.storage.data() + offset);
-                    return util::Result<void>::ok();
-                }
+            auto written = _addressSpace->write(address, data);
+            if (written.isError() && written.error() == util::ErrorCode::AccessDenied) {
+                const MemoryRegion* refused = _addressSpace->findRegion(address);
+                KNX_LOGW(TAG, "Write into %s at 0x%04X refused in its current load state",
+                         refused != nullptr && refused->name != nullptr ? refused->name : "region",
+                         static_cast<unsigned>(address.raw));
             }
-            return util::Result<void>::err(util::ErrorCode::InvalidAddress);
+            return written;
         });
 
     return util::Result<void>::ok();

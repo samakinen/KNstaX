@@ -115,6 +115,17 @@ public:
         AuthorizationService::KeyTableChangedCallback authorizationKeysChanged;
     };
 
+    /**
+     * @brief Interface objects registerPropertyObject() can record.
+     *
+     * The most a device can have: the core objects (five, six with KNX Secure)
+     * and one of each reference object type (twelve, thirteen with the coupler
+     * role). That is objects::InterfaceObjectManager::kMaxInterfaceObjects,
+     * which this layer cannot include; bau_stack_port.cpp holds the two equal.
+     */
+    static constexpr size_t kMaxInterfaceObjects =
+        (KNX_SECURE_ENABLED ? 6u : 5u) + (KNX_FEATURE_COUPLER ? 13u : 12u);
+
     explicit ManagementServer(ASendPipeline& send);
 
     // The service objects hold callbacks capturing `this`.
@@ -154,6 +165,14 @@ public:
     void setPropertyReadProvider(PropertyReadProvider provider);
     void setPropertyWriteProvider(PropertyWriteProvider provider);
     void setPropertyDescriptionProvider(PropertyDescriptionProvider provider);
+    /**
+     * @brief Map @p storage at @p region for A_Memory_* and A_MemoryExtended_*
+     * @return ok; NotInitialized before init(); InvalidParameter when @p storage
+     *         is shorter than the region; ResourceUnavailable when
+     *         KNX_MEMORY_REGIONS regions are mapped; OperationFailed when it
+     *         overlaps a region already mapped. A region that was not mapped is
+     *         answered like any unmapped address.
+     */
     util::Result<void> registerMemoryRegion(const MemoryRegion& region, std::span<uint8_t> storage,
                                             MemoryWriteGuard writeGuard = {});
 
@@ -244,6 +263,7 @@ private:
 
     // Service handler dependencies
     std::unique_ptr<DeviceDescriptor> _deviceDescriptor;
+    /// The memory-mapped regions and the RAM behind each (registerMemoryRegion()).
     std::unique_ptr<AddressSpace> _addressSpace;
 
     /// Index -> type of every object announced through registerPropertyObject().
@@ -251,19 +271,7 @@ private:
         InterfaceObjectIndex index;
         InterfaceObjectType type;
     };
-    static constexpr size_t kMaxInterfaceObjects = 32;
     util::FixedVector<RegisteredObject, kMaxInterfaceObjects> _registeredObjects;
-
-    // Memory-mapped regions registered via registerMemoryRegion(); the memory
-    // service read/write callbacks route A_Memory accesses into these spans.
-    struct MemorySegmentBinding {
-        MemoryRegion region;
-        std::span<uint8_t> storage;
-        /// Refuses writes while it returns false (see MemoryWriteGuard).
-        MemoryWriteGuard writeGuard{};
-    };
-    static constexpr size_t kMaxMemorySegments = 8;
-    util::FixedVector<MemorySegmentBinding, kMaxMemorySegments> _memorySegments;
 
     // Service handlers (created in init())
     std::unique_ptr<DeviceDescriptorService> _deviceDescriptorService;

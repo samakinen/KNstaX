@@ -74,7 +74,7 @@ def test_tp1_small_is_tp1_only_baremetal_without_logs():
 CAPACITY_SYMBOLS = ('MAX_APDU_LENGTH', 'TP1_RX_QUEUE_FRAMES', 'TRANSPORT_RX_QUEUE', 'ADDRESS_TABLE_ENTRIES',
                     'ASSOCIATION_TABLE_ENTRIES', 'ADDITIONAL_INDIVIDUAL_ADDRESSES',
                     'MAX_GROUP_OBJECT_PAYLOAD_BYTES', 'SEND_PIPELINE_DEPTH', 'PENDING_ACTION_CAPACITY',
-                    'CALLBACK_CAPTURE_BYTES')
+                    'CALLBACK_CAPTURE_BYTES', 'MEMORY_REGIONS', 'AUTHORIZED_PARTNERS')
 
 
 def _capacities(profile):
@@ -164,19 +164,20 @@ def test_capacities_per_profile():
     full = dict(MAX_APDU_LENGTH=254, TP1_RX_QUEUE_FRAMES=32, TRANSPORT_RX_QUEUE=8, ADDRESS_TABLE_ENTRIES=256,
                 ASSOCIATION_TABLE_ENTRIES=512, ADDITIONAL_INDIVIDUAL_ADDRESSES=16,
                 MAX_GROUP_OBJECT_PAYLOAD_BYTES=16, SEND_PIPELINE_DEPTH=8, PENDING_ACTION_CAPACITY=0,
-                CALLBACK_CAPTURE_BYTES=0)
+                CALLBACK_CAPTURE_BYTES=0, MEMORY_REGIONS=8, AUTHORIZED_PARTNERS=16)
     small = dict(MAX_APDU_LENGTH=15, TP1_RX_QUEUE_FRAMES=4, TRANSPORT_RX_QUEUE=2, ADDRESS_TABLE_ENTRIES=128,
                  ASSOCIATION_TABLE_ENTRIES=160, ADDITIONAL_INDIVIDUAL_ADDRESSES=0,
                  MAX_GROUP_OBJECT_PAYLOAD_BYTES=14, SEND_PIPELINE_DEPTH=2, PENDING_ACTION_CAPACITY=8,
-                 CALLBACK_CAPTURE_BYTES=8)
+                 CALLBACK_CAPTURE_BYTES=8, MEMORY_REGIONS=4, AUTHORIZED_PARTNERS=1)
     standard = dict(MAX_APDU_LENGTH=55, TP1_RX_QUEUE_FRAMES=8, TRANSPORT_RX_QUEUE=4, ADDRESS_TABLE_ENTRIES=255,
                     ASSOCIATION_TABLE_ENTRIES=400, ADDITIONAL_INDIVIDUAL_ADDRESSES=4,
                     MAX_GROUP_OBJECT_PAYLOAD_BYTES=14, SEND_PIPELINE_DEPTH=4, PENDING_ACTION_CAPACITY=16,
-                    CALLBACK_CAPTURE_BYTES=8)
+                    CALLBACK_CAPTURE_BYTES=8, MEMORY_REGIONS=4, AUTHORIZED_PARTNERS=1)
     assert _capacities('full') == full
     assert _capacities('host-test') == full
     assert _capacities('tp1-small') == small
-    assert _capacities('host-small') == dict(small, CALLBACK_CAPTURE_BYTES=0)
+    # host-small has the coupler, whose Filter Table is a fifth memory region.
+    assert _capacities('host-small') == dict(small, CALLBACK_CAPTURE_BYTES=0, MEMORY_REGIONS=5)
     assert _capacities('tp1-standard') == standard
 
 
@@ -189,7 +190,8 @@ def test_capacity_defaults_equal_full_when_unset():
                   'CONFIG_KNX_TRANSPORT_RX_QUEUE 8', 'CONFIG_KNX_ADDRESS_TABLE_ENTRIES 256',
                   'CONFIG_KNX_ASSOCIATION_TABLE_ENTRIES 512', 'CONFIG_KNX_ADDITIONAL_INDIVIDUAL_ADDRESSES 16',
                   'CONFIG_KNX_SEND_PIPELINE_DEPTH 8', 'CONFIG_KNX_PENDING_ACTION_CAPACITY 0',
-                  'CONFIG_KNX_CALLBACK_CAPTURE_BYTES 0'):
+                  'CONFIG_KNX_CALLBACK_CAPTURE_BYTES 0', 'CONFIG_KNX_MEMORY_REGIONS 8',
+                  'CONFIG_KNX_AUTHORIZED_PARTNERS 16'):
         assert f'#define {macro}' in text, macro
 
 

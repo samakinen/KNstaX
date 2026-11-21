@@ -66,6 +66,16 @@ public:
     /// Sends A_Authorize_Response(level) to @p destination.
     using ResponseCallback = util::InplaceFunction<void(const IndividualAddress& destination, AccessLevel level), ::knx::config::callbackBytes(32)>;
 
+    /**
+     * @brief Partners whose current level is held at once (KNX_AUTHORIZED_PARTNERS).
+     *
+     * A level lasts until its connection is released (§3.5.7), so this need
+     * not exceed the transport connections open at once; application_layer.cpp
+     * checks that. When it is full, the oldest authorisation is dropped and
+     * that partner is back at the free access level.
+     */
+    static constexpr size_t kMaxAuthorizedPartners = config::AUTHORIZED_PARTNERS;
+
     /// The key table changed through a management service; persist it.
     using KeyTableChangedCallback = util::InplaceFunction<void(const KeyTable& keys), ::knx::config::callbackBytes(32)>;
 
@@ -166,11 +176,9 @@ private:
         uint32_t timestamp{0};
     };
 
-    static constexpr size_t MAX_AUTHORIZED_DEVICES = 16;
-
     KeyTable _keys;
 
-    AuthorizedDevice _authorizedDevices[MAX_AUTHORIZED_DEVICES];
+    AuthorizedDevice _authorizedDevices[kMaxAuthorizedPartners];
     size_t _authorizedCount{0};
     uint32_t _authorizationTimeout{NO_TIMEOUT};
     mutable uint32_t _logicalClock{0};

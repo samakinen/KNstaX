@@ -59,6 +59,70 @@ void test_AddressSpace_RejectZeroSize(void) {
     TEST_ASSERT_TRUE(space.addRegion(region).isError());
 }
 
+// A capacity is a promise (small-target-profile.md §3.3): the region after the
+// last one KNX_MEMORY_REGIONS allows is refused, and the table is unchanged.
+void test_AddressSpace_FullTableRefusesAnotherRegion(void) {
+    AddressSpace space;
+    for (size_t i = 0; i < AddressSpace::MAX_REGIONS; ++i) {
+        const MemoryRegion region{knx::MemoryAddress(static_cast<uint16_t>(0x1000 + i * 0x10)), 0x10,
+                                  MemoryAccessMode::ReadWrite, "Region"};
+        TEST_ASSERT_TRUE(space.addRegion(region).isOk());
+    }
+    const MemoryRegion oneMore{knx::MemoryAddress(0x0100), 0x10, MemoryAccessMode::ReadWrite, "OneMore"};
+    const auto refused = space.addRegion(oneMore);
+    TEST_ASSERT_TRUE(refused.isError());
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::ResourceUnavailable, refused.error());
+    TEST_ASSERT_EQUAL(AddressSpace::MAX_REGIONS, space.getRegionCount());
+    TEST_ASSERT_NULL(space.findRegion(knx::MemoryAddress(0x0100)));
+}
+
+// A region registered with its storage is read and written in place; one
+// without storage, or a range running past the region, is not reachable.
+void test_AddressSpace_ReadAndWriteReachTheStorage(void) {
+    AddressSpace space;
+    std::array<uint8_t, 8> storage{};
+    const MemoryRegion region{knx::MemoryAddress(0x4000), 8, MemoryAccessMode::ReadWrite, "Table"};
+    TEST_ASSERT_TRUE(space.addRegion(region, storage).isOk());
+    const MemoryRegion bare{knx::MemoryAddress(0x5000), 8, MemoryAccessMode::ReadWrite, "Bare"};
+    TEST_ASSERT_TRUE(space.addRegion(bare).isOk());
+
+    const std::array<uint8_t, 3> data{0x11, 0x22, 0x33};
+    TEST_ASSERT_TRUE(space.write(knx::MemoryAddress(0x4002), data).isOk());
+    TEST_ASSERT_EQUAL_HEX8(0x11, storage[2]);
+    TEST_ASSERT_EQUAL_HEX8(0x33, storage[4]);
+
+    std::array<uint8_t, 3> out{};
+    TEST_ASSERT_TRUE(space.read(knx::MemoryAddress(0x4002), out).isOk());
+    TEST_ASSERT_TRUE(out == data);
+
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::InvalidAddress, space.read(knx::MemoryAddress(0x4006), out).error());
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::InvalidAddress, space.read(knx::MemoryAddress(0x5000), out).error());
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::InvalidAddress, space.write(knx::MemoryAddress(0x5000), data).error());
+}
+
+void test_AddressSpace_StorageShorterThanTheRegionIsRefused(void) {
+    AddressSpace space;
+    std::array<uint8_t, 4> storage{};
+    const MemoryRegion region{knx::MemoryAddress(0x4000), 8, MemoryAccessMode::ReadWrite, "Table"};
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::InvalidParameter, space.addRegion(region, storage).error());
+    TEST_ASSERT_EQUAL(0, space.getRegionCount());
+}
+
+void test_AddressSpace_WriteGuardRefusesWrites(void) {
+    AddressSpace space;
+    std::array<uint8_t, 4> storage{};
+    bool open = false;
+    const MemoryRegion region{knx::MemoryAddress(0x4000), 4, MemoryAccessMode::ReadWrite, "Filter"};
+    TEST_ASSERT_TRUE(space.addRegion(region, storage, [&open]() { return open; }).isOk());
+
+    const std::array<uint8_t, 1> data{0x5A};
+    TEST_ASSERT_EQUAL(knx::util::ErrorCode::AccessDenied, space.write(knx::MemoryAddress(0x4000), data).error());
+    TEST_ASSERT_EQUAL_HEX8(0x00, storage[0]);
+    open = true;
+    TEST_ASSERT_TRUE(space.write(knx::MemoryAddress(0x4000), data).isOk());
+    TEST_ASSERT_EQUAL_HEX8(0x5A, storage[0]);
+}
+
 void test_AddressSpace_FindRegion(void) {
     AddressSpace space;
     
@@ -741,6 +805,10 @@ int main(void) {
     RUN_TEST(test_AddressSpace_AddRegion);
     RUN_TEST(test_AddressSpace_RejectOverlap);
     RUN_TEST(test_AddressSpace_RejectZeroSize);
+    RUN_TEST(test_AddressSpace_FullTableRefusesAnotherRegion);
+    RUN_TEST(test_AddressSpace_ReadAndWriteReachTheStorage);
+    RUN_TEST(test_AddressSpace_StorageShorterThanTheRegionIsRefused);
+    RUN_TEST(test_AddressSpace_WriteGuardRefusesWrites);
     RUN_TEST(test_AddressSpace_FindRegion);
     RUN_TEST(test_AddressSpace_CanRead);
     RUN_TEST(test_AddressSpace_BoundaryCheck);

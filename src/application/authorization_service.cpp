@@ -19,7 +19,7 @@ static const char* TAG = "KNX.App.Auth";
 AuthorizationService::AuthorizationService()
 {
     _keys.fill(kNoKey);
-    std::fill_n(_authorizedDevices, MAX_AUTHORIZED_DEVICES, AuthorizedDevice{});
+    std::fill_n(_authorizedDevices, kMaxAuthorizedPartners, AuthorizedDevice{});
 }
 
 util::Result<void> AuthorizationService::setKey(AccessLevel level, const AuthorizationKey& key)
@@ -160,7 +160,7 @@ void AuthorizationService::clearAuthorization(const IndividualAddress& address)
 void AuthorizationService::clearAllAuthorizations()
 {
     _authorizedCount = 0;
-    std::fill_n(_authorizedDevices, MAX_AUTHORIZED_DEVICES, AuthorizedDevice{});
+    std::fill_n(_authorizedDevices, kMaxAuthorizedPartners, AuthorizedDevice{});
 }
 
 void AuthorizationService::storeAuthorization(const IndividualAddress& address, AccessLevel level)
@@ -175,7 +175,7 @@ void AuthorizationService::storeAuthorization(const IndividualAddress& address, 
         return;
     }
 
-    if (_authorizedCount < MAX_AUTHORIZED_DEVICES) {
+    if (_authorizedCount < kMaxAuthorizedPartners) {
         _authorizedDevices[_authorizedCount] = AuthorizedDevice{address, level, now};
         ++_authorizedCount;
         return;
