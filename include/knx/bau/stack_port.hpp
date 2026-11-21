@@ -95,6 +95,8 @@ public:
     /// Install the device-side Resources behind Master Reset erase codes and
     /// Verify Mode (see ApplicationLayer::ManagementServerHooks).
     void setManagementServerHooks(application::ApplicationLayer::ManagementServerHooks hooks);
+    /// A Master Reset asked for on the device (ManagementServer::localMasterReset).
+    util::Result<void> localMasterReset(application::EraseCode eraseCode);
     void processBackgroundWork();
     util::Result<void> sendDataLinkFrame(const datalink::LDataFrame& frame);
     void setDataLinkPromiscuousMode(datalink::PromiscuousMode mode);

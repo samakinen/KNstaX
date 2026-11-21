@@ -654,6 +654,50 @@ void test_product_fdsk_returns_after_a_factory_reset(void)
     eraseFdskStore();
 }
 
+// The factory reset a product offers on the device (a long press of the
+// programming button): ETS's Master Reset 02h without the bus, then a
+// restart. Unlike erasing the store, it keeps what a Master Reset keeps.
+namespace {
+class RestartRecordingPlatform : public platform::LinuxPlatform {
+public:
+    void restart() override { ++restarts; }
+    int restarts{0};
+};
+} // namespace
+
+void test_product_factory_reset_on_the_device(void)
+{
+    eraseFdskStore();
+    {
+        // Addressed and secured by ETS.
+        platform::LinuxPlatform platform;
+        bau::BusAccessUnit device(platform, makeNullBackend());
+        TEST_ASSERT_TRUE(device.init(IndividualAddress(1, 1, 46), kFdskNamespace, 3).isOk());
+        device.securityObject().setSecurityMode(objects::SecurityMode::Enabled);
+        TEST_ASSERT_TRUE(device.writeProperty(
+            InterfaceObjectType::security(), InterfaceObjectInstance(1),
+            static_cast<application::PropertyID>(objects::SecurityProperty::ToolKey), 1,
+            std::span<const uint8_t>(kDownloadedToolKey)).isOk());
+        device.flushPendingPersistence();
+        device.close();
+    }
+    {
+        RestartRecordingPlatform platform;
+        auto runtime = startFdskProduct(platform);
+        TEST_ASSERT_TRUE(runtime->toolKeyInForceIs(kDownloadedToolKey));
+        TEST_ASSERT_TRUE(runtime->factoryReset().isOk());
+        TEST_ASSERT_EQUAL_INT(1, platform.restarts);
+    }
+    {
+        // What the restart boots into: ex-factory, the FDSK back in force.
+        platform::LinuxPlatform platform;
+        auto runtime = startFdskProduct(platform);
+        TEST_ASSERT_TRUE(runtime->toolKeyInForceIs(kFdsk));
+        TEST_ASSERT_FALSE(runtime->isSecurityEnabled());
+    }
+    eraseFdskStore();
+}
+
 void test_product_commissioned_security_helpers_refuse_before_start(void)
 {
     // They act on the started device. Before start() they used to return ok
@@ -673,6 +717,7 @@ void test_product_commissioned_security_helpers_refuse_before_start(void)
     TEST_ASSERT_EQUAL_INT(notReady, static_cast<int>(runtime.applyEtsToolKey(kKey).error()));
     TEST_ASSERT_EQUAL_INT(notReady, static_cast<int>(runtime.installFactoryToolKey(kKey).error()));
     TEST_ASSERT_EQUAL_INT(notReady, static_cast<int>(runtime.enableSecurityMode().error()));
+    TEST_ASSERT_EQUAL_INT(notReady, static_cast<int>(runtime.factoryReset().error()));
     TEST_ASSERT_EQUAL_INT(notReady,
                           static_cast<int>(runtime.applyEtsGroupKey(GroupAddress(1, 2, 3), kKey).error()));
 }
@@ -836,6 +881,7 @@ int main(void)
     RUN_TEST(test_product_fdsk_fresh_device_has_the_fdsk_and_mode_off);
     RUN_TEST(test_product_fdsk_yields_to_the_ets_download_across_restarts);
     RUN_TEST(test_product_fdsk_returns_after_a_factory_reset);
+    RUN_TEST(test_product_factory_reset_on_the_device);
     RUN_TEST(test_product_commissioned_security_helpers_refuse_before_start);
     RUN_TEST(test_product_commissioned_support_tier_values);
 #if KNX_IP_TUNNELING

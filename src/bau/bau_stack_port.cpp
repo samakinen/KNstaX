@@ -469,6 +469,14 @@ void BusAccessStackPort::setManagementServerHooks(application::ApplicationLayer:
     }
 }
 
+util::Result<void> BusAccessStackPort::localMasterReset(application::EraseCode eraseCode)
+{
+    if (!_application) {
+        return util::ErrorCode::NotInitialized;
+    }
+    return _application->managementServer().localMasterReset(eraseCode);
+}
+
 util::Result<void> BusAccessStackPort::setOwnAddress(const IndividualAddress& ownAddress)
 {
     auto* dataLink = _medium->dataLinkLayer();

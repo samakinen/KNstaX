@@ -161,6 +161,18 @@ public:
     void setAdcReadProvider(AdcReadProvider provider) { _adcReadProvider = std::move(provider); }
     void setHooks(Hooks hooks);
 
+    /**
+     * @brief A Master Reset asked for on the device itself, not over the bus
+     *        (a factory reset button, say).
+     *
+     * Does what an A_Restart Master Reset with @p eraseCode does, except the
+     * restart: the caller restarts afterwards. Physical access stands in for
+     * the highest access level, so Erase Codes 02h and 07h reset every
+     * authorisation key (03/05/02 §3.7.1.2.3.2.3 resets from the requester's
+     * level up). No authorisation check and no response.
+     */
+    util::Result<void> localMasterReset(EraseCode eraseCode);
+
     void registerPropertyObject(InterfaceObjectType objectType, InterfaceObjectIndex objectIndex);
     void setPropertyReadProvider(PropertyReadProvider provider);
     void setPropertyWriteProvider(PropertyWriteProvider provider);
@@ -293,6 +305,8 @@ private:
     AccessLevel _masterResetRequesterLevel{AuthorizationService::kMinimumAccessLevel};
     /// The owner's part of a Master Reset (Hooks::masterReset).
     RestartService::MasterResetCallback _masterResetHook{};
+    /// The authorisation keys, then the owner's part, for a requester at @p level.
+    util::Result<void> applyMasterReset(EraseCode eraseCode, AccessLevel requesterLevel);
 
     IndividualAddressUpdateCallback _individualAddressUpdateCallback{};
     AdcReadProvider _adcReadProvider{};

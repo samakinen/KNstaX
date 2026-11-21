@@ -275,6 +275,15 @@ for (;;) {
 }
 ```
 
+A factory reset on the device itself (a long press of the programming button,
+say) is `app->factoryReset()`: the Master Reset ETS does with Erase Code 02h,
+then a restart through the platform. Use it rather than erasing the product's
+storage, which would also lose what a Master Reset keeps, the Data Secure
+sending sequence number above all. A record of the product's own in the same
+store (an actuator's output states, say) takes a key from
+`InterfaceObjectManager::kProductKeyIdFirst`..`kProductKeyIdLast`, which the
+stack never uses.
+
 **6. Keep commissioning data out of normal firmware paths.**
 
 Group addresses are written by ETS and restored automatically from persistence.

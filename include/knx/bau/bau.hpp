@@ -620,6 +620,20 @@ public:
     util::Result<void> setCommissioningMode(bool enabled);
     bool commissioningModeEnabled() const;
 
+    /**
+     * Factory reset asked for on the device (a long press of its programming
+     * button, say): the Master Reset ETS does with Erase Code 02h, then a
+     * restart through Platform::restart(). The individual address, links,
+     * parameters and keys go back to ex-factory; the Data Secure Sequence
+     * Number Sending does not (03/03/07 §5), which is why a product must not
+     * erase its storage instead. Physical access counts as the highest
+     * access level, so every authorisation key is reset.
+     *
+     * Returns only on failure, or where Platform::restart() returns (a host
+     * test): OperationNotReady before the stack runs.
+     */
+    util::Result<void> factoryReset();
+
 #if KNX_FEATURE_COUPLER
     /// Declare this device a coupler and publish the Router Object. Opt-in:
     /// see BusAccessUnit::RouterRoleConfig for why it is not automatic.

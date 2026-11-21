@@ -523,6 +523,15 @@ public:
     }
 #endif
 
+    /// See ManagementControl::factoryReset().
+    util::Result<void> factoryReset()
+    {
+        if (!_bau) {
+            return util::ErrorCode::OperationNotReady;
+        }
+        return _bau->management().factoryReset();
+    }
+
     bool isProgrammingModeActive() const
     {
         if (_bau) {

@@ -158,6 +158,15 @@ public:
     /// Bit that selects bank 1 in a property key.
     static constexpr uint16_t kPersistenceBank1KeyBit = 0x8000u;
 
+    /// Keys the stack never uses, for records of the product's own in the
+    /// same store (an actuator's output states written at a bus power
+    /// failure, say). Object type 0x7F is not assigned and bit 15 is clear,
+    /// so no property key, banked or not, falls in the range. The stack
+    /// leaves them alone, except that a schema version change (see
+    /// kPersistenceSchemaVersionKeyId) erases the whole store.
+    static constexpr uint16_t kProductKeyIdFirst = 0x7F00u;
+    static constexpr uint16_t kProductKeyIdLast = 0x7FFFu;
+
     /// Banked record holding a coupler's Filter Table with its load state,
     /// allocation, PID_ERROR_CODE and PID_MCB_TABLE
     /// (network::FilterTableLoadControl::serialize()).

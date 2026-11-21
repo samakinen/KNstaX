@@ -387,6 +387,22 @@ void DeviceManagement::setDomainAddress(std::span<const uint8_t> domainAddress)
 
 // ─── Master Reset ────────────────────────────────────────────────────────────
 
+util::Result<void> DeviceManagement::factoryReset()
+{
+    if (_stackPort == nullptr || !_running) {
+        return util::ErrorCode::OperationNotReady;
+    }
+    // The same Resources as ETS's Erase Code 02h, address included, and saved
+    // the same way (applyMasterReset); then the restart A_Restart would do.
+    if (const auto reset = _stackPort->localMasterReset(application::EraseCode::FactoryReset); reset.isError()) {
+        return reset;
+    }
+    KNX_LOGW(TAG, "Factory reset on the device: restarting");
+    _model.flushPersistenceIfDirty();
+    _platform.restart();
+    return util::Result<void>::ok();
+}
+
 util::Result<void> DeviceManagement::applyMasterReset(application::EraseCode eraseCode)
 {
     using application::EraseCode;
@@ -1482,6 +1498,7 @@ util::Result<void> DeviceManagement::applyKnxNetIpConfiguration(const netip::Knx
 void ManagementControl::setDeviceMedium(MediumType medium) { _management.setDeviceMedium(medium); }
 util::Result<void> ManagementControl::setCommissioningMode(bool enabled) { return _management.setCommissioningMode(enabled); }
 bool ManagementControl::commissioningModeEnabled() const { return _management.commissioningModeEnabled(); }
+util::Result<void> ManagementControl::factoryReset() { return _management.factoryReset(); }
 #if KNX_FEATURE_COUPLER
 util::Result<void> ManagementControl::configureRouterRole(const RouterRoleConfig& config) { return _management.configureRouterRole(config); }
 util::Result<void> ManagementControl::syncRouterRoutingConfig() { return _management.syncRouterRoutingConfig(); }

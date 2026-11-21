@@ -905,6 +905,22 @@ void ManagementServer::handleKeyWrite(const ADataFrame& frame) {
     sendServiceResponse(frame.source, APCIService::KeyResponse, payload);
 }
 
+util::Result<void> ManagementServer::applyMasterReset(EraseCode eraseCode, AccessLevel requesterLevel) {
+    if (eraseCode == EraseCode::FactoryReset || eraseCode == EraseCode::FactoryResetWithoutIndividualAddress) {
+        _authorizationService->resetKeysFrom(requesterLevel);
+    }
+    return _masterResetHook ? _masterResetHook(eraseCode) : util::Result<void>::ok();
+}
+
+util::Result<void> ManagementServer::localMasterReset(EraseCode eraseCode) {
+    // ConfirmedRestart (01h) resets nothing; only 02h..07h are Master Resets.
+    if (eraseCode == EraseCode::ConfirmedRestart || !_restartService
+        || !_restartService->isEraseCodeSupported(static_cast<uint8_t>(eraseCode))) {
+        return util::ErrorCode::InvalidParameter;
+    }
+    return applyMasterReset(eraseCode, AuthorizationService::kMaximumAccessLevel);
+}
+
 void ManagementServer::setHooks(Hooks hooks) {
     _masterResetHook = std::move(hooks.masterReset);
     if (_restartService) {
@@ -915,11 +931,7 @@ void ManagementServer::setHooks(Hooks hooks) {
         // this server's, so they are reset here before the owner of the other
         // Resources does its part.
         _restartService->setMasterResetCallback([this](EraseCode eraseCode) -> util::Result<void> {
-            if (eraseCode == EraseCode::FactoryReset
-                || eraseCode == EraseCode::FactoryResetWithoutIndividualAddress) {
-                _authorizationService->resetKeysFrom(_masterResetRequesterLevel);
-            }
-            return _masterResetHook ? _masterResetHook(eraseCode) : util::Result<void>::ok();
+            return applyMasterReset(eraseCode, _masterResetRequesterLevel);
         });
     }
     if (_memoryService) {

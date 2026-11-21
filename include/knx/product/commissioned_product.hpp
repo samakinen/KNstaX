@@ -1864,6 +1864,20 @@ public:
         _runtime.toggleProgrammingMode();
     }
 
+    /**
+     * Factory reset from the device itself, for a long press of the
+     * programming button: what ETS's Master Reset with Erase Code 02h does
+     * (address, links, parameters and keys back to ex-factory, the Data
+     * Secure sending counter kept), then a restart through the platform.
+     * Use this rather than erasing the product's storage, which would also
+     * lose the sending counter. Returns only if it fails or the platform's
+     * restart returns.
+     */
+    util::Result<void> factoryReset()
+    {
+        return _runtime.factoryReset();
+    }
+
     void requestProgrammingMode(bool active)
     {
         if (_runtime.isProgrammingModeActive() != active) {

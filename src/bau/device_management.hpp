@@ -83,6 +83,7 @@ public:
     void setDeviceMedium(MediumType medium);
     util::Result<void> setCommissioningMode(bool enabled);
     bool commissioningModeEnabled() const;
+    util::Result<void> factoryReset();
 #if KNX_FEATURE_COUPLER
     util::Result<void> configureRouterRole(const RouterRoleConfig& config);
     util::Result<void> syncRouterRoutingConfig();
