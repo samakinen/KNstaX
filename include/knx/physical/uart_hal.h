@@ -15,7 +15,9 @@
  *   - Interrupt context. The HAL calls the RX callback from its receive
  *     interrupt, once per octet, in the order the octets arrived. The callback
  *     may call write() (the TP-UART acknowledge decision is made there), so
- *     write() must be safe to call from inside the RX callback.
+ *     write() must be safe to call from inside the RX callback. Where the
+ *     board gives SAVE an edge interrupt, the SAVE edge callback runs there
+ *     too and may call read_save().
  *   - Main context. open(), close(), write(), tx_free() and the pin functions.
  *     The stack calls them from one thread only (the cooperative main loop on
  *     bare metal, the stack's task elsewhere).
@@ -72,6 +74,14 @@ typedef struct {
  *               timer may pass a coarser clock scaled to microseconds. */
 typedef void (*knx_uart_hal_rx_cb_t)(void* rx_context, uint8_t octet, uint8_t flags, uint32_t timestamp_us);
 
+/* Called from an interrupt on an edge of the transceiver's SAVE output.
+ *
+ * timestamp_us: when the edge was seen, from the same clock as the RX
+ *               callback's time stamps. The callback reads the level itself
+ *               (read_save), so a board may call it for both edges. It may
+ *               call read_save() and must not block. */
+typedef void (*knx_uart_hal_save_edge_cb_t)(void* save_context, uint32_t timestamp_us);
+
 typedef struct {
     /* Configure the port and start receiving. The RX callback may run as soon
      * as open() has enabled the receiver, before open() returns. Returns false
@@ -104,8 +114,21 @@ typedef struct {
 
     /* Optional (NULL when the board does not wire the transceiver's SAVE
      * output to the MCU). Returns true while the transceiver signals a bus
-     * power failure. The board applies the pin's polarity. */
+     * power failure. The board applies the pin's polarity. The backend samples
+     * it from the main context and debounces it (LinkSignalPolicy in the
+     * backend's configuration), exactly as the TP1 bitbang driver treats the
+     * STKNX KNX_OK output. */
     bool (*read_save)(void* context);
+
+    /* Optional, both or neither (NULL when SAVE has no edge interrupt; it is
+     * then only polled). install_save_edge_isr() makes the board call cb from
+     * an interrupt on every edge of SAVE, until remove_save_edge_isr(). The
+     * backend uses it only for the early power-fail warning
+     * (LinkSignalPolicy::notifyPowerFailFromIsr); the debounced state is
+     * still taken from read_save(). Returns false if the interrupt cannot be
+     * set up. Requires read_save. */
+    bool (*install_save_edge_isr)(void* context, knx_uart_hal_save_edge_cb_t cb, void* save_context);
+    void (*remove_save_edge_isr)(void* context);
 } knx_uart_hal_ops_t;
 
 typedef struct {
@@ -163,6 +186,26 @@ static inline bool knx_uart_hal_has_save(const knx_uart_hal_t* hal)
 static inline bool knx_uart_hal_read_save(const knx_uart_hal_t* hal)
 {
     return knx_uart_hal_has_save(hal) && hal->ops.read_save(hal->context);
+}
+
+static inline bool knx_uart_hal_has_save_edge_isr(const knx_uart_hal_t* hal)
+{
+    return knx_uart_hal_has_save(hal) && hal->ops.install_save_edge_isr && hal->ops.remove_save_edge_isr;
+}
+
+static inline bool knx_uart_hal_install_save_edge_isr(const knx_uart_hal_t* hal,
+                                                      knx_uart_hal_save_edge_cb_t cb,
+                                                      void* save_context)
+{
+    return knx_uart_hal_has_save_edge_isr(hal) && cb &&
+           hal->ops.install_save_edge_isr(hal->context, cb, save_context);
+}
+
+static inline void knx_uart_hal_remove_save_edge_isr(const knx_uart_hal_t* hal)
+{
+    if (knx_uart_hal_has_save_edge_isr(hal)) {
+        hal->ops.remove_save_edge_isr(hal->context);
+    }
 }
 
 #ifdef __cplusplus

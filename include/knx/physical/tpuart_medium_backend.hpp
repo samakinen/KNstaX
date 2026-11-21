@@ -20,6 +20,8 @@
  *     slots, decides the acknowledge and writes U_AckInformation, and records
  *     confirmations and chip indications in atomics. It never allocates, locks
  *     or logs, and it runs from RAM where the platform needs it (KNX_ISR_RAM).
+ *     Where the board gives SAVE an edge interrupt, its callback runs here
+ *     too: it only reads SAVE and calls the power-fail handler.
  *   - Main context: every Tp1MediumBackend method. service() drains the ring
  *     and turns what the interrupt recorded into Tp1RxEvents, exactly as the
  *     bit-bang pump does, so Tp1MacPhysical sees the same event contract.
@@ -41,6 +43,17 @@
  * only then does service() send U_ResetBusyMode. The chip also leaves busy
  * mode by itself after 700 ms. TP-UART2 manual §3.2.3.1.5 and §3.2.3.1.6.
  *
+ * Bus power (SAVE)
+ * ----------------
+ * The transceiver's SAVE output is the TP-UART's counterpart of the STKNX
+ * KNX_OK output, and is handled the same way: sampled from the main context
+ * (service()), debounced by LinkMonitor with a LinkSignalPolicy
+ * (TpUartConfig::saveSignal), reported as LinkStateChanged, and, where the
+ * board gives it an edge interrupt, an early power-fail warning from that
+ * interrupt (setPowerFailIsrHandler). A debounced power failure reports the
+ * link Down, as do a chip that does not come back and two unanswered
+ * U_State.req.
+ *
  * Protocol values: Siemens TP-UART2 technical manual, cross-checked against
  * thelsing/knx (tpuart_data_link_layer.cpp). The table in the design note
  * lists them. Items still to confirm on a real chip are in §3.8 there.
@@ -49,6 +62,7 @@
 #pragma once
 
 #include "knx/config.hpp"
+#include "knx/physical/link_monitor.hpp"
 #include "knx/physical/tp1_medium_backend.hpp"
 #include "knx/physical/uart_hal.h"
 #include "knx/platform/flash_erase_guard.hpp"
@@ -98,6 +112,12 @@ struct TpUartConfig {
     /// The H8i8o's TP-UART2 answered after 6.9 ms (15 Nov 2026), so 10 ms was too tight.
     uint32_t resetTimeoutMs{50u};
     uint8_t resetAttempts{3u};
+    /// The transceiver's SAVE output, where the HAL provides read_save:
+    /// debounce windows and the early power-fail warning, with the same
+    /// meaning and defaults as the TP1 bitbang driver's KNX_OK input
+    /// (LinkSignalConfig). SAVE is sampled at every service(), so a debounce
+    /// decision lands at the first service() after its window.
+    LinkSignalPolicy saveSignal{};
 };
 
 /// Counters for diagnostics and tests. Interrupt-side counts are read with
@@ -125,6 +145,7 @@ struct TpUartStatistics {
     uint32_t chipResets{0};           ///< U_Reset.ind the backend did not ask for
     uint32_t stateIndications{0};
     uint32_t missedStatePolls{0};
+    uint32_t powerFailWarnings{0};    ///< SAVE edges into power failure passed to the handler
     uint8_t lastStateBits{0};         ///< last U_State.ind
 };
 
@@ -223,6 +244,10 @@ public:
     Tp1MediumState getState() const override;
     Tp1CapabilityProfile getCapabilities() const override;
     LinkState getLinkState() const override { return _linkState; }
+    /// Called from the HAL's SAVE edge interrupt when SAVE asserts, provided
+    /// TpUartConfig::saveSignal.notifyPowerFailFromIsr is set and the HAL has
+    /// install_save_edge_isr. See Tp1MediumBackend::setPowerFailIsrHandler().
+    void setPowerFailIsrHandler(LinkPowerFailIsrHandler handler, void* context) override;
 
     /// Entering sends U_Busmon.req; leaving resets the chip (the only way out).
     util::Result<void> setBusMonitorMode(bool enabled) override;
@@ -296,6 +321,9 @@ private:
     };
 
     static void rxTrampoline(void* context, uint8_t octet, uint8_t flags, uint32_t timestampUs);
+    static void saveEdgeTrampoline(void* context, uint32_t timestampUs);
+    void openSaveSignal();
+    void closeSaveSignal();
     void onRxOctet(uint8_t octet, uint8_t flags, uint32_t timestampUs);
     void onIdleOctet(uint8_t octet, uint8_t flags);
     void decideAck(uint16_t destination, bool groupAddressed);
@@ -365,6 +393,10 @@ private:
     uint32_t _stateIndications{0};
     uint32_t _missedStatePolls{0};
     uint8_t _lastStateBits{0};
+    /// SAVE, debounced as the bitbang driver debounces KNX_OK. Inert when the
+    /// HAL has no read_save.
+    LinkMonitor _saveMonitor{};
+    bool _saveEdgeInstalled{false};
 
     // --- Flash erase (main context) ------------------------------------------
     bool _busyModeActive{false};   ///< U_ActivateBusyMode sent, U_ResetBusyMode not yet
@@ -412,6 +444,13 @@ private:
     IsrCounter _echoesDropped;
     IsrCounter _ackWriteFailures;
     IsrCounter _resyncDiscards;
+    IsrCounter _powerFailWarnings;
+
+    // --- Main to the SAVE edge interrupt --------------------------------------
+    /// The context is stored before the handler and read after it, so the
+    /// interrupt never pairs a new handler with an old context.
+    std::atomic<LinkPowerFailIsrHandler> _powerFailHandler{nullptr};
+    std::atomic<void*> _powerFailContext{nullptr};
 
     // --- Main to interrupt: the acknowledge inputs ---------------------------
     std::atomic<uint32_t> _ackTableSequence{0}; ///< odd while the inputs below are being replaced

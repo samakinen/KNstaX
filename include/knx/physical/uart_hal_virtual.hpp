@@ -32,8 +32,9 @@ namespace physical {
 class UartHalVirtual {
 public:
     struct Pins {
-        bool reset{false}; ///< Provide set_reset
-        bool save{false};  ///< Provide read_save
+        bool reset{false};     ///< Provide set_reset
+        bool save{false};      ///< Provide read_save
+        bool saveEdge{false};  ///< Provide the SAVE edge interrupt (with save)
     };
 
     explicit UartHalVirtual(size_t txCapacity = DEFAULT_TX_CAPACITY);
@@ -85,7 +86,10 @@ public:
     size_t openCount() const { return _openCount; }
 
     bool resetAsserted() const { return _resetAsserted; }
-    void setSave(bool asserted) { _saveAsserted = asserted; }
+    /// Change SAVE. A change calls the installed SAVE edge callback, stamped
+    /// with nowUs(), synchronously, as if from the edge interrupt.
+    void setSave(bool asserted);
+    bool saveEdgeInstalled() const { return _saveEdgeCb != nullptr; }
 
     // --- Time -------------------------------------------------------------
 
@@ -114,6 +118,8 @@ private:
 
     bool _resetAsserted{false};
     bool _saveAsserted{false};
+    knx_uart_hal_save_edge_cb_t _saveEdgeCb{nullptr};
+    void* _saveEdgeContext{nullptr};
     uint64_t _nowUs{0};
 
     static bool openShim(void* context,
@@ -125,6 +131,8 @@ private:
     static size_t txFreeShim(void* context);
     static bool setResetShim(void* context, bool asserted);
     static bool readSaveShim(void* context);
+    static bool installSaveEdgeShim(void* context, knx_uart_hal_save_edge_cb_t cb, void* save_context);
+    static void removeSaveEdgeShim(void* context);
 };
 
 } // namespace physical

@@ -9,7 +9,7 @@
  * actually usable, independently of whether anything is being received:
  *
  *   - TP1 bitbang (STKNX):  KNX_OK / bus-voltage-good output of the transceiver
- *   - TP1 TPUART2:          SAVE pin, plus the U_State.indication warning bits
+ *   - TP1 TPUART2:          SAVE output, plus the U_State.indication warning bits
  *   - KNXnet/IP tunneling:  interface up + tunnel connection alive
  *   - KNXnet/IP routing:    interface up + multicast group joined
  *
@@ -107,8 +107,9 @@ using LinkStateCallback = util::InplaceFunction<void(const LinkStatus&, void*), 
 /**
  * @brief Interrupt-context notification of an imminent supply loss
  *
- * Called directly from the edge interrupt of the hardware signal, before any
- * debouncing, so that boards with a short hold-up time get the maximum possible
+ * Called directly from the edge interrupt of the hardware signal (STKNX
+ * KNX_OK, TP-UART SAVE), before any debouncing, on an edge into the power-fail
+ * state, so that boards with a short hold-up time get the maximum possible
  * save window. It runs under all the usual ISR restrictions — on ESP-IDF it
  * must be IRAM-resident and must not log, block, or touch flash. The intended
  * body is a few instructions that hand off to a high-priority task (give a
@@ -117,25 +118,26 @@ using LinkStateCallback = util::InplaceFunction<void(const LinkStatus&, void*), 
  * The signal is advisory: it says the transceiver's supply comparator tripped,
  * not that the rail has collapsed. It can also fire spuriously on a marginal
  * bus, so a handler must be safe to run when power then does not go away.
+ *
+ * timestampUs is in the medium's own microsecond time domain: the bitbang
+ * driver's free-running timer, or the TP-UART HAL's receive clock (32 bits,
+ * wrapping), the clock its octet time stamps come from.
  */
 using LinkPowerFailIsrHandler = void (*)(void* context, uint64_t timestampUs);
 
 /**
- * @brief Configuration of a hardware link-health input
+ * @brief How a hardware link-health signal is filtered and reported
  *
- * Polarity, thresholds and hold-up time are board properties, not stack
- * properties, so all of them are configuration rather than constants.
+ * The part of a signal's configuration that does not depend on how the signal
+ * reaches the MCU, so every backend applies the same rules: the TP1 bitbang
+ * driver to STKNX KNX_OK (LinkSignalConfig, which adds the GPIO it owns) and
+ * the TP-UART backend to the transceiver's SAVE output (TpUartConfig, read
+ * through the board's knx_uart_hal_t). Both feed LinkMonitor with it.
+ *
+ * Thresholds and hold-up time are board properties, not stack properties, so
+ * all of them are configuration rather than constants.
  */
-struct LinkSignalConfig {
-    /// GPIO carrying the signal; 0xFF means no such signal is wired.
-    uint8_t pin{0xFF};
-
-    /// true when the asserted (healthy) state drives the pin high.
-    bool activeHigh{true};
-
-    /// Enable an internal pull-up (needed for open-drain transceiver outputs).
-    bool enablePullup{false};
-
+struct LinkSignalPolicy {
     /**
      * Time the signal must stay deasserted before Down is reported.
      *
@@ -152,8 +154,28 @@ struct LinkSignalConfig {
     uint32_t upDebounceUs{200000};
 
     /// Emit LinkEventKind::PowerFailImminent from the edge ISR, ahead of the
-    /// debounce. Only useful when a handler is registered.
+    /// debounce. Only useful when a handler is registered and the signal has
+    /// an edge interrupt.
     bool notifyPowerFailFromIsr{false};
+};
+
+/**
+ * @brief Configuration of a link-health input on a GPIO the driver owns
+ *
+ * Used where the stack configures the pin itself (the TP1 bitbang driver over
+ * knx_timer_gpio_hal_t), so the pin, its polarity and its pull-up are part of
+ * the configuration. Where the board's HAL reads the signal (TP-UART SAVE),
+ * the HAL applies those and only the LinkSignalPolicy is configured.
+ */
+struct LinkSignalConfig : LinkSignalPolicy {
+    /// GPIO carrying the signal; 0xFF means no such signal is wired.
+    uint8_t pin{0xFF};
+
+    /// true when the asserted (healthy) state drives the pin high.
+    bool activeHigh{true};
+
+    /// Enable an internal pull-up (needed for open-drain transceiver outputs).
+    bool enablePullup{false};
 
     [[nodiscard]] constexpr bool isConfigured() const noexcept { return pin != 0xFF; }
 };

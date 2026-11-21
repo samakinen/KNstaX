@@ -1023,16 +1023,168 @@ void test_two_unanswered_state_requests_report_the_link_down(void)
     TEST_ASSERT_EQUAL_INT(static_cast<int>(LinkState::Up), static_cast<int>(f.backend->getLinkState()));
 }
 
-void test_save_pin_reports_the_link_down(void)
+// SAVE is debounced like the bitbang driver's KNX_OK: the same LinkMonitor,
+// the same default windows (LinkSignalPolicy).
+constexpr uint32_t SAVE_DOWN_MS = LinkSignalPolicy{}.downDebounceUs / 1000u;
+constexpr uint32_t SAVE_UP_MS = LinkSignalPolicy{}.upDebounceUs / 1000u;
+
+int linkState(const Fixture& f)
 {
-    Fixture f(UartHalVirtual::Pins{false, true});
+    return static_cast<int>(f.backend->getLinkState());
+}
+
+void bringLinkUp(Fixture& f)
+{
     TEST_ASSERT_TRUE(f.init().isOk());
     f.serviceRound();
     f.serviceRound();
-    TEST_ASSERT_EQUAL_INT(static_cast<int>(LinkState::Up), static_cast<int>(f.backend->getLinkState()));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LinkState::Up), linkState(f));
+}
+
+void test_save_reports_the_link_down_after_the_down_window(void)
+{
+    Fixture f(UartHalVirtual::Pins{false, true});
+    bringLinkUp(f);
     f.uart.setSave(true);
     f.serviceRound();
-    TEST_ASSERT_EQUAL_INT(static_cast<int>(LinkState::Down), static_cast<int>(f.backend->getLinkState()));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LinkState::Up), linkState(f));
+    advanceMs(SAVE_DOWN_MS - 1u);
+    f.serviceRound();
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LinkState::Up), linkState(f));
+    advanceMs(1u);
+    f.serviceRound();
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LinkState::Down), linkState(f));
+    auto event = f.lastEvent(Tp1RxEventType::LinkStateChanged);
+    TEST_ASSERT_TRUE(event.has_value());
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LinkState::Down), static_cast<int>(event->linkStatus.state));
+}
+
+void test_save_dip_shorter_than_the_down_window_is_filtered(void)
+{
+    Fixture f(UartHalVirtual::Pins{false, true});
+    bringLinkUp(f);
+    const size_t eventsBefore = f.events.size();
+    f.uart.setSave(true);
+    f.serviceRound();
+    advanceMs(SAVE_DOWN_MS / 2u);
+    f.serviceRound();
+    f.uart.setSave(false);
+    f.serviceRound();
+    advanceMs(SAVE_DOWN_MS * 2u);
+    f.serviceRound();
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LinkState::Up), linkState(f));
+    for (size_t i = eventsBefore; i < f.events.size(); ++i) {
+        TEST_ASSERT_TRUE(f.events[i].type != Tp1RxEventType::LinkStateChanged);
+    }
+}
+
+void test_save_release_reports_the_link_up_after_the_longer_up_window(void)
+{
+    Fixture f(UartHalVirtual::Pins{false, true});
+    bringLinkUp(f);
+    f.uart.setSave(true);
+    f.serviceRound();
+    advanceMs(SAVE_DOWN_MS);
+    f.serviceRound();
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LinkState::Down), linkState(f));
+
+    f.uart.setSave(false);
+    f.serviceRound();
+    advanceMs(SAVE_UP_MS - 1u);
+    f.serviceRound();
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LinkState::Down), linkState(f));
+    advanceMs(1u);
+    f.serviceRound();
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LinkState::Up), linkState(f));
+}
+
+void test_save_windows_come_from_the_configuration(void)
+{
+    TpUartConfig config;
+    config.saveSignal.downDebounceUs = 2000u;
+    Fixture f(UartHalVirtual::Pins{false, true}, config);
+    bringLinkUp(f);
+    f.uart.setSave(true);
+    f.serviceRound();
+    advanceMs(2u);
+    f.serviceRound();
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LinkState::Down), linkState(f));
+}
+
+void test_save_asserted_at_init_reports_the_link_down_at_once(void)
+{
+    // The first sample is adopted without a window, as for KNX_OK: at init
+    // there is no earlier state to debounce against.
+    Fixture f(UartHalVirtual::Pins{false, true});
+    f.uart.setSave(true);
+    TEST_ASSERT_TRUE(f.init().isOk());
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LinkState::Down), linkState(f));
+}
+
+struct PowerFailLog {
+    int calls{0};
+    uint64_t timestampUs{0};
+    void* context{nullptr};
+};
+
+void recordPowerFail(void* context, uint64_t timestampUs)
+{
+    auto* log = static_cast<PowerFailLog*>(context);
+    ++log->calls;
+    log->timestampUs = timestampUs;
+    log->context = context;
+}
+
+void test_save_edge_warns_of_power_failure_ahead_of_the_debounce(void)
+{
+    TpUartConfig config;
+    config.saveSignal.notifyPowerFailFromIsr = true;
+    Fixture f(UartHalVirtual::Pins{false, true, true}, config);
+    PowerFailLog log;
+    f.backend->setPowerFailIsrHandler(&recordPowerFail, &log);  // before init(): kept
+    bringLinkUp(f);
+    TEST_ASSERT_TRUE(f.uart.saveEdgeInstalled());
+
+    advanceMs(5u);
+    f.uart.setSave(true);
+    TEST_ASSERT_EQUAL_INT(1, log.calls);
+    TEST_ASSERT_TRUE(log.context == &log);
+    TEST_ASSERT_EQUAL_UINT64(f.uart.nowUs(), log.timestampUs);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(LinkState::Up), linkState(f));  // not debounced yet
+    TEST_ASSERT_EQUAL_UINT32(1u, f.backend->statistics().powerFailWarnings);
+
+    f.uart.setSave(false);  // the edge back is no warning
+    TEST_ASSERT_EQUAL_INT(1, log.calls);
+
+    f.backend->close();
+    TEST_ASSERT_FALSE(f.uart.saveEdgeInstalled());
+}
+
+void test_save_edge_is_not_used_unless_the_warning_is_enabled(void)
+{
+    Fixture f(UartHalVirtual::Pins{false, true, true});
+    PowerFailLog log;
+    f.backend->setPowerFailIsrHandler(&recordPowerFail, &log);
+    bringLinkUp(f);
+    TEST_ASSERT_FALSE(f.uart.saveEdgeInstalled());
+    f.uart.setSave(true);
+    TEST_ASSERT_EQUAL_INT(0, log.calls);
+}
+
+void test_power_fail_handler_registers_through_the_mac(void)
+{
+    // The application's hook is backend-neutral: Tp1MacPhysical forwards it.
+    TpUartConfig config;
+    config.saveSignal.notifyPowerFailFromIsr = true;
+    Fixture f(UartHalVirtual::Pins{false, true, true}, config);
+    Tp1MacPhysical mac(std::move(f.backend));
+    mac.setTimingPlatform(&f.platform);
+    PowerFailLog log;
+    mac.setPowerFailIsrHandler(&recordPowerFail, &log);
+    TEST_ASSERT_TRUE(mac.init().isOk());
+    f.uart.setSave(true);
+    TEST_ASSERT_EQUAL_INT(1, log.calls);
+    mac.close();
 }
 
 void test_spontaneous_chip_reset_reconfigures_and_fails_the_outstanding_frame(void)
@@ -1158,7 +1310,14 @@ int main(void)
     RUN_TEST(test_bus_monitor_mode_acknowledges_nothing_and_leaves_through_a_reset);
     RUN_TEST(test_state_indication_reports_the_link_up_then_degraded);
     RUN_TEST(test_two_unanswered_state_requests_report_the_link_down);
-    RUN_TEST(test_save_pin_reports_the_link_down);
+    RUN_TEST(test_save_reports_the_link_down_after_the_down_window);
+    RUN_TEST(test_save_dip_shorter_than_the_down_window_is_filtered);
+    RUN_TEST(test_save_release_reports_the_link_up_after_the_longer_up_window);
+    RUN_TEST(test_save_windows_come_from_the_configuration);
+    RUN_TEST(test_save_asserted_at_init_reports_the_link_down_at_once);
+    RUN_TEST(test_save_edge_warns_of_power_failure_ahead_of_the_debounce);
+    RUN_TEST(test_save_edge_is_not_used_unless_the_warning_is_enabled);
+    RUN_TEST(test_power_fail_handler_registers_through_the_mac);
     RUN_TEST(test_spontaneous_chip_reset_reconfigures_and_fails_the_outstanding_frame);
     RUN_TEST(test_new_own_address_is_sent_between_frames);
     RUN_TEST(test_data_link_layer_sends_once_and_takes_a_negative_group_confirmation_as_sent);

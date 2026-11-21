@@ -12,6 +12,7 @@
 using knx::physical::LinkEventKind;
 using knx::physical::LinkMonitor;
 using knx::physical::LinkSignalConfig;
+using knx::physical::LinkSignalPolicy;
 using knx::physical::LinkState;
 using knx::physical::LinkStatus;
 
@@ -41,6 +42,39 @@ void test_unconfigured_is_inert() {
     TEST_ASSERT_FALSE(monitor.sample(false, 0, status));
     TEST_ASSERT_FALSE(monitor.sample(true, 1000000, status));
     TEST_ASSERT_EQUAL(static_cast<int>(LinkState::Unknown), static_cast<int>(monitor.state()));
+}
+
+// A signal a HAL reads (TP-UART SAVE) arrives with its polarity applied: the
+// monitor runs from the policy alone, with the same windows as a GPIO signal.
+void test_policy_configured_monitor_debounces_the_same_way() {
+    LinkMonitor monitor;
+    monitor.configure(LinkSignalPolicy{}, true);
+    TEST_ASSERT_TRUE(monitor.isConfigured());
+
+    LinkStatus status{};
+    TEST_ASSERT_TRUE(monitor.sample(true, 0, status));
+    TEST_ASSERT_FALSE(monitor.sample(false, 1000, status));
+    TEST_ASSERT_FALSE(monitor.sample(false, 20999, status));
+    TEST_ASSERT_TRUE(monitor.sample(false, 21000, status));
+    TEST_ASSERT_EQUAL(static_cast<int>(LinkState::Down), static_cast<int>(status.state));
+}
+
+void test_policy_disabled_monitor_is_inert() {
+    LinkMonitor monitor;
+    monitor.configure(LinkSignalPolicy{}, false);
+    LinkStatus status{};
+    TEST_ASSERT_FALSE(monitor.isConfigured());
+    TEST_ASSERT_FALSE(monitor.sample(false, 0, status));
+    TEST_ASSERT_EQUAL(static_cast<int>(LinkState::Unknown), static_cast<int>(monitor.state()));
+}
+
+// A GPIO configuration without a pin leaves the monitor inert.
+void test_config_without_a_pin_is_inert() {
+    LinkMonitor monitor;
+    monitor.configure(LinkSignalConfig{});
+    LinkStatus status{};
+    TEST_ASSERT_FALSE(monitor.isConfigured());
+    TEST_ASSERT_FALSE(monitor.sample(true, 0, status));
 }
 
 // The first sample is adopted without debouncing: at init there is no prior
@@ -187,6 +221,9 @@ void test_reset_reseeds() {
 int main() {
     UNITY_BEGIN();
     RUN_TEST(test_unconfigured_is_inert);
+    RUN_TEST(test_policy_configured_monitor_debounces_the_same_way);
+    RUN_TEST(test_policy_disabled_monitor_is_inert);
+    RUN_TEST(test_config_without_a_pin_is_inert);
     RUN_TEST(test_first_sample_seeds_immediately);
     RUN_TEST(test_down_requires_debounce_window);
     RUN_TEST(test_transient_dip_is_filtered);

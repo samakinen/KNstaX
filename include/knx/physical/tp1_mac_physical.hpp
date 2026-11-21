@@ -134,6 +134,20 @@ public:
     void setLinkStateCallback(LinkStateCallback callback, void* context);
 
     /**
+     * @brief Be told of a bus power failure from interrupt context, before the debounce
+     *
+     * Forwards to Tp1MediumBackend::setPowerFailIsrHandler(), whatever the
+     * backend: the same hook serves STKNX KNX_OK and TP-UART SAVE. The handler
+     * runs in interrupt context (LinkPowerFailIsrHandler); the debounced loss
+     * follows through setLinkStateCallback().
+     *
+     * @thread_safety Main context; before or after init().
+     */
+    void setPowerFailIsrHandler(LinkPowerFailIsrHandler handler, void* context) {
+        _backend->setPowerFailIsrHandler(handler, context);
+    }
+
+    /**
      * @brief Refuse transmission while the link is known Down (default on)
      *
      * With a known-dead bus, every frame would otherwise run its full CSMA and

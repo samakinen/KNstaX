@@ -327,6 +327,25 @@ KNX_ISR_RAM void TpUartMediumBackend::rxTrampoline(void* context, uint8_t octet,
     static_cast<TpUartMediumBackend*>(context)->onRxOctet(octet, flags, timestampUs);
 }
 
+// Interrupt context, on an edge of SAVE. Deliberately minimal, as the bitbang
+// driver's KNX_OK edge interrupt: the debounced state is decided in service()
+// from sampled levels; this only passes the edge into power failure to the
+// handler, ahead of the debounce. The level is read here, so a board may
+// report both edges.
+KNX_ISR_RAM void TpUartMediumBackend::saveEdgeTrampoline(void* context, uint32_t timestampUs)
+{
+    auto* self = static_cast<TpUartMediumBackend*>(context);
+    if (!knx_uart_hal_read_save(&self->_hal)) {
+        return;
+    }
+    const LinkPowerFailIsrHandler handler = self->_powerFailHandler.load(std::memory_order_acquire);
+    if (handler == nullptr) {
+        return;
+    }
+    self->_powerFailWarnings.increment();
+    handler(self->_powerFailContext.load(std::memory_order_relaxed), timestampUs);
+}
+
 // ============================================================================
 // Main context
 // ============================================================================
@@ -370,6 +389,7 @@ util::Result<void> TpUartMediumBackend::init(const Tp1MediumConfig& config)
 
     _initialized = true;
     _lastStatePollMs = util::nowMs(&_timing);
+    openSaveSignal();
     return util::Result<void>::ok();
 }
 
@@ -378,10 +398,41 @@ void TpUartMediumBackend::close()
     if (!_initialized) {
         return;
     }
+    closeSaveSignal();
     knx_uart_hal_close(&_hal);
     _initialized = false;
     setTxPhase(TxPhase::None);
     resetRxState();
+}
+
+void TpUartMediumBackend::openSaveSignal()
+{
+    _saveMonitor.configure(_config.saveSignal, knx_uart_hal_has_save(&_hal));
+    // Seed from the current level, so the first state reported is the real
+    // one rather than a transition at the first service().
+    updateLinkState();
+    // The edge interrupt only serves the early warning; without it SAVE is
+    // polled, which is all the debounce needs.
+    _saveEdgeInstalled = _config.saveSignal.notifyPowerFailFromIsr &&
+                         knx_uart_hal_install_save_edge_isr(&_hal, &saveEdgeTrampoline, this);
+}
+
+void TpUartMediumBackend::closeSaveSignal()
+{
+    if (_saveEdgeInstalled) {
+        knx_uart_hal_remove_save_edge_isr(&_hal);
+        _saveEdgeInstalled = false;
+    }
+    _saveMonitor.configure(_config.saveSignal, false);
+}
+
+void TpUartMediumBackend::setPowerFailIsrHandler(LinkPowerFailIsrHandler handler, void* context)
+{
+    // Handler cleared first and stored last: the interrupt never pairs a
+    // handler with another handler's context.
+    _powerFailHandler.store(nullptr, std::memory_order_release);
+    _powerFailContext.store(context, std::memory_order_relaxed);
+    _powerFailHandler.store(handler, std::memory_order_release);
 }
 
 void TpUartMediumBackend::resetRxState()
@@ -729,8 +780,17 @@ void TpUartMediumBackend::pollState()
 
 void TpUartMediumBackend::updateLinkState()
 {
+    // SAVE asserted means the bus supply is failing: the opposite sense of
+    // KNX_OK, the same monitor. A dip shorter than the down window is not a
+    // power failure.
+    if (_saveMonitor.isConfigured()) {
+        LinkStatus ignored{};
+        (void)_saveMonitor.sample(!knx_uart_hal_read_save(&_hal), _timing.micros(), ignored);
+    }
+    const bool powerFailed = _saveMonitor.state() == LinkState::Down;
+
     LinkState state = LinkState::Up;
-    if (_error || _missedStatePollsInRow >= 2u || knx_uart_hal_read_save(&_hal)) {
+    if (_error || _missedStatePollsInRow >= 2u || powerFailed) {
         state = LinkState::Down;
     } else if (_stateIndications == 0u) {
         state = _linkState;  // no answer yet: nothing new to report
@@ -973,6 +1033,7 @@ TpUartStatistics TpUartMediumBackend::statistics() const
     stats.chipResets = _chipResets;
     stats.stateIndications = _stateIndications;
     stats.missedStatePolls = _missedStatePolls;
+    stats.powerFailWarnings = _powerFailWarnings.read();
     stats.lastStateBits = _lastStateBits;
     return stats;
 }

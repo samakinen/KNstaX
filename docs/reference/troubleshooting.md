@@ -149,6 +149,9 @@ of your objects have it enabled.
 
 If a link-health pin is configured with the wrong polarity, the stack believes
 the bus is down and refuses to transmit. `getLinkState()` reports what it thinks.
+A TP-UART board whose `read_save()` returns the pin level the wrong way round
+does the same: `read_save()` must return true only while `SAVE` signals a power
+failure.
 
 ## Getting more detail
 

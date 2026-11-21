@@ -32,6 +32,7 @@ public:
     Tp1MediumState getState() const override;
     Tp1CapabilityProfile getCapabilities() const override;
     LinkState getLinkState() const override;
+    void setPowerFailIsrHandler(LinkPowerFailIsrHandler handler, void* context) override;
 
     util::Result<void> setBusMonitorMode(bool enabled) override;
     util::Result<void> service() override;

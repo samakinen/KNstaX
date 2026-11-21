@@ -194,7 +194,7 @@ enters Transmitting.
 | `init()` | `U_Reset.req`, wait for `U_Reset.ind` (50 ms, 3 attempts), set the address and repetition counts, `U_State.req` |
 | Failure | State Error, `LinkState::Down` |
 | `service()` | Polls `U_State` every second while idle, maps its warning bits, and runs the gap timeout |
-| `LinkState` | `U_State` errors, or no response at all, give Down; the `SAVE` pin (K10), when the board provides one, gives Down. |
+| `LinkState` | `U_State` errors, or no response at all, give Down; the `SAVE` pin, when the board provides one, gives Down once debounced. |
 | Busmon | `setBusMonitorMode(true)` sends `U_Busmon.req`; leaving it needs a reset |
 
 Capabilities:
@@ -248,8 +248,12 @@ Where it differs from §3.1–3.6:
   resets the chip.
 - **`U_State` bits.** The temperature warning gives `Degraded`. Slave collision, receive, transmit
   and protocol errors report single events, so they are kept in the statistics and do not take
-  the link down. No answer to two `U_State.req` in a row, a failed reset or an asserted `SAVE`
-  gives `Down`.
+  the link down. No answer to two `U_State.req` in a row, a failed reset or a debounced `SAVE`
+  power failure gives `Down`.
+- **`SAVE`.** Handled as the bitbang driver handles STKNX `KNX_OK` (§12): sampled at every
+  `service()`, debounced by `LinkMonitor` with `TpUartConfig::saveSignal` (a
+  `LinkSignalPolicy`; 20 ms down, 200 ms up by default), and optionally an early warning from
+  the board's `SAVE` edge interrupt.
 - **Requests between frames.** `U_SetAddress` after `setOwnAddress()` and `U_State.req` are sent
   from `service()` only while no frame is being fed to the chip.
 - **One address at start.** `init()` configures the chip without `U_SetAddress`; the first
@@ -408,7 +412,9 @@ the contract. It differs from the sketch in these ways:
   noise, overrun) and a wrapping 32-bit microsecond timestamp taken by the board. The RX engine
   needs it for the 2 ms gap, and the board's interrupt is the only place it is accurate.
 - **Pins.** The optional pins are `set_reset(asserted)` and `read_save()`. They are logical
-  (the board applies polarity), and either may be NULL.
+  (the board applies polarity), and either may be NULL. `install_save_edge_isr()` and
+  `remove_save_edge_isr()`, also optional, give `SAVE` an edge interrupt for the early
+  power-fail warning, the counterpart of `install_status_edge_isr()` in `timer_gpio_hal.h`.
 - **Concurrency.** `write()` is all-or-nothing. It may be called from the RX callback, and the
   octets of one call stay contiguous against the other context.
 
@@ -867,12 +873,21 @@ Each is checked against ETS6 import on hardware, the same bar the existing expor
 
 ## 12. K10: power-fail save
 
-For UART transceivers, the `SAVE` output (where wired, read through
-`knx_uart_hal_t::read_save_pin` or an edge interrupt the product forwards) and `U_State`
-warnings feed `LinkMonitor`.
+The signal side is done. The TP-UART `SAVE` output and the STKNX `KNX_OK` output report the
+same thing, so the backends handle them the same way:
 
-- **Early warning.** The existing `LinkEventKind::PowerFailImminent` fires from the edge without
-  debouncing.
+| | TP1 bitbang (`KNX_OK`) | TP-UART (`SAVE`) |
+|---|---|---|
+| Read | `read_status_level_fast()`, polarity from `LinkSignalConfig` | `read_save()`, polarity applied by the board |
+| Debounce | `LinkMonitor`, `LinkSignalConfig` (a `LinkSignalPolicy`) | `LinkMonitor`, `TpUartConfig::saveSignal` (a `LinkSignalPolicy`) |
+| Sampled | on the edge interrupt's wake-up and a re-poll timer | at every `service()` |
+| Reported | `LinkStateChanged`, `getLinkState()` | the same; chip faults also give `Down` |
+| Early warning | `install_status_edge_isr()` | `install_save_edge_isr()` |
+
+The early warning (`LinkPowerFailIsrHandler`, `notifyPowerFailFromIsr`) is registered the same
+way for both: `Tp1MediumBackend::setPowerFailIsrHandler()`, or `Tp1MacPhysical`'s, which
+forwards to it.
+
 - **Save path.** Products register a small save routine that writes a few records into
   `FlashLogPersistence`'s pre-erased space, with no erase allowed on this path.
 - **Data Secure.** The sending sequence number checkpoint (today at most once a minute) should

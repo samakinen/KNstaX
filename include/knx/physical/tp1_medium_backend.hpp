@@ -123,6 +123,27 @@ public:
     /// therefore needs no changes and causes no behaviour change.
     virtual LinkState getLinkState() const { return LinkState::Unknown; }
 
+    /**
+     * @brief Register the pre-debounce power-fail handler
+     *
+     * Called from the edge interrupt of the transceiver's power signal (STKNX
+     * KNX_OK on the bitbang driver, SAVE on a TP-UART) when it reports the
+     * bus supply gone, before any debouncing, provided the backend's
+     * LinkSignalPolicy::notifyPowerFailFromIsr is set and the board gives the
+     * signal an edge interrupt. The debounced loss still arrives later as a
+     * LinkStateChanged event. See LinkPowerFailIsrHandler for what the handler
+     * may do. Null unregisters.
+     *
+     * The default ignores it: a backend without such a signal never calls it.
+     *
+     * @thread_safety Main context. May be called before or after init(); a
+     * handler set before init() is kept.
+     */
+    virtual void setPowerFailIsrHandler(LinkPowerFailIsrHandler handler, void* context) {
+        (void)handler;
+        (void)context;
+    }
+
     virtual util::Result<void> setBusMonitorMode(bool enabled) = 0;
     virtual util::Result<void> service() = 0;
     virtual util::Result<void> setOwnAddress(uint16_t addressRaw) { return util::Result<void>::ok(); }

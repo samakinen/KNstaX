@@ -162,6 +162,7 @@ Medium health is medium-neutral vocabulary, defined in `knx/physical/link_state.
 | Medium | Source of the indication |
 | --- | --- |
 | TP1 bitbang | transceiver bus-health output (STKNX `KNX_OK`) |
+| TP1 TP-UART | transceiver `SAVE` output, plus the chip's own health (`U_State`, resets) |
 | KNXnet/IP tunneling | interface up plus a live tunnel connection (not yet wired) |
 | KNXnet/IP routing | interface up plus multicast group joined (not yet wired) |
 
@@ -169,9 +170,9 @@ A backend reports it through `getLinkState()`, the `supportsLinkStateIndication`
 
 Above the backend, `Tp1MacPhysical` caches the debounced state, exposes it to the application through `setLinkStateCallback()`, and refuses transmission while the link is known `Down`. Without the indication a dead bus is indistinguishable from a quiet one, so every frame would otherwise spend its full CSMA and retransmission budget to discover the same thing.
 
-`LinkMonitor` (`knx/physical/link_monitor.hpp`) holds the debounce logic, shared so the semantics do not diverge per backend. It samples levels rather than latching edges: an interrupt only wakes the consumer, so a missed or bouncing edge cannot desynchronise the state.
+`LinkMonitor` (`knx/physical/link_monitor.hpp`) holds the debounce logic, shared so the semantics do not diverge per backend. It samples levels rather than latching edges: an interrupt only wakes the consumer, so a missed or bouncing edge cannot desynchronise the state. STKNX `KNX_OK` and TP-UART `SAVE` report the same thing and go through it alike, with one `LinkSignalPolicy` (debounce windows, early warning). Where the stack owns the GPIO (the bitbang driver), `LinkSignalConfig` adds pin, polarity and pull-up; where the board's HAL reads the signal (`knx_uart_hal_t::read_save`), the HAL applies them.
 
-Debounce windows and polarity are board properties, not stack constants. The down window must stay inside the board's hold-up time — how long the local supply survives the bus. Boards whose hold-up is too short to wait out that window can additionally take a pre-debounce `LinkEventKind::PowerFailImminent` notification from interrupt context, which is what makes a save-before-power-loss path possible on hardware that has no margin for the debounced path.
+Debounce windows and polarity are board properties, not stack constants. The down window must stay inside the board's hold-up time — how long the local supply survives the bus. Boards whose hold-up is too short to wait out that window can additionally take a pre-debounce `LinkEventKind::PowerFailImminent` notification from interrupt context, which is what makes a save-before-power-loss path possible on hardware that has no margin for the debounced path. The handler is registered through `Tp1MediumBackend::setPowerFailIsrHandler()` (or `Tp1MacPhysical`, which forwards it), whichever backend is underneath.
 
 ## TP1 backend families
 

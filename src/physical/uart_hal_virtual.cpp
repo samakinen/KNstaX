@@ -32,6 +32,18 @@ void UartHalVirtual::bind(knx_uart_hal_t& outHal, Pins pins)
     outHal.ops.tx_free = &txFreeShim;
     outHal.ops.set_reset = pins.reset ? &setResetShim : nullptr;
     outHal.ops.read_save = pins.save ? &readSaveShim : nullptr;
+    const bool saveEdge = pins.save && pins.saveEdge;
+    outHal.ops.install_save_edge_isr = saveEdge ? &installSaveEdgeShim : nullptr;
+    outHal.ops.remove_save_edge_isr = saveEdge ? &removeSaveEdgeShim : nullptr;
+}
+
+void UartHalVirtual::setSave(bool asserted)
+{
+    const bool changed = asserted != _saveAsserted;
+    _saveAsserted = asserted;
+    if (changed && _saveEdgeCb != nullptr) {
+        _saveEdgeCb(_saveEdgeContext, static_cast<uint32_t>(_nowUs));
+    }
 }
 
 bool UartHalVirtual::deliverRx(uint8_t octet, uint8_t flags)
@@ -133,6 +145,27 @@ bool UartHalVirtual::readSaveShim(void* context)
 {
     const auto* self = static_cast<const UartHalVirtual*>(context);
     return self != nullptr && self->_saveAsserted;
+}
+
+bool UartHalVirtual::installSaveEdgeShim(void* context, knx_uart_hal_save_edge_cb_t cb, void* save_context)
+{
+    auto* self = static_cast<UartHalVirtual*>(context);
+    if (self == nullptr || cb == nullptr) {
+        return false;
+    }
+    self->_saveEdgeCb = cb;
+    self->_saveEdgeContext = save_context;
+    return true;
+}
+
+void UartHalVirtual::removeSaveEdgeShim(void* context)
+{
+    auto* self = static_cast<UartHalVirtual*>(context);
+    if (self == nullptr) {
+        return;
+    }
+    self->_saveEdgeCb = nullptr;
+    self->_saveEdgeContext = nullptr;
 }
 
 } // namespace physical

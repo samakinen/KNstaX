@@ -25,8 +25,27 @@ namespace physical {
 
 class LinkMonitor {
 public:
+    /**
+     * @brief Follow a signal on a GPIO the caller owns (TP1 bitbang KNX_OK)
+     *
+     * The monitor is active only when config names a pin; an unconfigured
+     * config makes it inert. levelMeansUp() applies config.activeHigh.
+     */
     void configure(const LinkSignalConfig& config) {
-        _config = config;
+        configure(config, config.isConfigured());
+        _activeHigh = config.activeHigh;
+    }
+
+    /**
+     * @brief Follow a signal a HAL reads, polarity already applied (TP-UART SAVE)
+     *
+     * @param policy  Debounce windows and early-warning setting
+     * @param enabled false makes the monitor inert (the board has no such signal)
+     */
+    void configure(const LinkSignalPolicy& policy, bool enabled) {
+        _policy = policy;
+        _enabled = enabled;
+        _activeHigh = true;
         reset();
     }
 
@@ -39,7 +58,8 @@ public:
         _lastSampleUs = 0;
     }
 
-    [[nodiscard]] bool isConfigured() const { return _config.isConfigured(); }
+    [[nodiscard]] bool isConfigured() const { return _enabled; }
+    [[nodiscard]] const LinkSignalPolicy& policy() const { return _policy; }
     [[nodiscard]] LinkState state() const { return _state; }
     [[nodiscard]] uint32_t transitionCount() const { return _transitionCount; }
 
@@ -56,7 +76,7 @@ public:
      * @brief Translate a raw pin level into the asserted/healthy sense
      */
     [[nodiscard]] bool levelMeansUp(int rawLevel) const {
-        return (rawLevel != 0) == _config.activeHigh;
+        return (rawLevel != 0) == _activeHigh;
     }
 
     /**
@@ -71,7 +91,7 @@ public:
      * real level avoids reporting a spurious transition on the first poll.
      */
     bool sample(bool up, uint64_t nowUs, LinkStatus& outStatus) {
-        if (!_config.isConfigured()) {
+        if (!_enabled) {
             return false;
         }
 
@@ -100,8 +120,8 @@ public:
             return false;
         }
 
-        const uint32_t window = (observed == LinkState::Down) ? _config.downDebounceUs
-                                                              : _config.upDebounceUs;
+        const uint32_t window = (observed == LinkState::Down) ? _policy.downDebounceUs
+                                                              : _policy.upDebounceUs;
         if ((nowUs - _candidateSinceUs) < static_cast<uint64_t>(window)) {
             return false;
         }
@@ -134,14 +154,16 @@ public:
             return 0;
         }
 
-        const uint32_t window = (_candidate == LinkState::Down) ? _config.downDebounceUs
-                                                                : _config.upDebounceUs;
+        const uint32_t window = (_candidate == LinkState::Down) ? _policy.downDebounceUs
+                                                                : _policy.upDebounceUs;
         const uint64_t elapsed = nowUs - _candidateSinceUs;
         return (elapsed >= window) ? 0 : (static_cast<uint64_t>(window) - elapsed);
     }
 
 private:
-    LinkSignalConfig _config{};
+    LinkSignalPolicy _policy{};
+    bool _enabled{false};
+    bool _activeHigh{true};
     LinkState _state{LinkState::Unknown};
     LinkState _candidate{LinkState::Unknown};
     bool _seeded{false};

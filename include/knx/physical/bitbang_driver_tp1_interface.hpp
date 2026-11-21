@@ -47,6 +47,11 @@ public:
     // without the signal need no changes.
     virtual bool hasTp1LinkStateIndication() const { return false; }
     virtual LinkState getTp1LinkState() const { return LinkState::Unknown; }
+    /// See Tp1MediumBackend::setPowerFailIsrHandler().
+    virtual void setPowerFailIsrHandler(LinkPowerFailIsrHandler handler, void* context) {
+        (void)handler;
+        (void)context;
+    }
 };
 
 } // namespace physical

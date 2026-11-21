@@ -128,6 +128,10 @@ LinkState BitBangMediumBackendAdapter::getLinkState() const {
     return _tp1Driver.getTp1LinkState();
 }
 
+void BitBangMediumBackendAdapter::setPowerFailIsrHandler(LinkPowerFailIsrHandler handler, void* context) {
+    _tp1Driver.setPowerFailIsrHandler(handler, context);
+}
+
 util::Result<void> BitBangMediumBackendAdapter::setBusMonitorMode(bool enabled) {
     _config.busMonitorMode = enabled;
     return _tp1Driver.setBusMonitorMode(enabled);

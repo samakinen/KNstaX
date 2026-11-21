@@ -64,7 +64,7 @@ public:
      * need for it and should react to the debounced LinkStateChanged event
      * from task context instead.
      */
-    void setPowerFailIsrHandler(LinkPowerFailIsrHandler handler, void* context);
+    void setPowerFailIsrHandler(LinkPowerFailIsrHandler handler, void* context) override;
 
 protected:
     void process() override;

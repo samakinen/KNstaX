@@ -62,6 +62,8 @@ void c_board_uart_init(c_board_uart_t* uart, knx_uart_hal_t* out_hal)
     out_hal->ops.tx_free = c_board_tx_free;
     out_hal->ops.set_reset = NULL;
     out_hal->ops.read_save = NULL;
+    out_hal->ops.install_save_edge_isr = NULL;
+    out_hal->ops.remove_save_edge_isr = NULL;
 }
 
 void c_board_uart_receive(c_board_uart_t* uart, uint8_t octet, uint32_t timestamp_us)

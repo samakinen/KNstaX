@@ -239,6 +239,51 @@ void test_optional_pins_when_bound(void)
     TEST_ASSERT_FALSE(knx_uart_hal_read_save(&hal));
     uart.setSave(true);
     TEST_ASSERT_TRUE(knx_uart_hal_read_save(&hal));
+    TEST_ASSERT_FALSE(knx_uart_hal_has_save_edge_isr(&hal));  // not asked for
+}
+
+struct SaveEdgeLog {
+    int calls{0};
+    uint32_t timestampUs{0};
+};
+
+void recordSaveEdge(void* context, uint32_t timestampUs)
+{
+    auto* log = static_cast<SaveEdgeLog*>(context);
+    ++log->calls;
+    log->timestampUs = timestampUs;
+}
+
+void test_save_edge_interrupt_when_bound(void)
+{
+    UartHalVirtual uart;
+    knx_uart_hal_t hal{};
+    uart.bind(hal, UartHalVirtual::Pins{false, true, true});
+    TEST_ASSERT_TRUE(knx_uart_hal_has_save_edge_isr(&hal));
+    TEST_ASSERT_FALSE(knx_uart_hal_install_save_edge_isr(&hal, nullptr, nullptr));
+
+    SaveEdgeLog log;
+    TEST_ASSERT_TRUE(knx_uart_hal_install_save_edge_isr(&hal, &recordSaveEdge, &log));
+    uart.setNowUs(1234u);
+    uart.setSave(true);
+    uart.setSave(true);  // no change, no edge
+    uart.setSave(false);
+    TEST_ASSERT_EQUAL_INT(2, log.calls);
+    TEST_ASSERT_EQUAL_UINT32(1234u, log.timestampUs);
+
+    knx_uart_hal_remove_save_edge_isr(&hal);
+    uart.setSave(true);
+    TEST_ASSERT_EQUAL_INT(2, log.calls);
+}
+
+void test_save_edge_interrupt_needs_the_save_pin(void)
+{
+    UartHalVirtual uart;
+    knx_uart_hal_t hal{};
+    uart.bind(hal, UartHalVirtual::Pins{false, false, true});
+    TEST_ASSERT_FALSE(knx_uart_hal_has_save_edge_isr(&hal));
+    SaveEdgeLog log;
+    TEST_ASSERT_FALSE(knx_uart_hal_install_save_edge_isr(&hal, &recordSaveEdge, &log));
 }
 
 void test_virtual_refuses_invalid_config(void)
@@ -293,6 +338,8 @@ int main(void)
     RUN_TEST(test_write_from_rx_callback_is_recorded_as_interrupt_context);
     RUN_TEST(test_optional_pins_absent_unless_bound);
     RUN_TEST(test_optional_pins_when_bound);
+    RUN_TEST(test_save_edge_interrupt_when_bound);
+    RUN_TEST(test_save_edge_interrupt_needs_the_save_pin);
     RUN_TEST(test_virtual_refuses_invalid_config);
     RUN_TEST(test_board_hal_written_in_c);
     return UNITY_END();
