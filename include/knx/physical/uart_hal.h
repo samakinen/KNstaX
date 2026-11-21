@@ -136,7 +136,9 @@ typedef struct {
     knx_uart_hal_ops_t ops;
 } knx_uart_hal_t;
 
-static inline bool knx_uart_hal_is_valid(const knx_uart_hal_t* hal)
+/* The SAVE helpers below are called from the KNX_ISR_RAM edge trampoline, where
+ * an out-of-line call into flash needs a veneer the gate rejects: force them inline. */
+static inline __attribute__((always_inline)) bool knx_uart_hal_is_valid(const knx_uart_hal_t* hal)
 {
     return hal && hal->context && hal->ops.open && hal->ops.close && hal->ops.write && hal->ops.tx_free;
 }
@@ -176,14 +178,14 @@ static inline bool knx_uart_hal_set_reset(const knx_uart_hal_t* hal, bool assert
     return knx_uart_hal_has_reset(hal) && hal->ops.set_reset(hal->context, asserted);
 }
 
-static inline bool knx_uart_hal_has_save(const knx_uart_hal_t* hal)
+static inline __attribute__((always_inline)) bool knx_uart_hal_has_save(const knx_uart_hal_t* hal)
 {
     return knx_uart_hal_is_valid(hal) && hal->ops.read_save;
 }
 
 /* False when the board has no SAVE input: without the signal, the stack
  * cannot tell a power failure is coming and does not act on one. */
-static inline bool knx_uart_hal_read_save(const knx_uart_hal_t* hal)
+static inline __attribute__((always_inline)) bool knx_uart_hal_read_save(const knx_uart_hal_t* hal)
 {
     return knx_uart_hal_has_save(hal) && hal->ops.read_save(hal->context);
 }

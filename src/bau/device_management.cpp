@@ -59,7 +59,7 @@ using application::FunctionPropertyReturnCode;
 /// Map the classic function-property return codes onto the unified schema the
 /// extended services answer in (03/03/07 §3.4.8.3 table).  The two sets are
 /// different code spaces, not the same numbers at different widths.
-application::KnxReturnCode translateFunctionPropertyReturnCode(FunctionPropertyReturnCode code)
+[[maybe_unused]] application::KnxReturnCode translateFunctionPropertyReturnCode(FunctionPropertyReturnCode code)
 {
     switch (code) {
         case FunctionPropertyReturnCode::Success:
@@ -248,7 +248,7 @@ constexpr std::array<uint8_t, 5> kRouterConfigPids{
 #endif
 
 /// Big-endian helpers: KNX properties are always network byte order.
-std::array<uint8_t, 2> beU16(uint16_t value)
+[[maybe_unused]] std::array<uint8_t, 2> beU16(uint16_t value)
 {
     return {static_cast<uint8_t>((value >> 8) & 0xFFu), static_cast<uint8_t>(value & 0xFFu)};
 }
