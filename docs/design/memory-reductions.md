@@ -8,11 +8,13 @@
 
 ## 1. Starting point (measured)
 
-Size gate, `tp1-small` reference device (60 group objects), Cortex-M3, LTO, at `673a005`:
+Size gate, `tp1-small` reference device (60 group objects), Cortex-M3, LTO. The attribution below
+was made at `673a005`; `eb54dfa` (the Data Secure sequence reserve and the SAVE path) changed only
+flash: 88 709 B against a raised budget of 90 624 B. The RAM figures are identical.
 
 | | Measured | Budget |
 |---|---:|---:|
-| KNstaX flash | 88 613 B | 88 064 B (**over by 549 B**; CI on Ubuntu: 88 562 B) |
+| KNstaX flash | 88 613 B (`eb54dfa`: 88 709 B) | 88 064 B (`eb54dfa`: 90 624 B) |
 | KNstaX static RAM | 1 608 B | |
 | Heap high-water | 11 724 B (40 allocations, all at start-up) | |
 | KNstaX RAM | 13 332 B | 13 856 B |
@@ -146,3 +148,50 @@ The measured device headroom is 1 100 B. Data Secure as designed (fixed tables, 
 APDU 55) needs about 2 KiB of RAM and about 200 B of stack (data-secure-small-target.md §6,
 software-aes.md §5). R1 and R2 alone (3–3.5 KiB) cover it on the reference device without any
 product-side saving.
+
+## 8. Implementation plan
+
+### 8.1 Rules every change follows
+
+- **One behaviour.** No change alters what ETS or a bus partner sees, except where §5 names it.
+  The size gate's traffic run (an ETS download of three tables, group traffic, the ports checked
+  against what the tables route) and the host tests are the evidence.
+- **Every target gains.** A reduction is made in the shared code, not behind `#if` for small
+  parts. Where a capacity is the lever, it becomes a Kconfig symbol with the old value as the
+  `full` default, so ESP32 and host builds keep their behaviour and choose smaller numbers when
+  they want them. ESP-IDF reads the same Kconfig, so a new symbol needs a default and help text
+  there too.
+- **DX does not get worse.** Product code (the `constexpr` product declaration, the callbacks it
+  binds, `startCommissionedProduct()`) keeps compiling unchanged. A capacity that is exceeded is
+  a compile-time error naming the symbol, or a negative response at run time, never silent.
+- **Measured.** Each package states its size gate figures before and after (`tp1-small` M3 and
+  `tp1-standard` M4) and lowers the budgets to the new figure plus the gate's margin.
+
+### 8.2 Work packages
+
+Grouped so that packages touch disjoint files and can be built in parallel; P5 depends on the
+others being in.
+
+| Package | Items | Main files | ESP32 and host |
+|---|---|---|---|
+| **P1 Interface objects** | R1 `constexpr` property handler tables; F3 no `std::set` in the unique-address count; F4 no `std::function` in the device object | `property_kernel.hpp`, the object `.cpp` files, `group_object_table_object.cpp`, `device_object.*` | Same saving in internal RAM; less static-initialisation time at boot |
+| **P2 Platform and management** | F1 logging compiled out at level 0; `NetworkParameterService` only with its feature; R7 address space, memory segment bindings, registered-object and authorised-device capacities as configuration | `cooperative_platform.cpp`, `management_server.*`, `address_space.hpp`, `authorization_service.hpp`, Kconfig | `full` keeps today's capacities |
+| **P3 Group tables** | R2 one copy of each loaded table; the group object segment sized by the product | `device_model.*`, `table_segments.hpp`, `association_table_object.*`, `address_table_object.*`, `interface_object_manager.*` | Same saving everywhere; the persistence format does not change |
+| **P4 Frames** | R6 the data link layer's frame pool by configuration, sized from measured peak use | `tp1_data_link_layer.*`, `tp1_mac_physical.*`, Kconfig | `full` keeps 16 |
+| **P5 Product runtime** | R3 bindings sized by the product; R4 group object descriptors as a `constexpr` table; R8 pending actions as a bitset | `endpoint_bindings.hpp`, `endpoint_runtime.hpp`, `product_port_core.*`, `group_object.*` | Same saving everywhere; product code unchanged |
+| **P6 Static device** | R9 one statically allocated device; R5 direct calls between layers; R10 no `std::string`; F2 `DptValue` without `std::variant` | BAU, stack port, layers, `dpt.hpp` | A device whose RAM is known at link time; ESP32 loses heap fragmentation at boot |
+
+P1–P4 first, in parallel, then P5, then P6, which is the largest and benefits from the others
+having removed the duplicate state it would otherwise have to carry.
+
+### 8.3 Verification
+
+On this project's Windows workstation, where the Linux host suite (ucontext fibres) cannot run:
+
+- the bare-metal size gate under QEMU for `tp1-small` (M3) and `tp1-standard` (M4): figures,
+  zero allocations after the lock, the download applied and the routed port values observed;
+- the host unit tests that build natively with MinGW GCC (41 programs on a `host-minimal`
+  profile without the virtual bus and KNXnet/IP), before and after;
+- the H8i8o firmware built against the result.
+
+CI runs the full Linux suites, the interop tests and the gates on the pull request.
