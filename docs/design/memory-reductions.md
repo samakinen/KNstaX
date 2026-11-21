@@ -239,3 +239,46 @@ added entries to it during the download.
 
 `tp1-standard` gains more because its capacities are larger (255 addresses, 400 associations: the
 association segment and the save scratch were 1 602 B each, the index about 800 B). The budgets are left to the integrator of P1–P4.
+
+### P5 Product runtime (R3, R4), 21 November 2026
+
+Done on `p5-product-runtime`, measured on its own against the base of the plan (P1–P4 not
+included). Size gate, `tp1-small` Cortex-M3 and `tp1-standard` Cortex-M4; every step passed with
+the download applied and no allocation after the heap lock.
+
+| Step | M3 flash | M3 heap | M3 RAM | M4 flash | M4 RAM |
+|---|---:|---:|---:|---:|---:|
+| Base | 88 709 B | 11 724 B | 13 332 B | 107 221 B | 20 855 B |
+| R3 two-word binding entries; state writes only for state ports | 88 875 B | 10 996 B | 12 604 B | 107 383 B | 20 127 B |
+| Product definition held once | 88 823 B | 10 932 B | 12 540 B | 107 323 B | 20 063 B |
+| R4 datapoint types from the port table (`GroupObject` 16 → 12 B) | 89 391 B | 10 716 B | 12 324 B | 107 969 B | 19 847 B |
+
+Together −1 008 B of RAM on both profiles, for +682 B (M3) and +748 B (M4) of flash. H8i8o
+firmware: flash 97 404 → 97 908 B, static RAM 5 720 B unchanged (the saving is heap).
+
+- **R3.** A binding is `{ thunk, ctx }`: the thunk called without a value frees a heap callable, so
+  the `manage` pointer went (12 → 8 B). State-write entries exist only for readable ports that take
+  writes; they hold the first receive ranks, so no third rank is needed in the 14 B port
+  descriptor. On the reference device the bindings fell from 1 424 to 688 B. *API:* `onStateWrite`
+  on a command port (no state) is now a `static_assert`, like the other bindings a port cannot use.
+  No product (the examples, the gate device, H8i8o) did that; one unit test did and now uses
+  `onCommand`. Compile-time dispatch was not done: bindings are registered at run time with
+  callables whose captures are run-time values, so the storage cannot come from the type alone.
+- **Definition.** `CommissionedProductRuntime` no longer copies the definition; `definition()`
+  returns by value, rebuilt from the endpoint runtime's copy.
+- **R4.** The datapoint type moved out of the object: `GroupObjectStore::setStaticDpts()` reads it
+  from the port table in rodata for the objects a product registers; any other object keeps its type
+  in the store, so tables built by tests, tools or `addGroupObject` behave as before. The value
+  offset and length, the flags (ETS writes them through `PID_TABLE`), the address and the policy
+  index stay. Going to 8 B would need the store pointer or the address out of the object, which
+  belongs with P6's static device. The flash cost (about 570 B) is the type side table and its
+  lookup.
+- **R8 not done.** The pending-action queue is a contract: the guide promises that requests made
+  before start are queued and sent, and the tests check distinct entries for the same port in order
+  and `QueueFull` at capacity, so a dirty bitset would coalesce what is promised as a queue. The
+  record is 40 B because `DptValue` is 32 B; F2 (`DptValue` as a tagged plain struct, P6) shrinks
+  it without a second representation here.
+- **Not done, noted.** `ResolvedKnxPersistenceIdentity` keeps its two `std::string`s: they are
+  public (`knxPersistenceIdentity().storageNamespace.c_str()` in the tests), so they go with R10 in
+  P6. The two 40 B product callbacks (programming mode, fault) keep their 32 B capture, which is the
+  product's API.
