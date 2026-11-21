@@ -193,6 +193,24 @@ void DeviceModel::bind()
     // ETS allocates a segment via PID_LOAD_STATE_CONTROL additional load
     // controls, reads its address from PID_TABLE_REFERENCE and streams the
     // table content with A_Memory_Write / verifies with A_Memory_Read.
+#if KNX_SHARED_LOAD_SEGMENT
+    // One staging buffer behind all three: only the table that started
+    // loading may write it, and the others are read from their tables.
+    const auto registerShared = [&](uint32_t base, uint32_t size, const char* name, StagedTable table) {
+        (void)stackPort.registerMemoryRegion(
+            application::MemoryRegion{MemoryAddress(static_cast<uint16_t>(base)), size,
+                                      application::MemoryAccessMode::ReadWrite, name},
+            std::span<uint8_t>(_staging).first(size),
+            [this, table]() { return _staged == table; },
+            [this, table](uint32_t offset, std::span<uint8_t> out) { readSegment(table, offset, out); });
+    };
+    registerShared(objects::tableseg::kGroupAddressTableBase, objects::tableseg::kGroupAddressTableSize, "GrAT",
+                   StagedTable::GroupAddress);
+    registerShared(objects::tableseg::kAssociationTableBase, objects::tableseg::kAssociationTableSize,
+                   "AssocTable", StagedTable::Association);
+    registerShared(objects::tableseg::kGroupObjectTableBase, objects::tableseg::kGroupObjectTableSize, "GrOT",
+                   StagedTable::GroupObject);
+#else
     (void)stackPort.registerMemoryRegion(
         application::MemoryRegion{MemoryAddress(objects::tableseg::kGroupAddressTableBase),
                                   objects::tableseg::kGroupAddressTableSize,
@@ -208,6 +226,7 @@ void DeviceModel::bind()
                                   objects::tableseg::kGroupObjectTableSize,
                                   application::MemoryAccessMode::ReadWrite, "GrOT"},
         std::span<uint8_t>(_groupObjectSegment));
+#endif
     // The application code segment is the product's parameter image: a
     // single buffer that ETS writes and the product reads. A product without
     // parameters has none.
@@ -511,8 +530,29 @@ void DeviceModel::afterTableObjectWrite(InterfaceObjectType objectType,
         && !request.data.empty();
     const bool isLoadCompleted = isLoadControlWrite
         && request.data.span()[0] == objects::loadstate::kEventLoadCompleted;
+#if KNX_SHARED_LOAD_SEGMENT
+    // StartLoading claims the staging buffer (taking it from a load that was
+    // abandoned, which then fails at its LoadCompleted); Unload gives it back.
+    if (const auto table = stagedTableFor(objectType); isLoadControlWrite && table != StagedTable::None) {
+        const uint8_t event = request.data.span()[0];
+        if (event == objects::loadstate::kEventStartLoading) {
+            if (_staged != StagedTable::None && _staged != table) {
+                KNX_LOGW(TAG, "Load segment taken over by another table; the earlier load will fail");
+            }
+            _staging.fill(0);
+            _staged = table;
+        } else if (event == objects::loadstate::kEventUnload && _staged == table) {
+            _staged = StagedTable::None;
+        }
+    }
+#endif
     if (isLoadCompleted) {
         applyLoadedTableSegment(objectType);
+#if KNX_SHARED_LOAD_SEGMENT
+        if (_staged == stagedTableFor(objectType)) {
+            _staged = StagedTable::None;
+        }
+#endif
     }
     // Every write to the address table can change what the data link layers
     // filter on (Unload and StartLoading empty it, a table write changes
@@ -547,8 +587,23 @@ void DeviceModel::applyLoadedTableSegment(InterfaceObjectType objectType)
                                      | segment[offset + 1u]);
     };
 
+#if KNX_SHARED_LOAD_SEGMENT
+    // A table whose load lost the staging buffer (another table started
+    // loading in between) has nothing to parse: the load fails, and ETS
+    // reports it, rather than completing with an empty table.
+    if (stagedTableFor(objectType) != StagedTable::None && loadedSegment(objectType).empty()) {
+        KNX_LOGE(TAG, "LoadCompleted without a staged segment: load failed");
+        if (objectType == InterfaceObjectType::addressTable()) {
+            _addressTable.setLoadState(objects::loadstate::kError);
+        } else if (objectType == InterfaceObjectType::associationTable()) {
+            _associationTable.setLoadState(objects::loadstate::kError);
+        }
+        return;
+    }
+#endif
+
     if (objectType == InterfaceObjectType::addressTable()) {
-        const std::span<const uint8_t> segment(_groupAddressSegment);
+        const std::span<const uint8_t> segment = loadedSegment(objectType);
         uint16_t count = u16at(segment, 0);
         if (count > objects::AddressTableDomain::kMaxEntries) {
             // A capacity is a promise: the table is refused, not cut short.
@@ -569,7 +624,7 @@ void DeviceModel::applyLoadedTableSegment(InterfaceObjectType objectType)
     }
 
     if (objectType == InterfaceObjectType::associationTable()) {
-        const std::span<const uint8_t> segment(_associationSegment);
+        const std::span<const uint8_t> segment = loadedSegment(objectType);
         uint16_t count = u16at(segment, 0);
         if (count > objects::AssociationTableDomain::kMaxEntries) {
             KNX_LOGE(TAG, "Association segment holds %u entries, capacity is %u: load refused",
@@ -605,6 +660,91 @@ void DeviceModel::applyLoadedTableSegment(InterfaceObjectType objectType)
     // ComObjectTable). The segment bytes are accepted for the download to
     // complete but not applied.
 }
+
+std::span<const uint8_t> DeviceModel::loadedSegment(InterfaceObjectType objectType) const
+{
+#if KNX_SHARED_LOAD_SEGMENT
+    const StagedTable table = stagedTableFor(objectType);
+    if (table == StagedTable::None || table != _staged) {
+        return {};
+    }
+    const size_t size = table == StagedTable::GroupAddress  ? objects::tableseg::kGroupAddressTableSize
+                      : table == StagedTable::Association ? objects::tableseg::kAssociationTableSize
+                                                            : objects::tableseg::kGroupObjectTableSize;
+    return std::span<const uint8_t>(_staging).first(size);
+#else
+    if (objectType == InterfaceObjectType::addressTable()) {
+        return _groupAddressSegment;
+    }
+    if (objectType == InterfaceObjectType::associationTable()) {
+        return _associationSegment;
+    }
+    if (objectType == InterfaceObjectType::groupObjectTable()) {
+        return _groupObjectSegment;
+    }
+    return {};
+#endif
+}
+
+#if KNX_SHARED_LOAD_SEGMENT
+DeviceModel::StagedTable DeviceModel::stagedTableFor(InterfaceObjectType objectType)
+{
+    if (objectType == InterfaceObjectType::addressTable()) {
+        return StagedTable::GroupAddress;
+    }
+    if (objectType == InterfaceObjectType::associationTable()) {
+        return StagedTable::Association;
+    }
+    if (objectType == InterfaceObjectType::groupObjectTable()) {
+        return StagedTable::GroupObject;
+    }
+    return StagedTable::None;
+}
+
+// A segment that holds no staged load reads as its table would have been
+// written: the address and association tables in the segment format (a
+// big-endian count, then the entries), the group object table as zeros (its
+// content is firmware-defined and never parsed).
+void DeviceModel::readSegment(StagedTable table, uint32_t offset, std::span<uint8_t> out) const
+{
+    if (table == _staged) {
+        std::copy_n(_staging.data() + offset, out.size(), out.data());
+        return;
+    }
+    const auto u16 = [](uint16_t value, uint32_t which) {
+        return static_cast<uint8_t>(which == 0u ? value >> 8 : value & 0xFFu);
+    };
+    const auto octetAt = [&](uint32_t position) -> uint8_t {
+        if (table == StagedTable::GroupAddress) {
+            const auto addresses = _addressTable.addresses();
+            if (position < 2u) {
+                return u16(static_cast<uint16_t>(addresses.size()), position);
+            }
+            const uint32_t index = (position - 2u) / 2u;
+            return index < addresses.size() ? u16(addresses[index].raw, (position - 2u) % 2u) : uint8_t{0};
+        }
+        if (table == StagedTable::Association) {
+            if (position < 2u) {
+                return u16(_associationTable.entryCount(), position);
+            }
+            const uint32_t index = (position - 2u) / 4u;
+            const auto* entry = index < _associationTable.entryCount()
+                                    ? _associationTable.getEntry(static_cast<uint16_t>(index))
+                                    : nullptr;
+            if (entry == nullptr) {
+                return uint8_t{0};
+            }
+            const uint32_t field = (position - 2u) % 4u;
+            return field < 2u ? u16(entry->addressIndex.value(), field)
+                              : u16(entry->groupObjectNumber.value(), field - 2u);
+        }
+        return uint8_t{0};
+    };
+    for (size_t i = 0; i < out.size(); ++i) {
+        out[i] = octetAt(offset + static_cast<uint32_t>(i));
+    }
+}
+#endif
 
 void DeviceModel::resubscribeGroupAddresses()
 {

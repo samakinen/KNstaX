@@ -35,6 +35,8 @@ CONFIG_KNX_DPT_COLOUR=n
 CONFIG_KNX_DPT_ACCESS=n
 CONFIG_KNX_ENABLE_DPT_CATALOGUE=n
 CONFIG_KNX_HEAP_POLICY_INIT_ONLY=y
+# One buffer for the table load segments instead of three (Kconfig help).
+CONFIG_KNX_SHARED_LOAD_SEGMENT=y
 # The receive path stays in flash: the board masks interrupts while a page
 # erases and the TP-UART2 answers BUSY meanwhile (FlashEraseGuard).
 CONFIG_KNX_ISR_IN_RAM=n

@@ -13,6 +13,7 @@
 
 #include "knx/config.hpp"
 #include <cstdint>
+#include <span>
 #include <cstddef>
 #include <optional>
 
@@ -43,6 +44,17 @@ enum class MemoryAccessMode : uint8_t {
  * means always.
  */
 using MemoryWriteGuard = util::InplaceFunction<bool(), ::knx::config::callbackBytes(16)>;
+
+/**
+ * @brief Answers a memory read of a region instead of its storage
+ *
+ * Fills @p out with the octets at @p offset from the region's start. For a
+ * region whose storage is shared and may hold another region's content (the
+ * shared load segment, Kconfig KNX_SHARED_LOAD_SEGMENT). Empty means read the
+ * storage.
+ */
+using MemoryReadProvider =
+    util::InplaceFunction<void(uint32_t offset, std::span<uint8_t> out), ::knx::config::callbackBytes(16)>;
 
 /**
  * @brief Memory region descriptor
