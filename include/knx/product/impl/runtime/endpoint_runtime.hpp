@@ -126,6 +126,13 @@ public:
         return compileEndpointDefinition(_definition);
     }
 
+    /// The definition this runtime was built from (its identity, persistence
+    /// and security policy; the ports are in its type).
+    const definition_type& definition() const
+    {
+        return _definition;
+    }
+
     /// The product identity this runtime was built from.
     const ProductIdentity& identity() const
     {

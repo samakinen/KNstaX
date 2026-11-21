@@ -944,12 +944,11 @@ public:
                                detail::ParameterCallbacks<parameters_type>&& parameterCallbacks,
                                LifecycleChangedCallback lifecycleCallback,
                                CommissionedProductOptions options)
-        : _definition(definition)
-        , _knxPersistenceIdentity(detail::resolveKnxPersistenceIdentity(definition, options.persistence))
+        : _knxPersistenceIdentity(detail::resolveKnxPersistenceIdentity(definition, options.persistence))
         , _parametersState(std::move(parameterCallbacks))
         , _lifecycleCallback(std::move(lifecycleCallback))
         , _runtime(
-              _definition.endpointDefinition,
+              definition.endpointDefinition,
               std::move(endpointBindings),
               endpoint::EndpointInstanceConfig{
                   .defaultIndividualAddress =
@@ -1872,9 +1871,12 @@ public:
         }
     }
 
-    const auto& definition() const
+    /// The product definition, by value: the endpoint runtime holds the one
+    /// copy (the definition type carries nothing else), so this rebuilds the
+    /// small wrapper around it. `const auto&` bound to the result keeps it alive.
+    product_definition_type definition() const
     {
-        return _definition;
+        return product_definition_type{.endpointDefinition = _runtime.definition()};
     }
 
     /// Compiled endpoint view: runtime communication-object descriptors plus the
@@ -1916,7 +1918,7 @@ private:
         }
     }
 
-    product_definition_type _definition;
+    // No copy of the product definition here: _runtime holds it (definition()).
     ResolvedKnxPersistenceIdentity _knxPersistenceIdentity;
     detail::ParameterState<parameters_type> _parametersState;
     LifecycleChangedCallback _lifecycleCallback;
