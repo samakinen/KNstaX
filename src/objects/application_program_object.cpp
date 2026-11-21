@@ -345,30 +345,30 @@ util::Result<void> writeStringProperty(
     return util::Result<void>::ok();
 }
 
-static const ScalarPropertyData<ApplicationProgramObject, uint16_t> kObjectTypeData{ &getObjectType, nullptr };
-static const ScalarPropertyData<ApplicationProgramObject, uint16_t> kApplicationIdData{ &getApplicationId, &setApplicationId };
-static const ScalarPropertyData<ApplicationProgramObject, uint8_t> kApplicationVersionData{ &getApplicationVersion, &setApplicationVersion };
-static const ScalarPropertyData<ApplicationProgramObject, uint16_t> kApplicationNumberData{ &getApplicationNumber, &setApplicationNumber };
-static const ScalarPropertyData<ApplicationProgramObject, uint8_t> kApplicationAreaData{ &getApplicationArea, &setApplicationArea };
-static const ScalarPropertyData<ApplicationProgramObject, uint16_t> kApplicationManufacturerData{ &getApplicationManufacturer, &setApplicationManufacturer };
-static const ScalarPropertyData<ApplicationProgramObject, uint8_t> kProgramStateData{ &getProgramState, &setProgramState };
-static const ScalarPropertyData<ApplicationProgramObject, uint8_t> kProgramControlData{ nullptr, &setProgramControl };
-static const ScalarPropertyData<ApplicationProgramObject, uint16_t> kParameterStartData{ &getParameterStart, &setParameterStart };
-static const ScalarPropertyData<ApplicationProgramObject, uint16_t> kParameterEndData{ &getParameterEnd, &setParameterEnd };
+static constexpr ScalarPropertyData<ApplicationProgramObject, uint16_t> kObjectTypeData{ &getObjectType, nullptr };
+static constexpr ScalarPropertyData<ApplicationProgramObject, uint16_t> kApplicationIdData{ &getApplicationId, &setApplicationId };
+static constexpr ScalarPropertyData<ApplicationProgramObject, uint8_t> kApplicationVersionData{ &getApplicationVersion, &setApplicationVersion };
+static constexpr ScalarPropertyData<ApplicationProgramObject, uint16_t> kApplicationNumberData{ &getApplicationNumber, &setApplicationNumber };
+static constexpr ScalarPropertyData<ApplicationProgramObject, uint8_t> kApplicationAreaData{ &getApplicationArea, &setApplicationArea };
+static constexpr ScalarPropertyData<ApplicationProgramObject, uint16_t> kApplicationManufacturerData{ &getApplicationManufacturer, &setApplicationManufacturer };
+static constexpr ScalarPropertyData<ApplicationProgramObject, uint8_t> kProgramStateData{ &getProgramState, &setProgramState };
+static constexpr ScalarPropertyData<ApplicationProgramObject, uint8_t> kProgramControlData{ nullptr, &setProgramControl };
+static constexpr ScalarPropertyData<ApplicationProgramObject, uint16_t> kParameterStartData{ &getParameterStart, &setParameterStart };
+static constexpr ScalarPropertyData<ApplicationProgramObject, uint16_t> kParameterEndData{ &getParameterEnd, &setParameterEnd };
 
 util::Result<uint32_t> getTableReference(const ApplicationProgramObject& /*object*/) {
     return tableseg::kApplicationCodeBase;
 }
 
-static const ScalarPropertyData<ApplicationProgramObject, uint32_t> kTableReferenceData{
+static constexpr ScalarPropertyData<ApplicationProgramObject, uint32_t> kTableReferenceData{
     &getTableReference,
     nullptr
 };
 
-static const StringPropertyKind kProgramNameKind = StringPropertyKind::ProgramName;
-static const StringPropertyKind kProgramDescriptionKind = StringPropertyKind::ProgramDescription;
+static constexpr StringPropertyKind kProgramNameKind = StringPropertyKind::ProgramName;
+static constexpr StringPropertyKind kProgramDescriptionKind = StringPropertyKind::ProgramDescription;
 
-static const PropertyHandler kAppProgramHandlers[] = {
+static constexpr PropertyHandler kAppProgramHandlers[] = {
     ScalarProperty<ApplicationProgramObject, uint16_t>::make(
         application::PropertyID::ObjectType,
         application::PropertyDataType::UnsignedInt,
@@ -486,17 +486,11 @@ static const PropertyHandler kAppProgramHandlers[] = {
 };
 
 constexpr size_t kAppProgramHandlerCount = sizeof(kAppProgramHandlers) / sizeof(kAppProgramHandlers[0]);
+static_assert(validatePropertyTable(kAppProgramHandlers, kAppProgramHandlerCount).isOk(),
+              "kAppProgramHandlers breaks the property kernel's rules");
 } // namespace
 
 KernelBinding ApplicationProgramObject::kernelBinding() const {
-    static bool validated = false;
-    if (!validated) {
-        const auto validation = validatePropertyTable(kAppProgramHandlers, kAppProgramHandlerCount);
-        if (validation.isError()) {
-            KNX_LOGE("KNX.AppProg", "Invalid property handler table (err=%d)", static_cast<int>(validation.error()));
-        }
-        validated = true;
-    }
     KernelBinding binding;
     binding.handlers = kAppProgramHandlers;
     binding.handlerCount = kAppProgramHandlerCount;

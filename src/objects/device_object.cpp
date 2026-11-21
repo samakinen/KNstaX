@@ -424,20 +424,20 @@ util::Result<void> setRunState(DeviceObject& domain, const uint8_t& value) {
     return util::Result<void>::ok();
 }
 
-static const ScalarPropertyData<DeviceObject, uint16_t> kObjectTypeData{ &getObjectType, nullptr };
-static const ScalarPropertyData<DeviceObject, uint16_t> kManufacturerData{ &getManufacturerId, &setManufacturerId };
-static const ScalarPropertyData<DeviceObject, uint8_t> kFirmwareData{ &getFirmwareRevision, nullptr };
-static const ScalarPropertyData<DeviceObject, uint8_t> kProgModeData{ &getProgMode, &setProgMode };
-static const ScalarPropertyData<DeviceObject, uint16_t> kMaxApduData{ &getMaxApduLength, nullptr };
-static const ScalarPropertyData<DeviceObject, uint8_t> kSubnetData{ &getSubnetAddress, &setSubnetAddress };
-static const ScalarPropertyData<DeviceObject, uint8_t> kDeviceAddrData{ &getDeviceAddress, &setDeviceAddress };
-static const ScalarPropertyData<DeviceObject, uint8_t> kRoutingData{ &getRoutingCount, &setRoutingCount };
-static const ScalarPropertyData<DeviceObject, uint8_t> kRetryData{ &getMaxRetryCount, &setMaxRetryCount };
-static const ScalarPropertyData<DeviceObject, uint8_t> kErrorFlagsData{ &getErrorFlags, &setErrorFlags };
-static const ScalarPropertyData<DeviceObject, uint8_t> kProgVersionData{ &getProgVersion, &setProgVersion };
-static const ScalarPropertyData<DeviceObject, uint8_t> kDeviceControlData{ &getDeviceControl, &setDeviceControl };
-static const ScalarPropertyData<DeviceObject, uint8_t> kLoadStateData{ &getLoadState, nullptr };
-static const ScalarPropertyData<DeviceObject, uint8_t> kRunStateData{ &getRunState, &setRunState };
+static constexpr ScalarPropertyData<DeviceObject, uint16_t> kObjectTypeData{ &getObjectType, nullptr };
+static constexpr ScalarPropertyData<DeviceObject, uint16_t> kManufacturerData{ &getManufacturerId, &setManufacturerId };
+static constexpr ScalarPropertyData<DeviceObject, uint8_t> kFirmwareData{ &getFirmwareRevision, nullptr };
+static constexpr ScalarPropertyData<DeviceObject, uint8_t> kProgModeData{ &getProgMode, &setProgMode };
+static constexpr ScalarPropertyData<DeviceObject, uint16_t> kMaxApduData{ &getMaxApduLength, nullptr };
+static constexpr ScalarPropertyData<DeviceObject, uint8_t> kSubnetData{ &getSubnetAddress, &setSubnetAddress };
+static constexpr ScalarPropertyData<DeviceObject, uint8_t> kDeviceAddrData{ &getDeviceAddress, &setDeviceAddress };
+static constexpr ScalarPropertyData<DeviceObject, uint8_t> kRoutingData{ &getRoutingCount, &setRoutingCount };
+static constexpr ScalarPropertyData<DeviceObject, uint8_t> kRetryData{ &getMaxRetryCount, &setMaxRetryCount };
+static constexpr ScalarPropertyData<DeviceObject, uint8_t> kErrorFlagsData{ &getErrorFlags, &setErrorFlags };
+static constexpr ScalarPropertyData<DeviceObject, uint8_t> kProgVersionData{ &getProgVersion, &setProgVersion };
+static constexpr ScalarPropertyData<DeviceObject, uint8_t> kDeviceControlData{ &getDeviceControl, &setDeviceControl };
+static constexpr ScalarPropertyData<DeviceObject, uint8_t> kLoadStateData{ &getLoadState, nullptr };
+static constexpr ScalarPropertyData<DeviceObject, uint8_t> kRunStateData{ &getRunState, &setRunState };
 
 static util::Result<void> readSerialNumber(
     const PropertyContext& context,
@@ -456,7 +456,7 @@ static util::Result<void> readSerialNumber(
     return out.writeBytes(domain->getSerialNumber());
 }
 
-static const PropertyHandler kSerialNumberHandler{
+static constexpr PropertyHandler kSerialNumberHandler{
     static_cast<application::PropertyID>(DeviceProperty::SerialNumber),
     application::PropertyDataType::Generic06,
     PropertyCapability::ReadOnly,
@@ -505,7 +505,7 @@ static util::Result<void> readHardwareType(
     return util::Result<void>::ok();
 }
 
-static const PropertyHandler kHardwareTypeHandler{
+static constexpr PropertyHandler kHardwareTypeHandler{
     static_cast<application::PropertyID>(DeviceProperty::HardwareType),
     application::PropertyDataType::Generic06,
     PropertyCapability::ReadOnly,
@@ -551,7 +551,7 @@ static util::Result<void> readOrderInfo(
     return util::Result<void>::ok();
 }
 
-static const PropertyHandler kOrderInfoHandler{
+static constexpr PropertyHandler kOrderInfoHandler{
     static_cast<application::PropertyID>(DeviceProperty::OrderInfo),
     application::PropertyDataType::Generic10,
     PropertyCapability::ReadOnly,
@@ -566,7 +566,7 @@ util::Result<uint16_t> getVersion(const DeviceObject& domain) {
     return domain.getVersion();
 }
 
-static const ScalarPropertyData<DeviceObject, uint16_t> kVersionData{ &getVersion, nullptr };
+static constexpr ScalarPropertyData<DeviceObject, uint16_t> kVersionData{ &getVersion, nullptr };
 
 // PID_IO_LIST (03/05/01 §4.3.22): read-only PDT_UNSIGNED_INT[], mandatory
 // with the extended property services. Element 0 is the number of interface
@@ -609,7 +609,7 @@ static util::Result<uint16_t> countIoList(const PropertyContext& context, const 
     return domain->interfaceObjectCount();
 }
 
-static const PropertyHandler kIoListHandler{
+static constexpr PropertyHandler kIoListHandler{
     static_cast<application::PropertyID>(DeviceProperty::IoList),
     application::PropertyDataType::UnsignedInt,
     PropertyCapability::ReadOnly,
@@ -622,7 +622,7 @@ static const PropertyHandler kIoListHandler{
     nullptr,
 };
 
-static const PropertyHandler kDeviceHandlers[] = {
+static constexpr PropertyHandler kDeviceHandlers[] = {
     kSerialNumberHandler,
     kHardwareTypeHandler,
     kOrderInfoHandler,
@@ -721,17 +721,11 @@ static const PropertyHandler kDeviceHandlers[] = {
 };
 
 constexpr size_t kDeviceHandlerCount = sizeof(kDeviceHandlers) / sizeof(kDeviceHandlers[0]);
+static_assert(validatePropertyTable(kDeviceHandlers, kDeviceHandlerCount).isOk(),
+              "kDeviceHandlers breaks the property kernel's rules");
 } // namespace
 
 KernelBinding DeviceObject::kernelBinding() const {
-    static bool validated = false;
-    if (!validated) {
-        const auto validation = validatePropertyTable(kDeviceHandlers, kDeviceHandlerCount);
-        if (validation.isError()) {
-            KNX_LOGE("KNX.DeviceObj", "Invalid property handler table (err=%d)", static_cast<int>(validation.error()));
-        }
-        validated = true;
-    }
     KernelBinding binding;
     binding.handlers = kDeviceHandlers;
     binding.handlerCount = kDeviceHandlerCount;

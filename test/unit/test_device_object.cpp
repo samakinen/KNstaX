@@ -728,6 +728,57 @@ void test_DeviceObject_PropertyAccess_Version() {
                              DeviceObject::packVersion(32, 32, 64));
 }
 
+// The handler tables of the fixed interface objects are constant-initialised
+// (they live in read-only memory and need no start-up code), which needs every
+// kernel helper that builds or checks a handler to be usable in a constant
+// expression. These assertions fail to compile if one stops being.
+namespace {
+struct ConstantDomain {
+    uint8_t loadState() const { return 0; }
+    void setLoadState(uint8_t) {}
+    void loadControlReset() {}
+};
+
+util::Result<uint16_t> constantObjectType(const ConstantDomain&) { return 0; }
+util::Result<uint8_t> constantEntry(const ConstantDomain&, DomainIndex) { return 0; }
+util::Result<uint16_t> constantCount(const ConstantDomain&) { return 0; }
+
+constexpr ScalarPropertyData<ConstantDomain, uint16_t> kConstantObjectType{&constantObjectType, nullptr};
+constexpr VariableTablePropertyData<ConstantDomain, uint8_t> kConstantTable{
+    &constantEntry, nullptr, nullptr, &constantCount};
+
+constexpr PropertyHandler kConstantHandlers[] = {
+    ScalarProperty<ConstantDomain, uint16_t>::make(
+        application::PropertyID::ObjectType, application::PropertyDataType::UnsignedInt,
+        PropertyCapability::ReadOnly, &kConstantObjectType),
+    LoadControlProperty<ConstantDomain>::make(static_cast<application::PropertyID>(5)),
+    VariableTableProperty<ConstantDomain, uint8_t, 4>::make(
+        static_cast<application::PropertyID>(23), application::PropertyDataType::UnsignedChar,
+        PropertyCapability::ReadOnly, &kConstantTable),
+    FunctionProperty::make(static_cast<application::PropertyID>(66)),
+};
+constexpr size_t kConstantHandlerCount = sizeof(kConstantHandlers) / sizeof(kConstantHandlers[0]);
+
+static_assert(validatePropertyTable(kConstantHandlers, kConstantHandlerCount).isOk());
+static_assert(kConstantHandlers[0].write == nullptr && kConstantHandlers[0].maxElements == 1);
+static_assert(kConstantHandlers[2].maxElements == 4 && kConstantHandlers[2].count != nullptr);
+// The rules hold at compile time too: no PID_OBJECT_TYPE, no table.
+static_assert(validatePropertyTable(kConstantHandlers + 1, kConstantHandlerCount - 1).isError());
+} // namespace
+
+void test_PropertyKernel_ConstantTableIsUsable() {
+    std::vector<uint8_t> out;
+    const PropertyContext context{nullptr, ValidationPolicy::OnWrite};
+    TEST_ASSERT_TRUE(readProperty(kConstantHandlers, kConstantHandlerCount, context,
+                                  application::PropertyID::ObjectType, 1, 1, out)
+                         .isError());  // no domain bound: refused, not dereferenced
+    PropertyDescription description;
+    TEST_ASSERT_TRUE(describeProperty(kConstantHandlers, kConstantHandlerCount,
+                                      static_cast<application::PropertyID>(0), 0, description)
+                         .isOk());
+    TEST_ASSERT_EQUAL(static_cast<int>(application::PropertyID::ObjectType), static_cast<int>(description.id));
+}
+
 // === Main Test Runner ===
 
 int main(int argc, char** argv) {
@@ -760,6 +811,7 @@ int main(int argc, char** argv) {
     RUN_TEST(test_DeviceObject_ProgMode_Enable);
     RUN_TEST(test_DeviceObject_ProgMode_Callback);
     RUN_TEST(test_DeviceObject_ProgMode_NoCallbackIfNoChange);
+    RUN_TEST(test_PropertyKernel_ConstantTableIsUsable);
     
     // Property access
     RUN_TEST(test_DeviceObject_PropertyAccess_ManufacturerId);

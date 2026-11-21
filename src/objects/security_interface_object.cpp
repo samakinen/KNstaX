@@ -673,28 +673,24 @@ util::Result<void> resizeBlobProperty(const PropertyContext& context,
     return util::Result<void>::ok();
 }
 
-static const ScalarPropertyData<SecurityInterfaceObject, uint16_t> kObjectTypeData{ &getObjectType, nullptr };
-static const ScalarPropertyData<SecurityInterfaceObject, uint8_t> kSecurityModeData{ &getSecurityMode, &setSecurityMode };
+static constexpr ScalarPropertyData<SecurityInterfaceObject, uint16_t> kObjectTypeData{ &getObjectType, nullptr };
+static constexpr ScalarPropertyData<SecurityInterfaceObject, uint8_t> kSecurityModeData{ &getSecurityMode, &setSecurityMode };
 
-static const BlobPropertyInfo kP2PKeyInfo{ SecurityProperty::P2PKeyTable, 20 };
-static const BlobPropertyInfo kGroupKeyInfo{ SecurityProperty::GroupKeyTable, 18 };
-static const BlobPropertyInfo kIndividualAddrInfo{ SecurityProperty::SecurityIndividualAddressTable, 8 };
-static const BlobPropertyInfo kSecurityReportInfo{ SecurityProperty::SecurityReport, 1 };
-static const BlobPropertyInfo kSecurityReportControlInfo{ SecurityProperty::SecurityReportControl, 1 };
-static const BlobPropertyInfo kZoneKeyInfo{ SecurityProperty::ZoneKeyTable, 19 };
-static const BlobPropertyInfo kGoSecurityFlagsInfo{ SecurityProperty::GoSecurityFlags, 1 };
+static constexpr BlobPropertyInfo kP2PKeyInfo{ SecurityProperty::P2PKeyTable, 20 };
+static constexpr BlobPropertyInfo kGroupKeyInfo{ SecurityProperty::GroupKeyTable, 18 };
+static constexpr BlobPropertyInfo kIndividualAddrInfo{ SecurityProperty::SecurityIndividualAddressTable, 8 };
+static constexpr BlobPropertyInfo kSecurityReportInfo{ SecurityProperty::SecurityReport, 1 };
+static constexpr BlobPropertyInfo kSecurityReportControlInfo{ SecurityProperty::SecurityReportControl, 1 };
+static constexpr BlobPropertyInfo kZoneKeyInfo{ SecurityProperty::ZoneKeyTable, 19 };
+static constexpr BlobPropertyInfo kGoSecurityFlagsInfo{ SecurityProperty::GoSecurityFlags, 1 };
 
-static const PropertyHandler kSecurityHandlers[] = {
+static constexpr PropertyHandler kSecurityHandlers[] = {
     ScalarProperty<SecurityInterfaceObject, uint16_t>::make(
         application::PropertyID::ObjectType,
         application::PropertyDataType::UnsignedInt,
         PropertyCapability::ReadOnly,
         &kObjectTypeData),
 
-    // PID_LOAD_STATE_CONTROL: ETS runs the standard load procedure
-    // (StartLoading -> write key tables -> LoadCompleted) before it will
-    // download Data Secure key material. Without this property the download
-    // aborts at the first step.
     // PID_LOAD_STATE_CONTROL: ETS runs the standard load procedure
     // (StartLoading -> write key tables -> LoadCompleted) before it will
     // download Data Secure key material. Without this property the download
@@ -830,17 +826,11 @@ static const PropertyHandler kSecurityHandlers[] = {
 };
 
 constexpr size_t kSecurityHandlerCount = sizeof(kSecurityHandlers) / sizeof(kSecurityHandlers[0]);
+static_assert(validatePropertyTable(kSecurityHandlers, kSecurityHandlerCount).isOk(),
+              "kSecurityHandlers breaks the property kernel's rules");
 } // namespace
 
 KernelBinding SecurityInterfaceObject::kernelBinding() const {
-    static bool validated = false;
-    if (!validated) {
-        const auto validation = validatePropertyTable(kSecurityHandlers, kSecurityHandlerCount);
-        if (validation.isError()) {
-            KNX_LOGE("KNX.Security", "Invalid property handler table (err=%d)", static_cast<int>(validation.error()));
-        }
-        validated = true;
-    }
     KernelBinding binding;
     binding.handlers = kSecurityHandlers;
     binding.handlerCount = kSecurityHandlerCount;

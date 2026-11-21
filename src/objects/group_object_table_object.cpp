@@ -138,7 +138,7 @@ util::Result<void> writeTableData(
     return util::Result<void>::ok();
 }
 
-static const ScalarPropertyData<GroupObjectTableDomain, uint16_t> kObjectTypeData{
+static constexpr ScalarPropertyData<GroupObjectTableDomain, uint16_t> kObjectTypeData{
     &getObjectType,
     nullptr
 };
@@ -147,12 +147,12 @@ util::Result<uint32_t> getTableReference(const GroupObjectTableDomain& /*domain*
     return tableseg::kGroupObjectTableBase;
 }
 
-static const ScalarPropertyData<GroupObjectTableDomain, uint32_t> kTableReferenceData{
+static constexpr ScalarPropertyData<GroupObjectTableDomain, uint32_t> kTableReferenceData{
     &getTableReference,
     nullptr
 };
 
-static const PropertyHandler kGroupObjectTableHandlers[] = {
+static constexpr PropertyHandler kGroupObjectTableHandlers[] = {
     ScalarProperty<GroupObjectTableDomain, uint16_t>::make(
         application::PropertyID::ObjectType,
         application::PropertyDataType::UnsignedInt,
@@ -203,6 +203,8 @@ static const PropertyHandler kGroupObjectTableHandlers[] = {
 };
 
 constexpr size_t kGroupObjectTableHandlerCount = sizeof(kGroupObjectTableHandlers) / sizeof(kGroupObjectTableHandlers[0]);
+static_assert(validatePropertyTable(kGroupObjectTableHandlers, kGroupObjectTableHandlerCount).isOk(),
+              "kGroupObjectTableHandlers breaks the property kernel's rules");
 
 util::Result<GroupObjectTableDomain::Index> toDomainIndex(GroupObjectIndex index) {
     if (!index.isValid() || index.value() >= GroupObjectTableDomain::kMaxObjects) {
@@ -345,12 +347,7 @@ uint16_t GroupObjectTableDomain::countUniqueAddresses() const {
 
 // === GroupObjectTableObject ===
 
-GroupObjectTableObject::GroupObjectTableObject() {
-    const auto validation = validatePropertyTable(kGroupObjectTableHandlers, kGroupObjectTableHandlerCount);
-    if (validation.isError()) {
-        KNX_LOGE("KNX.GOTable", "Invalid property handler table (err=%d)", static_cast<int>(validation.error()));
-    }
-}
+GroupObjectTableObject::GroupObjectTableObject() = default;
 
 KernelBinding GroupObjectTableObject::kernelBinding() const {
     KernelBinding binding;

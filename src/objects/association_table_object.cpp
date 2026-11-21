@@ -58,7 +58,7 @@ util::Result<void> validateTableEntry(const AssociationTableDomain& /*domain*/, 
     return util::Result<void>::ok();
 }
 
-static const ScalarPropertyData<AssociationTableDomain, uint16_t> kObjectTypeData{
+static constexpr ScalarPropertyData<AssociationTableDomain, uint16_t> kObjectTypeData{
     &getObjectType,
     nullptr
 };
@@ -67,7 +67,7 @@ util::Result<uint32_t> getTableReference(const AssociationTableDomain& /*domain*
     return tableseg::kAssociationTableBase;
 }
 
-static const ScalarPropertyData<AssociationTableDomain, uint32_t> kTableReferenceData{
+static constexpr ScalarPropertyData<AssociationTableDomain, uint32_t> kTableReferenceData{
     &getTableReference,
     nullptr
 };
@@ -79,14 +79,14 @@ util::Result<uint16_t> countTableEntries(const AssociationTableDomain& domain) {
     return domain.size();
 }
 
-static const VariableTablePropertyData<AssociationTableDomain, AssociationEntry> kTableData{
+static constexpr VariableTablePropertyData<AssociationTableDomain, AssociationEntry> kTableData{
     &getTableEntry,
     &setTableEntry,
     &validateTableEntry,
     &countTableEntries
 };
 
-static const PropertyHandler kAssociationTableHandlers[] = {
+static constexpr PropertyHandler kAssociationTableHandlers[] = {
     ScalarProperty<AssociationTableDomain, uint16_t>::make(
         application::PropertyID::ObjectType,
         application::PropertyDataType::UnsignedInt,
@@ -114,6 +114,8 @@ static const PropertyHandler kAssociationTableHandlers[] = {
 };
 
 constexpr size_t kAssociationTableHandlerCount = sizeof(kAssociationTableHandlers) / sizeof(kAssociationTableHandlers[0]);
+static_assert(validatePropertyTable(kAssociationTableHandlers, kAssociationTableHandlerCount).isOk(),
+              "kAssociationTableHandlers breaks the property kernel's rules");
 
 util::Result<AssociationTableDomain::Index> toDomainIndex(uint16_t index) {
     if (index >= AssociationTableDomain::kMaxEntries) {
@@ -340,11 +342,6 @@ bool AssociationTableDomain::isValid() const {
 AssociationTableObject::AssociationTableObject() {
     constexpr uint16_t kDefaultReserve = 64;
     _table.reserve(kDefaultReserve);
-
-    const auto validation = validatePropertyTable(kAssociationTableHandlers, kAssociationTableHandlerCount);
-    if (validation.isError()) {
-        KNX_LOGE("KNX.AssocTable", "Invalid property handler table (err=%d)", static_cast<int>(validation.error()));
-    }
 }
 
 KernelBinding AssociationTableObject::kernelBinding() const {

@@ -35,7 +35,7 @@ util::Result<void> validateTableEntry(const AddressTableDomain& /*domain*/, Doma
     return util::Result<void>::ok();
 }
 
-static const ScalarPropertyData<AddressTableDomain, uint16_t> kObjectTypeData{
+static constexpr ScalarPropertyData<AddressTableDomain, uint16_t> kObjectTypeData{
     &getObjectType,
     nullptr
 };
@@ -44,7 +44,7 @@ util::Result<uint32_t> getTableReference(const AddressTableDomain& /*domain*/) {
     return tableseg::kGroupAddressTableBase;
 }
 
-static const ScalarPropertyData<AddressTableDomain, uint32_t> kTableReferenceData{
+static constexpr ScalarPropertyData<AddressTableDomain, uint32_t> kTableReferenceData{
     &getTableReference,
     nullptr
 };
@@ -56,14 +56,14 @@ util::Result<uint16_t> countTableEntries(const AddressTableDomain& domain) {
     return domain.size();
 }
 
-static const VariableTablePropertyData<AddressTableDomain, GroupAddress> kTableData{
+static constexpr VariableTablePropertyData<AddressTableDomain, GroupAddress> kTableData{
     &getTableEntry,
     &setTableEntry,
     &validateTableEntry,
     &countTableEntries
 };
 
-static const PropertyHandler kAddressTableHandlers[] = {
+static constexpr PropertyHandler kAddressTableHandlers[] = {
     ScalarProperty<AddressTableDomain, uint16_t>::make(
         application::PropertyID::ObjectType,
         application::PropertyDataType::UnsignedInt,
@@ -90,6 +90,8 @@ static const PropertyHandler kAddressTableHandlers[] = {
 };
 
 constexpr size_t kAddressTableHandlerCount = sizeof(kAddressTableHandlers) / sizeof(kAddressTableHandlers[0]);
+static_assert(validatePropertyTable(kAddressTableHandlers, kAddressTableHandlerCount).isOk(),
+              "kAddressTableHandlers breaks the property kernel's rules");
 
 util::Result<AddressTableDomain::Index> toDomainIndex(AddressTableIndex index) {
     if (!index.isValid()) {
@@ -236,11 +238,6 @@ bool AddressTableDomain::isValid() const {
 AddressTableObject::AddressTableObject() {
     constexpr uint16_t kDefaultReserve = 32;
     _table.reserve(kDefaultReserve);
-
-    const auto validation = validatePropertyTable(kAddressTableHandlers, kAddressTableHandlerCount);
-    if (validation.isError()) {
-        KNX_LOGE("KNX.AddrTable", "Invalid property handler table (err=%d)", static_cast<int>(validation.error()));
-    }
 }
 
 KernelBinding AddressTableObject::kernelBinding() const {

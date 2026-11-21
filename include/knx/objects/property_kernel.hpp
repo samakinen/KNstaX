@@ -77,15 +77,15 @@ struct KernelBinding {
     PropertyContext context{};
 };
 
-inline bool canRead(PropertyCapability cap) {
+constexpr bool canRead(PropertyCapability cap) {
     return cap == PropertyCapability::ReadOnly || cap == PropertyCapability::ReadWrite;
 }
 
-inline bool canWrite(PropertyCapability cap) {
+constexpr bool canWrite(PropertyCapability cap) {
     return cap == PropertyCapability::WriteOnly || cap == PropertyCapability::ReadWrite;
 }
 
-inline uint8_t propertyElementSize(application::PropertyDataType type) {
+constexpr uint8_t propertyElementSize(application::PropertyDataType type) {
     using PDT = application::PropertyDataType;
     switch (type) {
         case PDT::Control:
@@ -168,7 +168,15 @@ inline uint8_t propertyElementSize(application::PropertyDataType type) {
     }
 }
 
-inline util::Result<void> validatePropertyTable(const PropertyHandler* handlers, size_t count) {
+/// Check a handler table against the kernel's rules.
+///
+/// `constexpr`, like the make() helpers below, so that a fixed table is
+/// declared `constexpr` and checked once by `static_assert` in its own
+/// translation unit: the table is then constant-initialised into read-only
+/// memory instead of being built in RAM by start-up code, and a mistake in it is
+/// a compile error rather than a log line on the device. Tables assembled at
+/// run time (GenericInterfaceObject) still call it at run time.
+constexpr util::Result<void> validatePropertyTable(const PropertyHandler* handlers, size_t count) {
     if (!handlers || count == 0) {
         return util::Result<void>::err(util::ErrorCode::InvalidParameter);
     }
@@ -581,13 +589,13 @@ struct ScalarPropertyData {
 
 template <typename Domain, typename T>
 struct ScalarProperty {
-    static PropertyHandler make(
+    static constexpr PropertyHandler make(
         application::PropertyID id,
         application::PropertyDataType type,
         PropertyCapability capability,
         const ScalarPropertyData<Domain, T>* data)
     {
-        PropertyHandler handler;
+        PropertyHandler handler{};
         handler.id = id;
         handler.type = type;
         handler.capability = capability;
@@ -664,13 +672,13 @@ struct VariableTablePropertyData {
 
 template <typename Domain, typename T, uint16_t Max>
 struct VariableTableProperty {
-    static PropertyHandler make(
+    static constexpr PropertyHandler make(
         application::PropertyID id,
         application::PropertyDataType type,
         PropertyCapability capability,
         const VariableTablePropertyData<Domain, T>* data)
     {
-        PropertyHandler handler;
+        PropertyHandler handler{};
         handler.id = id;
         handler.type = type;
         handler.capability = capability;
@@ -826,8 +834,8 @@ inline void applyLoadControlEvent(Domain& domain, uint8_t event)
 
 template <typename Domain>
 struct LoadControlProperty {
-    static PropertyHandler make(application::PropertyID id) {
-        PropertyHandler handler;
+    static constexpr PropertyHandler make(application::PropertyID id) {
+        PropertyHandler handler{};
         handler.id = id;
         handler.type = application::PropertyDataType::Control;
         handler.capability = PropertyCapability::ReadWrite;
@@ -907,8 +915,8 @@ struct LoadControlProperty {
 /// property is a client error, answered with nr_of_elem = 0 (§3.4.4.1
 /// "Error handling"), which is what InvalidParameter maps to here.
 struct FunctionProperty {
-    static PropertyHandler make(application::PropertyID id) {
-        PropertyHandler handler;
+    static constexpr PropertyHandler make(application::PropertyID id) {
+        PropertyHandler handler{};
         handler.id = id;
         handler.type = application::PropertyDataType::Function;
         handler.capability = PropertyCapability::ReadWrite;
