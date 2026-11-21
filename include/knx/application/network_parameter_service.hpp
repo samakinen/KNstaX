@@ -16,6 +16,10 @@
  * button.  With only A_IndividualAddress_Write (which addresses "whichever
  * device is in programming mode") a device that is physically hard to reach
  * cannot be commissioned at all.
+ *
+ * The serial-number services (and A_DomainAddressSerialNumber_*) are in every
+ * build. The A_NetworkParameter_* part, its handlers and their storage, exists
+ * only with KNX_ENABLE_NETWORK_PARAMETER.
  */
 
 #pragma once
@@ -105,6 +109,7 @@ using DomainAddressResponseCallback = util::InplaceFunction<
 using DomainAddressWriteCallback = util::InplaceFunction<
     util::Result<void>(std::span<const uint8_t> domainAddress), ::knx::config::callbackBytes(64)>;
 
+#if KNX_FEATURE_NETWORK_PARAMETER
 /**
  * @brief Answers A_NetworkParameter_Read.  Returning an error means "this
  * device does not expose that parameter", which per spec means stay silent.
@@ -119,9 +124,13 @@ using NetworkParameterResponseCallback = util::InplaceFunction<
     void(InterfaceObjectType objectType,
          PropertyID propertyId,
          std::span<const uint8_t> value), ::knx::config::callbackBytes(64)>;
+#endif
 
 /**
  * @brief Handler for the serial-number and network-parameter broadcast services.
+ *
+ * Built whatever the configuration: the serial-number services are how a
+ * device that cannot be put in programming mode by hand gets its address.
  *
  * @thread_safety Owner-context only.
  */
@@ -156,6 +165,7 @@ public:
     void setAddressWriteCallback(SerialNumberAddressWriteCallback callback) {
         _addressWriteCallback = std::move(callback);
     }
+#if KNX_FEATURE_NETWORK_PARAMETER
     void setNetworkParameterReadHandler(NetworkParameterReadHandler handler) {
         _networkParameterRead = std::move(handler);
     }
@@ -165,6 +175,7 @@ public:
     void setNetworkParameterResponseCallback(NetworkParameterResponseCallback callback) {
         _networkParameterResponse = std::move(callback);
     }
+#endif
 
     /**
      * @brief Handle A_IndividualAddressSerialNumber_Read.
@@ -188,8 +199,10 @@ public:
     util::Result<void> handleDomainAddressSerialNumberWrite(const KnxSerialNumber& requested,
                                                             std::span<const uint8_t> domainAddress);
 
+#if KNX_FEATURE_NETWORK_PARAMETER
     util::Result<void> handleNetworkParameterRead(const NetworkParameterRequest& request);
     util::Result<void> handleNetworkParameterWrite(const NetworkParameterRequest& request);
+#endif
 
 private:
     KnxSerialNumber _serialNumber{};
@@ -198,9 +211,11 @@ private:
     DomainAddressWriteCallback _domainAddressWriteCallback{};
     SerialNumberResponseCallback _serialResponseCallback{};
     SerialNumberAddressWriteCallback _addressWriteCallback{};
+#if KNX_FEATURE_NETWORK_PARAMETER
     NetworkParameterReadHandler _networkParameterRead{};
     NetworkParameterWriteHandler _networkParameterWrite{};
     NetworkParameterResponseCallback _networkParameterResponse{};
+#endif
 };
 
 } // namespace application

@@ -155,6 +155,8 @@ void test_serial_write_rejects_invalid_address(void) {
 
 // --- Network parameter -----------------------------------------------------
 
+#if KNX_FEATURE_NETWORK_PARAMETER
+
 void test_network_parameter_read_stays_silent_when_unsupported(void) {
     auto service = makeService();
     service.setNetworkParameterResponseCallback(
@@ -212,6 +214,7 @@ void test_network_parameter_handler_error_is_silence_not_failure(void) {
     TEST_ASSERT_TRUE(service.handleNetworkParameterRead(request).isOk());
     TEST_ASSERT_EQUAL(0, g_captured.parameterResponses);
 }
+#endif
 
 
 // --- Domain address by serial number (03/03/07 §3.3.6, §3.3.7) -------------
@@ -325,8 +328,10 @@ int main(void) {
     RUN_TEST(test_serial_write_applies_address_for_own_serial);
     RUN_TEST(test_serial_write_ignores_other_serial);
     RUN_TEST(test_serial_write_rejects_invalid_address);
+#if KNX_FEATURE_NETWORK_PARAMETER
     RUN_TEST(test_network_parameter_read_stays_silent_when_unsupported);
     RUN_TEST(test_network_parameter_read_answers_when_supported);
     RUN_TEST(test_network_parameter_handler_error_is_silence_not_failure);
+#endif
     return UNITY_END();
 }

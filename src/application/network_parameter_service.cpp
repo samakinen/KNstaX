@@ -130,6 +130,7 @@ util::Result<void> NetworkParameterService::handleDomainAddressSerialNumberWrite
     return util::Result<void>::ok();
 }
 
+#if KNX_FEATURE_NETWORK_PARAMETER
 util::Result<void> NetworkParameterService::handleNetworkParameterRead(
     const NetworkParameterRequest& request)
 {
@@ -156,6 +157,7 @@ util::Result<void> NetworkParameterService::handleNetworkParameterWrite(
     }
     return _networkParameterWrite(request);
 }
+#endif
 
 } // namespace application
 } // namespace knx

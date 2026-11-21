@@ -103,6 +103,9 @@ void ManagementServer::init() {
 #if KNX_FEATURE_FUNCTION_PROPERTIES
     _functionPropertyServices = std::make_unique<FunctionPropertyServices>();
 #endif
+    // In every build, KNX_ENABLE_NETWORK_PARAMETER or not: it also answers
+    // the serial-number services, which commission a device without its
+    // programming button. Only its A_NetworkParameter_* part follows the option.
     _networkParameterService = std::make_unique<NetworkParameterService>();
 
     // Wire service handler response callbacks to the send pipeline
