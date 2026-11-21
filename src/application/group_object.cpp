@@ -37,8 +37,11 @@ GroupObjectStore::~GroupObjectStore() = default;
 void GroupObjectStore::reserve(uint16_t objects, size_t valueBytes)
 {
     // Types are kept for the objects the static table does not cover.
-    if (objects > _staticTableCount && objects - _staticTableCount > _dpts.capacity()) {
-        _dpts.reserve(objects - _staticTableCount);
+    if (objects > _staticTableCount) {
+        const size_t uncovered = static_cast<size_t>(objects - _staticTableCount);
+        if (uncovered > _dpts.capacity()) {
+            _dpts.reserve(uncovered);
+        }
     }
     if (objects > _capacity) {
         std::unique_ptr<GroupObject[]> grown(new GroupObject[objects]);
