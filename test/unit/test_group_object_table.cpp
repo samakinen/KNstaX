@@ -681,6 +681,25 @@ void test_GroupObjectTable_GetStatisticsWithDuplicateAddresses() {
     TEST_ASSERT_EQUAL_UINT16(2, stats.uniqueAddresses); // Only 2 unique
 }
 
+// Duplicates that are not adjacent are still counted once: the count does not
+// rely on the objects being sorted by address.
+void test_GroupObjectTable_GetStatisticsWithInterleavedDuplicates() {
+    GroupObjectTableObject table;
+    TEST_ASSERT_EQUAL_UINT16(0, table.getStatistics().uniqueAddresses);
+
+    const GroupAddress addresses[] = {GroupAddress(1, 0, 1), GroupAddress(1, 0, 2), GroupAddress(1, 0, 1),
+                                      GroupAddress(1, 0, 3), GroupAddress(1, 0, 2), GroupAddress(1, 0, 1)};
+    for (const auto& address : addresses) {
+        GroupObjectConfig config{};
+        config.address = address;
+        table.addGroupObject(std::make_unique<GroupObject>(config));
+    }
+
+    const auto stats = table.getStatistics();
+    TEST_ASSERT_EQUAL_UINT16(6, stats.totalObjects);
+    TEST_ASSERT_EQUAL_UINT16(3, stats.uniqueAddresses);
+}
+
 void test_GroupObjectTable_GetStatisticsWithActiveObjects() {
     GroupObjectTableObject table;
     
@@ -791,6 +810,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_GroupObjectTable_IsValid);
     RUN_TEST(test_GroupObjectTable_GetStatistics);
     RUN_TEST(test_GroupObjectTable_GetStatisticsWithDuplicateAddresses);
+    RUN_TEST(test_GroupObjectTable_GetStatisticsWithInterleavedDuplicates);
     RUN_TEST(test_GroupObjectTable_GetStatisticsWithActiveObjects);
     
     // Integration

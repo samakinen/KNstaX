@@ -12,7 +12,6 @@
 #include "knx/objects/property_kernel.hpp"
 #include "knx/util/log.hpp"
 #include <algorithm>
-#include <set>
 
 namespace knx {
 namespace objects {
@@ -338,11 +337,22 @@ GroupObjectTableDomain::Statistics GroupObjectTableDomain::getStatistics() const
 }
 
 uint16_t GroupObjectTableDomain::countUniqueAddresses() const {
-    std::set<uint16_t> uniqueAddrs;
-    for (uint16_t i = 0; i < _store->size(); ++i) {
-        uniqueAddrs.insert(_store->at(i)->getAddress().raw);
+    // An address counts at its first occurrence. Quadratic in the number of
+    // objects (at most kMaxObjects), but it allocates nothing, so it stays
+    // usable after the heap lock, and it runs only for statistics.
+    const uint16_t count = _store->size();
+    uint16_t unique = 0;
+    for (uint16_t i = 0; i < count; ++i) {
+        const uint16_t raw = _store->at(i)->getAddress().raw;
+        bool seenBefore = false;
+        for (uint16_t j = 0; j < i && !seenBefore; ++j) {
+            seenBefore = _store->at(j)->getAddress().raw == raw;
+        }
+        if (!seenBefore) {
+            ++unique;
+        }
     }
-    return static_cast<uint16_t>(uniqueAddrs.size());
+    return unique;
 }
 
 // === GroupObjectTableObject ===
