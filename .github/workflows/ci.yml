@@ -96,15 +96,16 @@ jobs:
           ctest --test-dir build_${{ matrix.profile }} --output-on-failure -j"$(nproc)"
           ${{ matrix.ctest_args }}
 
-  # Bare-metal size gate, one reference device per profile and core
-  # (docs/design/small-target-profile.md section 7). Each run links the device
-  # with LTO, checks flash and static RAM against the ratcheting budget of
-  # test/baremetal/size_gate/budgets/<profile>-<core>.json and runs the forbid
+  # Bare-metal size gate, one reference device per profile and core, and the
+  # tp1-small device with Data Secure (variant secure: software AES, no crypto
+  # library); docs/design/small-target-profile.md section 7. Each run links the
+  # device with LTO, checks flash and static RAM against the ratcheting budget of
+  # test/baremetal/size_gate/budgets/<profile>[-<variant>]-<core>.json and runs the forbid
   # list; the Cortex-M3 device is also run under QEMU for the heap high-water
   # mark. On a pull request the base is measured first, with the same gate, and
   # the change of every figure is printed and put in the job summary.
   size-gate:
-    name: Size gate (${{ matrix.profile }}, ${{ matrix.cpu }})
+    name: Size gate (${{ matrix.profile }}${{ matrix.variant && format(' {0}', matrix.variant) || '' }}, ${{ matrix.cpu }})
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -119,6 +120,10 @@ jobs:
           - id: tp1-small-m0plus
             profile: tp1-small
             cpu: cortex-m0plus
+          - id: tp1-small-secure-m3
+            profile: tp1-small
+            variant: secure
+            cpu: cortex-m3
     steps:
       - uses: actions/checkout@v4
         with:
@@ -143,7 +148,7 @@ jobs:
           git worktree add ../knstax_base "${{ github.event.pull_request.base.sha }}"
           KNX_SIZE_GATE_KNSTAX_ROOT="$PWD/../knstax_base" \
             sh test/baremetal/size_gate/run_gate.sh "$PWD/build_size_gate_base/${{ matrix.id }}" \
-              ${{ matrix.profile }} ${{ matrix.cpu }} || echo "base: gate exit status $? (the base's own budget does not matter here)"
+              ${{ matrix.profile }} ${{ matrix.cpu }} "${{ matrix.variant }}" || echo "base: gate exit status $? (the base's own budget does not matter here)"
           test -f "build_size_gate_base/${{ matrix.id }}/gate_report.json"
 
       - name: Size gate
@@ -151,7 +156,7 @@ jobs:
           baseline="$PWD/build_size_gate_base/${{ matrix.id }}/gate_report.json"
           if [ -f "$baseline" ]; then export KNX_SIZE_GATE_BASELINE="$baseline"; fi
           sh test/baremetal/size_gate/run_gate.sh "$PWD/build_size_gate/${{ matrix.id }}" \
-            ${{ matrix.profile }} ${{ matrix.cpu }}
+            ${{ matrix.profile }} ${{ matrix.cpu }} "${{ matrix.variant }}"
 
       - name: Job summary
         if: always()
@@ -159,7 +164,7 @@ jobs:
           report="build_size_gate/${{ matrix.id }}/gate_report.txt"
           if [ -f "$report" ]; then
             {
-              echo "### Size gate: ${{ matrix.profile }} on ${{ matrix.cpu }}"
+              echo "### Size gate: ${{ matrix.profile }}${{ matrix.variant && format(' ({0})', matrix.variant) || '' }} on ${{ matrix.cpu }}"
               echo '```'
               sed -n '/^Reference device/,$p' "$report"
               echo '```'

@@ -11,18 +11,23 @@
 #
 # The reference devices (small-target-profile.md section 7) and their budgets:
 #
-#   profile       core           budget file                       heap run
-#   tp1-small     cortex-m3      budgets/tp1-small-m3.json         QEMU mps2-an385
-#   tp1-standard  cortex-m4      budgets/tp1-standard-m4.json      QEMU mps2-an386
-#   tp1-small     cortex-m0plus  budgets/tp1-small-m0plus.json     no
+#   profile       variant  core           budget file                         heap run
+#   tp1-small     -        cortex-m3      budgets/tp1-small-m3.json           QEMU mps2-an385
+#   tp1-standard  -        cortex-m4      budgets/tp1-standard-m4.json        QEMU mps2-an386
+#   tp1-small     -        cortex-m0plus  budgets/tp1-small-m0plus.json       no
+#   tp1-small     secure   cortex-m3      budgets/tp1-small-secure-m3.json    QEMU mps2-an385
+#
+# A variant applies variants/<variant>.defconfig over the profile (secure: Data
+# Secure with the software AES and APDUs of 55 octets).
 #
 # Needs arm-none-eabi-gcc, cmake, ninja and python3. The heap run also needs
 # qemu-system-arm; without it the gate checks flash and static RAM only and
 # says so. Exit status: 0 within budget, 1 over budget, 2 the gate could not run.
 #
-# Usage: run_gate.sh <build-dir> [profile [cpu]]
+# Usage: run_gate.sh <build-dir> [profile [cpu [variant]]]
 #   profile   default $KNX_SIZE_GATE_PROFILE, else tp1-small
 #   cpu       default $KNX_ARM_CPU, else cortex-m3 (the toolchain file's default)
+#   variant   default $KNX_SIZE_GATE_VARIANT, else none
 #   $KNX_SIZE_GATE_BUDGET       a budget file to use instead of the one named from profile and cpu
 #   $KNX_SIZE_GATE_KNSTAX_ROOT  measure another KNstaX tree (CI: the base of a pull request)
 #   $KNX_SIZE_GATE_BASELINE     the gate_report.json of an earlier run; the change is printed
@@ -36,9 +41,10 @@
 
 set -u
 
-BUILD=${1:?usage: run_gate.sh <build-dir> [profile [cpu]]}
+BUILD=${1:?usage: run_gate.sh <build-dir> [profile [cpu [variant]]]}
 PROFILE=${2:-${KNX_SIZE_GATE_PROFILE:-tp1-small}}
 CPU=${3:-${KNX_ARM_CPU:-cortex-m3}}
+VARIANT=${4:-${KNX_SIZE_GATE_VARIANT:-}}
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../../.." && pwd)
 TOOLCHAIN="$ROOT/cmake/toolchains/arm-none-eabi.cmake"
@@ -49,11 +55,11 @@ case "$CPU" in
     cortex-m0plus) CORE=m0plus ;;
     *) CORE=$CPU ;;
 esac
-BUDGET=${KNX_SIZE_GATE_BUDGET:-$HERE/budgets/$PROFILE-$CORE.json}
-[ -f "$BUDGET" ] || { echo "error: no budget file $BUDGET for $PROFILE on $CPU" >&2; exit 2; }
+BUDGET=${KNX_SIZE_GATE_BUDGET:-$HERE/budgets/$PROFILE${VARIANT:+-$VARIANT}-$CORE.json}
+[ -f "$BUDGET" ] || { echo "error: no budget file $BUDGET for $PROFILE${VARIANT:+ ($VARIANT)} on $CPU" >&2; exit 2; }
 
 mkdir -p "$BUILD" || exit 2
-CONFIGURE_ARGS="-DKNX_SIZE_GATE_PROFILE=$PROFILE -DKNX_ARM_CPU=$CPU"
+CONFIGURE_ARGS="-DKNX_SIZE_GATE_PROFILE=$PROFILE -DKNX_SIZE_GATE_VARIANT=$VARIANT -DKNX_ARM_CPU=$CPU"
 [ -z "${KNX_SIZE_GATE_KNSTAX_ROOT:-}" ] || CONFIGURE_ARGS="$CONFIGURE_ARGS -DKNX_SIZE_GATE_KNSTAX_ROOT=$KNX_SIZE_GATE_KNSTAX_ROOT"
 
 # shellcheck disable=SC2086
@@ -107,7 +113,7 @@ BASELINE_ARG=""
 # shellcheck disable=SC2086
 python3 -I "$ROOT/scripts/ci/knstax_size_gate.py" \
     --map "$BUILD/gate/size_gate.elf.map" --budget "$BUDGET" --elf "$BUILD/gate/size_gate.elf" \
-    --profile "$PROFILE" --cpu "$CPU" --config "$CONFIG" --json "$BUILD/gate_report.json" \
+    --profile "$PROFILE${VARIANT:+-$VARIANT}" --cpu "$CPU" --config "$CONFIG" --json "$BUILD/gate_report.json" \
     $HEAP_ARG $BASELINE_ARG > "$BUILD/gate_report.txt"
 STATUS=$?
 cat "$BUILD/gate_report.txt"

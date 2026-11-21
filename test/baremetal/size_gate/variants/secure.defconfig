@@ -1,0 +1,11 @@
+# The reference device with KNX Data Secure: the Security Interface Object,
+# the secure application layer and the software AES (no crypto library on
+# bare metal). A secured APDU is 13 octets longer than the plain one and a
+# key table entry does not fit in 15 (data-secure-small-target.md section 3.4),
+# so APDUs are 55 octets: an extended frame, which the TP-UART2 carries.
+# Data Secure selects the extended property services; they are set here too
+# so the fragment says what the device contains.
+CONFIG_KNX_ENABLE_SECURITY=y
+CONFIG_KNX_AES_BACKEND_SOFTWARE=y
+CONFIG_KNX_ENABLE_PROPERTY_EXT=y
+CONFIG_KNX_MAX_APDU_LENGTH=55

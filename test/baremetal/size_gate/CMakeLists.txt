@@ -8,7 +8,8 @@
 #   cmake -S test/baremetal/size_gate -B build/size_gate -G Ninja \
 #         -DCMAKE_TOOLCHAIN_FILE=<KNstaX>/cmake/toolchains/arm-none-eabi.cmake \
 #         -DCMAKE_BUILD_TYPE=MinSizeRel \
-#         [-DKNX_SIZE_GATE_PROFILE=tp1-standard] [-DKNX_ARM_CPU=cortex-m4]
+#         [-DKNX_SIZE_GATE_PROFILE=tp1-standard] [-DKNX_ARM_CPU=cortex-m4] \
+#         [-DKNX_SIZE_GATE_VARIANT=secure]
 #   cmake --build build/size_gate
 #
 # The profile defaults to tp1-small; the core is the toolchain file's
@@ -40,8 +41,19 @@ else()
 endif()
 include(${KNX_ROOT}/cmake/knx_config.cmake)
 set(KNX_SIZE_GATE_PROFILE "tp1-small" CACHE STRING "KNstaX profile of the reference device")
-knx_configure(PROFILE ${KNX_SIZE_GATE_PROFILE})
-message(STATUS "size gate: profile ${KNX_SIZE_GATE_PROFILE}, cpu ${KNX_ARM_CPU}")
+# A variant is the same device with a fragment of variants/ over the profile
+# (secure: Data Secure on). Empty: the profile as it is.
+set(KNX_SIZE_GATE_VARIANT "" CACHE STRING "Variant of the reference device (a file under variants/, without .defconfig)")
+if(KNX_SIZE_GATE_VARIANT)
+    set(_gate_variant_file "${CMAKE_CURRENT_LIST_DIR}/variants/${KNX_SIZE_GATE_VARIANT}.defconfig")
+    if(NOT EXISTS "${_gate_variant_file}")
+        message(FATAL_ERROR "size gate: no variant ${_gate_variant_file}")
+    endif()
+    knx_configure(PROFILE ${KNX_SIZE_GATE_PROFILE} OVERRIDES "${_gate_variant_file}")
+else()
+    knx_configure(PROFILE ${KNX_SIZE_GATE_PROFILE})
+endif()
+message(STATUS "size gate: profile ${KNX_SIZE_GATE_PROFILE}, variant '${KNX_SIZE_GATE_VARIANT}', cpu ${KNX_ARM_CPU}")
 add_subdirectory(${KNX_ROOT} knstax EXCLUDE_FROM_ALL)
 
 # Emulator variant: -DKNX_SIZE_GATE_SEMIHOST=ON links for an address map with code

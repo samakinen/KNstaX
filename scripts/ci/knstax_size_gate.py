@@ -26,7 +26,7 @@ Usage:
                       [--config knx.config] [--baseline earlier.json]
 
 Budgets ratchet (small-target-profile.md section 7). There is one budget file
-per reference configuration (profile and core), in test/baremetal/size_gate/budgets:
+per reference configuration (profile, variant and core), in test/baremetal/size_gate/budgets:
 
   {
     "profile": "tp1-small", "cpu": "cortex-m3",
