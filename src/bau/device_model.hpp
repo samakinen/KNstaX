@@ -302,11 +302,10 @@ private:
     std::atomic<bool> _powerFailSaveRequested{false};
 #endif
 
-    // Backing storage for the memory-mapped table load segments (registered
-    // with the application layer's memory service in bind()).
-    std::array<uint8_t, objects::tableseg::kGroupAddressTableSize> _groupAddressSegment{};
-    std::array<uint8_t, objects::tableseg::kAssociationTableSize> _associationSegment{};
-    std::array<uint8_t, objects::tableseg::kGroupObjectTableSize> _groupObjectSegment{};
+    // The group object table's load segment (registered with the memory
+    // service in bind(), sized there by the group objects the device has).
+    // The address and association table segments belong to their objects.
+    std::vector<uint8_t> _groupObjectSegment;
 };
 
 } // namespace bau

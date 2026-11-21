@@ -460,17 +460,14 @@ private:
     // Persistence
     std::unique_ptr<ObjectPersistence> _persistence;
     std::unique_ptr<PersistenceManager> _persistenceManager;
-    /// Room for the largest record a save builds: the association table image
-    /// (the group address table is smaller), 256 B for the rest, and with Data
-    /// Secure the key tables. Reserved when persistence starts; a record that
-    /// outgrows it makes the vector allocate.
-    static constexpr size_t kRecordScratchBytes =
-        (tableseg::kAssociationTableSize > 256u ? tableseg::kAssociationTableSize : 256u)
-#if KNX_SECURE_ENABLED
-        + 1024u
-#endif
-        ;
-    /// The largest record a save builds is a table image; see kRecordScratchBytes.
+    /// Room for the records a save cannot take from where their value is: the
+    /// parameter image record (reserved at its size when persistence starts),
+    /// and a record carried over from the previous bank, which is one property
+    /// element at most (a property read is one APDU). The tables, strings and
+    /// key tables are saved from their own storage. A record that outgrows the
+    /// reservation makes the vector allocate.
+    static constexpr size_t kRecordScratchBytes = config::MAX_APDU_LENGTH;
+    /// See kRecordScratchBytes.
     std::vector<uint8_t> _recordScratch;
     bool _persistenceEnabled;
     bool _initialized;

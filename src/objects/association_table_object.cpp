@@ -128,36 +128,68 @@ util::Result<AssociationTableDomain::Index> toDomainIndex(uint16_t index) {
 
 // === AssociationTableDomain ===
 
+static_assert(AssociationTableDomain::kImageBytes == tableseg::kAssociationTableSize,
+              "the association table is its load segment");
+
+void AssociationTableDomain::put(uint16_t position, const AssociationEntry& entry) {
+    const size_t offset = 2u + kEntryBytes * position;
+    _image[offset] = static_cast<uint8_t>(entry.addressIndex.raw >> 8);
+    _image[offset + 1u] = static_cast<uint8_t>(entry.addressIndex.raw & 0xFFu);
+    _image[offset + 2u] = static_cast<uint8_t>(entry.groupObjectNumber.raw >> 8);
+    _image[offset + 3u] = static_cast<uint8_t>(entry.groupObjectNumber.raw & 0xFFu);
+}
+
+void AssociationTableDomain::setSize(uint16_t size) {
+    // The count octets follow the table, so the segment reads back as the
+    // table in force once a load is over, after a restore or a firmware edit.
+    _size = size;
+    _image[0] = static_cast<uint8_t>(size >> 8);
+    _image[1] = static_cast<uint8_t>(size & 0xFFu);
+}
+
+bool AssociationTableDomain::loading() const {
+    return _loadState == loadstate::kLoading;
+}
+
 util::Result<void> AssociationTableDomain::add(const AssociationEntry& entry) {
     if (!entry.isValid()) {
         return util::Result<void>::err(util::ErrorCode::InvalidParameter);
     }
-    if (_entries.size() >= kMaxEntries) {
+    if (loading()) {
+        // The append would overwrite the octets ETS has streamed so far, and
+        // LoadCompleted replaces the table anyway (it did so before as well,
+        // only after accepting the entry).
+        return util::Result<void>::err(util::ErrorCode::Busy);
+    }
+    if (_size >= kMaxEntries) {
         return util::Result<void>::err(util::ErrorCode::ResourceUnavailable);
     }
     if (hasAssociation(entry.addressIndex, entry.groupObjectNumber)) {
         return util::Result<void>::ok();
     }
-    _entries.push_back(entry);
-    rebuildIndex();
+    put(_size, entry);
+    setSize(static_cast<uint16_t>(_size + 1u));
     return util::Result<void>::ok();
 }
 
 util::Result<void> AssociationTableDomain::remove(Index index) {
-    if (index.value >= _entries.size()) {
+    if (index.value >= _size) {
         return util::Result<void>::err(util::ErrorCode::InvalidParameter);
     }
-    _entries.erase(index.value);
-    rebuildIndex();
+    const size_t offset = 2u + kEntryBytes * index.value;
+    const size_t end = 2u + kEntryBytes * _size;
+    std::copy(_image.begin() + static_cast<std::ptrdiff_t>(offset + kEntryBytes),
+              _image.begin() + static_cast<std::ptrdiff_t>(end),
+              _image.begin() + static_cast<std::ptrdiff_t>(offset));
+    setSize(static_cast<uint16_t>(_size - 1u));
     return util::Result<void>::ok();
 }
 
 util::Result<void> AssociationTableDomain::set(Index index, const AssociationEntry& entry) {
-    if (index.value >= _entries.size() || !entry.isValid()) {
+    if (index.value >= _size || !entry.isValid()) {
         return util::Result<void>::err(util::ErrorCode::InvalidParameter);
     }
-    _entries[index.value] = entry;
-    rebuildIndex();
+    put(index.value, entry);
     return util::Result<void>::ok();
 }
 
@@ -165,105 +197,86 @@ util::Result<void> AssociationTableDomain::setExpand(Index index, const Associat
     if (index.value >= kMaxEntries) {
         return util::Result<void>::err(util::ErrorCode::InvalidParameter);
     }
-    if (_entries.size() <= index.value) {
-        _entries.resize(index.value + 1);
+    // Entries skipped over read as invalid until they are written, as when
+    // the table was a vector of default-constructed entries.
+    for (uint16_t position = _size; position < index.value; ++position) {
+        put(position, AssociationEntry());
     }
-    _entries[index.value] = entry;
-    rebuildIndex();
+    put(index.value, entry);
+    if (index.value >= _size) {
+        setSize(static_cast<uint16_t>(index.value + 1u));
+    }
     return util::Result<void>::ok();
 }
 
 AssociationEntry AssociationTableDomain::get(Index index) const {
-    if (index.value >= _entries.size()) {
+    if (index.value >= _size) {
         return AssociationEntry();
     }
-    return _entries[index.value];
-}
-
-const AssociationEntry* AssociationTableDomain::getPtr(Index index) const {
-    if (index.value >= _entries.size()) {
-        return nullptr;
-    }
-    return &_entries[index.value];
+    return at(index.value);
 }
 
 uint16_t AssociationTableDomain::removeEntriesForAddress(AddressTableIndex addressIndex) {
-    size_t removed = 0;
-    for (size_t i = 0; i < _entries.size();) {
-        if (_entries[i].addressIndex == addressIndex) {
-            _entries.erase(i);
-            ++removed;
+    uint16_t kept = 0;
+    for (uint16_t position = 0; position < _size; ++position) {
+        if (tsapAt(position) == addressIndex.raw) {
             continue;
         }
-        ++i;
+        if (kept != position) {
+            put(kept, at(position));
+        }
+        ++kept;
     }
-    rebuildIndex();
-    return static_cast<uint16_t>(removed);
+    const auto removed = static_cast<uint16_t>(_size - kept);
+    setSize(kept);
+    return removed;
 }
 
 uint16_t AssociationTableDomain::removeEntriesForGroupObject(GroupObjectIndex groupObjectNumber) {
-    size_t removed = 0;
-    for (size_t i = 0; i < _entries.size();) {
-        if (_entries[i].groupObjectNumber == groupObjectNumber) {
-            _entries.erase(i);
-            ++removed;
+    uint16_t kept = 0;
+    for (uint16_t position = 0; position < _size; ++position) {
+        if (asapAt(position) == groupObjectNumber.raw) {
             continue;
         }
-        ++i;
+        if (kept != position) {
+            put(kept, at(position));
+        }
+        ++kept;
     }
-    rebuildIndex();
-    return static_cast<uint16_t>(removed);
+    const auto removed = static_cast<uint16_t>(_size - kept);
+    setSize(kept);
+    return removed;
 }
 
-void AssociationTableDomain::rebuildIndex() {
-    // Sorting on (address index, position) keeps table order among the group
-    // objects of one address and needs no scratch memory. At most 512 entries,
-    // so even an element-by-element download rebuilding after every write
-    // stays in the low milliseconds.
-    _byAddress.clear();
-    for (uint16_t position = 0; position < _entries.size(); ++position) {
-        (void)_byAddress.push_back(position);
+bool AssociationTableDomain::hasGroupObjects(AddressTableIndex addressIndex) const {
+    for (uint16_t position = 0; position < _size; ++position) {
+        if (tsapAt(position) == addressIndex.raw) {
+            return true;
+        }
     }
-    const auto key = [this](uint16_t position) {
-        return (static_cast<uint32_t>(_entries[position].addressIndex.raw) << 16) | position;
-    };
-    std::sort(_byAddress.begin(), _byAddress.end(),
-              [&key](uint16_t a, uint16_t b) { return key(a) < key(b); });
-}
-
-std::span<const uint16_t> AssociationTableDomain::positionsFor(AddressTableIndex addressIndex) const {
-    const auto byAddress = [this](uint16_t position, uint16_t raw) {
-        return _entries[position].addressIndex.raw < raw;
-    };
-    const auto first = std::lower_bound(_byAddress.begin(), _byAddress.end(), addressIndex.raw, byAddress);
-    auto last = first;
-    while (last != _byAddress.end() && _entries[*last].addressIndex.raw == addressIndex.raw) {
-        ++last;
-    }
-    return std::span<const uint16_t>(first, last);
+    return false;
 }
 
 util::Result<size_t> AssociationTableDomain::findGroupObjects(AddressTableIndex addressIndex,
                                                               std::span<GroupObjectIndex> out) const {
-    const auto positions = positionsFor(addressIndex);
+    size_t required = 0;
+    forEachGroupObject(addressIndex, [&required](GroupObjectIndex) { ++required; });
     if (out.empty()) {
-        return positions.size();
+        return required;
     }
-    if (out.size() < positions.size()) {
+    if (out.size() < required) {
         return util::ErrorCode::BufferTooSmall;
     }
     size_t written = 0;
-    for (const uint16_t position : positions) {
-        out[written++] = _entries[position].groupObjectNumber;
-    }
+    forEachGroupObject(addressIndex, [&](GroupObjectIndex groupObject) { out[written++] = groupObject; });
     return written;
 }
 
 util::Result<size_t> AssociationTableDomain::findAddressIndices(GroupObjectIndex groupObjectNumber,
                                                                 std::span<AddressTableIndex> out) const {
     size_t required = 0;
-    for (const auto& entry : _entries) {
-        if (entry.groupObjectNumber == groupObjectNumber) {
+    for (uint16_t position = 0; position < _size; ++position) {
+        if (asapAt(position) == groupObjectNumber.raw) {
             ++required;
         }
     }
@@ -277,19 +290,21 @@ util::Result<size_t> AssociationTableDomain::findAddressIndices(GroupObjectIndex
     }
 
     size_t written = 0;
-    for (const auto& entry : _entries) {
-        if (entry.groupObjectNumber == groupObjectNumber) {
-            out[written++] = entry.addressIndex;
+    for (uint16_t position = 0; position < _size; ++position) {
+        if (asapAt(position) == groupObjectNumber.raw) {
+            out[written++] = AddressTableIndex(tsapAt(position));
         }
     }
     return written;
 }
 
 bool AssociationTableDomain::hasAssociation(AddressTableIndex addressIndex, GroupObjectIndex groupObjectNumber) const {
-    return std::any_of(_entries.begin(), _entries.end(),
-                       [addressIndex, groupObjectNumber](const AssociationEntry& e) {
-                           return e.addressIndex == addressIndex && e.groupObjectNumber == groupObjectNumber;
-                       });
+    for (uint16_t position = 0; position < _size; ++position) {
+        if (tsapAt(position) == addressIndex.raw && asapAt(position) == groupObjectNumber.raw) {
+            return true;
+        }
+    }
+    return false;
 }
 
 util::Result<void> AssociationTableDomain::load(std::span<const AssociationEntry> entries) {
@@ -301,23 +316,56 @@ util::Result<void> AssociationTableDomain::load(std::span<const AssociationEntry
             return util::Result<void>::err(util::ErrorCode::InvalidParameter);
         }
     }
-    if (!_entries.assign(entries)) {
-        return util::Result<void>::err(util::ErrorCode::InvalidParameter);
+    if (loading()) {
+        return util::Result<void>::err(util::ErrorCode::Busy);  // as add()
     }
-    rebuildIndex();
+    for (size_t position = 0; position < entries.size(); ++position) {
+        put(static_cast<uint16_t>(position), entries[position]);
+    }
+    setSize(static_cast<uint16_t>(entries.size()));
     return util::Result<void>::ok();
 }
 
+util::Result<uint16_t> AssociationTableDomain::applyLoadSegment() {
+    const uint16_t count = u16At(0);
+    if (count > kMaxEntries) {
+        clear();
+        return util::ErrorCode::InvalidParameter;
+    }
+    // Compacted in place. Finding the repeats is O(n^2), once per download:
+    // about 13 000 comparisons for 160 entries.
+    uint16_t kept = 0;
+    for (uint16_t position = 0; position < count; ++position) {
+        const AssociationEntry entry = at(position);
+        if (!entry.isValid()) {
+            continue;
+        }
+        bool repeat = false;
+        for (uint16_t earlier = 0; earlier < kept && !repeat; ++earlier) {
+            repeat = at(earlier) == entry;
+        }
+        if (repeat) {
+            continue;
+        }
+        if (kept != position) {
+            put(kept, entry);
+        }
+        ++kept;
+    }
+    setSize(kept);
+    return kept;
+}
+
 void AssociationTableDomain::truncate(uint16_t size) {
-    if (size < _entries.size()) {
-        _entries.resize(size);
-        rebuildIndex();
+    if (size < _size) {
+        setSize(size);
     }
 }
 
 void AssociationTableDomain::clear() {
-    _entries.clear();
-    rebuildIndex();
+    // Only the count: the octets past it are not in force, and while ETS
+    // loads they are what it has written.
+    setSize(0);
 }
 
 void AssociationTableDomain::reserve(uint16_t capacity) {
@@ -325,12 +373,12 @@ void AssociationTableDomain::reserve(uint16_t capacity) {
 }
 
 uint16_t AssociationTableDomain::size() const {
-    return static_cast<uint16_t>(_entries.size());
+    return _size;
 }
 
 bool AssociationTableDomain::isValid() const {
-    for (const auto& entry : _entries) {
-        if (!entry.isValid()) {
+    for (uint16_t position = 0; position < _size; ++position) {
+        if (!at(position).isValid()) {
             return false;
         }
     }
@@ -410,12 +458,12 @@ bool AssociationTableObject::hasAssociation(AddressTableIndex addressIndex, Grou
     return _table.hasAssociation(addressIndex, groupObjectNumber);
 }
 
-const AssociationEntry* AssociationTableObject::getEntry(uint16_t index) const {
+std::optional<AssociationEntry> AssociationTableObject::getEntry(uint16_t index) const {
     auto domainIndex = toDomainIndex(index);
-    if (domainIndex.isError()) {
-        return nullptr;
+    if (domainIndex.isError() || domainIndex.value().value >= _table.size()) {
+        return std::nullopt;
     }
-    return _table.getPtr(domainIndex.value());
+    return _table.get(domainIndex.value());
 }
 
 util::Result<void> AssociationTableObject::loadTable(std::span<const AssociationEntry> entries) {
@@ -427,16 +475,15 @@ void AssociationTableObject::reserve(uint16_t capacity) {
 }
 
 util::Result<size_t> AssociationTableObject::getAllEntries(std::span<AssociationEntry> out) const {
-    const size_t count = _table.entries().size();
+    const size_t count = _table.size();
     if (out.empty()) return count;
     if (out.size() < count) {
         return util::ErrorCode::BufferTooSmall;
     }
-    size_t written = 0;
-    for (const auto& entry : _table.entries()) {
-        out[written++] = entry;
+    for (uint16_t position = 0; position < count; ++position) {
+        out[position] = _table.get(AssociationTableDomain::Index{position});
     }
-    return written;
+    return count;
 }
 
 bool AssociationTableObject::isValid() const {

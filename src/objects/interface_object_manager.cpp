@@ -296,9 +296,10 @@ util::Result<void> InterfaceObjectManager::init(bool enablePersistence,
         _activeBank = readActivePersistenceBank();
 
         _persistenceManager = std::make_unique<PersistenceManager>(*_persistence);
-        // The parameter image is a record too, and may be the largest one.
-        const size_t imageRecord = _applicationProgramPtr->parameterImage().size()
-                                   + ApplicationProgramObject::kParameterImageRecordOverhead;
+        // The parameter image record is the one a save has to build.
+        const size_t imageRecord = _applicationProgramPtr->hasParameterImage()
+            ? _applicationProgramPtr->parameterImage().size() + ApplicationProgramObject::kParameterImageRecordOverhead
+            : 0u;
         _recordScratch.reserve(std::max(kRecordScratchBytes, imageRecord));
         KNX_LOGD(TAG, "Persistence enabled");
     }
@@ -552,18 +553,23 @@ util::Result<size_t> InterfaceObjectManager::saveToPersistence() {
     const uint8_t nextBank = static_cast<uint8_t>(_activeBank ^ 1u);
     bool bankComplete = true;
 
-    // One copy of the write path for every getter: @p readable is what the
-    // getter returned, @p data what it produced.
-    auto saveRecord = [&](uint16_t baseKeyId, bool readable, std::vector<uint8_t>& data) {
+    // One copy of the write path for every record: @p readable is whether
+    // there was a value to save, @p data the record. A record is saved from
+    // where its value already is (a table's own storage, a string, a blob, a
+    // property read on the stack), so a save needs no buffer as large as the
+    // largest record; _recordScratch takes only what has to be built.
+    auto saveRecord = [&](uint16_t baseKeyId, bool readable, std::span<const uint8_t> data) {
         const uint16_t keyId = bankedKeyId(baseKeyId, nextBank);
         if (!readable) {
             // Nothing readable now (an object this device does not have, say).
             // The old bank is about to be dropped, so carry its copy across
-            // rather than lose it.
-            data.clear();
-            if (_persistence->loadById(bankedKeyId(baseKeyId, _activeBank), data).isError()) {
-                data.clear();
+            // rather than lose it. Only a single-element property read can
+            // fail, so the copy fits the scratch (see kRecordScratchBytes).
+            _recordScratch.clear();
+            if (_persistence->loadById(bankedKeyId(baseKeyId, _activeBank), _recordScratch).isError()) {
+                _recordScratch.clear();
             }
+            data = _recordScratch;
         }
 
         // Avoid saving empty blobs for NVS safety; erase instead. An erase
@@ -587,56 +593,23 @@ util::Result<size_t> InterfaceObjectManager::saveToPersistence() {
         ++saved;
     };
 
-    auto saveProp = [&](InterfaceObjectType objectType, application::PropertyID propertyId, auto getter) {
-        // One buffer for every record: allocated when persistence starts, so a save
-        // allocates nothing (KNX_HEAP_POLICY=init_only).
-        auto& data = _recordScratch;
-        data.clear();
-        const bool readable = getter(data);
-        saveRecord(makePersistenceKeyId(objectType, propertyId), readable, data);
+    auto saveProp = [&](InterfaceObjectType objectType, application::PropertyID propertyId,
+                        std::span<const uint8_t> data) {
+        saveRecord(makePersistenceKeyId(objectType, propertyId), true, data);
     };
 
     auto savePropViaManager = [&](InterfaceObjectType objectType, application::PropertyID propertyId) {
-        saveProp(objectType, propertyId,
-                 [&](std::vector<uint8_t>& out) {
-                     application::PropertyServiceDataBuffer value;
-                     const auto res = readProperty(objectType,
-                                                   instance,
-                                                   propertyId,
-                                                   1,
-                                                   1,
-                                                   value);
-                     if (res.isError()) {
-                         return false;
-                     }
-                     out.assign(value.begin(), value.end());
-                     return true;
-                 });
+        application::PropertyServiceDataBuffer value;
+        const auto res = readProperty(objectType, instance, propertyId, 1, 1, value);
+        saveRecord(makePersistenceKeyId(objectType, propertyId), res.isOk(),
+                   std::span<const uint8_t>(value.data(), value.size()));
     };
 
-    auto savePropertyFromKernel = [&](InterfaceObjectType objectType,
-                                      application::PropertyID propertyId,
-                                      InterfaceObject& object,
-                                      uint16_t elementCount) {
+    // PID_PROGRAM_NAME and PID_PROGRAM_DESCRIPTION read back as their octets.
+    auto saveString = [&](InterfaceObjectType objectType, application::PropertyID propertyId,
+                          const std::string& value) {
         saveProp(objectType, propertyId,
-                 [&](std::vector<uint8_t>& out) {
-                     out.clear();
-                     const auto binding = object.kernelBinding();
-                     if (!binding.handlers || binding.handlerCount == 0) {
-                         return false;
-                     }
-                     if (elementCount == 0) {
-                         return true;
-                     }
-                     const auto res = ::knx::objects::readProperty(binding.handlers,
-                                                                   binding.handlerCount,
-                                                                   binding.context,
-                                                                   propertyId,
-                                                                   1,
-                                                                   elementCount,
-                                                                   out);
-                     return res.isOk();
-                 });
+                 std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(value.data()), value.size()));
     };
 
     forEachPersistedProperty([&](InterfaceObjectType objectType, application::PropertyID propertyId) {
@@ -650,42 +623,40 @@ util::Result<size_t> InterfaceObjectManager::saveToPersistence() {
             // array whole and let the restore write it back at index 1.
             if (objectType == InterfaceObjectType::security() && _securityObjectPtr != nullptr) {
                 if (const auto property = securityBlobProperty(propertyId)) {
-                    saveProp(objectType, propertyId, [&](std::vector<uint8_t>& out) {
-                        const auto* blob = _securityObjectPtr->findExtraProperty(*property);
-                        // An absent table is a real state, not a skip: ETS
-                        // erases these on Unload/StartLoading, and leaving the
-                        // previous download's keys in NVS would resurrect them
-                        // at the next boot. An empty vector makes saveProp
-                        // erase the stored copy instead.
-                        out = (blob != nullptr) ? *blob : std::vector<uint8_t>{};
-                        return true;
-                    });
+                    const auto* blob = _securityObjectPtr->findExtraProperty(*property);
+                    // An absent table is a real state, not a skip: ETS
+                    // erases these on Unload/StartLoading, and leaving the
+                    // previous download's keys in NVS would resurrect them
+                    // at the next boot. An empty record makes saveRecord
+                    // erase the stored copy instead.
+                    saveProp(objectType, propertyId,
+                             blob != nullptr ? std::span<const uint8_t>(*blob) : std::span<const uint8_t>{});
                     return;
                 }
             }
 #endif
 
+            // The tables as PID_TABLE reads them (2 and 4 octets per entry,
+            // big-endian), from their load segments.
             if (objectType == InterfaceObjectType::addressTable() &&
                 propertyId == static_cast<application::PropertyID>(AddressTableProperty::TableData)) {
-                savePropertyFromKernel(objectType, propertyId, *_addressTablePtr, _addressTablePtr->entryCount());
+                saveProp(objectType, propertyId, _addressTablePtr->persistenceRecord());
                 return;
             }
 
             if (objectType == InterfaceObjectType::associationTable() &&
                 propertyId == static_cast<application::PropertyID>(AssociationTableProperty::TableData)) {
-                savePropertyFromKernel(objectType, propertyId, *_associationTablePtr, _associationTablePtr->entryCount());
+                saveProp(objectType, propertyId, _associationTablePtr->persistenceRecord());
                 return;
             }
 
             if (objectType == InterfaceObjectType::applicationProgram()) {
                 if (propertyId == static_cast<application::PropertyID>(AppProgramProperty::ProgramName)) {
-                    savePropertyFromKernel(objectType, propertyId, *_applicationProgramPtr,
-                                           static_cast<uint16_t>(_applicationProgramPtr->getProgramName().size()));
+                    saveString(objectType, propertyId, _applicationProgramPtr->getProgramName());
                     return;
                 }
                 if (propertyId == static_cast<application::PropertyID>(AppProgramProperty::ProgramDescription)) {
-                    savePropertyFromKernel(objectType, propertyId, *_applicationProgramPtr,
-                                           static_cast<uint16_t>(_applicationProgramPtr->getProgramDescription().size()));
+                    saveString(objectType, propertyId, _applicationProgramPtr->getProgramDescription());
                     return;
                 }
                 if (propertyId == static_cast<application::PropertyID>(AppProgramProperty::ProgramData)) {
@@ -693,12 +664,11 @@ util::Result<size_t> InterfaceObjectManager::saveToPersistence() {
                     // fingerprint, not as the bare property value. A product
                     // without parameters stores nothing, and the empty record
                     // erases what an earlier firmware left.
-                    saveProp(objectType, propertyId, [&](std::vector<uint8_t>& out) {
-                        if (_applicationProgramPtr->hasParameterImage()) {
-                            _applicationProgramPtr->appendParameterImageRecord(out);
-                        }
-                        return true;
-                    });
+                    _recordScratch.clear();
+                    if (_applicationProgramPtr->hasParameterImage()) {
+                        _applicationProgramPtr->appendParameterImageRecord(_recordScratch);
+                    }
+                    saveProp(objectType, propertyId, _recordScratch);
                     return;
                 }
             }

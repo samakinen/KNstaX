@@ -10,6 +10,9 @@
 #include "knx/objects/association_table_object.hpp"
 #include "knx/objects/property_kernel.hpp"
 #include <unity.h>
+#include <algorithm>
+#include <cstddef>
+#include <utility>
 #include <vector>
 #include <span>
 
@@ -340,13 +343,13 @@ void test_AssociationTable_GetEntry() {
     TEST_ASSERT_TRUE(assocTable->addEntry(AssociationEntry(AddressTableIndex(1), GroupObjectIndex(10))).isOk());
     TEST_ASSERT_TRUE(assocTable->addEntry(AssociationEntry(AddressTableIndex(2), GroupObjectIndex(20))).isOk());
     
-    const AssociationEntry* entry = assocTable->getEntry(0);
-    TEST_ASSERT_NOT_NULL(entry);
+    const auto entry = assocTable->getEntry(0);
+    TEST_ASSERT_TRUE(entry.has_value());
     TEST_ASSERT_EQUAL_UINT16(1, entry->addressIndex.value());
     TEST_ASSERT_EQUAL_UINT16(10, entry->groupObjectNumber.value());
     
-    const AssociationEntry* invalid = assocTable->getEntry(99);
-    TEST_ASSERT_NULL(invalid);
+    TEST_ASSERT_FALSE(assocTable->getEntry(99).has_value());
+    TEST_ASSERT_FALSE(assocTable->getEntry(2).has_value());  // past the entries in force
 }
 
 void test_AssociationTable_RemoveEntry() {
@@ -429,7 +432,8 @@ void test_AssociationTable_PropertyAccess_SetTableData() {
                          .isOk());
     TEST_ASSERT_EQUAL_UINT16(2, assocTable->entryCount());
     
-    const AssociationEntry* entry = assocTable->getEntry(0);
+    const auto entry = assocTable->getEntry(0);
+    TEST_ASSERT_TRUE(entry.has_value());
     TEST_ASSERT_EQUAL_UINT16(1, entry->addressIndex.value());
     TEST_ASSERT_EQUAL_UINT16(10, entry->groupObjectNumber.value());
 }
@@ -528,7 +532,7 @@ void test_AddressTable_UnsortedTableStillFindsEntries(void) {
     TEST_ASSERT_FALSE(table.findIndex(GroupAddress(0x0905)).isValid());
 }
 
-void test_AssociationTable_IndexFollowsEveryMutationAndHasNoPerAddressLimit(void) {
+void test_AssociationTable_LookupsFollowEveryMutationAndHaveNoPerAddressLimit(void) {
     AssociationTableObject table;
     // 40 objects on ASAP 3, interleaved with others, deliberately unsorted.
     for (uint16_t go = 0; go < 40; ++go) {
@@ -546,7 +550,7 @@ void test_AssociationTable_IndexFollowsEveryMutationAndHasNoPerAddressLimit(void
     TEST_ASSERT_TRUE(table.hasGroupObjects(AddressTableIndex(7)));
     TEST_ASSERT_FALSE(table.hasGroupObjects(AddressTableIndex(4)));
 
-    // Removing entries shifts positions; the index must follow.
+    // Removing entries shifts positions; the lookups must follow.
     TEST_ASSERT_EQUAL_UINT16(20, table.removeEntriesForAddress(AddressTableIndex(1)));
     seen.clear();
     table.forEachGroupObject(AddressTableIndex(3), [&](GroupObjectIndex go) { seen.push_back(go.value()); });
@@ -616,6 +620,254 @@ void test_AssociationTable_CapacityIsAPromise(void) {
     TEST_ASSERT_EQUAL_UINT16(0, other.entryCount());
 }
 
+// === The load segments ===
+//
+// What ETS does with the SystemB procedure (test_ets_connected_session.cpp,
+// downloadLikeEts; the size gate's traffic.hpp): PID_LOAD_STATE_CONTROL Unload
+// and StartLoading, the segment by A_Memory_Write in 12-octet chunks (which
+// straddle the 4-octet association entries), one A_Memory_Read of the first
+// chunk, LoadCompleted. The memory service copies into and out of
+// loadSegment(); DeviceModel calls applyLoadSegment() after the kernel took
+// the LoadCompleted event, as below.
+
+namespace {
+
+void loadEvent(AssociationTableObject& table, uint8_t event) {
+    const uint8_t data[] = {event};
+    TEST_ASSERT_TRUE(writeAssociationProperty(table,
+                                              static_cast<application::PropertyID>(AssociationTableProperty::LoadState),
+                                              data).isOk());
+}
+
+void loadEvent(AddressTableObject& table, uint8_t event) {
+    const uint8_t data[] = {event};
+    TEST_ASSERT_TRUE(writeAddressProperty(table,
+                                          static_cast<application::PropertyID>(AddressTableProperty::LoadState),
+                                          data).isOk());
+}
+
+/// The memory service's write: a chunk copied into the segment at @p offset.
+void memoryWrite(std::span<uint8_t> segment, size_t offset, std::span<const uint8_t> chunk) {
+    TEST_ASSERT_TRUE(offset + chunk.size() <= segment.size());
+    std::copy(chunk.begin(), chunk.end(), segment.begin() + static_cast<std::ptrdiff_t>(offset));
+}
+
+/// A segment image as ETS writes it: count, then 16-bit words.
+std::vector<uint8_t> segmentImage(uint16_t count, const std::vector<uint16_t>& words) {
+    std::vector<uint8_t> image{static_cast<uint8_t>(count >> 8), static_cast<uint8_t>(count & 0xFFu)};
+    for (const uint16_t word : words) {
+        image.push_back(static_cast<uint8_t>(word >> 8));
+        image.push_back(static_cast<uint8_t>(word & 0xFFu));
+    }
+    return image;
+}
+
+void streamInChunks(std::span<uint8_t> segment, const std::vector<uint8_t>& image) {
+    constexpr size_t kChunk = 12;
+    for (size_t offset = 0; offset < image.size(); offset += kChunk) {
+        const size_t length = std::min(kChunk, image.size() - offset);
+        memoryWrite(segment, offset, std::span<const uint8_t>(image.data() + offset, length));
+    }
+}
+
+bool sameOctets(const uint8_t* expected, const uint8_t* actual, size_t length) {
+    return std::equal(expected, expected + length, actual);
+}
+
+std::vector<uint16_t> groupObjectsOf(const AssociationTableObject& table, uint16_t tsap) {
+    std::vector<uint16_t> seen;
+    table.forEachGroupObject(AddressTableIndex(tsap), [&](GroupObjectIndex go) { seen.push_back(go.value()); });
+    return seen;
+}
+
+} // namespace
+
+void test_AssociationTable_DownloadLikeEtsTakesEffectAtLoadCompleted(void) {
+    AssociationTableObject table;
+    // A table from an earlier download, in force.
+    TEST_ASSERT_TRUE(table.addEntry(AssociationEntry(AddressTableIndex(9), GroupObjectIndex(9))).isOk());
+
+    loadEvent(table, loadstate::kEventUnload);
+    TEST_ASSERT_EQUAL_UINT16(0, table.entryCount());
+    TEST_ASSERT_FALSE(table.hasGroupObjects(AddressTableIndex(9)));
+    loadEvent(table, loadstate::kEventStartLoading);
+    TEST_ASSERT_EQUAL_UINT8(loadstate::kLoading, table.loadState());
+
+    // 7 entries (30 octets): the 12-octet chunks end mid-entry.
+    const auto image = segmentImage(7, {1, 0,  1, 8,  2, 1,  3, 2,  3, 10,  4, 3,  5, 4});
+    streamInChunks(table.loadSegment(), image);
+
+    // Not in force before LoadCompleted...
+    TEST_ASSERT_EQUAL_UINT16(0, table.entryCount());
+    TEST_ASSERT_FALSE(table.hasGroupObjects(AddressTableIndex(1)));
+    TEST_ASSERT_TRUE(table.persistenceRecord().empty());
+    // ...but the verification read returns what was written, every octet.
+    const auto segment = std::as_const(table).loadSegment();
+    TEST_ASSERT_TRUE(sameOctets(image.data(), segment.data(), image.size()));
+
+    loadEvent(table, loadstate::kEventLoadCompleted);
+    const auto applied = table.applyLoadSegment();
+    TEST_ASSERT_TRUE(applied.isOk());
+    TEST_ASSERT_EQUAL_UINT16(7, applied.value());
+    TEST_ASSERT_EQUAL_UINT8(loadstate::kLoaded, table.loadState());
+    TEST_ASSERT_EQUAL_UINT16(7, table.entryCount());
+    TEST_ASSERT_TRUE((groupObjectsOf(table, 1) == std::vector<uint16_t>{0, 8}));
+    TEST_ASSERT_TRUE((groupObjectsOf(table, 3) == std::vector<uint16_t>{2, 10}));
+    TEST_ASSERT_TRUE((groupObjectsOf(table, 5) == std::vector<uint16_t>{4}));
+    TEST_ASSERT_FALSE(table.hasGroupObjects(AddressTableIndex(9)));
+    AddressTableIndex addresses[2]{};
+    TEST_ASSERT_EQUAL_UINT32(1, table.findAddressIndices(GroupObjectIndex(10), addresses).value());
+    TEST_ASSERT_EQUAL_UINT16(3, addresses[0].value());
+
+    // A read after LoadCompleted still returns the download.
+    TEST_ASSERT_TRUE(sameOctets(image.data(), segment.data(), image.size()));
+
+    // PID_TABLE reads what ETS wrote.
+    std::vector<uint8_t> value;
+    TEST_ASSERT_TRUE(readAssociationProperty(table,
+                                             static_cast<application::PropertyID>(AssociationTableProperty::TableData),
+                                             7, value).isOk());
+    TEST_ASSERT_EQUAL_UINT32(28, value.size());
+    TEST_ASSERT_TRUE(sameOctets(image.data() + 2, value.data(), value.size()));
+}
+
+void test_AssociationTable_LoadDropsInvalidEntriesAndRepeats(void) {
+    // The table a load leaves is the one adding the entries one by one built:
+    // a repeat and an entry with an invalid TSAP (0) or ASAP (0xFFFF) dropped,
+    // the order kept.
+    AssociationTableObject table;
+    loadEvent(table, loadstate::kEventStartLoading);
+    streamInChunks(table.loadSegment(),
+                   segmentImage(6, {1, 0,  0, 1,  2, 1,  1, 0,  3, 0xFFFF,  4, 3}));
+    loadEvent(table, loadstate::kEventLoadCompleted);
+    TEST_ASSERT_EQUAL_UINT16(3, table.applyLoadSegment().value());
+    TEST_ASSERT_EQUAL_UINT16(3, table.entryCount());
+    TEST_ASSERT_EQUAL_UINT16(1, table.getEntry(0)->addressIndex.value());
+    TEST_ASSERT_EQUAL_UINT16(2, table.getEntry(1)->addressIndex.value());
+    TEST_ASSERT_EQUAL_UINT16(4, table.getEntry(2)->addressIndex.value());
+    TEST_ASSERT_EQUAL_UINT16(3, table.getEntry(2)->groupObjectNumber.value());
+    const auto segment = std::as_const(table).loadSegment();
+    TEST_ASSERT_EQUAL_UINT8(0, segment[0]);
+    TEST_ASSERT_EQUAL_UINT8(3, segment[1]);  // the count follows the table in force
+}
+
+void test_AssociationTable_LoadOverCapacityIsRefused(void) {
+    AssociationTableObject table;
+    TEST_ASSERT_TRUE(table.addEntry(AssociationEntry(AddressTableIndex(1), GroupObjectIndex(1))).isOk());
+    loadEvent(table, loadstate::kEventStartLoading);
+    const auto tooMany = static_cast<uint16_t>(table.maxEntries() + 1u);
+    memoryWrite(table.loadSegment(), 0, segmentImage(tooMany, {}));
+    loadEvent(table, loadstate::kEventLoadCompleted);
+    TEST_ASSERT_TRUE(table.applyLoadSegment().isError());
+    TEST_ASSERT_EQUAL_UINT16(0, table.entryCount());
+}
+
+void test_AssociationTable_FirmwareAppendIsRefusedWhileLoading(void) {
+    AssociationTableObject table;
+    loadEvent(table, loadstate::kEventStartLoading);
+    const auto image = segmentImage(2, {1, 0,  2, 1});
+    streamInChunks(table.loadSegment(), image);
+
+    // An append now would land on what ETS wrote.
+    const auto refused = table.addEntry(AssociationEntry(AddressTableIndex(7), GroupObjectIndex(7)));
+    TEST_ASSERT_TRUE(refused.isError());
+    TEST_ASSERT_EQUAL(util::ErrorCode::Busy, refused.error());
+    const AssociationEntry one[] = {AssociationEntry(AddressTableIndex(7), GroupObjectIndex(7))};
+    TEST_ASSERT_TRUE(table.loadTable(one).isError());
+    TEST_ASSERT_TRUE(sameOctets(image.data(), std::as_const(table).loadSegment().data(), image.size()));
+
+    loadEvent(table, loadstate::kEventLoadCompleted);
+    TEST_ASSERT_EQUAL_UINT16(2, table.applyLoadSegment().value());
+    TEST_ASSERT_TRUE(table.addEntry(AssociationEntry(AddressTableIndex(7), GroupObjectIndex(7))).isOk());
+    TEST_ASSERT_EQUAL_UINT16(3, table.entryCount());
+}
+
+void test_AssociationTable_PersistenceRecordIsThePidTableAndRestores(void) {
+    AssociationTableObject table;
+    for (uint16_t i = 0; i < 20; ++i) {
+        TEST_ASSERT_TRUE(table.addEntry(AssociationEntry(AddressTableIndex(static_cast<uint16_t>(1 + i / 2)),
+                                                         GroupObjectIndex(i))).isOk());
+    }
+    TEST_ASSERT_TRUE(table.removeEntry(3).isOk());
+    TEST_ASSERT_EQUAL_UINT16(2, table.removeEntriesForGroupObject(GroupObjectIndex(0)) +
+                                    table.removeEntriesForGroupObject(GroupObjectIndex(19)));
+
+    // The record is what saving PID_TABLE through the kernel produced.
+    std::vector<uint8_t> value;
+    TEST_ASSERT_TRUE(readAssociationProperty(table,
+                                             static_cast<application::PropertyID>(AssociationTableProperty::TableData),
+                                             table.entryCount(), value).isOk());
+    const auto record = table.persistenceRecord();
+    TEST_ASSERT_EQUAL_UINT32(value.size(), record.size());
+    TEST_ASSERT_TRUE(sameOctets(value.data(), record.data(), value.size()));
+
+    // The restore writes it back at index 1, as InterfaceObjectManager does.
+    AssociationTableObject restored;
+    TEST_ASSERT_TRUE(writeAssociationProperty(restored,
+                                              static_cast<application::PropertyID>(AssociationTableProperty::TableData),
+                                              record).isOk());
+    TEST_ASSERT_EQUAL_UINT16(table.entryCount(), restored.entryCount());
+    for (uint16_t i = 0; i < table.entryCount(); ++i) {
+        TEST_ASSERT_TRUE(*table.getEntry(i) == *restored.getEntry(i));
+    }
+    // After a restore the segment reads as the table in force.
+    const auto segment = std::as_const(restored).loadSegment();
+    TEST_ASSERT_EQUAL_UINT8(table.entryCount(), segment[1]);
+    TEST_ASSERT_TRUE(sameOctets(record.data(), segment.data() + 2, record.size()));
+
+    // An empty table is an empty record (the save erases the stored copy).
+    restored.clearEntries();
+    TEST_ASSERT_TRUE(restored.persistenceRecord().empty());
+}
+
+void test_AddressTable_DownloadLikeEtsLeavesTheStagingAlone(void) {
+    AddressTableObject table;
+    TEST_ASSERT_TRUE(table.addEntry(GroupAddress(0x0901)).isValid());
+    loadEvent(table, loadstate::kEventUnload);
+    loadEvent(table, loadstate::kEventStartLoading);
+    TEST_ASSERT_EQUAL_UINT16(0, table.entryCount());
+
+    std::vector<uint16_t> addresses;
+    for (uint16_t i = 0; i < 9; ++i) {
+        addresses.push_back(static_cast<uint16_t>(0x0801 + i));
+    }
+    const auto image = segmentImage(9, addresses);
+    streamInChunks(table.loadSegment(), image);
+
+    // A save while ETS is loading saves the (empty) table and does not touch
+    // what ETS wrote: the verification read still returns it.
+    TEST_ASSERT_TRUE(table.persistenceRecord().empty());
+    TEST_ASSERT_TRUE(sameOctets(image.data(), std::as_const(table).loadSegment().data(), image.size()));
+}
+
+void test_AddressTable_PersistenceRecordIsThePidTableAndRestores(void) {
+    AddressTableObject table;
+    for (uint16_t i = 0; i < 12; ++i) {
+        TEST_ASSERT_TRUE(table.addEntry(GroupAddress(static_cast<uint16_t>(0x1100 + 3 * i))).isValid());
+    }
+    std::vector<uint8_t> value;
+    TEST_ASSERT_TRUE(readAddressProperty(table,
+                                         static_cast<application::PropertyID>(AddressTableProperty::TableData),
+                                         table.entryCount(), value).isOk());
+    const auto record = table.persistenceRecord();
+    TEST_ASSERT_EQUAL_UINT32(value.size(), record.size());
+    TEST_ASSERT_TRUE(sameOctets(value.data(), record.data(), value.size()));
+    // The record lives in the segment, behind the count.
+    const auto segment = std::as_const(table).loadSegment();
+    TEST_ASSERT_EQUAL_UINT8(12, segment[1]);
+    TEST_ASSERT_TRUE(segment.data() + 2 == record.data());
+
+    AddressTableObject restored;
+    TEST_ASSERT_TRUE(writeAddressProperty(restored,
+                                          static_cast<application::PropertyID>(AddressTableProperty::TableData),
+                                          record).isOk());
+    TEST_ASSERT_EQUAL_UINT16(12, restored.entryCount());
+    for (uint16_t i = 1; i <= 12; ++i) {
+        TEST_ASSERT_EQUAL_UINT16(table.getAddress(AddressTableIndex(i)).raw,
+                                 restored.getAddress(AddressTableIndex(i)).raw);
+    }
+}
+
 // === Main Test Runner ===
 
 int main(int argc, char** argv) {
@@ -625,7 +877,16 @@ int main(int argc, char** argv) {
     RUN_TEST(test_AssociationTable_CapacityIsAPromise);
     RUN_TEST(test_AddressTable_SortedTableFindsEveryEntryAndRejectsGaps);
     RUN_TEST(test_AddressTable_UnsortedTableStillFindsEntries);
-    RUN_TEST(test_AssociationTable_IndexFollowsEveryMutationAndHasNoPerAddressLimit);
+    RUN_TEST(test_AssociationTable_LookupsFollowEveryMutationAndHaveNoPerAddressLimit);
+
+    // The load segments: an ETS download, verification reads, persistence
+    RUN_TEST(test_AssociationTable_DownloadLikeEtsTakesEffectAtLoadCompleted);
+    RUN_TEST(test_AssociationTable_LoadDropsInvalidEntriesAndRepeats);
+    RUN_TEST(test_AssociationTable_LoadOverCapacityIsRefused);
+    RUN_TEST(test_AssociationTable_FirmwareAppendIsRefusedWhileLoading);
+    RUN_TEST(test_AssociationTable_PersistenceRecordIsThePidTableAndRestores);
+    RUN_TEST(test_AddressTable_DownloadLikeEtsLeavesTheStagingAlone);
+    RUN_TEST(test_AddressTable_PersistenceRecordIsThePidTableAndRestores);
 
     // Address Table tests
     RUN_TEST(test_AddressTable_DefaultConstruction);

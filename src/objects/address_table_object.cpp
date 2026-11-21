@@ -328,5 +328,22 @@ bool AddressTableObject::isValid() const {
     return _table.isValid();
 }
 
+std::span<const uint8_t> AddressTableObject::persistenceRecord() {
+    if (_table.loadState() == loadstate::kLoading) {
+        return {};
+    }
+    static_assert(tableseg::kGroupAddressTableSize == 2u + 2u * AddressTableDomain::kMaxEntries,
+                  "the segment holds the whole table");
+    const uint16_t count = _table.size();
+    _segment[0] = static_cast<uint8_t>(count >> 8);
+    _segment[1] = static_cast<uint8_t>(count & 0xFFu);
+    for (uint16_t i = 0; i < count; ++i) {
+        const uint16_t raw = _table.get(AddressTableDomain::Index{i}).raw;
+        _segment[2u + 2u * i] = static_cast<uint8_t>(raw >> 8);
+        _segment[3u + 2u * i] = static_cast<uint8_t>(raw & 0xFFu);
+    }
+    return std::span<const uint8_t>(_segment.data() + 2u, 2u * count);
+}
+
 } // namespace objects
 } // namespace knx

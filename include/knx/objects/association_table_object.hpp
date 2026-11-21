@@ -15,8 +15,10 @@
 #include "knx/objects/interface_object.hpp"
 #include "knx/types.hpp"
 #include "knx/util/result.hpp"
-#include "knx/util/fixed_vector.hpp"
+#include <array>
+#include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <utility>
 
@@ -59,7 +61,19 @@ struct AssociationEntry {
 /**
  * @brief Domain model for the association table (0-based indices)
  *
- * KNX wire semantics are intentionally excluded.
+ * The entries are held once, in the form ETS loads them: the association
+ * table's load segment (a big-endian entry count, then per entry the TSAP,
+ * which is the address table index, and the ASAP, the group object number,
+ * both big-endian u16). A_Memory_Write lands in that storage, A_Memory_Read
+ * reads it, persistence saves the entries straight from it, and lookups
+ * decode it in place. There is no parsed copy and no index beside it.
+ *
+ * What is in force is the first size() entries. The load procedure keeps
+ * that apart from what ETS is writing: Unload and StartLoading empty the
+ * table (size 0) while the octets ETS streams after them land in the same
+ * storage, and LoadCompleted (applyLoadSegment()) takes the count ETS wrote.
+ * So a verification read before LoadCompleted returns what was written, and
+ * the table takes effect at LoadCompleted, as when the segment was a copy.
  */
 class AssociationTableDomain {
 public:
@@ -67,6 +81,10 @@ public:
 
     /// KNX_ASSOCIATION_TABLE_ENTRIES.
     static constexpr uint16_t kMaxEntries = static_cast<uint16_t>(config::ASSOCIATION_TABLE_ENTRIES);
+    /// One entry in the load segment: TSAP and ASAP, big-endian.
+    static constexpr size_t kEntryBytes = 4;
+    /// The load segment: the entry count, then the entries.
+    static constexpr size_t kImageBytes = 2u + kEntryBytes * kMaxEntries;
 
     util::Result<void> add(const AssociationEntry& entry);
     util::Result<void> remove(Index index);
@@ -74,7 +92,6 @@ public:
     util::Result<void> setExpand(Index index, const AssociationEntry& entry);
 
     AssociationEntry get(Index index) const;
-    const AssociationEntry* getPtr(Index index) const;
 
     uint16_t removeEntriesForAddress(AddressTableIndex addressIndex);
     uint16_t removeEntriesForGroupObject(GroupObjectIndex groupObjectNumber);
@@ -87,17 +104,24 @@ public:
      * @brief Call @p visit for every group object associated with @p addressIndex
      *
      * No buffer and no limit on how many objects share an address. Objects
-     * are visited in table order. O(log n + matches) through the address index.
+     * are visited in table order. A linear scan of the entries in place,
+     * O(n): a device's table is a few hundred entries at most, and a scan of
+     * the 80 of a 60-object device is a few microseconds on a Cortex-M3, once
+     * per group telegram. An index beside the table cost 2 octets per entry
+     * of capacity and had to follow every change, including the octets ETS
+     * writes.
      */
     template <typename Visitor>
     void forEachGroupObject(AddressTableIndex addressIndex, Visitor&& visit) const {
-        for (const uint16_t position : positionsFor(addressIndex)) {
-            visit(_entries[position].groupObjectNumber);
+        for (uint16_t position = 0; position < _size; ++position) {
+            if (tsapAt(position) == addressIndex.raw) {
+                visit(GroupObjectIndex(asapAt(position)));
+            }
         }
     }
 
-    /// True if at least one group object is associated with @p addressIndex.
-    bool hasGroupObjects(AddressTableIndex addressIndex) const { return !positionsFor(addressIndex).empty(); }
+    /// True if at least one group object is associated with @p addressIndex. O(n), as forEachGroupObject().
+    bool hasGroupObjects(AddressTableIndex addressIndex) const;
 
     util::Result<void> load(std::span<const AssociationEntry> entries);
     void truncate(uint16_t size);
@@ -106,7 +130,29 @@ public:
 
     uint16_t size() const;
     bool isValid() const;
-    const util::FixedVector<AssociationEntry, kMaxEntries>& entries() const { return _entries; }
+
+    /// The load segment ETS reads and writes through A_Memory (PID_TABLE_REFERENCE).
+    std::span<uint8_t> loadSegment() { return _image; }
+    std::span<const uint8_t> loadSegment() const { return _image; }
+
+    /**
+     * @brief Put the entries ETS wrote into force (the LoadCompleted event)
+     *
+     * Takes the count from the segment. The table a load leaves is the one
+     * add() would build from the same entries: invalid entries and repeats
+     * are dropped, the order is kept (in place, so the segment then reads
+     * back without them). A count over the capacity is refused, the table is
+     * left empty: a capacity is a promise, not a cut.
+     *
+     * @return the number of entries now in force, or InvalidParameter
+     */
+    util::Result<uint16_t> applyLoadSegment();
+
+    /// The persisted form of PID_TABLE (the entries in force, 4 octets each),
+    /// which is the segment's own storage: a save needs no buffer for it.
+    std::span<const uint8_t> persistenceRecord() const {
+        return std::span<const uint8_t>(_image.data() + 2u, kEntryBytes * _size);
+    }
 
     // KNX 03.05.02 load state (PID_LOAD_STATE_CONTROL), driven by the ETS
     // download procedure via LoadControlProperty.
@@ -115,16 +161,23 @@ public:
     void loadControlReset() { clear(); }
 
 private:
-    /// Positions in _entries whose address index is @p addressIndex, in table order.
-    std::span<const uint16_t> positionsFor(AddressTableIndex addressIndex) const;
+    uint16_t u16At(size_t offset) const {
+        return static_cast<uint16_t>((static_cast<uint16_t>(_image[offset]) << 8) | _image[offset + 1u]);
+    }
+    uint16_t tsapAt(uint16_t position) const { return u16At(2u + kEntryBytes * position); }
+    uint16_t asapAt(uint16_t position) const { return u16At(4u + kEntryBytes * position); }
+    AssociationEntry at(uint16_t position) const {
+        return AssociationEntry(AddressTableIndex(tsapAt(position)), GroupObjectIndex(asapAt(position)));
+    }
+    void put(uint16_t position, const AssociationEntry& entry);
+    /// Entries in force, and the segment's count with them.
+    void setSize(uint16_t size);
+    /// While ETS loads the table, the storage past the entries in force holds
+    /// what it is writing; an append by the firmware would land on it.
+    bool loading() const;
 
-    /// Rebuild _byAddress. Every mutator calls it, so lookups never have to.
-    void rebuildIndex();
-
-    util::FixedVector<AssociationEntry, kMaxEntries> _entries;
-    /// Positions of _entries ordered by (address index, position): the
-    /// group address → group object index used on every group telegram.
-    util::FixedVector<uint16_t, kMaxEntries> _byAddress;
+    std::array<uint8_t, kImageBytes> _image{};
+    uint16_t _size{0};
     uint8_t _loadState{1};  // loadstate::kLoaded — firmware boots with usable tables
 };
 
@@ -248,9 +301,10 @@ public:
     /**
      * @brief Get entry at specific index
      * @param index Entry index (0-based)
-     * @return Pointer to entry, or nullptr if index invalid
+     * @return The entry, or nullopt if index invalid. A copy: the entries are
+     *         held in their load segment form, not as AssociationEntry.
      */
-    const AssociationEntry* getEntry(uint16_t index) const;
+    std::optional<AssociationEntry> getEntry(uint16_t index) const;
 
     /**
      * @brief Get number of entries
@@ -294,6 +348,16 @@ public:
     // === Validation ===
 
     bool isValid() const;
+
+    // === ETS download and persistence ===
+
+    /// The table's storage, as the memory-mapped load segment (see AssociationTableDomain).
+    std::span<uint8_t> loadSegment() { return _table.loadSegment(); }
+    std::span<const uint8_t> loadSegment() const { return _table.loadSegment(); }
+    /// LoadCompleted: put the entries ETS wrote into force. See AssociationTableDomain::applyLoadSegment().
+    util::Result<uint16_t> applyLoadSegment() { return _table.applyLoadSegment(); }
+    /// The persisted PID_TABLE record, read in place.
+    std::span<const uint8_t> persistenceRecord() const { return _table.persistenceRecord(); }
 
 private:
     AssociationTableDomain _table;

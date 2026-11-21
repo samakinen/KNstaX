@@ -18,6 +18,7 @@
 #include <unity.h>
 #include <cstdio>
 #include <memory>
+#include <string>
 #include <vector>
 
 using namespace knx;
@@ -411,6 +412,74 @@ void test_Persistence_KnxNetIpBackboneKeySurvivesRestart(void) {
     }
 }
 
+/// The tables, the program name and the parameter-less program data are saved
+/// from where they are held, not from a copy: the stored records must be what
+/// PID_TABLE and PID_PROGRAM_NAME read, and come back whole.
+void test_Persistence_TablesAndNamesAreSavedFromTheirOwnStorage(void) {
+    clearPersistenceNamespace();
+    const auto kAssocTablePid = static_cast<application::PropertyID>(AssociationTableProperty::TableData);
+    const auto kProgramNamePid = static_cast<application::PropertyID>(AppProgramProperty::ProgramName);
+    const std::string programName = "Switch actuator 8-fold, 60 objects";
+    std::vector<uint8_t> addresses;
+    std::vector<uint8_t> associations;
+    uint8_t savedBank = 0;
+    {
+        InterfaceObjectManager mgr;
+        TEST_ASSERT_TRUE(mgr.init(true).isOk());
+        for (uint16_t i = 0; i < 60; ++i) {
+            TEST_ASSERT_TRUE(mgr.addressTable().addEntry(GroupAddress(static_cast<uint16_t>(0x0801 + i))).isValid());
+            TEST_ASSERT_TRUE(mgr.associationTable().addEntry(
+                AssociationEntry(AddressTableIndex(static_cast<uint16_t>(1 + i)), GroupObjectIndex(i))).isOk());
+            if (i < 20) {
+                TEST_ASSERT_TRUE(mgr.associationTable().addEntry(
+                    AssociationEntry(AddressTableIndex(static_cast<uint16_t>(1 + i)),
+                                     GroupObjectIndex(static_cast<uint16_t>(i + 30)))).isOk());
+            }
+        }
+        mgr.applicationProgram().setProgramName(programName);
+        TEST_ASSERT_TRUE(mgr.saveToPersistence().value() > 0u);
+        savedBank = mgr.activePersistenceBank();
+
+        // What a save through PID_TABLE used to store.
+        for (uint16_t i = 1; i <= mgr.addressTable().entryCount(); ++i) {
+            knx::application::PropertyServiceDataBuffer out;
+            TEST_ASSERT_TRUE(mgr.readProperty(InterfaceObjectType::addressTable(), InterfaceObjectInstance(1),
+                                              kAddrTablePid, i, 1, out).isOk());
+            addresses.insert(addresses.end(), out.begin(), out.end());
+        }
+        for (uint16_t i = 1; i <= mgr.associationTable().entryCount(); ++i) {
+            knx::application::PropertyServiceDataBuffer out;
+            TEST_ASSERT_TRUE(mgr.readProperty(InterfaceObjectType::associationTable(), InterfaceObjectInstance(1),
+                                              kAssocTablePid, i, 1, out).isOk());
+            associations.insert(associations.end(), out.begin(), out.end());
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT32(120, addresses.size());
+    TEST_ASSERT_EQUAL_UINT32(320, associations.size());
+
+    {
+        auto p = createPersistence();
+        TEST_ASSERT_TRUE(p->init("knx_objects"));
+        std::vector<uint8_t> stored;
+        TEST_ASSERT_TRUE(p->loadById(bankKey(InterfaceObjectType::addressTable(), kAddrTablePid, savedBank), stored).isOk());
+        TEST_ASSERT_TRUE(stored == addresses);
+        TEST_ASSERT_TRUE(p->loadById(bankKey(InterfaceObjectType::associationTable(), kAssocTablePid, savedBank), stored).isOk());
+        TEST_ASSERT_TRUE(stored == associations);
+        TEST_ASSERT_TRUE(p->loadById(bankKey(InterfaceObjectType::applicationProgram(), kProgramNamePid, savedBank), stored).isOk());
+        TEST_ASSERT_TRUE(std::string(stored.begin(), stored.end()) == programName);
+        p->close();
+    }
+
+    InterfaceObjectManager mgr;
+    TEST_ASSERT_TRUE(mgr.init(true).isOk());
+    TEST_ASSERT_TRUE(mgr.loadFromPersistence() > 0u);
+    TEST_ASSERT_EQUAL_UINT16(60, mgr.addressTable().entryCount());
+    TEST_ASSERT_EQUAL_UINT16(80, mgr.associationTable().entryCount());
+    TEST_ASSERT_EQUAL_HEX16(0x083C, mgr.addressTable().getAddress(AddressTableIndex(60)).raw);
+    TEST_ASSERT_TRUE(mgr.associationTable().hasAssociation(AddressTableIndex(20), GroupObjectIndex(49)));
+    TEST_ASSERT_TRUE(mgr.applicationProgram().getProgramName() == programName);
+}
+
 int main(int argc, char** argv) {
     (void)argc;
     (void)argv;
@@ -420,5 +489,6 @@ int main(int argc, char** argv) {
     RUN_TEST(test_Persistence_LegacyUnmarkedLayoutIsLoadedAndMigrated);
     RUN_TEST(test_Persistence_InterruptedSaveKeepsPreviousDownload);
     RUN_TEST(test_Persistence_KnxNetIpBackboneKeySurvivesRestart);
+    RUN_TEST(test_Persistence_TablesAndNamesAreSavedFromTheirOwnStorage);
     return UNITY_END();
 }

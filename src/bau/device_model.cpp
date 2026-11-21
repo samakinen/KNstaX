@@ -193,19 +193,33 @@ void DeviceModel::bind()
     // ETS allocates a segment via PID_LOAD_STATE_CONTROL additional load
     // controls, reads its address from PID_TABLE_REFERENCE and streams the
     // table content with A_Memory_Write / verifies with A_Memory_Read.
+    // The association table is its segment; the address table's segment is
+    // staging for its entries (table_segments.hpp).
     (void)stackPort.registerMemoryRegion(
         application::MemoryRegion{MemoryAddress(objects::tableseg::kGroupAddressTableBase),
                                   objects::tableseg::kGroupAddressTableSize,
                                   application::MemoryAccessMode::ReadWrite, "GrAT"},
-        std::span<uint8_t>(_groupAddressSegment));
+        _addressTable.loadSegment());
     (void)stackPort.registerMemoryRegion(
         application::MemoryRegion{MemoryAddress(objects::tableseg::kAssociationTableBase),
                                   objects::tableseg::kAssociationTableSize,
                                   application::MemoryAccessMode::ReadWrite, "AssocTable"},
-        std::span<uint8_t>(_associationSegment));
+        _associationTable.loadSegment());
+    // The group object table segment holds one descriptor per group object
+    // the device has: ETS writes as many as the product declares (the
+    // .knxprod is made from the same declaration), and a write past them is
+    // refused like one past any segment. A product registers its objects
+    // before BusAccessUnit::init(); a device that adds them only later has
+    // none yet and gets room for the most a table can hold, as before.
+    // Sized once: the region keeps pointing at this storage.
+    if (_groupObjectSegment.empty()) {
+        const uint16_t objectCount = _groupObjectTable.objectCount();
+        _groupObjectSegment.resize(objects::tableseg::groupObjectTableSize(
+            objectCount != 0 ? objectCount : objects::tableseg::kGroupObjectTableMaxObjects));
+    }
     (void)stackPort.registerMemoryRegion(
         application::MemoryRegion{MemoryAddress(objects::tableseg::kGroupObjectTableBase),
-                                  objects::tableseg::kGroupObjectTableSize,
+                                  static_cast<uint32_t>(_groupObjectSegment.size()),
                                   application::MemoryAccessMode::ReadWrite, "GrOT"},
         std::span<uint8_t>(_groupObjectSegment));
     // The application code segment is the product's parameter image: a
@@ -548,7 +562,7 @@ void DeviceModel::applyLoadedTableSegment(InterfaceObjectType objectType)
     };
 
     if (objectType == InterfaceObjectType::addressTable()) {
-        const std::span<const uint8_t> segment(_groupAddressSegment);
+        const std::span<const uint8_t> segment = std::as_const(_addressTable).loadSegment();
         uint16_t count = u16at(segment, 0);
         if (count > objects::AddressTableDomain::kMaxEntries) {
             // A capacity is a promise: the table is refused, not cut short.
@@ -569,23 +583,17 @@ void DeviceModel::applyLoadedTableSegment(InterfaceObjectType objectType)
     }
 
     if (objectType == InterfaceObjectType::associationTable()) {
-        const std::span<const uint8_t> segment(_associationSegment);
-        uint16_t count = u16at(segment, 0);
-        if (count > objects::AssociationTableDomain::kMaxEntries) {
+        // The segment is the table's storage: the entries are put into force
+        // where ETS wrote them.
+        const auto applied = _associationTable.applyLoadSegment();
+        if (applied.isError()) {
             KNX_LOGE(TAG, "Association segment holds %u entries, capacity is %u: load refused",
-                     count, static_cast<unsigned>(objects::AssociationTableDomain::kMaxEntries));
-            _associationTable.clearEntries();
+                     static_cast<unsigned>(u16at(std::as_const(_associationTable).loadSegment(), 0)),
+                     static_cast<unsigned>(objects::AssociationTableDomain::kMaxEntries));
             _associationTable.setLoadState(objects::loadstate::kError);
             return;
         }
-        _associationTable.clearEntries();
-        for (uint16_t i = 0; i < count; ++i) {
-            const uint16_t tsap = u16at(segment, 2u + 4u * i);
-            const uint16_t asap = u16at(segment, 4u + 4u * i);
-            (void)_associationTable.addEntry(
-                objects::AssociationEntry(AddressTableIndex(tsap), GroupObjectIndex(asap)));
-        }
-        KNX_LOGI(TAG, "Applied %u associations from load segment", count);
+        KNX_LOGI(TAG, "Applied %u associations from load segment", static_cast<unsigned>(applied.value()));
         return;
     }
 

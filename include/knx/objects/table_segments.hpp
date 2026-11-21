@@ -10,8 +10,15 @@
  * load controls, reads the segment address from PID_TABLE_REFERENCE (7) and
  * streams the table content with A_Memory_Write (verified via A_Memory_Read).
  * The addresses below define the device's virtual memory map for those
- * segments; the backing storage lives in the BAU and the content is applied
- * to the table domains when the LoadCompleted event arrives.
+ * segments; the content is put into force when the LoadCompleted event
+ * arrives. Each table exists once:
+ *  - association table: the segment is the table's own storage
+ *    (AssociationTableObject), read in place;
+ *  - group address table: the segment is staging for the native entries the
+ *    data link layers read, and the buffer a save encodes them into
+ *    (AddressTableObject);
+ *  - group object table: accepted, not applied (DeviceModel), as long as the
+ *    product's group objects need.
  *
  * Segment layout: big-endian u16 entry count followed by the entries.
  */
@@ -42,11 +49,16 @@ static_assert(kGroupAddressTableBase + kGroupAddressTableSize <= kAssociationTab
 static_assert(kAssociationTableBase + kAssociationTableSize <= 0x5000u,
               "the association segment must not run into the group object segment");
 
-// Group object table (object index 3): count + 256 × 2-byte descriptor
-// (capacity matches GroupObjectTableDomain::kMaxObjects). Content is accepted
-// but not applied — the group objects are firmware-defined.
+// Group object table (object index 3): count + one 2-byte descriptor per
+// group object. Content is accepted but not applied — the group objects are
+// firmware-defined — and kept only so that ETS reads back what it wrote. The
+// segment is as long as the device's group objects need
+// (groupObjectTableSize()); the address map keeps room for 256
+// (GroupObjectTableDomain::kMaxObjects).
 constexpr uint32_t kGroupObjectTableBase = 0x5000;
-constexpr uint32_t kGroupObjectTableSize = 2u + 256u * 2u;
+constexpr uint32_t kGroupObjectTableMaxObjects = 256u;
+constexpr uint32_t kGroupObjectTableMaxSize = 2u + kGroupObjectTableMaxObjects * 2u;
+constexpr uint32_t groupObjectTableSize(uint32_t objects) { return 2u + objects * 2u; }
 
 // Application program code segment (object index 4): the product's parameter
 // image (ParameterImageBinding), exactly as long as the image. A product

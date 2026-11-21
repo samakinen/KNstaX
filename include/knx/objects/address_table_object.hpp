@@ -13,10 +13,12 @@
 
 #include "knx/config.hpp"
 #include "knx/objects/interface_object.hpp"
+#include "knx/objects/table_segments.hpp"
 #include "knx/types.hpp"
 #include "knx/util/result.hpp"
 #include "knx/util/fixed_vector.hpp"
 #include "knx/util/shared_group_address_list.hpp"
+#include <array>
 #include <span>
 #include <cstdint>
 
@@ -256,9 +258,37 @@ public:
 
     bool isValid() const;
 
+    // === ETS download and persistence ===
+
+    /**
+     * @brief The memory-mapped load segment ETS writes the table into
+     *
+     * A big-endian entry count, then the group addresses big-endian. ETS
+     * streams it with A_Memory_Write after StartLoading and reads it back;
+     * LoadCompleted parses it into the entries (DeviceModel). The entries
+     * stay a separate, native array because the data link layers and the
+     * TP-UART interrupt read them directly (ARCHITECTURE.md, "Who owns the
+     * group address list"). The segment is also the buffer a save encodes
+     * the table into, so it is never a third copy.
+     */
+    std::span<uint8_t> loadSegment() { return _segment; }
+    std::span<const uint8_t> loadSegment() const { return _segment; }
+
+    /**
+     * @brief The persisted form of PID_TABLE (2 octets per entry, big-endian)
+     *
+     * Encoded into the load segment, count included, and returned from there,
+     * so a save needs no buffer of its own; the segment then reads back as the
+     * table in force. While ETS is loading the table (Loading) the segment
+     * holds what it has written and is not touched: the record is empty, as
+     * the table itself is between StartLoading and LoadCompleted.
+     */
+    std::span<const uint8_t> persistenceRecord();
+
 private:
     AddressTableDomain _table;
     ValidationPolicy _validationPolicy{ValidationPolicy::OnWrite};
+    std::array<uint8_t, tableseg::kGroupAddressTableSize> _segment{};
 };
 
 } // namespace objects
