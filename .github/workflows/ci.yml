@@ -179,6 +179,37 @@ jobs:
             build_size_gate/${{ matrix.id }}/gate/knx-config/knx.config
             build_size_gate_base/${{ matrix.id }}/gate_report.json
 
+  # The GD32F1 reference port (ports/gd32f1): its example firmware links with
+  # the port's start-up, linker script and HALs, warnings as errors. Not run:
+  # QEMU has no GD32F103. The image is kept as an artefact.
+  reference-port:
+    name: Reference port (gd32f1)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-arm-none-eabi libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib \
+            cmake ninja-build python3
+
+      - name: Build the example
+        run: |
+          cmake -S ports/gd32f1 -B build_port -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$PWD/cmake/toolchains/arm-none-eabi.cmake" \
+            -DKNX_GD32F1_WERROR=ON
+          cmake --build build_port
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gd32f1-example
+          path: |
+            build_port/knx_gd32f1_example.elf
+            build_port/knx_gd32f1_example.bin
+            build_port/knx_gd32f1_example.elf.map
+
   sanitizers:
     name: CTest under ASan and UBSan
     runs-on: ubuntu-24.04

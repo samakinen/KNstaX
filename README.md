@@ -117,6 +117,16 @@ idf.py build flash monitor
 > connecting to a live installation.** An inverted TX polarity holds the bus
 > dominant and takes down the whole line, not just your device.
 
+For bare-metal Cortex-M with a TP-UART2, start from the GD32F1 reference port,
+[ports/gd32f1](ports/gd32f1/README.md): start-up code, linker script, UART and
+flash HALs, and a one-channel example firmware, with a guide to porting it to
+another MCU:
+
+```bash
+cmake -S ports/gd32f1 -B build/gd32f1 -G Ninja       -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/arm-none-eabi.cmake
+cmake --build build/gd32f1
+```
+
 To build and test on a host with no hardware at all:
 
 ```bash
@@ -203,6 +213,7 @@ Parameters, enumerations, bounds and the load procedure:
 | [`tp1_thermostat/`](examples/tp1_thermostat/) | The richest product definition — HVAC modes, setpoints, ETS parameters |
 | [`tp1_line_coupler/`](examples/tp1_line_coupler/) | A coupler, through the same authoring path as an end device |
 | [`ip_device/`](examples/ip_device/), [`ip_routing_device/`](examples/ip_routing_device/), [`tp1_ip_interface/`](examples/tp1_ip_interface/) | KNXnet/IP tunnelling, routing and interface |
+| [`ports/gd32f1/example/`](ports/gd32f1/example/) | Bare-metal GD32F103 / STM32F103 with a TP-UART2: the start-up order every Cortex-M product needs |
 
 See [examples/README.md](examples/README.md) for what each one deliberately
 does *not* do, and why.
@@ -332,7 +343,8 @@ runtime and commissioning flows. On top of it:
   under AddressSanitizer and UndefinedBehaviorSanitizer, builds the library
   alone in the TP1-only, KNXnet/IP-only and knxip (routing + Secure, no
   tunnelling client) shapes with warnings as errors, runs the interop suite,
-  and runs the bare-metal size gate for Cortex-M0+, M3 and M4. It does not
+  runs the bare-metal size gate for Cortex-M0+, M3 and M4, and builds the
+  GD32F1 reference port. It does not
   build for ESP-IDF; the examples under
   `examples/esp_idf_*` are built by hand, so check both an xtensa and a RISC-V
   target after touching the bit-bang backend (the two SoC families declare
@@ -385,7 +397,7 @@ the `tp1-small` feature set; tests that need an absent feature are not registere
 - GCC 13+, Clang 17+, AppleClang 16+ or MSVC 19.38+ (C++23)
 - CMake 3.21+
 - ESP-IDF 5.3+ for ESP32 targets
-- Cortex-M without an RTOS: `-DKNX_PLATFORM=baremetal` with `cmake/toolchains/arm-none-eabi.cmake` and GCC 13+ for `arm-none-eabi` (see ARCHITECTURE.md, "Cooperative mode"). The board provides three C interfaces: a UART (`include/knx/physical/uart_hal.h`), flash for persistence, and a millisecond tick. See [docs/design/cortex-m-tpuart2-support.md](docs/design/cortex-m-tpuart2-support.md).
+- Cortex-M without an RTOS: `-DKNX_PLATFORM=baremetal` with `cmake/toolchains/arm-none-eabi.cmake` and GCC 13+ for `arm-none-eabi` (see ARCHITECTURE.md, "Cooperative mode"). The board provides three C interfaces: a UART (`include/knx/physical/uart_hal.h`), flash for persistence, and a millisecond tick; [ports/gd32f1](ports/gd32f1/README.md) implements them and says how to port them. See also [docs/design/cortex-m-tpuart2-support.md](docs/design/cortex-m-tpuart2-support.md).
 
 ### Installing as an ESP-IDF component
 

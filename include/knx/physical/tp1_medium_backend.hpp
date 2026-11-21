@@ -146,7 +146,7 @@ public:
 
     virtual util::Result<void> setBusMonitorMode(bool enabled) = 0;
     virtual util::Result<void> service() = 0;
-    virtual util::Result<void> setOwnAddress(uint16_t addressRaw) { return util::Result<void>::ok(); }
+    virtual util::Result<void> setOwnAddress([[maybe_unused]] uint16_t addressRaw) { return util::Result<void>::ok(); }
 
     virtual void setQueueNotifyCallback(QueueNotifyCallback callback, void* context) {
         (void)callback;

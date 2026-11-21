@@ -1194,10 +1194,12 @@ The open questions of this document are closed as follows.
    start-up, the high-water mark is measured, and the gate enforces both. An arena only helps a
    target without `malloc`, and none exists. Reopened if a port needs it.
 3. **The reference port lives in KNstaX**, in `ports/gd32f1/` (GD32F103, register-compatible with
-   STM32F103 for the peripherals used), and CI builds it. It is an example products copy, not a
-   BSP library: start-up, linker script, system calls, the UART HAL over a USART,
-   the flash HAL over the FMC and an RTT console. Products keep their application, pin
-   map and product file.
+   STM32F103 for the peripherals used), and CI builds its example. It is the H8i8o's board
+   code made generic: start-up, linker script, system calls, the UART HAL over a USART, the
+   flash HAL over the FMC and an RTT console. A product adds it to its firmware with
+   `knx_gd32f1_port()` and configures it with a `gd32f1_port_config.h`, or copies it; products
+   keep their application, pin map and product file. Its README is the porting guide §8 asked
+   for.
 4. **The load segments share one staging buffer** (the follow-up's step 3), as an option that is
    on in `tp1-small` only. A memory read of the address or association table segment is answered
    from the table; a second table that starts loading while another is staged is refused, and

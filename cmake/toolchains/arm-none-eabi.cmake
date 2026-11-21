@@ -29,9 +29,10 @@ set(CMAKE_RANLIB       arm-none-eabi-gcc-ranlib)
 set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 
 set(_knx_arch_flags "-mcpu=${KNX_ARM_CPU} -mthumb")
-set(_knx_size_flags "-ffunction-sections -fdata-sections -fno-threadsafe-statics")
+set(_knx_size_flags "-ffunction-sections -fdata-sections")
 set(CMAKE_C_FLAGS_INIT   "${_knx_arch_flags} ${_knx_size_flags}")
-set(CMAKE_CXX_FLAGS_INIT "${_knx_arch_flags} ${_knx_size_flags} -fno-exceptions -fno-rtti")
+# -fno-threadsafe-statics is C++ only: given to C, GCC warns on every file.
+set(CMAKE_CXX_FLAGS_INIT "${_knx_arch_flags} ${_knx_size_flags} -fno-threadsafe-statics -fno-exceptions -fno-rtti")
 set(CMAKE_EXE_LINKER_FLAGS_INIT "${_knx_arch_flags} --specs=nano.specs -Wl,--gc-sections")
 
 # Use -DCMAKE_BUILD_TYPE=MinSizeRel for -Os. CMake's Release type adds -O3
