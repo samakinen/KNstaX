@@ -105,7 +105,7 @@ key, 24 group objects, Cortex-M3, newlib `malloc` (8-octet header and alignment 
 | Persistence record scratch, `+1024` when Secure is on (`InterfaceObjectManager::kRecordScratchBytes`) | 1 024 |
 | `KNX_MAX_APDU_LENGTH` 15 → 55 (small-target-profile.md §11) | about 1 000 |
 | **Heap and static** | **about 4 850** |
-| Stack, at peak: the TX and RX transforms' buffers (`kMaxSecureTpduSize` 268 B, `kMaxPlainApduSize` 255 B), CCM blocks, the AES context (mbedTLS: 280 B) | about 900 |
+| Stack, at peak: the TX and RX transforms' buffers (`kMaxSecureTpduSize` 268 B, `kMaxPlainApduSize` 255 B), CCM blocks, the AES context (mbedTLS: 280 B) | about 1 300 (measured: 688 B CCM frame + 523 B transform buffers + MAC and AES) |
 
 The keys are held twice: once in the downloaded table, once in the resolved map. Most of the map
 cost is node overhead, not key material.
@@ -116,28 +116,17 @@ Each item is generic; none is specific to the H8i8o.
 
 ### D1. Portable AES-128 (K6)
 
-A third backend in `aes_block.hpp`, chosen when neither of the others is present (or forced with a
-build option): encrypt-only AES-128, S-box table, key schedule in the context (176 B) or expanded
-on the fly.
-
-- Flash about 1–1.5 KiB; no static RAM; the context lives on the stack only during a CCM operation.
-- Speed: a compact table implementation takes on the order of 10–20 k cycles per block on a
-  Cortex-M3 (est.). A secured telegram of 55 octets needs about 8 blocks: a few milliseconds at
-  48 MHz, off the acknowledge path (the TP-UART2 acknowledges by address before the APDU is
-  decrypted) and short next to the 20–40 ms a TP1 frame takes on the wire.
-- Side channels: the Cortex-M3 has no data cache, so table lookups do not leak through a cache.
-  Flash wait states are uniform over the table. A bitsliced implementation is not needed for this
-  class.
-- Validation: FIPS-197 Appendix C.1, and the existing 03/03/07 Annex C CCM vectors run against
-  every backend that the host build has.
+Designed and measured in [software-aes.md](software-aes.md): one portable, encrypt-only AES-128
+(32-bit columns, round key on the fly) on every platform, and an in-place KNX CCM. Measured on a
+Cortex-M3: 794 B + 538 B of flash, a 16-octet context, no static RAM, about 1 500 instructions per
+block and 5 000–12 000 per secured telegram (0.1–0.4 ms at 48 MHz, est.), off the acknowledge path.
 
 ### D2. Split the build requirements
 
-- Standalone CMake: Data Secure needs an AES backend, nothing else; mbedTLS is required only when
+- Standalone CMake: Data Secure needs no library; mbedTLS is required only when
   `KNX_SOURCES_SECURE_IP_CRYPTO` is compiled (Secure Tunnelling, `.knxkeys` import). Append
   `KNX_SOURCES_SECURE_DATA` and the IP crypto separately, as the ESP-IDF branch already does.
-- A Kconfig choice for the AES backend (`auto`, `mbedtls`, `esp`, `portable`), so a host build can
-  run the test suite against the portable backend too.
+- With one AES implementation (software-aes.md §3.1) there is no backend choice to configure.
 
 ### D3. Fixed-capacity Security Interface Object storage
 
@@ -190,12 +179,12 @@ With D3 the tables are fixed arrays already in their wire format. Persist them f
 (a record header and a span; `FlashLog` writes in pieces already) rather than copying them into
 `_recordScratch`, and drop the `+1024`. Saves 1 KiB of permanent heap.
 
-### D7. Size the secure transforms' buffers by the configuration
+### D7. No buffers in the secure path
 
-`bau_stack_port.cpp` puts a 268 B and a 255 B buffer on the stack, sized for a 255-octet APDU.
-Size them from `config::MAX_TPDU_LENGTH` (+ the 13 octets of overhead for the TX side): 70 and
-57 B for an APDU of 55. That saves about 400 B of peak stack, which matters with a 2.5 KiB
-reserve.
+Measured on a Cortex-M3: `ccmEncrypt` and `ccmDecrypt` take 688 B of stack each (two 259-octet
+arrays), and `bau_stack_port.cpp` adds a 268 B (TX) or 255 B (RX) buffer around them: about 1.3 KiB
+of the 2.5 KiB reserve for one secured telegram. Encrypting and decrypting in the frame's own TPDU
+(software-aes.md §3.3) removes all four; the measured peak in the crypto is then about 200 B.
 
 ### D8. Sequence numbers and flash wear
 
@@ -237,10 +226,10 @@ Same reference as §4.
 | `SecureApplicationLayer` | 150 |
 | `KNX_MAX_APDU_LENGTH` 55 | about 1 000 |
 | **Heap and static** | **about 2 000** |
-| Peak stack in the secure path (buffers sized by D7, CCM blocks, AES context) | about 450 |
+| Peak stack in the crypto (in place, D7; measured, software-aes.md) | about 200 |
 
 **Flash (est.):** Security Interface Object 5–7 KiB, secure application layer and CCM 4–6 KiB,
-extended property services 1–2 KiB, AES 1–1.5 KiB, secure persistence and key lookup 1–2 KiB:
+extended property services 1–2 KiB, AES and CCM 1.3 KiB (measured), secure persistence and key lookup 1–2 KiB:
 **13–19 KiB**. The 1.1 measurement in cortex-m-tpuart2-support.md (+6.3 KB of code for Data Secure
 on top of an image that already held the object, before LTO) is consistent with that.
 
