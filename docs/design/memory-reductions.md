@@ -131,9 +131,10 @@ than a list of patches:
 - **The device is a `constexpr` description plus one static object.** Handler tables, group
   object descriptors, bindings and capacities come from the product declaration at compile time
   and live in flash. The run-time state (tables ETS loads, values, queues) is one statically
-  allocated object whose size the linker reports: no heap, and the RAM figure is known at link
-  time (the `arena` policy of small-target-profile.md §6.4, reached by removing allocation rather
-  than by replacing the allocator).
+  allocated object whose size the linker reports, and the RAM figure is known at link time. This
+  is not the `arena` heap policy that small-target-profile.md §12 (decision 2) declined: the
+  allocator and `init_only` stay. P6 removes the allocations themselves, which is what takes the
+  `malloc` headers, the teardown code and the indirect calls with them.
 - **Every loaded table exists once,** in the form ETS writes it, and is read in place.
 - **Layers call each other directly.** A callback remains only where a product supplies behaviour.
 - **Capacities are configuration,** checked against the product at compile time.

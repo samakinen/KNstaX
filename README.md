@@ -273,14 +273,17 @@ For the service-by-service inventory, including what is missing and why, see
 
   | Reference device | KNstaX flash | KNstaX RAM (static + heap) |
   |---|---:|---:|
-  | `tp1-small`, Cortex-M3 | 88.7 KB | 13.3 KB |
-  | `tp1-small`, Cortex-M0+ | 91.9 KB | 1.6 KB static (linked, not run) |
-  | `tp1-standard`, Cortex-M4 | 107.2 KB | 20.9 KB |
+  | `tp1-small`, Cortex-M3 | 86.7 KB | 7.8 KB |
+  | `tp1-small`, Cortex-M0+ | 89.6 KB | 0.3 KB static (linked, not run) |
+  | `tp1-standard`, Cortex-M4 | 104.8 KB | 12.4 KB |
 
-  The H8i8o module firmware built on `tp1-small` is a 99.5 KB image with
-  5.7 KB of static RAM and about 10.5 KB of heap.
-- A group object costs **16 bytes** plus its value in a shared pool, about
-  20 bytes in all. Callbacks bound to ports are stored inline with a capture of
+  The memory reductions of
+  [memory-reductions.md](docs/design/memory-reductions.md) took 4.0 KB of flash
+  and 1.3 KB of static RAM off the H8i8o module firmware built on `tp1-small`,
+  and its heap shrinks with the KNstaX figure above.
+- A group object costs **12 bytes** plus its value in a shared pool, about
+  16 bytes in all; its datapoint type is read from the product's port table in
+  flash. Callbacks bound to ports are stored inline with a capture of
   `KNX_CALLBACK_CAPTURE_BYTES`.
 - The object table is sized at compile time by the number of ports in the
   product definition, so overflowing it is impossible by construction.
