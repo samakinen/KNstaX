@@ -188,19 +188,10 @@ of the 2.5 KiB reserve for one secured telegram. Encrypting and decrypting in th
 
 ### D8. Sequence numbers and flash wear
 
-Today the sequence state is checkpointed at most once a minute while secured traffic flows, and
-on every orderly restart. On an 8 KiB flash log that means a compaction, and so an erase of
-several pages, every hour or two of continuous secured traffic (est.), and a window of up to a
-minute in which a power cut can reuse sending sequence numbers.
-
-- **Sending sequence number: reserve ahead.** Persist `seq + N` (say 1 024) and send until the
-  reservation runs out; at start-up continue from the persisted value. Sequence numbers are
-  48-bit, so skipping is free. A power cut can then never reuse a number, and the record is
-  written once per N telegrams.
-- **Last Valid SeqNr per partner:** write at the power-fail warning, through the save path the
-  Cortex-M design already plans (cortex-m-tpuart2-support.md, "Save path": records into
-  pre-erased space, no erase), and keep the periodic checkpoint only as a fallback with a longer
-  interval.
+**Done on `main` (3a13d29),** see [data-secure-sequence-persistence.md](data-secure-sequence-persistence.md):
+the sending number is reserved `KNX_SECURE_SEQ_RESERVE` ahead, partner and Tool Access numbers are
+written only when changed and at most once per `KNX_SECURE_REPLAY_CHECKPOINT_S`, and
+`requestPowerFailSave()` lets a board write them at its power-fail warning (the H8i8o: `SAVE`).
 
 ### D9. Randomness
 
@@ -249,6 +240,7 @@ what proves §3.3 closed. Without it, a device with Secure on has never run with
 2. The size gate variant (§7), as built, to replace the estimates in §4 with measurements.
 3. D3–D5 (fixed tables, key lookup, sequence state): the gate's lock check passes.
 4. D6 and D7: the permanent and stack savings.
-5. D8 and D9 with the first product that uses them (H8i8o: the SAVE pin and a noise source).
+5. D9 with the first product that uses it (H8i8o: a noise source), and the board calling
+   `requestPowerFailSave()` from its power-fail warning.
 6. Conformance status and the product authoring guide updated as each item lands
    (DEVELOPMENT_GUIDELINES.md, "Which documents to update").
