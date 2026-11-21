@@ -70,8 +70,9 @@ if(DEFINED IDF_PATH OR COMMAND idf_component_register)
     # The virtual TP1 bus (KNX_SOURCES_VIRTUAL) is a host-test facility and is
     # never part of a component build.
 
-    # KNX Secure on ESP-IDF.  The crypto primitives call into mbedTLS from the
-    # IDF, but they are still translation units of their own: without them the
+    # KNX Secure on ESP-IDF.  The AES block comes from the backend Kconfig
+    # chooses (KNX_AES_BACKEND: the AES peripheral, mbedTLS or the portable
+    # software one), but CCM is translation units of our own: without them the
     # Data Secure session (CCM protect/unprotect) has no definition and the
     # stack links only because every `#if KNX_SECURE_ENABLED` guard is off.
     # The IP Secure transport additionally requires the KNXnet/IP group.
@@ -262,27 +263,44 @@ else()
 
     option(KNX_BUILD_EXAMPLES "Build standalone examples" OFF)
 
-    include(CheckIncludeFileCXX)
-    check_include_file_cxx("mbedtls/aes.h" HAVE_MBEDTLS_AES)
-    check_include_file_cxx("mbedtls/md.h" HAVE_MBEDTLS_MD)
-    check_include_file_cxx("mbedtls/pkcs5.h" HAVE_MBEDTLS_PKCS5)
+    # KNX Secure and mbedTLS. Data Secure needs only an AES block cipher, and
+    # with KNX_AES_BACKEND_SOFTWARE no library at all. mbedTLS is required for
+    # the mbedTLS AES backend and for the IP Secure crypto (SHA-256, X25519,
+    # PBKDF2: KNX_SOURCES_SECURE_IP_CRYPTO), which a build with KNXnet/IP
+    # compiles. A TP1-only device with the software backend needs neither.
+    set(KNX_AES_MBEDTLS OFF)
+    set(KNX_SECURE_IP_CRYPTO OFF)
+    if(KNX_SECURE_ENABLED)
+        if(CONFIG_KNX_AES_BACKEND_MBEDTLS)
+            set(KNX_AES_MBEDTLS ON)
+        elseif(CONFIG_KNX_AES_BACKEND_ESP_HW)
+            message(FATAL_ERROR "KNX_AES_BACKEND_ESP_HW exists only in an ESP-IDF build; choose SOFTWARE or MBEDTLS.")
+        endif()
+        if(KNX_FEATURE_NETIP)
+            set(KNX_SECURE_IP_CRYPTO ON)
+        endif()
+    endif()
+    set(KNX_NEEDS_MBEDTLS OFF)
+    if(KNX_AES_MBEDTLS OR KNX_SECURE_IP_CRYPTO)
+        set(KNX_NEEDS_MBEDTLS ON)
+    endif()
 
-    if(HAVE_MBEDTLS_AES)
+    if(KNX_NEEDS_MBEDTLS)
+        include(CheckIncludeFileCXX)
+        check_include_file_cxx("mbedtls/aes.h" HAVE_MBEDTLS_AES)
+        check_include_file_cxx("mbedtls/md.h" HAVE_MBEDTLS_MD)
+        check_include_file_cxx("mbedtls/pkcs5.h" HAVE_MBEDTLS_PKCS5)
         find_library(MBEDTLS_LIBRARY mbedtls)
         find_library(MBEDCRYPTO_LIBRARY mbedcrypto)
-    endif()
-    # When KNX Secure is enabled, mandate a real crypto backend
-    if(KNX_SECURE_ENABLED)
-        if(NOT HAVE_MBEDTLS_AES)
-            message(FATAL_ERROR "KNX_SECURE_ENABLED=ON requires mbedTLS AES headers (mbedtls/aes.h). Install mbedtls development headers, or set -DKNX_SECURE_ENABLED=OFF.")
-        endif()
 
-        if(NOT HAVE_MBEDTLS_PKCS5 OR NOT HAVE_MBEDTLS_MD)
-            message(FATAL_ERROR "KNX_SECURE_ENABLED=ON requires mbedTLS PBKDF2 headers (mbedtls/pkcs5.h, mbedtls/md.h). Install libmbedtls-dev or provide headers.")
+        if(KNX_AES_MBEDTLS AND NOT HAVE_MBEDTLS_AES)
+            message(FATAL_ERROR "KNX_AES_BACKEND_MBEDTLS requires the mbedTLS AES header (mbedtls/aes.h). Install the mbedTLS development headers, or choose CONFIG_KNX_AES_BACKEND_SOFTWARE.")
         endif()
-
+        if(KNX_SECURE_IP_CRYPTO AND (NOT HAVE_MBEDTLS_PKCS5 OR NOT HAVE_MBEDTLS_MD))
+            message(FATAL_ERROR "KNX Secure with KNXnet/IP requires the mbedTLS PBKDF2 headers (mbedtls/pkcs5.h, mbedtls/md.h) for IP Secure. Install libmbedtls-dev, or build without KNXnet/IP (CONFIG_KNX_BUILD_NETIP=n).")
+        endif()
         if(NOT (MBEDTLS_LIBRARY AND MBEDCRYPTO_LIBRARY))
-            message(FATAL_ERROR "KNX_SECURE_ENABLED=ON requires mbedtls and mbedcrypto libraries. Install libmbedtls-dev, or provide library paths, or set -DKNX_SECURE_ENABLED=OFF.")
+            message(FATAL_ERROR "KNX Secure with the mbedTLS AES backend or KNXnet/IP requires the mbedtls and mbedcrypto libraries. Install libmbedtls-dev, or provide library paths.")
         endif()
     endif()
 
@@ -300,13 +318,20 @@ else()
     # KNX_PLATFORM was resolved from the configuration above.
     message(STATUS "Building KNX Stack for platform: ${KNX_PLATFORM}")
     message(STATUS "")
-    message(STATUS "Crypto Backends:")
-    message(STATUS "  mbedtls/aes.h:      ${HAVE_MBEDTLS_AES}")
-    message(STATUS "  mbedtls/md.h:       ${HAVE_MBEDTLS_MD}")
-    message(STATUS "  mbedtls/pkcs5.h:    ${HAVE_MBEDTLS_PKCS5}")
-    message(STATUS "  mbedtls library:    ${MBEDTLS_LIBRARY}")
-    message(STATUS "  mbedcrypto library: ${MBEDCRYPTO_LIBRARY}")
+    message(STATUS "Crypto:")
     message(STATUS "  KNX Secure enabled: ${KNX_SECURE_ENABLED}")
+    if(KNX_SECURE_ENABLED)
+        if(KNX_AES_MBEDTLS)
+            message(STATUS "  AES backend:        mbedTLS")
+        else()
+            message(STATUS "  AES backend:        software")
+        endif()
+        message(STATUS "  IP Secure crypto:   ${KNX_SECURE_IP_CRYPTO}")
+    endif()
+    if(KNX_NEEDS_MBEDTLS)
+        message(STATUS "  mbedtls library:    ${MBEDTLS_LIBRARY}")
+        message(STATUS "  mbedcrypto library: ${MBEDCRYPTO_LIBRARY}")
+    endif()
 
     # ========================================================================
     # Source Files - Common
@@ -362,9 +387,13 @@ else()
         list(APPEND COMMON_SOURCES ${KNX_SOURCES_ETS})
     endif()
 
-    # Optional Security (requires mbedTLS when enabled)
+    # Optional Security. Data Secure on its own needs no library (see the
+    # mbedTLS requirements above); the IP Secure crypto comes with KNXnet/IP.
     if(KNX_SECURE_ENABLED)
-        list(APPEND COMMON_SOURCES ${KNX_SOURCES_SECURE})
+        list(APPEND COMMON_SOURCES ${KNX_SOURCES_SECURE_DATA})
+        if(KNX_SECURE_IP_CRYPTO)
+            list(APPEND COMMON_SOURCES ${KNX_SOURCES_SECURE_IP_CRYPTO})
+        endif()
         if(KNX_FEATURE_NETIP)
             list(APPEND COMMON_SOURCES ${KNX_SOURCES_SECURE_ROUTING})
             if(KNX_FEATURE_TUNNELING)
@@ -441,7 +470,7 @@ else()
         target_link_libraries(knx_core PUBLIC ZLIB::ZLIB)
     endif()
 
-    if(KNX_SECURE_ENABLED)
+    if(KNX_NEEDS_MBEDTLS)
         target_link_libraries(knx_core PUBLIC
             ${MBEDCRYPTO_LIBRARY}
             ${MBEDTLS_LIBRARY}
@@ -731,7 +760,9 @@ else()
             knx_add_test(test_netip_mc_timer_sync SOURCES test/unit/test_netip_mc_timer_sync.cpp)
             # Secure Routing context: nonces, replay, TIMER_NOTIFY, persistence
             knx_add_test(test_netip_secure_routing SOURCES test/unit/test_netip_secure_routing.cpp)
-            knx_add_test(test_key_derivation SOURCES test/unit/test_key_derivation.cpp LABELS unit)
+            if(KNX_SECURE_IP_CRYPTO)
+                knx_add_test(test_key_derivation SOURCES test/unit/test_key_derivation.cpp LABELS unit)
+            endif()
         else()
             message(STATUS "KNX Secure disabled: skipping secure unit tests (test_secure_application_layer, test_key_derivation)")
         endif()
