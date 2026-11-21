@@ -195,3 +195,47 @@ On this project's Windows workstation, where the Linux host suite (ucontext fibr
 - the H8i8o firmware built against the result.
 
 CI runs the full Linux suites, the interop tests and the gates on the pull request.
+
+## 9. Status
+
+### P3 Group tables (R2), 21 November 2026
+
+Each loaded table now exists once (ARCHITECTURE.md, "The group tables and their load segments"):
+
+- **Association table: the segment is the table.** `AssociationTableDomain` holds the entries in the
+  form ETS writes them (count, then TSAP and ASAP big-endian) and reads them in place. The parsed
+  `FixedVector<AssociationEntry, 160>` (644 B), the by-address index (324 B) and `DeviceModel`'s
+  segment (642 B) are one 642-octet array. Lookups are a linear scan, O(n) per group telegram.
+  What is in force is kept apart from what ETS is writing by the entry count, so the download
+  behaves as before: writes straddling entries, the verification read before LoadCompleted, the
+  table in force from LoadCompleted, Unload empties it.
+- **Persistence without the scratch copy.** `saveToPersistence()` saves each record from where its
+  value is: the association entries from their storage, the address table encoded into its own
+  segment (owned by `AddressTableObject` now), strings and key tables from their storage, single
+  property elements from the stack. `_recordScratch` keeps only the parameter image record and a
+  carried-over element: 15 B instead of 642 B (1 666 B with Secure). The stored records are
+  unchanged, so are the schema version, the banks and power-cut recovery.
+- **Group object segment by the product.** One descriptor per registered group object, allocated in
+  `DeviceModel::bind()`: 122 B for the reference device instead of 514 B. A device that registers
+  no group object before `init()` keeps room for 256.
+- **Not done: the address table's segment.** The data link layers and the TP-UART interrupt read the
+  native entries, and a segment that decodes them on access needs a read/write hook on memory
+  regions in the management server (P2's files). It stays as staging and save buffer (258 B).
+
+Behaviour differences, none in ETS's sequence: a memory write into the association segment while
+the table is Loaded changes the table at once (it used to wait for a LoadCompleted that ETS sends
+only after StartLoading); an append by the firmware while the association table is Loading is
+refused with `Busy` (it used to be accepted and lost at LoadCompleted); a segment read after a
+restore or a firmware change returns the table in force (it used to return zeros or the last
+download); an address table saved while it is Loading is stored empty also when the firmware
+added entries to it during the download.
+
+| | `tp1-small` M3 before | after | `tp1-standard` M4 before | after |
+|---|---:|---:|---:|---:|
+| Flash | 88 709 | 87 563 (−1 146) | 107 221 | 106 148 (−1 073) |
+| Static RAM | 1 608 | 1 608 | 2 831 | 2 831 |
+| Heap (start-up = peak, zero allocations after the lock) | 11 724 | 9 752 (−1 972) | 18 024 | 13 696 (−4 328) |
+| KNstaX RAM | 13 332 | 11 360 | 20 855 | 16 527 |
+
+`tp1-standard` gains more because its capacities are larger (255 addresses, 400 associations: the
+association segment and the save scratch were 1 602 B each, the index about 800 B). The budgets are left to the integrator of P1–P4.

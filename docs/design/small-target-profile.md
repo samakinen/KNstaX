@@ -985,7 +985,10 @@ in the table is no longer accepted or acknowledged. The old lists only grew, so 
 download with fewer addresses the device went on acknowledging the old ones until the next restart
 (test: `test_group_address_filter_follows_the_address_table`).
 
-**Step 3: the load segments, rejected.** What the code does:
+**Step 3: the load segments, rejected** (a shared staging buffer; §12, decision 4). Each table
+keeps its own segment. The copies were reduced since without sharing a buffer: memory-reductions.md,
+P3 (the association table is its segment, read in place; the address table's segment is also its
+save buffer; the group object segment is sized by the product). What the code does:
 - Tables are canonical; the segment is staging. A_Memory_Write lands in the segment; at LoadCompleted
   `applyLoadedTableSegment` parses it into the table (address and association table; the application
   code segment goes to `ApplicationProgramObject::setProgramData`; the group object table segment is

@@ -126,6 +126,16 @@ On the cooperative platform the receive filter, the stack's loop and the publica
 
 Behaviour change: the layer filters and acknowledges on the table, so an address that is no longer in the table is no longer accepted. The earlier lists only grew: after an ETS Unload, or a download with fewer addresses, the device kept accepting and acknowledging the old ones until the next restart.
 
+#### The group tables and their load segments
+
+ETS loads the three group tables with the SystemB procedure: Unload, StartLoading, the table into a memory-mapped segment by A_Memory_Write (`table_segments.hpp`; the 12-octet chunks of a 15-octet APDU do not align with entries), a verification A_Memory_Read, LoadCompleted. Each table exists once:
+
+- **Association table.** The segment is the table's storage (`AssociationTableDomain`: a big-endian count, then TSAP and ASAP per entry). What is in force is the first `size()` entries: Unload and StartLoading set it to 0, the octets ETS writes after them land in the same storage, and LoadCompleted (`applyLoadSegment()`) takes the count ETS wrote, dropping invalid entries and repeats as adding them one by one did. Lookups decode the entries in place by a linear scan, O(n) per group telegram (a few microseconds for the 80 entries of a 60-object device); there is no parsed copy and no by-address index. Persistence saves the entries straight from the storage. An append by the firmware (`addEntry`, `loadTable`) while the table is Loading is refused with `Busy`, because it would land on what ETS has written.
+- **Group address table.** The entries stay a native array, because the data link layers and the TP-UART interrupt read them (above). The segment (`AddressTableObject::loadSegment()`) is staging for a download, parsed into the entries at LoadCompleted, and the buffer a save encodes the table into (`persistenceRecord()`), so the persistence layer needs no copy of its own. While the table is Loading the segment is not touched and the record is empty, as the table is.
+- **Group object table.** Accepted and not applied (the group objects are the product's), and kept only so that ETS reads back what it wrote: `DeviceModel` holds one descriptor per group object the device registered before `init()` (256 when it registered none yet).
+
+A segment reads back what ETS wrote, before and after LoadCompleted. After a restore or a change by the firmware the association and address table segments read as the table in force (the address table's after the next save), where they used to read zeros or the last download.
+
 ### `Tp1PhysicalLike`
 
 The concept `Tp1DataLinkLayer` requires of a physical layer (`Tp1MacPhysical`, the KNXnet/IP physicals and the test mock). It is intentionally narrow: it exposes frame-oriented send/receive and bus-monitor control upward to the data-link layer. It does not expose backend-family-specific byte-stream policy.

@@ -102,9 +102,9 @@ key, 24 group objects, Cortex-M3, newlib `malloc` (8-octet header and alignment 
 | Resolved group keys, `std::map` (about 44 B per node) | 1 400 |
 | Resolved device keys and peer sequence map | 180 |
 | `SecureApplicationLayer` (four callbacks, peer contexts) | 150 |
-| Persistence record scratch, `+1024` when Secure is on (`InterfaceObjectManager::kRecordScratchBytes`) | 1 024 |
+| Persistence record scratch, `+1024` when Secure is on (`InterfaceObjectManager::kRecordScratchBytes`): gone, the key tables are saved from their own storage (memory-reductions.md, P3) | ~~1 024~~ 0 |
 | `KNX_MAX_APDU_LENGTH` 15 → 55 (small-target-profile.md §11) | about 1 000 |
-| **Heap and static** | **about 4 850** |
+| **Heap and static** | **about 3 850** (4 850 before P3) |
 | Stack, at peak: the TX and RX transforms' buffers (`kMaxSecureTpduSize` 268 B, `kMaxPlainApduSize` 255 B), CCM blocks, the AES context (mbedTLS: 280 B) | about 1 300 (measured: 688 B CCM frame + 523 B transform buffers + MAC and AES) |
 
 The keys are held twice: once in the downloaded table, once in the resolved map. Most of the map
