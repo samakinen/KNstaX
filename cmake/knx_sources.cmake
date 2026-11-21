@@ -140,10 +140,14 @@ set(KNX_SOURCES_TP1_NETIP_BRIDGE
 
 # --- KNX Secure ----------------------------------------------------------
 # Data Secure (the on-bus S-AL security) needs only AES: CBC-MAC for
-# authentication and CTR for confidentiality.
+# authentication and CTR for confidentiality. With the software AES backend
+# (KNX_AES_BACKEND_SOFTWARE) it needs no library at all. aes128_soft.cpp is
+# compiled whatever the backend, so the host tests can check it; a link that
+# does not use it drops it.
 set(KNX_SOURCES_SECURE_DATA
     "src/security/data_secure.cpp"
     "src/security/secure_application_layer.cpp"
+    "src/security/aes128_soft.cpp"
     "src/security/aes128_cbc_mac.cpp"
     "src/security/aes128_ctr.cpp"
 )

@@ -720,6 +720,9 @@ else()
         knx_add_test(test_security_access_policy SOURCES test/unit/test_security_access_policy.cpp LABELS unit secure)
 
         if(KNX_SECURE_ENABLED)
+            # The software AES on every backend; FIPS-197, SP 800-38A and the
+            # KNX CCM vectors on the configured one.
+            knx_add_test(test_aes128_soft SOURCES test/unit/test_aes128_soft.cpp LABELS unit secure)
             knx_add_test(test_secure_application_layer SOURCES test/unit/test_secure_application_layer.cpp
                 LABELS unit secure)
             knx_add_test(test_netip_secure_wrapper_vectors SOURCES test/unit/test_netip_secure_wrapper_vectors.cpp
