@@ -60,6 +60,7 @@ struct CooperativeHooks {
     /// Unrecoverable error. Null: `fatalError()` spins forever.
     void (*fatalError)(void* context){nullptr};
     /// Receives one formatted log line (no trailing newline). Null: log output is dropped.
+    /// Never called in a build with `CONFIG_KNX_LOG_LEVEL` 0, which links no formatting code.
     void (*logLine)(void* context, const char* line){nullptr};
 };
 

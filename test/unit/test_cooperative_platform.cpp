@@ -14,6 +14,7 @@
 
 #include "knx/platform/cooperative_platform.hpp"
 #include "knx/platform/mutex.hpp"
+#include "knx/util/log.hpp"
 
 #include <array>
 #include <cstdint>
@@ -202,6 +203,15 @@ void test_binary_semaphore_gives_once(void) {
     platform.deleteSemaphore(sem);
 }
 
+#if KNX_LOG_LEVEL_COMPILE == KNX_LOG_LEVEL_NONE
+// Level 0 links no formatting code (see CooperativePlatform::log): the sink is
+// never called, so nothing a product logs through the platform reaches it.
+void test_log_at_level_none_never_reaches_the_sink(void) {
+    CooperativePlatform platform(makeHooks());
+    platform.log("I", "Tag", "value=%d", 42);
+    TEST_ASSERT_TRUE(g_board.lastLine.empty());
+}
+#else
 void test_log_goes_to_the_sink_and_is_truncated(void) {
     CooperativePlatform platform(makeHooks());
     platform.log("I", "Tag", "value=%d", 42);
@@ -212,6 +222,7 @@ void test_log_goes_to_the_sink_and_is_truncated(void) {
     TEST_ASSERT_TRUE(g_board.lastLine.size() < 100u);
     TEST_ASSERT_TRUE(g_board.lastLine.rfind("E Tag: xxx", 0) == 0);
 }
+#endif
 
 void test_log_without_a_sink_is_dropped(void) {
     CooperativeHooks hooks = makeHooks();
@@ -267,7 +278,11 @@ int main(void) {
     RUN_TEST(test_notify_take_never_blocks);
     RUN_TEST(test_event_group_reports_and_clears_bits);
     RUN_TEST(test_binary_semaphore_gives_once);
+#if KNX_LOG_LEVEL_COMPILE == KNX_LOG_LEVEL_NONE
+    RUN_TEST(test_log_at_level_none_never_reaches_the_sink);
+#else
     RUN_TEST(test_log_goes_to_the_sink_and_is_truncated);
+#endif
     RUN_TEST(test_log_without_a_sink_is_dropped);
     RUN_TEST(test_mac_address_is_local_and_derived_from_the_serial);
     RUN_TEST(test_restart_calls_the_board_hook);

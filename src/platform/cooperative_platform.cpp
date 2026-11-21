@@ -3,6 +3,8 @@
 
 #include "knx/platform/cooperative_platform.hpp"
 
+#include "knx/util/log.hpp"
+
 #include <algorithm>
 #include <cstdarg>
 #include <cstdio>
@@ -16,8 +18,9 @@ namespace {
 using util::ErrorCode;
 using util::Result;
 
-/// Longest log line handed to the sink; longer output is truncated.
-constexpr size_t kLogLineCapacity = 96;
+/// Longest log line handed to the sink; longer output is truncated. Unused at
+/// log level 0, which formats nothing.
+[[maybe_unused]] constexpr size_t kLogLineCapacity = 96;
 
 /// Non-null handle returned for every mutex. A no-op lock needs no state,
 /// but callers treat a null handle as "creation failed".
@@ -277,6 +280,15 @@ Result<void> CooperativePlatform::semaphoreTake(SemaphoreHandle sem, uint32_t /*
 }
 
 void CooperativePlatform::log(const char* level, const char* tag, const char* format, ...) {
+#if KNX_LOG_LEVEL_COMPILE == KNX_LOG_LEVEL_NONE
+    // A build without logging has no line to hand to the sink. Formatting one
+    // anyway would keep vsnprintf and the rest of printf (about 2 KiB of flash)
+    // in the image: this function is reached through the vtable, so the linker
+    // keeps it, and everything it calls, whether or not anything logs.
+    (void)level;
+    (void)tag;
+    (void)format;
+#else
     if (_hooks.logLine == nullptr) {
         return;
     }
@@ -291,6 +303,7 @@ void CooperativePlatform::log(const char* level, const char* tag, const char* fo
     std::vsnprintf(line + prefix, sizeof line - prefix, format, args);
     va_end(args);
     _hooks.logLine(_hooks.context, line);
+#endif
 }
 
 }  // namespace knx::platform
