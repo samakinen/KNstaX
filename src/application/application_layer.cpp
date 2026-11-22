@@ -158,35 +158,31 @@ void ApplicationLayer::handleTransportRx(const transport::TDataFrame& frame) {
         return;
     }
 
-    // Service data is APDU payload bytes (after 2-byte header).
-    // For services where data6 belongs to the service payload, prepend it first
-    // so handlers receive a contiguous byte sequence.
-    util::FixedVector<uint8_t, config::MAX_APDU_LENGTH> serviceData;
-    const bool needsData6 = usesApciData6(service);
-    if (needsData6) {
-        serviceData.push_back(apciValue.data6());
-    }
-    if (frame.tpdu.size() > 2) {
-        for (size_t i = 2; i < frame.tpdu.size(); ++i) {
-            (void)serviceData.push_back(frame.tpdu[i]);
-        }
-    }
-
-    // GroupValue short APDU carries the 1-byte value in APCI data6 (even if 0).
-    // If a payload exists, it is the long APDU form and the payload bytes are used.
-    if (service == APCIService::GroupValueWrite || service == APCIService::GroupValueResponse) {
-        if (serviceData.empty()) {
-            serviceData.push_back(apciValue.data6());
-        }
-    }
-
-    // Create application frame
     ADataFrame aFrame;
     aFrame.source = frame.source;
     aFrame.destination = frame.destination;
     aFrame.service = service;
-    aFrame.data = serviceData;
     aFrame.destinationType = frame.destinationType;
+
+    // Service data is the APDU payload after the 2-byte header, built straight
+    // into the frame: on the receive path every copy of an APDU-sized buffer
+    // is stack the device has to reserve. For services where data6 belongs to
+    // the service payload, it comes first, so handlers receive a contiguous
+    // byte sequence.
+    if (usesApciData6(service)) {
+        aFrame.data.push_back(apciValue.data6());
+    }
+    for (size_t i = 2; i < frame.tpdu.size(); ++i) {
+        (void)aFrame.data.push_back(frame.tpdu[i]);
+    }
+
+    // GroupValue short APDU carries the 1-byte value in APCI data6 (even if 0).
+    // If a payload exists, it is the long APDU form and the payload bytes are used.
+    if ((service == APCIService::GroupValueWrite || service == APCIService::GroupValueResponse) &&
+        aFrame.data.empty()) {
+        aFrame.data.push_back(apciValue.data6());
+    }
+
     aFrame.apciData = apciValue.data6();
     aFrame.security = frame.security;
 
