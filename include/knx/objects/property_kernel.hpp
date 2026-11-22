@@ -168,15 +168,19 @@ constexpr uint8_t propertyElementSize(application::PropertyDataType type) {
     }
 }
 
-/// Check a handler table against the kernel's rules.
+/// Check a handler table's layout: element sizes, PIDs (non-zero, unique,
+/// PID_OBJECT_TYPE present). Everything except the read/write functions.
 ///
-/// `constexpr`, like the make() helpers below, so that a fixed table is
-/// declared `constexpr` and checked once by `static_assert` in its own
-/// translation unit: the table is then constant-initialised into read-only
-/// memory instead of being built in RAM by start-up code, and a mistake in it is
-/// a compile error rather than a log line on the device. Tables assembled at
-/// run time (GenericInterfaceObject) still call it at run time.
-constexpr util::Result<void> validatePropertyTable(const PropertyHandler* handlers, size_t count) {
+/// `constexpr`, so that a fixed table is declared `constexpr` and checked by
+/// `static_assert` in its own translation unit: the table is then
+/// constant-initialised into read-only memory instead of being built in RAM by
+/// start-up code, and a layout mistake in it is a compile error. Whether a
+/// function pointer is null is not a constant expression when the compiler
+/// keeps null checks on function addresses (GCC with
+/// -fno-delete-null-pointer-checks, which UBSan turns on), so the pairing of
+/// capability and functions is checked by validatePropertyTable() at run time;
+/// the make() helpers below set it consistently by construction.
+constexpr util::Result<void> validatePropertyTableLayout(const PropertyHandler* handlers, size_t count) {
     if (!handlers || count == 0) {
         return util::Result<void>::err(util::ErrorCode::InvalidParameter);
     }
@@ -191,18 +195,6 @@ constexpr util::Result<void> validatePropertyTable(const PropertyHandler* handle
         }
         const uint8_t elementSize = propertyElementSize(handler.type);
         if (elementSize == 0 && handler.elementSizeOverride == 0) {
-            return util::Result<void>::err(util::ErrorCode::InvalidParameter);
-        }
-        if (canRead(handler.capability) && handler.read == nullptr) {
-            return util::Result<void>::err(util::ErrorCode::InvalidParameter);
-        }
-        if (!canRead(handler.capability) && handler.read != nullptr) {
-            return util::Result<void>::err(util::ErrorCode::InvalidParameter);
-        }
-        if (canWrite(handler.capability) && handler.write == nullptr) {
-            return util::Result<void>::err(util::ErrorCode::InvalidParameter);
-        }
-        if (!canWrite(handler.capability) && handler.write != nullptr) {
             return util::Result<void>::err(util::ErrorCode::InvalidParameter);
         }
 
@@ -225,6 +217,26 @@ constexpr util::Result<void> validatePropertyTable(const PropertyHandler* handle
         return util::Result<void>::err(util::ErrorCode::InvalidParameter);
     }
 
+    return util::Result<void>::ok();
+}
+
+/// Check a handler table against all of the kernel's rules: its layout, and
+/// that a property has a read function exactly when it is readable and a
+/// write function exactly when it is writable. Run time: tables assembled by
+/// GenericInterfaceObject, and the unit test that checks every built-in table.
+inline util::Result<void> validatePropertyTable(const PropertyHandler* handlers, size_t count) {
+    if (const auto layout = validatePropertyTableLayout(handlers, count); layout.isError()) {
+        return layout;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        const auto& handler = handlers[i];
+        if (canRead(handler.capability) != (handler.read != nullptr)) {
+            return util::Result<void>::err(util::ErrorCode::InvalidParameter);
+        }
+        if (canWrite(handler.capability) != (handler.write != nullptr)) {
+            return util::Result<void>::err(util::ErrorCode::InvalidParameter);
+        }
+    }
     return util::Result<void>::ok();
 }
 

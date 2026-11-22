@@ -486,7 +486,7 @@ static constexpr PropertyHandler kAppProgramHandlers[] = {
 };
 
 constexpr size_t kAppProgramHandlerCount = sizeof(kAppProgramHandlers) / sizeof(kAppProgramHandlers[0]);
-static_assert(validatePropertyTable(kAppProgramHandlers, kAppProgramHandlerCount).isOk(),
+static_assert(validatePropertyTableLayout(kAppProgramHandlers, kAppProgramHandlerCount).isOk(),
               "kAppProgramHandlers breaks the property kernel's rules");
 } // namespace
 

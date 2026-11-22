@@ -826,7 +826,7 @@ static constexpr PropertyHandler kSecurityHandlers[] = {
 };
 
 constexpr size_t kSecurityHandlerCount = sizeof(kSecurityHandlers) / sizeof(kSecurityHandlers[0]);
-static_assert(validatePropertyTable(kSecurityHandlers, kSecurityHandlerCount).isOk(),
+static_assert(validatePropertyTableLayout(kSecurityHandlers, kSecurityHandlerCount).isOk(),
               "kSecurityHandlers breaks the property kernel's rules");
 } // namespace
 

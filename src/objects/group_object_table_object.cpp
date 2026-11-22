@@ -202,7 +202,7 @@ static constexpr PropertyHandler kGroupObjectTableHandlers[] = {
 };
 
 constexpr size_t kGroupObjectTableHandlerCount = sizeof(kGroupObjectTableHandlers) / sizeof(kGroupObjectTableHandlers[0]);
-static_assert(validatePropertyTable(kGroupObjectTableHandlers, kGroupObjectTableHandlerCount).isOk(),
+static_assert(validatePropertyTableLayout(kGroupObjectTableHandlers, kGroupObjectTableHandlerCount).isOk(),
               "kGroupObjectTableHandlers breaks the property kernel's rules");
 
 util::Result<GroupObjectTableDomain::Index> toDomainIndex(GroupObjectIndex index) {

@@ -6,9 +6,16 @@
  * @brief Unit tests for DeviceObject
  */
 
+#include "knx/objects/address_table_object.hpp"
+#include "knx/objects/application_program_object.hpp"
+#include "knx/objects/association_table_object.hpp"
 #include "knx/objects/device_object.hpp"
+#include "knx/objects/group_object_table_object.hpp"
 #include "knx/objects/interface_object_manager.hpp"
 #include "knx/objects/property_kernel.hpp"
+#if KNX_SECURE_ENABLED
+#include "knx/objects/security_interface_object.hpp"
+#endif
 #include <unity.h>
 #include <vector>
 
@@ -780,12 +787,38 @@ constexpr PropertyHandler kConstantHandlers[] = {
 };
 constexpr size_t kConstantHandlerCount = sizeof(kConstantHandlers) / sizeof(kConstantHandlers[0]);
 
-static_assert(validatePropertyTable(kConstantHandlers, kConstantHandlerCount).isOk());
-static_assert(kConstantHandlers[0].write == nullptr && kConstantHandlers[0].maxElements == 1);
-static_assert(kConstantHandlers[2].maxElements == 4 && kConstantHandlers[2].count != nullptr);
-// The rules hold at compile time too: no PID_OBJECT_TYPE, no table.
-static_assert(validatePropertyTable(kConstantHandlers + 1, kConstantHandlerCount - 1).isError());
+static_assert(validatePropertyTableLayout(kConstantHandlers, kConstantHandlerCount).isOk());
+static_assert(kConstantHandlers[0].maxElements == 1 && kConstantHandlers[2].maxElements == 4);
+// The layout rules hold at compile time: no PID_OBJECT_TYPE, no table.
+static_assert(validatePropertyTableLayout(kConstantHandlers + 1, kConstantHandlerCount - 1).isError());
 } // namespace
+
+void test_PropertyKernel_ConstantTableIsComplete() {
+    // The function pointers are checked at run time: a null check on a
+    // function address is not a constant expression under
+    // -fno-delete-null-pointer-checks (UBSan).
+    TEST_ASSERT_TRUE(validatePropertyTable(kConstantHandlers, kConstantHandlerCount).isOk());
+    TEST_ASSERT_NULL(kConstantHandlers[0].write);
+    TEST_ASSERT_NOT_NULL(kConstantHandlers[2].count);
+}
+
+void test_PropertyKernel_BuiltInTablesAreComplete() {
+    // Every fixed table is checked for its layout by a static_assert next to
+    // it; here, at run time, also for a read function exactly where the
+    // property is readable and a write function exactly where it is writable.
+    const auto check = [](const InterfaceObject& object) {
+        const KernelBinding binding = object.kernelBinding();
+        TEST_ASSERT_TRUE(validatePropertyTable(binding.handlers, binding.handlerCount).isOk());
+    };
+    check(DeviceObject{});
+    check(AddressTableObject{});
+    check(AssociationTableObject{});
+    check(GroupObjectTableObject{});
+    check(ApplicationProgramObject{});
+#if KNX_SECURE_ENABLED
+    check(SecurityInterfaceObject{});
+#endif
+}
 
 void test_PropertyKernel_ConstantTableIsUsable() {
     std::vector<uint8_t> out;
@@ -834,6 +867,8 @@ int main(int argc, char** argv) {
     RUN_TEST(test_DeviceObject_ProgMode_NoCallbackIfNoChange);
     RUN_TEST(test_DeviceObject_ProgMode_NotifiesAppendedAndInternalObservers);
     RUN_TEST(test_PropertyKernel_ConstantTableIsUsable);
+    RUN_TEST(test_PropertyKernel_ConstantTableIsComplete);
+    RUN_TEST(test_PropertyKernel_BuiltInTablesAreComplete);
     
     // Property access
     RUN_TEST(test_DeviceObject_PropertyAccess_ManufacturerId);

@@ -90,7 +90,7 @@ static constexpr PropertyHandler kAddressTableHandlers[] = {
 };
 
 constexpr size_t kAddressTableHandlerCount = sizeof(kAddressTableHandlers) / sizeof(kAddressTableHandlers[0]);
-static_assert(validatePropertyTable(kAddressTableHandlers, kAddressTableHandlerCount).isOk(),
+static_assert(validatePropertyTableLayout(kAddressTableHandlers, kAddressTableHandlerCount).isOk(),
               "kAddressTableHandlers breaks the property kernel's rules");
 
 util::Result<AddressTableDomain::Index> toDomainIndex(AddressTableIndex index) {

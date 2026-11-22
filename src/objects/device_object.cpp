@@ -721,7 +721,7 @@ static constexpr PropertyHandler kDeviceHandlers[] = {
 };
 
 constexpr size_t kDeviceHandlerCount = sizeof(kDeviceHandlers) / sizeof(kDeviceHandlers[0]);
-static_assert(validatePropertyTable(kDeviceHandlers, kDeviceHandlerCount).isOk(),
+static_assert(validatePropertyTableLayout(kDeviceHandlers, kDeviceHandlerCount).isOk(),
               "kDeviceHandlers breaks the property kernel's rules");
 } // namespace
 

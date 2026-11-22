@@ -114,7 +114,7 @@ static constexpr PropertyHandler kAssociationTableHandlers[] = {
 };
 
 constexpr size_t kAssociationTableHandlerCount = sizeof(kAssociationTableHandlers) / sizeof(kAssociationTableHandlers[0]);
-static_assert(validatePropertyTable(kAssociationTableHandlers, kAssociationTableHandlerCount).isOk(),
+static_assert(validatePropertyTableLayout(kAssociationTableHandlers, kAssociationTableHandlerCount).isOk(),
               "kAssociationTableHandlers breaks the property kernel's rules");
 
 util::Result<AssociationTableDomain::Index> toDomainIndex(uint16_t index) {
