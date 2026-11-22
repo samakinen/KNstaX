@@ -53,9 +53,10 @@ KNXnet/IP Secure Tunnelling and Secure Routing have wired runtime paths
 validated against the specification's own test vectors, but have never run
 against a real peer.
 
-There is no FDSK: key provisioning is manual by design, which makes secure
-commissioning a self-service flow rather than the certificate-based one an
-integrator expects from a catalogue product.
+The Factory Tool Key (FDSK) is per device, so it is the product's to supply. The
+stack has what a product needs to make one at the first start and print the
+device certificate ETS asks for (`security/seeded_random.hpp`,
+`security/device_certificate.hpp`); the H8i8o firmware does this.
 
 **The bit-bang TP1 backend is beta.** It works, but it needs the
 [bring-up guide](docs/reference/board_bringup_guide.md) and a scope to

@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | **In progress**, 22 November 2026. D1 (the AES part), D2, D3–D5 and D6 are done and the size gate measures the device (§9); D7 and D9 are open, and the gate does not yet script a secure download (§7). Figures marked "est." are estimates from the source and `sizeof` reasoning, not a size gate run. |
+| Status | **In progress**, 22 November 2026. D1 (the AES part), D2, D3–D6 and D9 are done and the size gate measures the device (§9); D7 is open, and the gate does not yet script a secure download (§7). The H8i8o runs it in its application version 4. Figures marked "est." are estimates from the source and `sizeof` reasoning, not a size gate run. |
 | Goal | Data Secure (03/03/07 §5, the Security Interface Object) on a TP1 end device with 128 KiB of flash and 20 KiB of RAM, with the heap locked after start-up. |
 | Motivating product | H8i8o (GD32F103CB + TP-UART2). Its board-side plan is in the h8i8o repository, `docs/data-secure.md`. |
 | Builds on | [cortex-m-tpuart2-support.md](cortex-m-tpuart2-support.md) §8 (K6, software AES) and [small-target-profile.md](small-target-profile.md) (profiles, capacities, `init_only`, the size gate). |
@@ -243,6 +243,19 @@ The S-A_Sync_Response Random must not repeat for a key. `CooperativePlatform` fa
 reset, `micros()` at the first sync is close to the same value every time. Document that a
 bare-metal product must supply a seeded source (noise at start-up plus a persisted counter), and
 give the cooperative platform a hook for it if it has none.
+
+**Done.** `CooperativeHooks::randomBytes` is the hook. `knx::security::SeededRandom`
+(`seeded_random.hpp`) is a generator for a part without a hardware one: a CBC-MAC with a fixed
+key over whatever the board collects (noise, unique ID, a persisted counter) becomes the key of
+AES-128 in counter mode. The board supplies the noise: the H8i8o converts the GD32F103's
+temperature sensor and V<sub>REFINT</sub> at the shortest sampling time.
+
+With it a device can make its own Factory Tool Key at the first start, and
+`security/device_certificate.hpp` formats the device certificate ETS asks for (serial number,
+FDSK and a CRC-4, in Base32). A product keeps such a key in the product key range of
+persistence (`InterfaceObjectManager::kProductKeyIdFirst`), which a schema change now keeps,
+like the sending sequence ceiling: a discard that took the ceiling would have the device send
+numbers again that it had already used under the same key.
 
 ### Already proposed elsewhere, still open
 

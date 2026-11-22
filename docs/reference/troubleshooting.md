@@ -126,8 +126,11 @@ Security Interface Object is registered.
 1. Sequence number out of the replay window. After a device restart without
    persisted sequence numbers, the peer's counter is ahead. The receiving
    sequence number must be restored from NVS across a reboot.
-2. Wrong key. This stack provisions its tool key into NVS at first boot and logs
-   it rather than using an FDSK, so the key ETS holds must be the logged one.
+2. Wrong key. ETS opens the first secure session with the Factory Tool Key the
+   product supplies (`SecureCommissioningOptions::factoryToolKey`), so the device
+   certificate entered in ETS must be the one made from that key and the
+   device's serial number (`security::formatDeviceCertificate()`). After a
+   download ETS uses its own tool key; a factory reset returns to the FDSK.
 
 ## Bus-level symptoms
 
