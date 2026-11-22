@@ -14,5 +14,6 @@
 #define EXAMPLE_OUTPUT_PIN 0
 #define EXAMPLE_BUTTON_PORT 0 /* PA11: programming button, active low */
 #define EXAMPLE_BUTTON_PIN 11
-#define EXAMPLE_LED_PORT 0 /* PA12: programming LED, active high */
+#define EXAMPLE_LED_PORT 0 /* PA12: programming LED */
+#define EXAMPLE_LED_ACTIVE_LOW 1 /* the H8i8o lights it with the pin low */
 #define EXAMPLE_LED_PIN 12

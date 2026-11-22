@@ -104,6 +104,7 @@ int main() {
     // 2. Clock, time, log; persistence before the stack.
     gd32f1_system_init();
     gd32f1_gpio_mode(EXAMPLE_BUTTON_PORT, EXAMPLE_BUTTON_PIN, GD32F1_GPIO_INPUT_PULL_UP);
+    gd32f1_gpio_write(EXAMPLE_LED_PORT, EXAMPLE_LED_PIN, EXAMPLE_LED_ACTIVE_LOW != 0);  // off, then output
     gd32f1_gpio_mode(EXAMPLE_LED_PORT, EXAMPLE_LED_PIN, GD32F1_GPIO_OUTPUT_2MHZ);
     rtt_init();
     rttLog("KNstaX GD32F1 example");
@@ -135,7 +136,8 @@ int main() {
     bindings.onCommand<Port::Switch>([](bool on) { setOutput(on); });
     bindings.provideState<Port::Status>([]() -> bool { return g_output; });
     bindings.onLifecycleChanged([](DeviceLifecycleState state) {
-        gd32f1_gpio_write(EXAMPLE_LED_PORT, EXAMPLE_LED_PIN, state == DeviceLifecycleState::Commissioning);
+        gd32f1_gpio_write(EXAMPLE_LED_PORT, EXAMPLE_LED_PIN,
+                          (state == DeviceLifecycleState::Commissioning) != (EXAMPLE_LED_ACTIVE_LOW != 0));
         rttLog(state == DeviceLifecycleState::Operational     ? "operational"
             : state == DeviceLifecycleState::Commissioning ? "programming mode"
                                                            : "uncommissioned");
