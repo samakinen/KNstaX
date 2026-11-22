@@ -256,6 +256,47 @@ constexpr uint16_t RESTART_PROCESS_TIME_S = CONFIG_KNX_RESTART_PROCESS_TIME_S;
     constexpr uint32_t SECURE_REPLAY_CHECKPOINT_MS = 900000u;
 #endif
 
+// Capacities of the Security Interface Object (Kconfig "Security
+// Configuration"; data-secure-small-target.md D3). They depend on
+// KNX_ENABLE_SECURITY, so a build without it takes the fallbacks, which are
+// the Kconfig defaults and unused.
+#ifdef CONFIG_KNX_SECURITY_GROUP_KEYS
+    constexpr size_t SECURITY_GROUP_KEYS = CONFIG_KNX_SECURITY_GROUP_KEYS;
+#else
+    constexpr size_t SECURITY_GROUP_KEYS = 256;
+#endif
+#ifdef CONFIG_KNX_SECURITY_P2P_KEYS
+    constexpr size_t SECURITY_P2P_KEYS = CONFIG_KNX_SECURITY_P2P_KEYS;
+#else
+    constexpr size_t SECURITY_P2P_KEYS = 32;
+#endif
+#ifdef CONFIG_KNX_SECURITY_IA_ENTRIES
+    constexpr size_t SECURITY_IA_ENTRIES = CONFIG_KNX_SECURITY_IA_ENTRIES;
+#else
+    constexpr size_t SECURITY_IA_ENTRIES = 128;
+#endif
+#ifdef CONFIG_KNX_SECURITY_ZONE_KEYS
+    constexpr size_t SECURITY_ZONE_KEYS = CONFIG_KNX_SECURITY_ZONE_KEYS;
+#else
+    constexpr size_t SECURITY_ZONE_KEYS = 16;
+#endif
+#ifdef CONFIG_KNX_SECURITY_FIRMWARE_KEYS
+    constexpr size_t SECURITY_FIRMWARE_KEYS = CONFIG_KNX_SECURITY_FIRMWARE_KEYS;
+#else
+    constexpr size_t SECURITY_FIRMWARE_KEYS = 16;
+#endif
+#ifdef CONFIG_KNX_SECURITY_UNLISTED_SENDERS
+    constexpr size_t SECURITY_UNLISTED_SENDERS = CONFIG_KNX_SECURITY_UNLISTED_SENDERS;
+#else
+    constexpr size_t SECURITY_UNLISTED_SENDERS = 16;
+#endif
+    static_assert(SECURITY_GROUP_KEYS >= 1 && SECURITY_GROUP_KEYS <= 256,
+                  "KNX_SECURITY_GROUP_KEYS must be 1 to 256");
+    static_assert(SECURITY_P2P_KEYS >= 1 && SECURITY_P2P_KEYS <= 255,
+                  "KNX_SECURITY_P2P_KEYS must be 1 to 255");
+    static_assert(SECURITY_IA_ENTRIES >= 1 && SECURITY_IA_ENTRIES <= 255,
+                  "KNX_SECURITY_IA_ENTRIES must be 1 to 255");
+
 // ============================================================================
 // Feature Flags
 // ============================================================================

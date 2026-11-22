@@ -1485,7 +1485,7 @@ void test_bau_security_sequence_numbers_survive_restart(void) {
         firstBau->flushPendingPersistence();
 
         // What the Secure Application Layer does after verifying a telegram.
-        firstBau->securityObject().setPeerSequence(peer, kPeerSequence);
+        TEST_ASSERT_TRUE(firstBau->securityObject().setPeerSequence(peer, kPeerSequence).isOk());
         firstBau->securityObject().setToolAccessSequence(kToolSequence);
 
         firstBau->flushPendingPersistence();
@@ -1618,7 +1618,7 @@ void test_bau_replay_checkpoint_waits_for_its_interval(void) {
         downloadSecurityIaTable(*device.bau, securityIaTableWith(peer));
         device.bau->loop();  // quiet: the interval starts now
 
-        device.bau->securityObject().setPeerSequence(peer, 5u);
+        TEST_ASSERT_TRUE(device.bau->securityObject().setPeerSequence(peer, 5u).isOk());
         nowMs += interval - 1u;
         device.bau->loop();
         device.bau->close();  // power cut one millisecond early
@@ -1630,7 +1630,7 @@ void test_bau_replay_checkpoint_waits_for_its_interval(void) {
 
         device.bau->setTimeSource([&nowMs]() { return nowMs; });
         device.bau->loop();
-        device.bau->securityObject().setPeerSequence(peer, 6u);
+        TEST_ASSERT_TRUE(device.bau->securityObject().setPeerSequence(peer, 6u).isOk());
         nowMs += interval;
         device.bau->loop();
         device.bau->close();
@@ -1659,7 +1659,7 @@ void test_bau_power_fail_request_saves_replay_state(void) {
         downloadSecurityIaTable(*device.bau, securityIaTableWith(peer));
         device.bau->loop();
 
-        device.bau->securityObject().setPeerSequence(peer, kPeerSequence);
+        TEST_ASSERT_TRUE(device.bau->securityObject().setPeerSequence(peer, kPeerSequence).isOk());
         device.bau->securityObject().setToolAccessSequence(kToolSequence);
         nowMs += 1000u;
         device.bau->loop();

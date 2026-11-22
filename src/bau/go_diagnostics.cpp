@@ -179,13 +179,9 @@ util::Result<FunctionPropertyResult> DeviceManagement::handleGroupObjectDiagnost
                 uint16_t config = static_cast<uint16_t>(object->descriptor() >> 8);
 
 #if KNX_SECURE_ENABLED
-                const auto* goFlags = _model.securityObject().findExtraProperty(
-                    objects::SecurityProperty::GoSecurityFlags);
-                if (goFlags != nullptr && goNumber < goFlags->size()) {
-                    const uint8_t security = (*goFlags)[goNumber];
-                    if ((security & kFlagAuthentication) != 0u) config |= 0x0100u;
-                    if ((security & kFlagConfidentiality) != 0u) config |= 0x0200u;
-                }
+                const uint8_t security = _model.securityObject().goSecurityFlags(goNumber);
+                if ((security & kFlagAuthentication) != 0u) config |= 0x0100u;
+                if ((security & kFlagConfidentiality) != 0u) config |= 0x0200u;
 #endif
                 if (_groups.isGroupObjectLinked(GroupObjectIndex(goNumber))) {
                     config |= 0x0400u;

@@ -79,6 +79,25 @@ util::Result<void> DeviceModel::init(std::string_view persistenceNamespace, uint
             return initRes;
         }
 #if KNX_SECURE_ENABLED
+        // The group key table names group addresses by GA_Index; the
+        // Security Interface Object resolves them through the address table
+        // on every lookup instead of holding a resolved copy.
+        _securityObject.setGroupAddressResolver(
+            [](const void* context, uint16_t gaIndex) {
+                return static_cast<const objects::AddressTableObject*>(context)->getAddress(
+                    AddressTableIndex(gaIndex));
+            },
+            &_addressTable);
+        // PID_GO_SECURITY_FLAGS has an octet per group object. Sized here,
+        // before the restore writes it and before the heap is locked; a
+        // product that registers its objects only later gets room for the
+        // most a table can hold, like the group object table segment.
+        {
+            const uint16_t objectCount = _groupObjectTable.objectCount();
+            _securityObject.setGroupObjectCount(objectCount != 0
+                ? objectCount
+                : static_cast<uint16_t>(objects::tableseg::kGroupObjectTableMaxObjects));
+        }
         // Without persistence there is nowhere to keep a ceiling, and the
         // counter stays unlimited as before.
         if (_interfaceObjectManager->persistenceEnabled()) {
@@ -856,103 +875,19 @@ void DeviceModel::restoreFactorySecurityDefaults()
 
 void DeviceModel::applySecurityKeyTables()
 {
-    using objects::SecurityProperty;
-    namespace security_ia_table = objects::security_ia_table;
-
-    // Entry sizes of 03/05/01 §6.3.6 Figure 72, §6.3.7 Figure 74 and §6.3.8
-    // Figure 75. They match the PDT_GENERIC_nn the properties are declared as.
-    constexpr size_t kGroupKeyEntryBytes = 18;   // GA_Index(2) + Key(16)
-    constexpr size_t kP2PKeyEntryBytes = 20;     // IA_Index(2) + Key(16) + Roles(2)
-    constexpr size_t kKeyBytes = 16;
-
-    const auto readIndex = [](const std::vector<uint8_t>& blob, size_t offset) {
-        return static_cast<uint16_t>((static_cast<uint16_t>(blob[offset]) << 8) | blob[offset + 1]);
-    };
-
-    // The maps are a derived view, rebuilt from empty so an entry ETS deleted
-    // in the project does not linger as a usable key. Firmware-provided keys
-    // are not part of it: the Security Interface Object keeps them apart and
-    // puts them in force when the downloaded table holds no entries.
-    objects::SecurityInterfaceObject::KeyMap resolvedGroupKeys;
-    objects::SecurityInterfaceObject::KeyMap resolvedDeviceKeys;
-    bool groupKeyTableHasEntries = false;
-    bool p2pKeyTableHasEntries = false;
-
-    // §6.3.7: the 2-octet field is the GA_Index — the TSAP, i.e. the 1-based
-    // index into the Group Address Table — and NOT the group address itself.
-    // Resolving it is the whole reason this lives here rather than in the
-    // Security Interface Object, which cannot see the address table.
-    size_t groupKeys = 0;
-    size_t unresolvedGroupKeys = 0;
-    if (const auto* blob = _securityObject.findExtraProperty(SecurityProperty::GroupKeyTable)) {
-        groupKeyTableHasEntries = blob->size() >= kGroupKeyEntryBytes;
-        for (size_t offset = 0; offset + kGroupKeyEntryBytes <= blob->size();
-             offset += kGroupKeyEntryBytes) {
-            const uint16_t gaIndex = readIndex(*blob, offset);
-            const GroupAddress address = _addressTable.getAddress(AddressTableIndex(gaIndex));
-            if (address.raw == 0u) {
-                // The group address table is downloaded as its own load
-                // procedure, so this is expected mid-download and resolves on
-                // the next call; a leftover here means the two tables disagree.
-                ++unresolvedGroupKeys;
-                continue;
-            }
-            std::array<uint8_t, kKeyBytes> key{};
-            std::copy_n(blob->begin() + static_cast<ptrdiff_t>(offset + 2), kKeyBytes, key.begin());
-            resolvedGroupKeys[address.raw] = key;
-            ++groupKeys;
-        }
-    }
-
-    // §6.3.8: the Security Individual Address Table is the index space the
-    // point-to-point key table refers to, so it has to be read first. Its
-    // second field is each partner's Last Valid SeqNr; adopting those values is
-    // what carries the replay window across a restart, so it happens here too —
-    // this function is the one place called whenever the tables change.
-    _securityObject.syncSequencesFromAddressTable();
-
-    std::vector<IndividualAddress> securityAddresses;
-    if (const auto* blob = _securityObject.findExtraProperty(
-            SecurityProperty::SecurityIndividualAddressTable)) {
-        const std::span<const uint8_t> table(*blob);
-        const size_t entries = security_ia_table::entryCount(table);
-        for (size_t index = 0; index < entries; ++index) {
-            securityAddresses.push_back(security_ia_table::addressAt(table, index));
-        }
-    }
-
-    size_t deviceKeys = 0;
-    size_t unresolvedDeviceKeys = 0;
-    if (const auto* blob = _securityObject.findExtraProperty(SecurityProperty::P2PKeyTable)) {
-        p2pKeyTableHasEntries = blob->size() >= kP2PKeyEntryBytes;
-        for (size_t offset = 0; offset + kP2PKeyEntryBytes <= blob->size();
-             offset += kP2PKeyEntryBytes) {
-            // IA_Index is 1-based, like every other KNX table index.
-            const uint16_t iaIndex = readIndex(*blob, offset);
-            if (iaIndex == 0u || iaIndex > securityAddresses.size()) {
-                ++unresolvedDeviceKeys;
-                continue;
-            }
-            std::array<uint8_t, kKeyBytes> key{};
-            std::copy_n(blob->begin() + static_cast<ptrdiff_t>(offset + 2), kKeyBytes, key.begin());
-            // The trailing Roles field is deliberately dropped: this stack has
-            // no Role model beyond Tool/Unlisted, and silently honouring a
-            // subset of the 16 configured Roles would be worse than ignoring
-            // them, because the refusals would look arbitrary.
-            resolvedDeviceKeys[securityAddresses[iaIndex - 1u].raw] = key;
-            ++deviceKeys;
-        }
-    }
-
-    _securityObject.applyDownloadedGroupKeys(std::move(resolvedGroupKeys), groupKeyTableHasEntries);
-    _securityObject.applyDownloadedDeviceKeys(std::move(resolvedDeviceKeys), p2pKeyTableHasEntries);
-
-    if (groupKeys != 0 || deviceKeys != 0 || unresolvedGroupKeys != 0 || unresolvedDeviceKeys != 0) {
+    // The Security Interface Object reads the downloaded tables in place on
+    // every lookup, so there is nothing to install: this only says what a
+    // download or a restore left in force.
+    const auto summary = _securityObject.keyTableSummary();
+    if (summary.groupKeys != 0 || summary.deviceKeys != 0
+        || summary.unresolvedGroupKeys != 0 || summary.unresolvedDeviceKeys != 0) {
         KNX_LOGI(TAG,
-                 "Data Secure key tables applied: %zu group key(s), %zu device key(s), "
-                 "%zu security IA entries (%zu group / %zu device entries unresolved)",
-                 groupKeys, deviceKeys, securityAddresses.size(),
-                 unresolvedGroupKeys, unresolvedDeviceKeys);
+                 "Data Secure key tables: %u group key(s), %u device key(s), "
+                 "%u security IA entries (%u group / %u device entries unresolved)",
+                 static_cast<unsigned>(summary.groupKeys), static_cast<unsigned>(summary.deviceKeys),
+                 static_cast<unsigned>(summary.securityAddresses),
+                 static_cast<unsigned>(summary.unresolvedGroupKeys),
+                 static_cast<unsigned>(summary.unresolvedDeviceKeys));
     } else if (_securityObject.isSecurityEnabled()
                && _securityObject.groupKeyCount() == 0u
                && _securityObject.deviceKeyCount() == 0u) {

@@ -9,3 +9,14 @@ CONFIG_KNX_ENABLE_SECURITY=y
 CONFIG_KNX_AES_BACKEND_SOFTWARE=y
 CONFIG_KNX_ENABLE_PROPERTY_EXT=y
 CONFIG_KNX_MAX_APDU_LENGTH=55
+# The Security Interface Object's tables are fixed arrays of these capacities
+# (data-secure-small-target.md D3), the reference sizes of section 4: 32
+# secured group addresses, 8 senders in the Security Individual Address Table
+# and room for 8 more outside it, 2 point-to-point keys. ETS commissions the
+# device, so no firmware keys and no zone keys.
+CONFIG_KNX_SECURITY_GROUP_KEYS=32
+CONFIG_KNX_SECURITY_P2P_KEYS=2
+CONFIG_KNX_SECURITY_IA_ENTRIES=8
+CONFIG_KNX_SECURITY_UNLISTED_SENDERS=8
+CONFIG_KNX_SECURITY_FIRMWARE_KEYS=0
+CONFIG_KNX_SECURITY_ZONE_KEYS=0

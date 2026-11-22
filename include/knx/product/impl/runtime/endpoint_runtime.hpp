@@ -747,6 +747,14 @@ public:
             dropBau();
             return util::ErrorCode::InvalidParameter;
         }
+        if (!securityPolicyFitsConfiguration(_definition.security,
+                                             std::remove_cvref_t<decltype(_definition)>::kPortCount)) {
+            KNX_LOGE("KNX.Product",
+                     "Product SecurityPolicy declares more key table entries than "
+                     "CONFIG_KNX_SECURITY_GROUP_KEYS / _P2P_KEYS / _IA_ENTRIES");
+            dropBau();
+            return util::ErrorCode::InvalidParameter;
+        }
         applyIdentity(platform);
         applyPreStartConfiguration();
 

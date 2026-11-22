@@ -10,8 +10,9 @@
 #include "knx/objects/property_kernel.hpp"
 #include "knx/util/log.hpp"
 #include "knx/util/result.hpp"
-#include <cstring>
 #include <algorithm>
+#include <cstring>
+#include <optional>
 
 namespace knx {
 namespace objects {
@@ -24,9 +25,40 @@ SecurityInterfaceObject::SecurityInterfaceObject()
     , _lastFailure(SecurityFailure::None)
     , _failureCount(0)
     , _lastFailureSource(0)
-    , _extraProperties()
 {
 }
+
+namespace {
+
+// Entry sizes of 03/05/01 §6.3.6 Figure 72, §6.3.7 Figure 74 and §6.3.8
+// Figure 75. They match the PDT_GENERIC_nn the properties are declared as.
+constexpr size_t kP2PKeyEntryBytes = 20;     // IA_Index(2) + Key(16) + Roles(2)
+constexpr size_t kGroupKeyEntryBytes = 18;   // GA_Index(2) + Key(16)
+constexpr size_t kZoneKeyEntryBytes = 19;
+constexpr size_t kKeyOffset = 2;
+constexpr size_t kKeyBytes = 16;
+
+uint16_t readIndex(std::span<const uint8_t> table, size_t offset)
+{
+    return static_cast<uint16_t>((static_cast<uint16_t>(table[offset]) << 8) | table[offset + 1]);
+}
+
+/// The key of the entry in @p table whose index field is @p index. The last
+/// such entry wins.
+bool findKeyByIndex(std::span<const uint8_t> table, size_t entryBytes, uint16_t index,
+                    std::array<uint8_t, 16>& key)
+{
+    bool found = false;
+    for (size_t offset = 0; offset + entryBytes <= table.size(); offset += entryBytes) {
+        if (readIndex(table, offset) == index) {
+            std::copy_n(table.begin() + static_cast<ptrdiff_t>(offset + kKeyOffset), kKeyBytes, key.begin());
+            found = true;
+        }
+    }
+    return found;
+}
+
+}  // namespace
 
 // === Security Mode ===
 
@@ -57,108 +89,216 @@ bool SecurityInterfaceObject::hasToolKey() const {
 
 // === Group and device keys ===
 
+const SecurityInterfaceObject::FirmwareKey*
+SecurityInterfaceObject::findFirmwareKey(uint16_t address, bool group) const {
+    for (size_t i = 0; i < _firmwareKeyCount; ++i) {
+        if (_firmwareKeys[i].address == address && _firmwareKeys[i].group == group) {
+            return &_firmwareKeys[i];
+        }
+    }
+    return nullptr;
+}
+
+bool SecurityInterfaceObject::setFirmwareKey(uint16_t address, bool group,
+                                             const std::array<uint8_t, 16>& key) {
+    for (size_t i = 0; i < _firmwareKeyCount; ++i) {
+        if (_firmwareKeys[i].address == address && _firmwareKeys[i].group == group) {
+            _firmwareKeys[i].key = key;
+            return true;
+        }
+    }
+    if (_firmwareKeyCount >= _firmwareKeys.size()) {
+        return false;
+    }
+    _firmwareKeys[_firmwareKeyCount] = FirmwareKey{key, address, group};
+    ++_firmwareKeyCount;
+    return true;
+}
+
+void SecurityInterfaceObject::removeFirmwareKey(uint16_t address, bool group) {
+    for (size_t i = 0; i < _firmwareKeyCount; ++i) {
+        if (_firmwareKeys[i].address == address && _firmwareKeys[i].group == group) {
+            --_firmwareKeyCount;
+            _firmwareKeys[i] = _firmwareKeys[_firmwareKeyCount];
+            _firmwareKeys[_firmwareKeyCount] = FirmwareKey{};
+            return;
+        }
+    }
+}
+
+uint16_t SecurityInterfaceObject::firmwareKeyCount(bool group) const {
+    uint16_t count = 0;
+    for (size_t i = 0; i < _firmwareKeyCount; ++i) {
+        if (_firmwareKeys[i].group == group) {
+            ++count;
+        }
+    }
+    return count;
+}
+
 void SecurityInterfaceObject::setDeviceKey(const IndividualAddress& address,
                                            const std::array<uint8_t, 16>& key) {
-    _firmwareDeviceKeys[address.raw] = key;
-    if (_downloadedDeviceKeysInForce) {
+    if (!setFirmwareKey(address.raw, false, key)) {
+        KNX_LOGE("KNX.Security", "Firmware device key for %d.%d.%d refused: %u keys set "
+                 "(KNX_SECURITY_FIRMWARE_KEYS)",
+                 address.area(), address.line(), address.device(),
+                 static_cast<unsigned>(_firmwareKeys.size()));
+        return;
+    }
+    if (downloadedDeviceKeysInForce()) {
         KNX_LOGW("KNX.Security",
                  "Firmware device key for %d.%d.%d recorded, not in force: the P2P key table "
                  "ETS downloaded is",
                  address.area(), address.line(), address.device());
         return;
     }
-    _deviceKeys[address.raw] = key;
     KNX_LOGD("KNX.Security", "Device key set for %d.%d.%d",
              address.area(), address.line(), address.device());
 }
 
 util::Result<void> SecurityInterfaceObject::getDeviceKey(const IndividualAddress& address,
                                            std::array<uint8_t, 16>& key) const {
-    auto it = _deviceKeys.find(address.raw);
-    if (it != _deviceKeys.end()) {
-        key = it->second;
+    if (downloadedDeviceKeysInForce()) {
+        // §6.3.6: the IA_Index is the partner's 1-based index in the Security
+        // Individual Address Table.
+        std::optional<size_t> index;
+        {
+            platform::LocalLock<platform::LocalMutex> lock(_sequenceMutex);
+            index = security_ia_table::indexOf(_iaTable.used(), address);
+        }
+        if (index.has_value()
+            && findKeyByIndex(_p2pKeyTable.used(), kP2PKeyEntryBytes,
+                              static_cast<uint16_t>(*index + 1u), key)) {
+            return util::Result<void>::ok();
+        }
+        return util::Result<void>::err(util::ErrorCode::ResourceUnavailable);
+    }
+    if (const auto* firmware = findFirmwareKey(address.raw, false)) {
+        key = firmware->key;
         return util::Result<void>::ok();
     }
     return util::Result<void>::err(util::ErrorCode::ResourceUnavailable);
 }
 
 void SecurityInterfaceObject::removeDeviceKey(const IndividualAddress& address) {
-    _firmwareDeviceKeys.erase(address.raw);
-    if (!_downloadedDeviceKeysInForce) {
-        _deviceKeys.erase(address.raw);
-    }
+    removeFirmwareKey(address.raw, false);
     KNX_LOGD("KNX.Security", "Device key removed for %d.%d.%d",
              address.area(), address.line(), address.device());
 }
 
 uint16_t SecurityInterfaceObject::deviceKeyCount() const {
-    return static_cast<uint16_t>(_deviceKeys.size());
+    if (downloadedDeviceKeysInForce()) {
+        return keyTableSummary().deviceKeys;
+    }
+    return firmwareKeyCount(false);
 }
 
 void SecurityInterfaceObject::setGroupKey(const GroupAddress& address,
                                           const std::array<uint8_t, 16>& key) {
-    _firmwareGroupKeys[address.raw] = key;
-    if (_downloadedGroupKeysInForce) {
+    if (!setFirmwareKey(address.raw, true, key)) {
+        KNX_LOGE("KNX.Security", "Firmware group key for %d/%d/%d refused: %u keys set "
+                 "(KNX_SECURITY_FIRMWARE_KEYS)",
+                 address.main(), address.middle(), address.sub(),
+                 static_cast<unsigned>(_firmwareKeys.size()));
+        return;
+    }
+    if (downloadedGroupKeysInForce()) {
         KNX_LOGW("KNX.Security",
                  "Firmware group key for %d/%d/%d recorded, not in force: the group key table "
                  "ETS downloaded is",
                  address.main(), address.middle(), address.sub());
         return;
     }
-    _groupKeys[address.raw] = key;
     KNX_LOGD("KNX.Security", "Group key set for %d/%d/%d",
              address.main(), address.middle(), address.sub());
 }
 
+GroupAddress SecurityInterfaceObject::groupAddressAt(uint16_t gaIndex) const {
+    if (_groupAddressResolver == nullptr || gaIndex == 0u) {
+        return GroupAddress(GroupAddress::invalidValue());
+    }
+    return _groupAddressResolver(_groupAddressResolverContext, gaIndex);
+}
+
 util::Result<void> SecurityInterfaceObject::getGroupKey(const GroupAddress& address,
                                           std::array<uint8_t, 16>& key) const {
-    auto it = _groupKeys.find(address.raw);
-    if (it != _groupKeys.end()) {
-        key = it->second;
+    if (downloadedGroupKeysInForce()) {
+        // §6.3.7: each entry names its group address by GA_Index. Resolving
+        // the entries here, rather than keeping a resolved copy, holds every
+        // key once and follows a new address table at once. The last entry
+        // for an address wins.
+        const auto table = _groupKeyTable.used();
+        bool found = false;
+        for (size_t offset = 0; offset + kGroupKeyEntryBytes <= table.size();
+             offset += kGroupKeyEntryBytes) {
+            const GroupAddress entryAddress = groupAddressAt(readIndex(table, offset));
+            if (entryAddress.raw != GroupAddress::invalidValue() && entryAddress.raw == address.raw) {
+                std::copy_n(table.begin() + static_cast<ptrdiff_t>(offset + kKeyOffset), kKeyBytes,
+                            key.begin());
+                found = true;
+            }
+        }
+        return found ? util::Result<void>::ok()
+                     : util::Result<void>::err(util::ErrorCode::ResourceUnavailable);
+    }
+    if (const auto* firmware = findFirmwareKey(address.raw, true)) {
+        key = firmware->key;
         return util::Result<void>::ok();
     }
     return util::Result<void>::err(util::ErrorCode::ResourceUnavailable);
 }
 
 void SecurityInterfaceObject::removeGroupKey(const GroupAddress& address) {
-    _firmwareGroupKeys.erase(address.raw);
-    if (!_downloadedGroupKeysInForce) {
-        _groupKeys.erase(address.raw);
-    }
+    removeFirmwareKey(address.raw, true);
     KNX_LOGD("KNX.Security", "Group key removed for %d/%d/%d",
              address.main(), address.middle(), address.sub());
 }
 
 uint16_t SecurityInterfaceObject::groupKeyCount() const {
-    return static_cast<uint16_t>(_groupKeys.size());
+    if (downloadedGroupKeysInForce()) {
+        return keyTableSummary().groupKeys;
+    }
+    return firmwareKeyCount(true);
 }
 
-void SecurityInterfaceObject::applyDownloadedGroupKeys(KeyMap resolved, bool tableHasEntries) {
-    _downloadedGroupKeysInForce = tableHasEntries;
-    if (tableHasEntries) {
-        _groupKeys = std::move(resolved);
-        if (!_firmwareGroupKeys.empty()) {
-            KNX_LOGI("KNX.Security",
-                     "%zu firmware group key(s) not in force: the downloaded group key table is",
-                     _firmwareGroupKeys.size());
-        }
-    } else {
-        _groupKeys = _firmwareGroupKeys;
-    }
+void SecurityInterfaceObject::setGroupAddressResolver(GroupAddressResolver resolver,
+                                                      const void* context) {
+    _groupAddressResolver = resolver;
+    _groupAddressResolverContext = context;
 }
 
-void SecurityInterfaceObject::applyDownloadedDeviceKeys(KeyMap resolved, bool tableHasEntries) {
-    _downloadedDeviceKeysInForce = tableHasEntries;
-    if (tableHasEntries) {
-        _deviceKeys = std::move(resolved);
-        if (!_firmwareDeviceKeys.empty()) {
-            KNX_LOGI("KNX.Security",
-                     "%zu firmware device key(s) not in force: the downloaded P2P key table is",
-                     _firmwareDeviceKeys.size());
+SecurityInterfaceObject::KeyTableSummary SecurityInterfaceObject::keyTableSummary() const {
+    KeyTableSummary summary;
+    const auto groupTable = _groupKeyTable.used();
+    for (size_t offset = 0; offset + kGroupKeyEntryBytes <= groupTable.size();
+         offset += kGroupKeyEntryBytes) {
+        if (groupAddressAt(readIndex(groupTable, offset)).raw != GroupAddress::invalidValue()) {
+            ++summary.groupKeys;
+        } else {
+            // The group address table is downloaded as its own load procedure,
+            // so this is expected mid-download; a leftover after it means the
+            // two tables disagree.
+            ++summary.unresolvedGroupKeys;
         }
-    } else {
-        _deviceKeys = _firmwareDeviceKeys;
     }
+
+    {
+        platform::LocalLock<platform::LocalMutex> lock(_sequenceMutex);
+        summary.securityAddresses = _iaTable.count;
+    }
+    const auto p2pTable = _p2pKeyTable.used();
+    for (size_t offset = 0; offset + kP2PKeyEntryBytes <= p2pTable.size();
+         offset += kP2PKeyEntryBytes) {
+        // IA_Index is 1-based, like every other KNX table index. The Roles
+        // field is not evaluated: this stack knows only Tool and Unlisted.
+        const uint16_t iaIndex = readIndex(p2pTable, offset);
+        if (iaIndex != 0u && iaIndex <= summary.securityAddresses) {
+            ++summary.deviceKeys;
+        } else {
+            ++summary.unresolvedDeviceKeys;
+        }
+    }
+    return summary;
 }
 
 // === Sequence Number Management ===
@@ -293,52 +433,113 @@ void SecurityInterfaceObject::setToolAccessSequence(uint64_t seq) {
 
 uint64_t SecurityInterfaceObject::getPeerSequence(const IndividualAddress& address) const {
     platform::LocalLock<platform::LocalMutex> lock(_sequenceMutex);
-    auto it = _peerSequences.find(address.raw);
-    return it == _peerSequences.end() ? 0u : it->second;
+    if (const auto index = security_ia_table::indexOf(_iaTable.used(), address)) {
+        return security_ia_table::sequenceAt(_iaTable.used(), *index);
+    }
+    if (const auto index = security_ia_table::indexOf(_unlisted.used(), address)) {
+        return security_ia_table::sequenceAt(_unlisted.used(), *index);
+    }
+    return 0u;
 }
 
-void SecurityInterfaceObject::setPeerSequence(const IndividualAddress& address, uint64_t seq) {
-    platform::LocalLock<platform::LocalMutex> lock(_sequenceMutex);
-    auto& stored = _peerSequences[address.raw];
-    if (stored == seq) {
-        return;
-    }
-    stored = seq;
-    _peerSequencesDirty = true;
-
-    // Write through to the array property. §6.3.8.4: after decrypting an
-    // S-A_Data-PDU the device "shall update the field Last Valid SeqNr for that
-    // IA in the Security Individual Address Table". Keeping the table current
-    // is also what makes the value durable — the table is a persisted property,
-    // the live map is not.
-    auto it = _extraProperties.find(SecurityProperty::SecurityIndividualAddressTable);
-    if (it != _extraProperties.end()) {
-        (void)security_ia_table::setSequenceFor(it->second, address, seq);
-    }
-}
-
-void SecurityInterfaceObject::syncSequencesFromAddressTable() {
+util::Result<void> SecurityInterfaceObject::setPeerSequence(const IndividualAddress& address,
+                                                            uint64_t seq) {
     platform::LocalLock<platform::LocalMutex> lock(_sequenceMutex);
 
-    const auto it = _extraProperties.find(SecurityProperty::SecurityIndividualAddressTable);
-    if (it == _extraProperties.end()) {
-        return;
-    }
-
-    const std::span<const uint8_t> blob(it->second);
-    const size_t count = security_ia_table::entryCount(blob);
-    for (size_t index = 0; index < count; ++index) {
-        const IndividualAddress address = security_ia_table::addressAt(blob, index);
-        const uint64_t stored = security_ia_table::sequenceAt(blob, index);
-        auto& live = _peerSequences[address.raw];
-        // A restored table and a running device can both be ahead: take the
-        // higher value so a restore never reopens an already-closed replay
-        // window, and a stale ETS download never rolls the window backwards.
-        if (stored > live) {
-            live = stored;
-        } else if (live > stored) {
-            (void)security_ia_table::setSequenceFor(it->second, address, live);
+    // §6.3.8.4: after decrypting an S-A_Data-PDU the device "shall update the
+    // field Last Valid SeqNr for that IA in the Security Individual Address
+    // Table". The table is a persisted property, so this is also what makes
+    // the value durable.
+    const auto table = _iaTable.used();
+    if (const auto index = security_ia_table::indexOf(table, address)) {
+        if (security_ia_table::sequenceAt(table, *index) != seq) {
+            security_ia_table::setEntryAt(table, *index, address, seq);
+            _peerSequencesDirty = true;
         }
+        return util::Result<void>::ok();
+    }
+
+    if (!parkSequenceLocked(address, seq)) {
+        KNX_LOGW("KNX.Security",
+                 "Sequence number of %d.%d.%d not tracked: it is not in the Security Individual "
+                 "Address Table and all %u unlisted slots are taken (KNX_SECURITY_UNLISTED_SENDERS)",
+                 address.area(), address.line(), address.device(),
+                 static_cast<unsigned>(config::SECURITY_UNLISTED_SENDERS));
+        return util::ErrorCode::ResourceUnavailable;
+    }
+    return util::Result<void>::ok();
+}
+
+bool SecurityInterfaceObject::canTrackPeer(const IndividualAddress& address) const {
+    platform::LocalLock<platform::LocalMutex> lock(_sequenceMutex);
+    return _unlisted.count < config::SECURITY_UNLISTED_SENDERS
+        || security_ia_table::indexOf(_iaTable.used(), address).has_value()
+        || security_ia_table::indexOf(_unlisted.used(), address).has_value();
+}
+
+bool SecurityInterfaceObject::parkSequenceLocked(IndividualAddress address, uint64_t seq) {
+    const auto slots = _unlisted.used();
+    if (const auto index = security_ia_table::indexOf(slots, address)) {
+        security_ia_table::setEntryAt(slots, *index, address, seq);
+        return true;
+    }
+    if (_unlisted.count >= config::SECURITY_UNLISTED_SENDERS) {
+        return false;
+    }
+    ++_unlisted.count;
+    security_ia_table::setEntryAt(_unlisted.used(), _unlisted.count - 1u, address, seq);
+    return true;
+}
+
+void SecurityInterfaceObject::removeUnlistedLocked(size_t index) {
+    constexpr size_t kEntry = security_ia_table::kEntryBytes;
+    const size_t last = _unlisted.count - 1u;
+    if (index != last) {
+        std::copy_n(_unlisted.data.begin() + static_cast<ptrdiff_t>(last * kEntry), kEntry,
+                    _unlisted.data.begin() + static_cast<ptrdiff_t>(index * kEntry));
+    }
+    std::fill_n(_unlisted.data.begin() + static_cast<ptrdiff_t>(last * kEntry), kEntry, uint8_t{0});
+    --_unlisted.count;
+}
+
+void SecurityInterfaceObject::parkIaEntriesLocked(size_t first, size_t count) {
+    // Entries leaving the table keep their Last Valid SeqNr in an unlisted
+    // slot: when ETS downloads the same partner again, adoptParkedLocked()
+    // puts the higher number back, so a download cannot reopen a replay
+    // window. Only numbers above 0 carry anything.
+    const auto table = _iaTable.used();
+    for (size_t index = first; index < first + count && index < _iaTable.count; ++index) {
+        const uint64_t seq = security_ia_table::sequenceAt(table, index);
+        if (seq == 0u) {
+            continue;
+        }
+        const IndividualAddress address = security_ia_table::addressAt(table, index);
+        if (!parkSequenceLocked(address, seq)) {
+            KNX_LOGW("KNX.Security",
+                     "Last Valid SeqNr of %d.%d.%d dropped: all %u unlisted slots are taken",
+                     address.area(), address.line(), address.device(),
+                     static_cast<unsigned>(config::SECURITY_UNLISTED_SENDERS));
+        }
+    }
+}
+
+void SecurityInterfaceObject::adoptParkedLocked(size_t first, size_t count) {
+    // A table entry and an unlisted slot for the same sender: the higher
+    // number wins, so neither a restored table nor a stale ETS download rolls
+    // the replay window back, and the slot is free again.
+    const auto table = _iaTable.used();
+    for (size_t index = first; index < first + count && index < _iaTable.count; ++index) {
+        const IndividualAddress address = security_ia_table::addressAt(table, index);
+        const auto slot = security_ia_table::indexOf(_unlisted.used(), address);
+        if (!slot.has_value()) {
+            continue;
+        }
+        const uint64_t parked = security_ia_table::sequenceAt(_unlisted.used(), *slot);
+        if (parked > security_ia_table::sequenceAt(table, index)) {
+            security_ia_table::setEntryAt(table, index, address, parked);
+            _peerSequencesDirty = true;
+        }
+        removeUnlistedLocked(*slot);
     }
 }
 
@@ -416,11 +617,6 @@ void SecurityInterfaceObject::clearFailureLog() {
 }
 
 namespace {
-struct BlobPropertyInfo {
-    SecurityProperty prop;
-    uint8_t elementSize;
-};
-
 util::Result<uint16_t> getObjectType(const SecurityInterfaceObject& /*domain*/) {
     return InterfaceObjectType::security().value();
 }
@@ -561,20 +757,20 @@ util::Result<void> writeSecurityFailuresLog(
     if (startIndex.value != 0 || elementCount != 1) {
         return util::Result<void>::err(util::ErrorCode::InvalidParameter);
     }
-    auto* domain = static_cast<SecurityInterfaceObject*>(context.domain);
-    if (!domain) {
+    if (context.domain == nullptr) {
         return util::Result<void>::err(util::ErrorCode::InvalidParameter);
     }
-    std::vector<uint8_t> data(7, 0);
-    auto res = in.readBytes(data);
-    if (res.isError()) {
-        return res;
-    }
-    domain->upsertExtraProperty(SecurityProperty::SecurityFailuresLog) = std::move(data);
-    return util::Result<void>::ok();
+    // Accepted and not stored: a read answers from the failure counters.
+    std::array<uint8_t, 7> data{};
+    return in.readBytes(data);
 }
 
-util::Result<void> readBlobProperty(
+/// userData of the array properties: which table the handler serves.
+struct ArrayPropertyInfo {
+    SecurityProperty prop;
+};
+
+util::Result<void> readArrayProperty(
     const PropertyContext& context,
     DomainIndex startIndex,
     uint16_t elementCount,
@@ -582,28 +778,32 @@ util::Result<void> readBlobProperty(
     const void* userData)
 {
     const auto* domain = static_cast<const SecurityInterfaceObject*>(context.domain);
-    const auto* info = static_cast<const BlobPropertyInfo*>(userData);
+    const auto* info = static_cast<const ArrayPropertyInfo*>(userData);
     if (!domain || !info) {
         return util::Result<void>::err(util::ErrorCode::InvalidParameter);
     }
 
-    const auto* dataPtr = domain->findExtraProperty(info->prop);
-    const size_t offset = static_cast<size_t>(startIndex.value) * info->elementSize;
-    const size_t count = static_cast<size_t>(elementCount) * info->elementSize;
+    const auto data = domain->tableData(info->prop);
+    const size_t elementSize = domain->tableElementSize(info->prop);
+    const size_t offset = static_cast<size_t>(startIndex.value) * elementSize;
+    const size_t count = static_cast<size_t>(elementCount) * elementSize;
 
-    if (!dataPtr) {
-        std::vector<uint8_t> zeros(count, 0);
-        return out.writeBytes(zeros);
+    if (data.empty()) {
+        // Never written: zeros, as for an element that exists but is unset.
+        for (size_t i = 0; i < count; ++i) {
+            if (auto res = out.u8(0); res.isError()) {
+                return res;
+            }
+        }
+        return util::Result<void>::ok();
     }
-
-    const auto& data = *dataPtr;
     if (offset + count > data.size()) {
         return util::Result<void>::err(util::ErrorCode::OutOfRange);
     }
-    return out.writeBytes(std::span<const uint8_t>(data).subspan(offset, count));
+    return out.writeBytes(data.subspan(offset, count));
 }
 
-util::Result<void> writeBlobProperty(
+util::Result<void> writeArrayProperty(
     const PropertyContext& context,
     DomainIndex startIndex,
     uint16_t elementCount,
@@ -611,78 +811,69 @@ util::Result<void> writeBlobProperty(
     const void* userData)
 {
     auto* domain = static_cast<SecurityInterfaceObject*>(context.domain);
-    const auto* info = static_cast<const BlobPropertyInfo*>(userData);
+    const auto* info = static_cast<const ArrayPropertyInfo*>(userData);
     if (!domain || !info) {
         return util::Result<void>::err(util::ErrorCode::InvalidParameter);
     }
 
-    const size_t offset = static_cast<size_t>(startIndex.value) * info->elementSize;
-    const size_t count = static_cast<size_t>(elementCount) * info->elementSize;
-    std::vector<uint8_t> chunk(count, 0);
-    auto res = in.readBytes(chunk);
-    if (res.isError()) {
+    const size_t count = static_cast<size_t>(elementCount) * domain->tableElementSize(info->prop);
+    if (count == 0 || in.remaining() < count) {
+        return util::Result<void>::err(util::ErrorCode::BufferTooSmall);
+    }
+    if (auto res = domain->writeTable(info->prop, startIndex.value, in.peek(count)); res.isError()) {
         return res;
     }
-
-    auto& data = domain->upsertExtraProperty(info->prop);
-    if (offset > data.size()) {
-        data.resize(offset, 0);
-    }
-    if (offset + count > data.size()) {
-        data.resize(offset + count, 0);
-    }
-    std::copy(chunk.begin(), chunk.end(), data.begin() + offset);
+    (void)in.skip(count);
     return util::Result<void>::ok();
 }
 
-/// Current number of elements of a blob-backed array property: how much of the
-/// table ETS has downloaded, not how much it could download.
-util::Result<uint16_t> countBlobProperty(const PropertyContext& context, const void* userData)
+/// Current number of elements of an array property: how much of the table
+/// ETS has downloaded, not how much it could download.
+util::Result<uint16_t> countArrayProperty(const PropertyContext& context, const void* userData)
 {
     const auto* domain = static_cast<const SecurityInterfaceObject*>(context.domain);
-    const auto* info = static_cast<const BlobPropertyInfo*>(userData);
-    if (!domain || !info || info->elementSize == 0) {
+    const auto* info = static_cast<const ArrayPropertyInfo*>(userData);
+    if (!domain || !info) {
         return util::Result<uint16_t>(util::ErrorCode::InvalidParameter);
     }
-    const auto* data = domain->findExtraProperty(info->prop);
-    if (!data) {
-        return util::Result<uint16_t>(static_cast<uint16_t>(0));
-    }
-    return util::Result<uint16_t>(static_cast<uint16_t>(data->size() / info->elementSize));
+    const size_t elementSize = domain->tableElementSize(info->prop);
+    return util::Result<uint16_t>(
+        static_cast<uint16_t>(elementSize == 0 ? 0 : domain->tableData(info->prop).size() / elementSize));
 }
 
 /// Set the current number of elements. ETS shortens a table this way before
 /// re-downloading it — "OT=17 PID=54 nr_of_elem=1 start_index=0 data=0000" is
 /// literally "clear the Security Individual Address Table". Growing is allowed
 /// too and zero-fills, so a subsequent element write lands in a defined array.
-util::Result<void> resizeBlobProperty(const PropertyContext& context,
-                                      uint16_t elementCount,
-                                      const void* userData)
+util::Result<void> resizeArrayProperty(const PropertyContext& context,
+                                       uint16_t elementCount,
+                                       const void* userData)
 {
     auto* domain = static_cast<SecurityInterfaceObject*>(context.domain);
-    const auto* info = static_cast<const BlobPropertyInfo*>(userData);
-    if (!domain || !info || info->elementSize == 0) {
+    const auto* info = static_cast<const ArrayPropertyInfo*>(userData);
+    if (!domain || !info) {
         return util::Result<void>::err(util::ErrorCode::InvalidParameter);
     }
+    return domain->resizeTable(info->prop, elementCount);
+}
 
-    // An empty table is a real state, not an absent one: the persistence layer
-    // turns the empty vector into an erase, so the previous download's entries
-    // cannot come back at the next boot.
-    auto& data = domain->upsertExtraProperty(info->prop);
-    data.assign(static_cast<size_t>(elementCount) * info->elementSize, 0);
-    return util::Result<void>::ok();
+/// maxElements of an array property: its capacity, which ETS reads from the
+/// property description. The kernel needs at least 1.
+constexpr uint16_t declaredCapacity(size_t capacity)
+{
+    return static_cast<uint16_t>(capacity == 0 ? 1 : capacity);
 }
 
 static constexpr ScalarPropertyData<SecurityInterfaceObject, uint16_t> kObjectTypeData{ &getObjectType, nullptr };
 static constexpr ScalarPropertyData<SecurityInterfaceObject, uint8_t> kSecurityModeData{ &getSecurityMode, &setSecurityMode };
 
-static constexpr BlobPropertyInfo kP2PKeyInfo{ SecurityProperty::P2PKeyTable, 20 };
-static constexpr BlobPropertyInfo kGroupKeyInfo{ SecurityProperty::GroupKeyTable, 18 };
-static constexpr BlobPropertyInfo kIndividualAddrInfo{ SecurityProperty::SecurityIndividualAddressTable, 8 };
-static constexpr BlobPropertyInfo kSecurityReportInfo{ SecurityProperty::SecurityReport, 1 };
-static constexpr BlobPropertyInfo kSecurityReportControlInfo{ SecurityProperty::SecurityReportControl, 1 };
-static constexpr BlobPropertyInfo kZoneKeyInfo{ SecurityProperty::ZoneKeyTable, 19 };
-static constexpr BlobPropertyInfo kGoSecurityFlagsInfo{ SecurityProperty::GoSecurityFlags, 1 };
+static constexpr ArrayPropertyInfo kP2PKeyInfo{ SecurityProperty::P2PKeyTable };
+static constexpr ArrayPropertyInfo kGroupKeyInfo{ SecurityProperty::GroupKeyTable };
+static constexpr ArrayPropertyInfo kIndividualAddrInfo{ SecurityProperty::SecurityIndividualAddressTable };
+static constexpr ArrayPropertyInfo kSecurityReportInfo{ SecurityProperty::SecurityReport };
+static constexpr ArrayPropertyInfo kSecurityReportControlInfo{ SecurityProperty::SecurityReportControl };
+static constexpr ArrayPropertyInfo kZoneKeyInfo{ SecurityProperty::ZoneKeyTable };
+static constexpr ArrayPropertyInfo kGoSecurityFlagsInfo{ SecurityProperty::GoSecurityFlags };
 
 static constexpr PropertyHandler kSecurityHandlers[] = {
     ScalarProperty<SecurityInterfaceObject, uint16_t>::make(
@@ -741,39 +932,39 @@ static constexpr PropertyHandler kSecurityHandlers[] = {
         static_cast<application::PropertyID>(SecurityProperty::P2PKeyTable),
         application::PropertyDataType::Generic20,
         PropertyCapability::ReadWrite,
-        0xFFFF,
+        declaredCapacity(config::SECURITY_P2P_KEYS),
         0,
-        &readBlobProperty,
-        &writeBlobProperty,
+        &readArrayProperty,
+        &writeArrayProperty,
         &kP2PKeyInfo,
-        &countBlobProperty,
-        &resizeBlobProperty
+        &countArrayProperty,
+        &resizeArrayProperty
     },
 
     {
         static_cast<application::PropertyID>(SecurityProperty::GroupKeyTable),
         application::PropertyDataType::Generic18,
         PropertyCapability::ReadWrite,
-        0xFFFF,
+        declaredCapacity(config::SECURITY_GROUP_KEYS),
         0,
-        &readBlobProperty,
-        &writeBlobProperty,
+        &readArrayProperty,
+        &writeArrayProperty,
         &kGroupKeyInfo,
-        &countBlobProperty,
-        &resizeBlobProperty
+        &countArrayProperty,
+        &resizeArrayProperty
     },
 
     {
         static_cast<application::PropertyID>(SecurityProperty::SecurityIndividualAddressTable),
         application::PropertyDataType::Generic08,
         PropertyCapability::ReadWrite,
-        0xFFFF,
+        declaredCapacity(config::SECURITY_IA_ENTRIES),
         0,
-        &readBlobProperty,
-        &writeBlobProperty,
+        &readArrayProperty,
+        &writeArrayProperty,
         &kIndividualAddrInfo,
-        &countBlobProperty,
-        &resizeBlobProperty
+        &countArrayProperty,
+        &resizeArrayProperty
     },
 
     {
@@ -782,8 +973,8 @@ static constexpr PropertyHandler kSecurityHandlers[] = {
         PropertyCapability::ReadWrite,
         1,
         0,
-        &readBlobProperty,
-        &writeBlobProperty,
+        &readArrayProperty,
+        &writeArrayProperty,
         &kSecurityReportInfo
     },
 
@@ -793,8 +984,8 @@ static constexpr PropertyHandler kSecurityHandlers[] = {
         PropertyCapability::ReadWrite,
         1,
         0,
-        &readBlobProperty,
-        &writeBlobProperty,
+        &readArrayProperty,
+        &writeArrayProperty,
         &kSecurityReportControlInfo
     },
 
@@ -802,13 +993,13 @@ static constexpr PropertyHandler kSecurityHandlers[] = {
         static_cast<application::PropertyID>(SecurityProperty::ZoneKeyTable),
         application::PropertyDataType::Generic19,
         PropertyCapability::ReadWrite,
-        0xFFFF,
+        declaredCapacity(config::SECURITY_ZONE_KEYS),
         0,
-        &readBlobProperty,
-        &writeBlobProperty,
+        &readArrayProperty,
+        &writeArrayProperty,
         &kZoneKeyInfo,
-        &countBlobProperty,
-        &resizeBlobProperty
+        &countArrayProperty,
+        &resizeArrayProperty
     },
 
     {
@@ -817,11 +1008,11 @@ static constexpr PropertyHandler kSecurityHandlers[] = {
         PropertyCapability::ReadWrite,
         0xFFFF,
         1,
-        &readBlobProperty,
-        &writeBlobProperty,
+        &readArrayProperty,
+        &writeArrayProperty,
         &kGoSecurityFlagsInfo,
-        &countBlobProperty,
-        &resizeBlobProperty
+        &countArrayProperty,
+        &resizeArrayProperty
     }
 };
 
@@ -842,25 +1033,29 @@ KernelBinding SecurityInterfaceObject::kernelBinding() const {
 
 void SecurityInterfaceObject::clearAllKeys() {
     _toolKey.fill(0);
-    _deviceKeys.clear();
-    _groupKeys.clear();
-    _firmwareDeviceKeys.clear();
-    _firmwareGroupKeys.clear();
+    _p2pKeyTable.clear();
+    _groupKeyTable.clear();
+    _firmwareKeys.fill(FirmwareKey{});
+    _firmwareKeyCount = 0;
     KNX_LOGI("KNX.Security", "All security keys cleared");
 }
 
 void SecurityInterfaceObject::loadControlReset() {
     // Tool key intentionally preserved — see the declaration for why. With
-    // the tables gone, the firmware-provided keys are in force again.
-    _deviceKeys = _firmwareDeviceKeys;
-    _groupKeys = _firmwareGroupKeys;
-    _downloadedDeviceKeysInForce = false;
-    _downloadedGroupKeysInForce = false;
-    _extraProperties.erase(SecurityProperty::P2PKeyTable);
-    _extraProperties.erase(SecurityProperty::GroupKeyTable);
-    _extraProperties.erase(SecurityProperty::SecurityIndividualAddressTable);
-    _extraProperties.erase(SecurityProperty::ZoneKeyTable);
-    _extraProperties.erase(SecurityProperty::GoSecurityFlags);
+    // the tables gone, the firmware-provided keys are in force again. The
+    // tables are zeroed, not only emptied: keys do not linger in RAM.
+    {
+        platform::LocalLock<platform::LocalMutex> lock(_sequenceMutex);
+        parkIaEntriesLocked(0, _iaTable.count);
+        _iaTable.clear();
+    }
+    _p2pKeyTable.clear();
+    _groupKeyTable.clear();
+    _zoneKeyTable.clear();
+    if (_goSecurityFlags) {
+        std::fill_n(_goSecurityFlags.get(), _goSecurityFlagsCapacity, uint8_t{0});
+    }
+    _goSecurityFlagsCount = 0;
     KNX_LOGI("KNX.Security", "Security key tables cleared for load");
 }
 
@@ -871,20 +1066,153 @@ bool SecurityInterfaceObject::isValid() const {
     if (_securityMode == SecurityMode::Disabled) {
         return true;
     }
-    
+
     return hasToolKey();
 }
 
-const std::vector<uint8_t>* SecurityInterfaceObject::findExtraProperty(SecurityProperty prop) const {
-    auto it = _extraProperties.find(prop);
-    if (it == _extraProperties.end()) {
-        return nullptr;
+// === Array properties ===
+
+bool SecurityInterfaceObject::isArrayProperty(SecurityProperty prop) {
+    switch (prop) {
+        case SecurityProperty::P2PKeyTable:
+        case SecurityProperty::GroupKeyTable:
+        case SecurityProperty::SecurityIndividualAddressTable:
+        case SecurityProperty::ZoneKeyTable:
+        case SecurityProperty::GoSecurityFlags:
+        case SecurityProperty::SecurityReport:
+        case SecurityProperty::SecurityReportControl:
+            return true;
+        default:
+            return false;
     }
-    return &it->second;
 }
 
-std::vector<uint8_t>& SecurityInterfaceObject::upsertExtraProperty(SecurityProperty prop) {
-    return _extraProperties[prop];
+SecurityInterfaceObject::TableRef SecurityInterfaceObject::tableRef(SecurityProperty prop) {
+    const auto ref = [](auto& table, size_t elementSize) {
+        return TableRef{table.data.data(), &table.count,
+                        static_cast<uint16_t>(table.data.size() / elementSize),
+                        static_cast<uint8_t>(elementSize)};
+    };
+    switch (prop) {
+        case SecurityProperty::P2PKeyTable:
+            return ref(_p2pKeyTable, kP2PKeyEntryBytes);
+        case SecurityProperty::GroupKeyTable:
+            return ref(_groupKeyTable, kGroupKeyEntryBytes);
+        case SecurityProperty::SecurityIndividualAddressTable:
+            return ref(_iaTable, security_ia_table::kEntryBytes);
+        case SecurityProperty::ZoneKeyTable:
+            return ref(_zoneKeyTable, kZoneKeyEntryBytes);
+        case SecurityProperty::SecurityReport:
+            return ref(_securityReport, 1);
+        case SecurityProperty::SecurityReportControl:
+            return ref(_securityReportControl, 1);
+        case SecurityProperty::GoSecurityFlags:
+            return TableRef{_goSecurityFlags.get(), &_goSecurityFlagsCount, _goSecurityFlagsCapacity, 1};
+        default:
+            return TableRef{};
+    }
+}
+
+std::span<const uint8_t> SecurityInterfaceObject::tableData(SecurityProperty prop) const {
+    const TableRef table = tableRef(prop);
+    if (table.data == nullptr || table.count == nullptr) {
+        return {};
+    }
+    return std::span<const uint8_t>(table.data, static_cast<size_t>(*table.count) * table.elementSize);
+}
+
+uint8_t SecurityInterfaceObject::tableElementSize(SecurityProperty prop) const {
+    return tableRef(prop).elementSize;
+}
+
+uint16_t SecurityInterfaceObject::tableCapacity(SecurityProperty prop) const {
+    return tableRef(prop).capacity;
+}
+
+util::Result<void> SecurityInterfaceObject::writeTable(SecurityProperty prop, size_t firstElement,
+                                                       std::span<const uint8_t> data) {
+    const TableRef table = tableRef(prop);
+    if (table.count == nullptr || table.elementSize == 0 || data.size() % table.elementSize != 0) {
+        return util::ErrorCode::InvalidParameter;
+    }
+    const size_t elements = data.size() / table.elementSize;
+    if (firstElement + elements > table.capacity) {
+        // The capacity is what the product file promised ETS; a table that
+        // does not fit gets a negative response, as the address table does.
+        KNX_LOGW("KNX.Security", "Write of PID %u elements %u..%u refused: capacity %u",
+                 static_cast<unsigned>(prop), static_cast<unsigned>(firstElement + 1u),
+                 static_cast<unsigned>(firstElement + elements), static_cast<unsigned>(table.capacity));
+        return util::ErrorCode::OutOfRange;
+    }
+
+    const auto write = [&] {
+        if (firstElement > *table.count) {
+            // A gap is zero-filled, so every element below the count is defined.
+            std::fill(table.data + static_cast<size_t>(*table.count) * table.elementSize,
+                      table.data + firstElement * table.elementSize, uint8_t{0});
+        }
+        std::copy(data.begin(), data.end(), table.data + firstElement * table.elementSize);
+        if (firstElement + elements > *table.count) {
+            *table.count = static_cast<uint16_t>(firstElement + elements);
+        }
+    };
+
+    if (prop != SecurityProperty::SecurityIndividualAddressTable) {
+        write();
+        return util::Result<void>::ok();
+    }
+
+    // The partners' Last Valid SeqNr values live in this table. Every entry
+    // the write replaces keeps its number in an unlisted slot first, and each
+    // written entry then takes the higher of its own number and its slot's:
+    // a download, even of the same partner, never moves a number back.
+    platform::LocalLock<platform::LocalMutex> lock(_sequenceMutex);
+    parkIaEntriesLocked(firstElement, elements);
+    write();
+    adoptParkedLocked(firstElement, elements);
+    return util::Result<void>::ok();
+}
+
+util::Result<void> SecurityInterfaceObject::resizeTable(SecurityProperty prop, uint16_t count) {
+    const TableRef table = tableRef(prop);
+    if (table.count == nullptr) {
+        return util::ErrorCode::InvalidParameter;
+    }
+    if (count > table.capacity) {
+        KNX_LOGW("KNX.Security", "PID %u resized to %u elements refused: capacity %u",
+                 static_cast<unsigned>(prop), static_cast<unsigned>(count),
+                 static_cast<unsigned>(table.capacity));
+        return util::ErrorCode::OutOfRange;
+    }
+
+    // An empty table is a real state, not an absent one: the persistence
+    // layer turns it into an erase, so the previous download's entries cannot
+    // come back at the next boot.
+    const auto resize = [&] {
+        std::fill(table.data, table.data + static_cast<size_t>(table.capacity) * table.elementSize,
+                  uint8_t{0});
+        *table.count = count;
+    };
+    if (prop == SecurityProperty::SecurityIndividualAddressTable) {
+        platform::LocalLock<platform::LocalMutex> lock(_sequenceMutex);
+        parkIaEntriesLocked(0, _iaTable.count);
+        resize();
+    } else {
+        resize();
+    }
+    return util::Result<void>::ok();
+}
+
+void SecurityInterfaceObject::setGroupObjectCount(uint16_t count) {
+    if (_goSecurityFlags || count == 0u) {
+        return;
+    }
+    _goSecurityFlags = std::make_unique<uint8_t[]>(count);
+    _goSecurityFlagsCapacity = count;
+}
+
+uint8_t SecurityInterfaceObject::goSecurityFlags(uint16_t number) const {
+    return number < _goSecurityFlagsCount ? _goSecurityFlags[number] : uint8_t{0};
 }
 
 // === Helper Methods ===

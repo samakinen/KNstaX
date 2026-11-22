@@ -127,6 +127,28 @@ struct SecurityPolicy {
     uint16_t p2pKeyTableEntries{1};
 };
 
+/// True when the key table sizes a Data Secure product declares (and the
+/// .knxprod promises ETS) fit the tables this build holds: KNX_SECURITY_*
+/// in the configuration. @p groupObjectCount resolves groupKeyTableEntries 0.
+/// Always true for a product that is not Data Secure, or a build without it.
+constexpr bool securityPolicyFitsConfiguration(const SecurityPolicy& security, size_t groupObjectCount)
+{
+#if KNX_SECURE_ENABLED
+    if (!security.dataSecureCapable) {
+        return true;
+    }
+    const size_t groupKeys = security.groupKeyTableEntries != 0 ? security.groupKeyTableEntries
+                                                                : groupObjectCount;
+    return groupKeys <= config::SECURITY_GROUP_KEYS
+        && security.p2pKeyTableEntries <= config::SECURITY_P2P_KEYS
+        && security.individualAddressEntries <= config::SECURITY_IA_ENTRIES;
+#else
+    (void)security;
+    (void)groupObjectCount;
+    return true;
+#endif
+}
+
 enum class PortDirection : uint8_t {
     CommandIn = 0,
     StateOut,
@@ -379,6 +401,10 @@ namespace detail {
 /// `if consteval` branch, so it never runs.
 inline void product_identity_maxApduLength_exceeds_CONFIG_KNX_MAX_APDU_LENGTH() {}
 
+/// The same for a SecurityPolicy that declares more key table entries than
+/// the build's KNX_SECURITY_* capacities.
+inline void product_security_key_tables_exceed_CONFIG_KNX_SECURITY_capacities() {}
+
 }  // namespace detail
 
 template <typename PortIdEnum, typename... Ports>
@@ -394,6 +420,14 @@ constexpr auto makeEndpointDefinition(ProductIdentity identity,
     if (identity.maxApduLength > config::MAX_APDU_LENGTH) {
         if consteval {
             detail::product_identity_maxApduLength_exceeds_CONFIG_KNX_MAX_APDU_LENGTH();
+        }
+    }
+    // Likewise the key table sizes the .knxprod promises ETS: a table ETS
+    // fills beyond the device's would be refused in the middle of a secure
+    // download. One group object per port is the bound for "0".
+    if (!securityPolicyFitsConfiguration(security, sizeof...(Ports))) {
+        if consteval {
+            detail::product_security_key_tables_exceed_CONFIG_KNX_SECURITY_capacities();
         }
     }
     return EndpointDefinition<PortIdEnum, Ports...>{

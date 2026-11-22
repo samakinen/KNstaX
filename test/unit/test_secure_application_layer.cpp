@@ -485,11 +485,26 @@ void test_group_telegrams_are_secured_on_every_group_address(void) {
     // and more than this product has group objects. Every one must be secured;
     // running out of a per-destination resource is what made a commissioned
     // device stop publishing.
+    // The keys come as ETS downloads them: a group key table of GA_Index
+    // entries, resolved through an address table of consecutive addresses.
     constexpr uint16_t kFirstGroup = 0x0930;
     constexpr size_t kGroupCount = 64;
-    for (uint16_t i = 0; i < kGroupCount; ++i) {
-        harness.securityObject.setGroupKey(GroupAddress(kFirstGroup + i), kGroupKey);
+    harness.securityObject.setGroupAddressResolver(
+        [](const void*, uint16_t gaIndex) {
+            return gaIndex >= 1u && gaIndex <= kGroupCount
+                       ? GroupAddress(static_cast<uint16_t>(kFirstGroup + gaIndex - 1u))
+                       : GroupAddress(GroupAddress::invalidValue());
+        },
+        nullptr);
+    std::vector<uint8_t> groupKeyTable;
+    for (uint16_t index = 1; index <= kGroupCount; ++index) {
+        groupKeyTable.push_back(static_cast<uint8_t>(index >> 8));
+        groupKeyTable.push_back(static_cast<uint8_t>(index & 0xFFu));
+        groupKeyTable.insert(groupKeyTable.end(), kGroupKey.begin(), kGroupKey.end());
     }
+    TEST_ASSERT_TRUE(harness.securityObject
+                         .writeTable(objects::SecurityProperty::GroupKeyTable, 0, groupKeyTable)
+                         .isOk());
 
     uint64_t previousSeq = 0;
     for (uint16_t i = 0; i < kGroupCount; ++i) {

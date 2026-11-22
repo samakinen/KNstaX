@@ -10,11 +10,37 @@
 #include "knx/objects/security_interface_object.hpp"
 #include "knx/objects/property_kernel.hpp"
 
+#include <array>
+#include <cstdlib>
+#include <iterator>
+#include <memory>
+#include <new>
 #include <span>
 #include <vector>
 
 using namespace knx;
 using namespace knx::objects;
+
+// Allocation counter. A device locks its heap after start-up
+// (KNX_HEAP_POLICY_INIT_ONLY), and on the host the policy does not replace
+// operator new, so this program does: every allocation made while counting is
+// one the device would refuse.
+namespace {
+bool g_countAllocations = false;
+size_t g_allocations = 0;
+}  // namespace
+
+void* operator new(std::size_t size) {
+    if (g_countAllocations) {
+        ++g_allocations;
+    }
+    if (void* p = std::malloc(size != 0 ? size : 1)) {
+        return p;
+    }
+    throw std::bad_alloc();
+}
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { std::free(p); }
 
 static util::Result<void> readSecurityProperty(const SecurityInterfaceObject& obj,
                                                application::PropertyID id,
@@ -23,6 +49,53 @@ static util::Result<void> readSecurityProperty(const SecurityInterfaceObject& ob
     const auto binding = obj.kernelBinding();
     return readProperty(binding.handlers, binding.handlerCount, binding.context, id, 1, elementCount, out);
 }
+
+static util::Result<void> writeSecurityProperty(SecurityInterfaceObject& obj,
+                                                application::PropertyID id,
+                                                std::span<const uint8_t> value) {
+    const auto binding = obj.kernelBinding();
+    return writeProperty(binding.handlers, binding.handlerCount, binding.context, id, 1, value);
+}
+
+namespace {
+
+constexpr auto kPidP2PKeyTable = static_cast<application::PropertyID>(SecurityProperty::P2PKeyTable);
+constexpr auto kPidGroupKeyTable = static_cast<application::PropertyID>(SecurityProperty::GroupKeyTable);
+constexpr auto kPidIaTable =
+    static_cast<application::PropertyID>(SecurityProperty::SecurityIndividualAddressTable);
+
+// One PID_SECURITY_INDIVIDUAL_ADDRESS_TABLE element: IA(2) + Last Valid SeqNr(6).
+void appendIaEntry(std::vector<uint8_t>& table, const IndividualAddress& address, uint64_t sequence) {
+    table.push_back(static_cast<uint8_t>(address.raw >> 8));
+    table.push_back(static_cast<uint8_t>(address.raw & 0xFFu));
+    for (int shift = 40; shift >= 0; shift -= 8) {
+        table.push_back(static_cast<uint8_t>((sequence >> shift) & 0xFFu));
+    }
+}
+
+// One key table element: index(2) + key(16), and Roles(2) for the P2P table.
+void appendKeyEntry(std::vector<uint8_t>& table, uint16_t index, const std::array<uint8_t, 16>& key,
+                    bool withRoles) {
+    table.push_back(static_cast<uint8_t>(index >> 8));
+    table.push_back(static_cast<uint8_t>(index & 0xFFu));
+    table.insert(table.end(), key.begin(), key.end());
+    if (withRoles) {
+        table.push_back(0);
+        table.push_back(0);
+    }
+}
+
+// A group address table of three entries: GA_Index 1, 2, 3.
+const GroupAddress kAddressTable[] = {GroupAddress(1, 2, 3), GroupAddress(1, 2, 4), GroupAddress(1, 2, 5)};
+
+GroupAddress addressAt(const void* /*context*/, uint16_t gaIndex) {
+    if (gaIndex == 0 || gaIndex > std::size(kAddressTable)) {
+        return GroupAddress(GroupAddress::invalidValue());
+    }
+    return kAddressTable[gaIndex - 1u];
+}
+
+}  // namespace
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -157,13 +230,6 @@ void test_SecurityInterfaceObject_Validation() {
     TEST_ASSERT_TRUE(sec.isValid()); // Enabled with key is valid
 }
 
-static util::Result<void> writeSecurityProperty(SecurityInterfaceObject& obj,
-                                                application::PropertyID id,
-                                                std::span<const uint8_t> value) {
-    const auto binding = obj.kernelBinding();
-    return writeProperty(binding.handlers, binding.handlerCount, binding.context, id, 1, value);
-}
-
 // Regression: without PID_LOAD_STATE_CONTROL (5) the Data Secure key-table
 // download aborts at StartLoading, because ETS runs the standard load
 // procedure against the Security Interface Object like any other loadable one.
@@ -181,8 +247,16 @@ void test_SecurityInterfaceObject_LoadStateControl() {
     std::array<uint8_t, 16> key;
     key.fill(0xAB);
     sec.setToolKey(key);
-    sec.applyDownloadedGroupKeys({{GroupAddress(1, 2, 3).raw, key}}, true);
-    sec.applyDownloadedDeviceKeys({{IndividualAddress(1, 1, 5).raw, key}}, true);
+    sec.setGroupAddressResolver(&addressAt, nullptr);
+    std::vector<uint8_t> groupKeys;
+    appendKeyEntry(groupKeys, 1, key, false);  // 1/2/3
+    TEST_ASSERT_TRUE(writeSecurityProperty(sec, kPidGroupKeyTable, groupKeys).isOk());
+    std::vector<uint8_t> addresses;
+    appendIaEntry(addresses, IndividualAddress(1, 1, 5), 0u);
+    TEST_ASSERT_TRUE(writeSecurityProperty(sec, kPidIaTable, addresses).isOk());
+    std::vector<uint8_t> deviceKeys;
+    appendKeyEntry(deviceKeys, 1, key, true);  // 1.1.5
+    TEST_ASSERT_TRUE(writeSecurityProperty(sec, kPidP2PKeyTable, deviceKeys).isOk());
     TEST_ASSERT_EQUAL_UINT16(1, sec.groupKeyCount());
     TEST_ASSERT_EQUAL_UINT16(1, sec.deviceKeyCount());
 
@@ -216,8 +290,9 @@ void test_SecurityInterfaceObject_LoadStateControl() {
     // Unload clears the tables again and returns to Unloaded. A firmware key
     // is the factory default and is what is in force once the table is gone.
     sec.setGroupKey(GroupAddress(1, 2, 4), key);
-    sec.applyDownloadedGroupKeys({{GroupAddress(1, 2, 3).raw, key}}, true);
+    TEST_ASSERT_TRUE(writeSecurityProperty(sec, kPidGroupKeyTable, groupKeys).isOk());
     std::array<uint8_t, 16> found{};
+    TEST_ASSERT_TRUE(sec.getGroupKey(GroupAddress(1, 2, 3), found).isOk());
     TEST_ASSERT_FALSE(sec.getGroupKey(GroupAddress(1, 2, 4), found).isOk());
     const uint8_t unload[] = {loadstate::kEventUnload};
     TEST_ASSERT_TRUE(writeSecurityProperty(sec, pid, unload).isOk());
@@ -228,19 +303,6 @@ void test_SecurityInterfaceObject_LoadStateControl() {
     TEST_ASSERT_TRUE(readSecurityProperty(sec, pid, 1, out).isOk());
     TEST_ASSERT_EQUAL_UINT8(loadstate::kUnloaded, out[0]);
 }
-
-namespace {
-
-// One PID_SECURITY_INDIVIDUAL_ADDRESS_TABLE element: IA(2) + Last Valid SeqNr(6).
-void appendIaEntry(std::vector<uint8_t>& table, const IndividualAddress& address, uint64_t sequence) {
-    table.push_back(static_cast<uint8_t>(address.raw >> 8));
-    table.push_back(static_cast<uint8_t>(address.raw & 0xFFu));
-    for (int shift = 40; shift >= 0; shift -= 8) {
-        table.push_back(static_cast<uint8_t>((sequence >> shift) & 0xFFu));
-    }
-}
-
-} // namespace
 
 // 03/05/01 §6.3.8.4: the Last Valid SeqNr of every partner is part of the
 // Security Individual Address Table, and the MaC "shall write this value in the
@@ -259,8 +321,6 @@ void test_SecurityInterfaceObject_AdoptsLastValidSeqNrFromAddressTable() {
         static_cast<application::PropertyID>(SecurityProperty::SecurityIndividualAddressTable),
         table).isOk());
 
-    sec.syncSequencesFromAddressTable();
-
     TEST_ASSERT_TRUE(sec.getPeerSequence(tool) == 0x0000000012345678ull);
     TEST_ASSERT_TRUE(sec.getPeerSequence(peer) == 42u);
     // A partner with no entry has no secure link, and no accepted number.
@@ -268,7 +328,7 @@ void test_SecurityInterfaceObject_AdoptsLastValidSeqNrFromAddressTable() {
 }
 
 // The same table is where an accepted sequence number has to end up, because
-// the table is a persisted property and the live map is not. §6.3.8.4: "it
+// the table is a persisted property. §6.3.8.4: "it
 // shall update the field Last Valid SeqNr for that IA in the Security
 // Individual Address Table with the received value".
 void test_SecurityInterfaceObject_AcceptedSeqNrIsWrittenIntoAddressTable() {
@@ -282,54 +342,232 @@ void test_SecurityInterfaceObject_AcceptedSeqNrIsWrittenIntoAddressTable() {
         sec,
         static_cast<application::PropertyID>(SecurityProperty::SecurityIndividualAddressTable),
         table).isOk());
-    sec.syncSequencesFromAddressTable();
     TEST_ASSERT_FALSE(sec.sequenceStateDirty());
 
-    sec.setPeerSequence(peer, 0x0000AABBCCDDEEllu);
+    TEST_ASSERT_TRUE(sec.setPeerSequence(peer, 0x0000AABBCCDDEEllu).isOk());
 
-    const auto* stored = sec.findExtraProperty(SecurityProperty::SecurityIndividualAddressTable);
-    TEST_ASSERT_NOT_NULL(stored);
-    TEST_ASSERT_EQUAL_UINT32(16u, stored->size());
+    const auto stored = sec.tableData(SecurityProperty::SecurityIndividualAddressTable);
+    TEST_ASSERT_EQUAL_UINT32(16u, stored.size());
     // Second element, sequence field: 0x00AABBCCDDEE.
     const uint8_t expected[] = {0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE};
     for (size_t i = 0; i < sizeof(expected); ++i) {
-        TEST_ASSERT_EQUAL_HEX8(expected[i], (*stored)[8 + 2 + i]);
+        TEST_ASSERT_EQUAL_HEX8(expected[i], stored[8 + 2 + i]);
     }
     // The first entry is untouched, and a checkpoint is now owed.
-    TEST_ASSERT_EQUAL_HEX8(0x00, (*stored)[2]);
+    TEST_ASSERT_EQUAL_HEX8(0x00, stored[2]);
     TEST_ASSERT_TRUE(sec.sequenceStateDirty());
 
     sec.clearSequenceStateDirty();
     TEST_ASSERT_FALSE(sec.sequenceStateDirty());
     // Re-accepting the same number is not a state change worth a flash write.
-    sec.setPeerSequence(peer, 0x0000AABBCCDDEEllu);
+    TEST_ASSERT_TRUE(sec.setPeerSequence(peer, 0x0000AABBCCDDEEllu).isOk());
     TEST_ASSERT_FALSE(sec.sequenceStateDirty());
 }
 
-// Reconciliation keeps the higher of the two sides: a table ETS downloaded
-// while this device was already running must not roll a replay window
-// backwards, and neither must a restored table that is behind the live state.
-void test_SecurityInterfaceObject_SequenceSyncNeverMovesBackwards() {
+// A download never moves a partner's number back: ETS empties the table and
+// writes it again with its own idea of the numbers, and each partner keeps
+// the higher of the two. The same holds for an entry written in place.
+void test_SecurityInterfaceObject_DownloadNeverMovesSequencesBackwards() {
     SecurityInterfaceObject sec;
     const IndividualAddress peer(1, 1, 7);
+    const IndividualAddress other(1, 1, 8);
 
     std::vector<uint8_t> table;
     appendIaEntry(table, peer, 100u);
-    TEST_ASSERT_TRUE(writeSecurityProperty(
-        sec,
-        static_cast<application::PropertyID>(SecurityProperty::SecurityIndividualAddressTable),
-        table).isOk());
+    appendIaEntry(table, other, 0u);
+    TEST_ASSERT_TRUE(writeSecurityProperty(sec, kPidIaTable, table).isOk());
+    TEST_ASSERT_TRUE(sec.setPeerSequence(peer, 500u).isOk());
 
-    sec.setPeerSequence(peer, 500u);
-    sec.syncSequencesFromAddressTable();
+    // StartLoading empties every table; the number waits in an unlisted slot.
+    sec.loadControlReset();
+    TEST_ASSERT_EQUAL_UINT32(0u, sec.tableData(SecurityProperty::SecurityIndividualAddressTable).size());
     TEST_ASSERT_TRUE(sec.getPeerSequence(peer) == 500u);
 
-    // …and the table is brought up to the live value, so the next checkpoint
-    // stores 500 rather than resurrecting 100.
-    const auto* stored = sec.findExtraProperty(SecurityProperty::SecurityIndividualAddressTable);
-    TEST_ASSERT_NOT_NULL(stored);
-    TEST_ASSERT_EQUAL_HEX8(0x01, (*stored)[6]);
-    TEST_ASSERT_EQUAL_HEX8(0xF4, (*stored)[7]);
+    // ETS shortens the table to one element, then writes both entries again
+    // with the numbers from its project.
+    const auto binding = sec.kernelBinding();
+    TEST_ASSERT_TRUE(resizeProperty(binding.handlers, binding.handlerCount, binding.context,
+                                    kPidIaTable, 1).isOk());
+    TEST_ASSERT_TRUE(writeSecurityProperty(sec, kPidIaTable, table).isOk());
+    TEST_ASSERT_TRUE(sec.getPeerSequence(peer) == 500u);
+    TEST_ASSERT_TRUE(sec.getPeerSequence(other) == 0u);
+
+    // The table itself holds 500, so the next checkpoint stores it.
+    const auto stored = sec.tableData(SecurityProperty::SecurityIndividualAddressTable);
+    TEST_ASSERT_EQUAL_HEX8(0x01, stored[6]);
+    TEST_ASSERT_EQUAL_HEX8(0xF4, stored[7]);
+
+    // An entry written in place with a lower number keeps the higher one.
+    std::vector<uint8_t> stale;
+    appendIaEntry(stale, peer, 7u);
+    TEST_ASSERT_TRUE(writeSecurityProperty(sec, kPidIaTable, stale).isOk());
+    TEST_ASSERT_TRUE(sec.getPeerSequence(peer) == 500u);
+}
+
+// The tables are fixed arrays of the configured capacity, reported to ETS as
+// the property's maximum: a write past it is refused, and the table keeps
+// what it had.
+void test_SecurityInterfaceObject_TablesRefuseWritesPastTheirCapacity() {
+    SecurityInterfaceObject sec;
+    const uint16_t capacity = sec.tableCapacity(SecurityProperty::P2PKeyTable);
+    TEST_ASSERT_EQUAL_UINT16(knx::config::SECURITY_P2P_KEYS, capacity);
+
+    std::array<uint8_t, 16> key{};
+    key.fill(0x5A);
+    std::vector<uint8_t> full;
+    for (uint16_t i = 1; i <= capacity; ++i) {
+        appendKeyEntry(full, i, key, true);
+    }
+    TEST_ASSERT_TRUE(writeSecurityProperty(sec, kPidP2PKeyTable, full).isOk());
+    TEST_ASSERT_EQUAL_UINT32(static_cast<uint32_t>(capacity) * 20u,
+                             sec.tableData(SecurityProperty::P2PKeyTable).size());
+
+    std::vector<uint8_t> oneMore;
+    appendKeyEntry(oneMore, static_cast<uint16_t>(capacity + 1u), key, true);
+    const auto binding = sec.kernelBinding();
+    TEST_ASSERT_TRUE(writeProperty(binding.handlers, binding.handlerCount, binding.context,
+                                   kPidP2PKeyTable, static_cast<uint16_t>(capacity + 1u), oneMore)
+                         .isError());
+    TEST_ASSERT_TRUE(resizeProperty(binding.handlers, binding.handlerCount, binding.context,
+                                    kPidP2PKeyTable, static_cast<uint16_t>(capacity + 1u))
+                         .isError());
+    TEST_ASSERT_EQUAL_UINT32(static_cast<uint32_t>(capacity) * 20u,
+                             sec.tableData(SecurityProperty::P2PKeyTable).size());
+}
+
+// A downloaded group key is found through the address table: the entry names
+// GA_Index 2, which is 1/2/4 there. Without the address table, or with an index
+// it does not have, the key resolves to nothing.
+void test_SecurityInterfaceObject_GroupKeyResolvesThroughTheAddressTable() {
+    SecurityInterfaceObject sec;
+    std::array<uint8_t, 16> key{};
+    key.fill(0x77);
+    std::vector<uint8_t> groupKeys;
+    appendKeyEntry(groupKeys, 2, key, false);
+    appendKeyEntry(groupKeys, 9, key, false);  // no such GA_Index
+    TEST_ASSERT_TRUE(writeSecurityProperty(sec, kPidGroupKeyTable, groupKeys).isOk());
+
+    std::array<uint8_t, 16> found{};
+    TEST_ASSERT_FALSE(sec.getGroupKey(GroupAddress(1, 2, 4), found).isOk());
+
+    sec.setGroupAddressResolver(&addressAt, nullptr);
+    TEST_ASSERT_TRUE(sec.getGroupKey(GroupAddress(1, 2, 4), found).isOk());
+    TEST_ASSERT_EQUAL_MEMORY(key.data(), found.data(), 16);
+    TEST_ASSERT_FALSE(sec.getGroupKey(GroupAddress(1, 2, 3), found).isOk());
+
+    const auto summary = sec.keyTableSummary();
+    TEST_ASSERT_EQUAL_UINT16(1, summary.groupKeys);
+    TEST_ASSERT_EQUAL_UINT16(1, summary.unresolvedGroupKeys);
+    TEST_ASSERT_EQUAL_UINT16(1, sec.groupKeyCount());
+}
+
+// A sender outside the Security Individual Address Table takes an unlisted
+// slot. When every slot is taken, one more such sender cannot be tracked and is
+// refused; senders in the table, and those that already hold a slot, still are.
+void test_SecurityInterfaceObject_UnlistedSendersAreBounded() {
+    SecurityInterfaceObject sec;
+    std::vector<uint8_t> table;
+    appendIaEntry(table, IndividualAddress(2, 1, 1), 0u);
+    TEST_ASSERT_TRUE(writeSecurityProperty(sec, kPidIaTable, table).isOk());
+
+    for (size_t i = 0; i < knx::config::SECURITY_UNLISTED_SENDERS; ++i) {
+        const IndividualAddress sender(1, 1, static_cast<uint8_t>(i + 1u));
+        TEST_ASSERT_TRUE(sec.canTrackPeer(sender));
+        TEST_ASSERT_TRUE(sec.setPeerSequence(sender, 10u + i).isOk());
+    }
+    const IndividualAddress oneMore(1, 1, 250);
+    TEST_ASSERT_FALSE(sec.canTrackPeer(oneMore));
+    TEST_ASSERT_TRUE(sec.setPeerSequence(oneMore, 1u).isError());
+    TEST_ASSERT_TRUE(sec.getPeerSequence(oneMore) == 0u);
+
+    TEST_ASSERT_TRUE(sec.canTrackPeer(IndividualAddress(1, 1, 1)));
+    TEST_ASSERT_TRUE(sec.setPeerSequence(IndividualAddress(1, 1, 1), 99u).isOk());
+    TEST_ASSERT_TRUE(sec.getPeerSequence(IndividualAddress(1, 1, 1)) == 99u);
+    TEST_ASSERT_TRUE(sec.setPeerSequence(IndividualAddress(2, 1, 1), 5u).isOk());
+    TEST_ASSERT_TRUE(sec.getPeerSequence(IndividualAddress(2, 1, 1)) == 5u);
+}
+
+// Firmware keys are a fixed array too: one past KNX_SECURITY_FIRMWARE_KEYS is
+// refused, and replacing an existing one takes no new slot.
+void test_SecurityInterfaceObject_FirmwareKeysAreBounded() {
+    SecurityInterfaceObject sec;
+    std::array<uint8_t, 16> key{};
+    key.fill(0x11);
+    for (size_t i = 0; i < knx::config::SECURITY_FIRMWARE_KEYS; ++i) {
+        sec.setGroupKey(GroupAddress(static_cast<uint16_t>(0x0800u + i)), key);
+    }
+    TEST_ASSERT_EQUAL_UINT16(knx::config::SECURITY_FIRMWARE_KEYS, sec.groupKeyCount());
+    sec.setGroupKey(GroupAddress(0x0800u), key);
+    TEST_ASSERT_EQUAL_UINT16(knx::config::SECURITY_FIRMWARE_KEYS, sec.groupKeyCount());
+    sec.setDeviceKey(IndividualAddress(1, 1, 1), key);
+    std::array<uint8_t, 16> found{};
+    TEST_ASSERT_FALSE(sec.getDeviceKey(IndividualAddress(1, 1, 1), found).isOk());
+}
+
+// What ETS does in a secure download, and the secured traffic after it, with
+// the heap as a device has it after start-up: nothing may allocate. Before the
+// tables were fixed arrays every table write, the key resolution after it and
+// the first telegram from each sender allocated.
+void test_SecurityInterfaceObject_SecureDownloadAllocatesNothing() {
+    SecurityInterfaceObject sec;
+    sec.setGroupObjectCount(24);
+    sec.setGroupAddressResolver(&addressAt, nullptr);
+    std::array<uint8_t, 16> key{};
+    key.fill(0x3C);
+
+    std::vector<uint8_t> addresses;
+    for (uint8_t device = 1; device <= 8; ++device) {
+        appendIaEntry(addresses, IndividualAddress(1, 1, device), device);
+    }
+    std::vector<uint8_t> groupKeys;
+    for (uint16_t index = 1; index <= std::size(kAddressTable); ++index) {
+        appendKeyEntry(groupKeys, index, key, false);
+    }
+    std::vector<uint8_t> deviceKeys;
+    appendKeyEntry(deviceKeys, 1, key, true);
+    appendKeyEntry(deviceKeys, 2, key, true);
+    std::vector<uint8_t> goFlags(24, 0x03);
+    const uint8_t startLoading[] = {loadstate::kEventStartLoading};
+    const uint8_t loadCompleted[] = {loadstate::kEventLoadCompleted};
+    const auto pidLoad = static_cast<application::PropertyID>(SecurityProperty::LoadStateControl);
+    const auto pidGoFlags = static_cast<application::PropertyID>(SecurityProperty::GoSecurityFlags);
+    const auto binding = sec.kernelBinding();
+
+    // The counter sees this program's allocations.
+    g_allocations = 0;
+    g_countAllocations = true;
+    { auto probe = std::make_unique<std::array<uint8_t, 8>>(); (void)probe; }
+    TEST_ASSERT_EQUAL_UINT32(1u, g_allocations);
+
+    g_allocations = 0;
+    for (int round = 0; round < 2; ++round) {  // a first download, then another
+        TEST_ASSERT_TRUE(writeSecurityProperty(sec, pidLoad, startLoading).isOk());
+        TEST_ASSERT_TRUE(resizeProperty(binding.handlers, binding.handlerCount, binding.context,
+                                        kPidIaTable, 1).isOk());
+        TEST_ASSERT_TRUE(writeSecurityProperty(sec, kPidIaTable, addresses).isOk());
+        TEST_ASSERT_TRUE(writeSecurityProperty(sec, kPidGroupKeyTable, groupKeys).isOk());
+        TEST_ASSERT_TRUE(writeSecurityProperty(sec, kPidP2PKeyTable, deviceKeys).isOk());
+        TEST_ASSERT_TRUE(writeSecurityProperty(sec, pidGoFlags, goFlags).isOk());
+        TEST_ASSERT_TRUE(writeSecurityProperty(sec, pidLoad, loadCompleted).isOk());
+
+        std::array<uint8_t, 16> found{};
+        TEST_ASSERT_TRUE(sec.getGroupKey(GroupAddress(1, 2, 5), found).isOk());
+        TEST_ASSERT_TRUE(sec.getDeviceKey(IndividualAddress(1, 1, 2), found).isOk());
+        TEST_ASSERT_EQUAL_UINT16(3, sec.keyTableSummary().groupKeys);
+        TEST_ASSERT_EQUAL_UINT8(0x03, sec.goSecurityFlags(23));
+        // Every listed partner, and as many unlisted senders as there are slots.
+        for (uint8_t device = 1; device <= 8; ++device) {
+            TEST_ASSERT_TRUE(sec.setPeerSequence(IndividualAddress(1, 1, device), 1000u + device).isOk());
+        }
+        for (size_t i = 0; i < knx::config::SECURITY_UNLISTED_SENDERS; ++i) {
+            (void)sec.setPeerSequence(IndividualAddress(3, 1, static_cast<uint8_t>(i + 1u)), 7u);
+        }
+        TEST_ASSERT_FALSE(sec.tableData(SecurityProperty::SecurityIndividualAddressTable).empty());
+    }
+    g_countAllocations = false;
+    TEST_ASSERT_EQUAL_UINT32(0u, g_allocations);
+    // The second download kept every partner's number.
+    TEST_ASSERT_TRUE(sec.getPeerSequence(IndividualAddress(1, 1, 8)) == 1008u);
 }
 
 // --- Sending sequence reserve (docs/design/data-secure-sequence-persistence.md)
@@ -459,7 +697,10 @@ void test_SecurityInterfaceObject_RestoredCeilingRaisesTheCounter() {
 // ETS talks to the device, so the partner table alone is written otherwise.
 void test_SecurityInterfaceObject_CheckpointRecordsHaveSeparateFlags() {
     SecurityInterfaceObject sec;
-    sec.setPeerSequence(IndividualAddress(1, 1, 7), 10u);
+    std::vector<uint8_t> table;
+    appendIaEntry(table, IndividualAddress(1, 1, 7), 0u);
+    TEST_ASSERT_TRUE(writeSecurityProperty(sec, kPidIaTable, table).isOk());
+    TEST_ASSERT_TRUE(sec.setPeerSequence(IndividualAddress(1, 1, 7), 10u).isOk());
     TEST_ASSERT_TRUE(sec.peerSequencesDirty());
     TEST_ASSERT_FALSE(sec.toolAccessSequenceDirty());
 
@@ -494,7 +735,12 @@ int main(int argc, char **argv) {
     RUN_TEST(test_SecurityInterfaceObject_LoadStateControl);
     RUN_TEST(test_SecurityInterfaceObject_AdoptsLastValidSeqNrFromAddressTable);
     RUN_TEST(test_SecurityInterfaceObject_AcceptedSeqNrIsWrittenIntoAddressTable);
-    RUN_TEST(test_SecurityInterfaceObject_SequenceSyncNeverMovesBackwards);
+    RUN_TEST(test_SecurityInterfaceObject_DownloadNeverMovesSequencesBackwards);
+    RUN_TEST(test_SecurityInterfaceObject_TablesRefuseWritesPastTheirCapacity);
+    RUN_TEST(test_SecurityInterfaceObject_GroupKeyResolvesThroughTheAddressTable);
+    RUN_TEST(test_SecurityInterfaceObject_UnlistedSendersAreBounded);
+    RUN_TEST(test_SecurityInterfaceObject_FirmwareKeysAreBounded);
+    RUN_TEST(test_SecurityInterfaceObject_SecureDownloadAllocatesNothing);
     RUN_TEST(test_SecurityInterfaceObject_SendingReserveWritesOncePerWindow);
     RUN_TEST(test_SecurityInterfaceObject_SendingReserveExhaustedWritesBeforeSending);
     RUN_TEST(test_SecurityInterfaceObject_SendingReserveFailureRefusesTheNumber);

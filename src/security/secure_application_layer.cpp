@@ -343,6 +343,15 @@ SecureRxResult SecureApplicationLayer::handleData(const SecureFrameInfo& info,
         return {SecureRxDisposition::Rejected, 0};
     }
 
+    // A sender whose number cannot be remembered could replay this telegram
+    // later, so it is refused before any crypto is spent on it. Only a sender
+    // outside the Security Individual Address Table, with every unlisted slot
+    // taken, gets here (KNX_SECURITY_UNLISTED_SENDERS).
+    if (!scf.toolAccess && !_securityObject.canTrackPeer(info.source)) {
+        _securityObject.logSecurityFailure(objects::SecurityFailure::InvalidSender, info.source.raw);
+        return {SecureRxDisposition::Rejected, 0};
+    }
+
     auto keyResult = selectKey(info, info.source, scf.toolAccess);
     if (keyResult.isError()) {
         _securityObject.logSecurityFailure(objects::SecurityFailure::UnknownKey, info.source.raw);
@@ -368,8 +377,10 @@ SecureRxResult SecureApplicationLayer::handleData(const SecureFrameInfo& info,
 
     if (scf.toolAccess) {
         _securityObject.setToolAccessSequence(seq);
-    } else {
-        _securityObject.setPeerSequence(info.source, seq);
+    } else if (_securityObject.setPeerSequence(info.source, seq).isError()) {
+        // Taken by another sender since the check above (another task).
+        _securityObject.logSecurityFailure(objects::SecurityFailure::InvalidSender, info.source.raw);
+        return {SecureRxDisposition::Rejected, 0};
     }
     // A peer context only steers how we protect a frame we address *back* to
     // that peer, so it is recorded for point-to-point traffic only. A multicast
@@ -453,8 +464,10 @@ SecureRxResult SecureApplicationLayer::handleSyncRequest(const SecureFrameInfo& 
     const uint64_t newStoredLocal = std::max(candidate, storedLocal);
     if (scf.toolAccess) {
         _securityObject.setToolAccessSequence(newStoredLocal);
-    } else {
-        _securityObject.setPeerSequence(info.source, newStoredLocal);
+    } else if (_securityObject.setPeerSequence(info.source, newStoredLocal).isError()) {
+        // No room to remember the partner's number: no answer, as for any
+        // request that cannot be served (§5.3.2 step 3).
+        return {SecureRxDisposition::Consumed, 0};
     }
 
     // SeqNrremote is the number we will use ourselves next. Sending a sync

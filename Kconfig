@@ -443,6 +443,76 @@ menu "KNX Stack Configuration"
                 numbers accepted since the last write: those telegrams could
                 be replayed once. A shorter interval narrows that window and
                 costs more writes.
+
+        # Capacities of the Security Interface Object. Each table is a fixed
+        # array in its wire format, so the RAM is taken whether ETS fills it or
+        # not, and a write past it gets a negative response, never an
+        # allocation (data-secure-small-target.md D3). A product's
+        # SecurityPolicy must not declare more than these.
+
+        config KNX_SECURITY_GROUP_KEYS
+            int "Group key table entries (PID_GRP_KEY_TABLE)"
+            depends on KNX_ENABLE_SECURITY
+            default 256
+            range 1 256
+            help
+                Secured group addresses the device can hold a key for: 18
+                octets each. At most one per group address table entry.
+
+        config KNX_SECURITY_P2P_KEYS
+            int "Point-to-point key table entries (PID_P2P_KEY_TABLE)"
+            depends on KNX_ENABLE_SECURITY
+            default 32
+            range 1 255
+            help
+                Partners the device holds a point-to-point key for: 20 octets
+                each. ETS talks to the device with the Tool Key, which is not
+                in this table.
+
+        config KNX_SECURITY_IA_ENTRIES
+            int "Security Individual Address Table entries"
+            depends on KNX_ENABLE_SECURITY
+            default 128
+            range 1 255
+            help
+                Senders ETS lists for the device, each with its Last Valid
+                Sequence Number (PID_SECURITY_INDIVIDUAL_ADDRESS_TABLE): 8
+                octets each. Every device that sends secured telegrams to
+                this one needs an entry.
+
+        config KNX_SECURITY_ZONE_KEYS
+            int "Zone key table entries (PID_ZONE_KEY_TABLE)"
+            depends on KNX_ENABLE_SECURITY
+            default 16
+            range 0 255
+            help
+                Stored for ETS, not used by the stack: 19 octets each. A TP1
+                device that is not a coupler can set 0.
+
+        config KNX_SECURITY_FIRMWARE_KEYS
+            int "Keys set by the firmware"
+            depends on KNX_ENABLE_SECURITY
+            default 16
+            range 0 255
+            help
+                Group and device keys the product sets itself with
+                setGroupKey() / setDeviceKey(), in force while ETS has
+                downloaded no key table: 20 octets each. 0 for a device that
+                ETS commissions; one more is refused with a log line.
+
+        config KNX_SECURITY_UNLISTED_SENDERS
+            int "Senders tracked outside the Security Individual Address Table"
+            depends on KNX_ENABLE_SECURITY
+            default 16
+            range 0 255
+            help
+                Last Valid Sequence Numbers of senders that have no entry in
+                the Security Individual Address Table: senders of a device
+                running on firmware keys, and the partners of a previous
+                download while ETS writes the table again (so a new download
+                cannot roll a replay window back). 8 octets each. When all are
+                taken, a secured telegram from one more such sender is
+                rejected; nothing is evicted.
     endmenu
 
     menu "Optional Features"

@@ -78,6 +78,19 @@ inline constexpr size_t kSequenceBytes = 6;
     return std::nullopt;
 }
 
+/// Overwrite element @p index with @p address and @p sequence.
+inline void setEntryAt(std::span<uint8_t> blob, size_t index,
+                       const IndividualAddress& address, uint64_t sequence) noexcept
+{
+    const size_t offset = index * kEntryBytes;
+    blob[offset + kAddressOffset] = static_cast<uint8_t>(address.raw >> 8);
+    blob[offset + kAddressOffset + 1] = static_cast<uint8_t>(address.raw & 0xFFu);
+    for (size_t i = 0; i < kSequenceBytes; ++i) {
+        const size_t shift = 8u * (kSequenceBytes - 1u - i);
+        blob[offset + kSequenceOffset + i] = static_cast<uint8_t>((sequence >> shift) & 0xFFu);
+    }
+}
+
 /// Overwrite the Last Valid SeqNr of @p address in place.
 /// @return false when @p address has no entry, which leaves @p blob untouched.
 inline bool setSequenceFor(std::span<uint8_t> blob,

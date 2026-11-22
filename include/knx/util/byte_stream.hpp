@@ -80,6 +80,14 @@ public:
         return true;
     }
 
+    /// The next @p length octets, not consumed; empty when fewer remain.
+    std::span<const uint8_t> peek(size_t length) const {
+        if (remaining() < length) {
+            return {};
+        }
+        return std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(_data.data() + _offset), length);
+    }
+
 private:
     std::span<const std::byte> _data;
     size_t _offset;

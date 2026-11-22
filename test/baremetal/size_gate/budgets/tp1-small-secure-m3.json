@@ -2,9 +2,9 @@
   "profile": "tp1-small-secure",
   "cpu": "cortex-m3",
   "margin_percent": 2,
-  "flash": {"budget": 108032, "target": 90112},
-  "ram": {"budget": 9728, "target": 10240, "includes_heap": true,
-          "target_note": "the tp1-small targets; no device check here: with Data Secure the H8i8o flash reservations are exceeded by about 2.4 KiB (data-secure-small-target.md, status)"},
+  "flash": {"budget": 106752, "target": 90112},
+  "ram": {"budget": 10496, "target": 10240, "includes_heap": true,
+          "target_note": "the tp1-small targets; no device check here: with Data Secure the H8i8o flash reservations are exceeded by about 1.2 KiB; the RAM includes the fixed key tables at their full capacity (data-secure-small-target.md, status)"},
   "runtime_flash": {"budget": 7424, "target": 8192},
   "forbid_strings": ["sw_in_1", "sw_state_16", "sw_io_8", "value_in_1", "dim_in_4", "scene_ctl_1", "scene_num_4"],
   "forbid": [

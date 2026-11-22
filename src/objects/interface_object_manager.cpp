@@ -623,14 +623,12 @@ util::Result<size_t> InterfaceObjectManager::saveToPersistence() {
             // array whole and let the restore write it back at index 1.
             if (objectType == InterfaceObjectType::security() && _securityObjectPtr != nullptr) {
                 if (const auto property = securityBlobProperty(propertyId)) {
-                    const auto* blob = _securityObjectPtr->findExtraProperty(*property);
-                    // An absent table is a real state, not a skip: ETS
+                    // An empty table is a real state, not a skip: ETS
                     // erases these on Unload/StartLoading, and leaving the
                     // previous download's keys in NVS would resurrect them
                     // at the next boot. An empty record makes saveRecord
                     // erase the stored copy instead.
-                    saveProp(objectType, propertyId,
-                             blob != nullptr ? std::span<const uint8_t>(*blob) : std::span<const uint8_t>{});
+                    saveProp(objectType, propertyId, _securityObjectPtr->tableData(*property));
                     return;
                 }
             }
@@ -759,10 +757,10 @@ size_t InterfaceObjectManager::saveSecuritySequenceState() {
             makePersistenceKeyId(InterfaceObjectType::security(),
                                  static_cast<application::PropertyID>(SecurityProperty::SecurityIndividualAddressTable)),
             _activeBank);
-        if (const auto* blob = _securityObjectPtr->findExtraProperty(
+        if (const auto table = _securityObjectPtr->tableData(
                 SecurityProperty::SecurityIndividualAddressTable);
-            blob != nullptr && !blob->empty()) {
-            if (const auto res = _persistence->saveById(tableKeyId, *blob); res.isOk()) {
+            !table.empty()) {
+            if (const auto res = _persistence->saveById(tableKeyId, table); res.isOk()) {
                 ++saved;
             } else {
                 KNX_LOGW(TAG, "Failed to checkpoint the Security Individual Address Table: %s",
