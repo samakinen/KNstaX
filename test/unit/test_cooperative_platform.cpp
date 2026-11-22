@@ -242,6 +242,30 @@ void test_mac_address_is_local_and_derived_from_the_serial(void) {
     TEST_ASSERT_NULL(platform.network());
 }
 
+void boardRandom(void* ctx, uint8_t* out, size_t length) {
+    (void)ctx;
+    for (size_t i = 0; i < length; ++i) out[i] = static_cast<uint8_t>(0xA0u + i);
+}
+
+void test_random_bytes_come_from_the_board_hook(void) {
+    // A board with a noise source supplies the S-A_Sync random itself.
+    CooperativeHooks hooks = makeHooks();
+    hooks.randomBytes = &boardRandom;
+    CooperativePlatform platform(hooks);
+    std::array<uint8_t, 4> random{};
+    platform.randomBytes(random);
+    TEST_ASSERT_EQUAL_HEX8(0xA0, random[0]);
+    TEST_ASSERT_EQUAL_HEX8(0xA3, random[3]);
+
+    // Without the hook the platform's fallback still fills the buffer.
+    CooperativePlatform fallback(makeHooks());
+    std::array<uint8_t, 16> a{};
+    std::array<uint8_t, 16> b{};
+    fallback.randomBytes(a);
+    fallback.randomBytes(b);
+    TEST_ASSERT_TRUE(a != b);
+}
+
 void test_restart_calls_the_board_hook(void) {
     // The hook returns here (a real one resets the MCU), so restart() would go on
     // to spin. Only the hook call is checked, through the same pointer it uses.
@@ -285,6 +309,7 @@ int main(void) {
 #endif
     RUN_TEST(test_log_without_a_sink_is_dropped);
     RUN_TEST(test_mac_address_is_local_and_derived_from_the_serial);
+    RUN_TEST(test_random_bytes_come_from_the_board_hook);
     RUN_TEST(test_restart_calls_the_board_hook);
     RUN_TEST(test_local_lock_compiles_to_the_selected_mutex);
     return UNITY_END();

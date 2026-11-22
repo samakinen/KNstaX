@@ -33,6 +33,7 @@
 
 #include "knx/platform/platform.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <span>
@@ -59,6 +60,12 @@ struct CooperativeHooks {
     void (*restart)(void* context){nullptr};
     /// Unrecoverable error. Null: `fatalError()` spins forever.
     void (*fatalError)(void* context){nullptr};
+    /// Fills `out` with `length` unpredictable octets: the Random of a Data
+    /// Secure S-A_Sync_Response, which must never repeat for a key. Seed it
+    /// from a physical noise source and a counter the device keeps across
+    /// resets. Null: Platform::randomBytes(), which mixes the clock and the
+    /// serial number and repeats easily after a reset (no use for Data Secure).
+    void (*randomBytes)(void* context, uint8_t* out, size_t length){nullptr};
     /// Receives one formatted log line (no trailing newline). Null: log output is dropped.
     /// Never called in a build with `CONFIG_KNX_LOG_LEVEL` 0, which links no formatting code.
     void (*logLine)(void* context, const char* line){nullptr};
@@ -89,6 +96,7 @@ public:
     void delayMicroseconds(uint32_t us) override;
     uint32_t uniqueSerialNumber() const override;
     void macAddress(std::span<uint8_t, 6> mac) const override;
+    void randomBytes(std::span<uint8_t> out) override;
     NetworkInterface* network() override;
 
     TaskHandle createTask(const TaskConfig& config) override;

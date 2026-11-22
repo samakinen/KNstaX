@@ -98,6 +98,14 @@ uint32_t CooperativePlatform::uniqueSerialNumber() const {
     return _hooks.serialNumber ? _hooks.serialNumber(_hooks.context) : 0u;
 }
 
+void CooperativePlatform::randomBytes(std::span<uint8_t> out) {
+    if (_hooks.randomBytes != nullptr) {
+        _hooks.randomBytes(_hooks.context, out.data(), out.size());
+        return;
+    }
+    Platform::randomBytes(out);
+}
+
 void CooperativePlatform::macAddress(std::span<uint8_t, 6> mac) const {
     // No Ethernet interface on this class of target; derive a stable value
     // from the serial number so callers that ask still get a unique one.
