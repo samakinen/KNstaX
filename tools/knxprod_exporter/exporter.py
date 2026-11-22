@@ -376,55 +376,66 @@ def _emit_parameter_blocks(static_elem, dynamic_channel, app_ref: str, rs_ref: s
 _LSM_APPLICATION_PROGRAM = 4
 
 
-def _emit_load_procedure(load_proc, param_bytes: int):
-    """Emit the download sequence ETS performs for this product.
+# The mask versions whose ETS master data load procedures this exporter knows
+# the merge points of. In MV-07B0 (TP1) and MV-57B0 (IP), every procedure that
+# loads the Application Program ("all", "par", "par,grp", "ap1") runs
+# "Unload 4 ... Load 4, Merge 2" and later "Merge 4" just before it writes the
+# tables with LdCtrlWriteRelMem. Another mask may number its merge points
+# differently, so it is refused rather than guessed.
+_MERGE_ALLOCATE_SEGMENT = 2
+_MERGE_WRITE_SEGMENT = 4
+_MASKS_WITH_KNOWN_MERGE_POINTS = (0x07B0, 0x57B0)
 
-    Previously this was a bare <LdCtrlConnect/>. Parameter download still
-    worked, because parameters are memory-mapped and ETS writes them directly,
-    but the product declared a procedure that did not describe what actually had
-    to happen — in particular it never drove the Application Program object's
-    load state machine, so the device was never told a download had begun or
-    completed.
 
-    The sequence below is the standard System B application download:
+def _emit_load_procedures(static, mask_version: int, param_bytes: int):
+    """Add the product's part of the download: the parameter segment.
 
-      connect → unload → allocate the segment → write it → load-completed
-      → disconnect
+    The application program is LoadProcedureStyle="MergedProcedure": ETS runs
+    the load procedure of the mask version from its master data (unload, load
+    and write the group tables, load-completed, restart) and inserts each
+    product <LoadProcedure MergeId="n"> at the LdCtrlMerge step with the same
+    id. A <LoadProcedure> without a MergeId has no place in that procedure and
+    ETS ignores it, which is why the parameters were once never written.
 
-    Unload before Load matters: the load state machine only accepts a segment
-    allocation from the Unloaded state, so skipping it leaves a device that was
-    already commissioned refusing the second download.
+    Two pieces, at the points the master data provides for them:
+
+      MergeId 2, right after "Load 4": allocate the Application Program's
+        relative segment. Mode 0 is the plain data segment; Fill 0 zeroes what
+        the write does not cover.
+      MergeId 4, before the tables are written: write the parameter image into
+        that segment, verified by read-back.
+
+    Unload, load and load-completed of the Application Program are already in
+    the master procedure. A product without parameters adds nothing, and the
+    element is left out.
     """
-    ET.SubElement(load_proc, 'LdCtrlConnect')
+    if param_bytes <= 0:
+        return
+    if mask_version not in _MASKS_WITH_KNOWN_MERGE_POINTS:
+        raise SystemExit(
+            f'mask version {mask_version:04X}h: the merge points of its ETS load '
+            'procedure are not known to this exporter, so the parameter segment '
+            'cannot be placed in the download. Supported: '
+            + ', '.join(f'{m:04X}h' for m in _MASKS_WITH_KNOWN_MERGE_POINTS) + '.')
 
-    # Drive the Application Program object to Unloaded, then back through
-    # Loading to Loaded around the memory write.
-    unload = ET.SubElement(load_proc, 'LdCtrlUnload')
-    unload.set('LsmIdx', str(_LSM_APPLICATION_PROGRAM))
+    load_procs = ET.SubElement(static, 'LoadProcedures')
 
-    if param_bytes > 0:
-        # Allocate the relative code segment the parameters live in, then write
-        # it. Mode 0 = the plain data segment; Fill 0 = zero the remainder, so a
-        # shortened parameter block cannot leave stale bytes from a previous
-        # download behind.
-        segment = ET.SubElement(load_proc, 'LdCtrlRelSegment')
-        segment.set('LsmIdx', str(_LSM_APPLICATION_PROGRAM))
-        segment.set('Size', str(param_bytes))
-        segment.set('Mode', '0')
-        segment.set('Fill', '0')
+    allocate = ET.SubElement(load_procs, 'LoadProcedure')
+    allocate.set('MergeId', str(_MERGE_ALLOCATE_SEGMENT))
+    segment = ET.SubElement(allocate, 'LdCtrlRelSegment')
+    segment.set('LsmIdx', str(_LSM_APPLICATION_PROGRAM))
+    segment.set('Size', str(param_bytes))
+    segment.set('Mode', '0')
+    segment.set('Fill', '0')
 
-        write = ET.SubElement(load_proc, 'LdCtrlWriteRelMem')
-        write.set('ObjIdx', str(_LSM_APPLICATION_PROGRAM))
-        write.set('Offset', '0')
-        write.set('Size', str(param_bytes))
-        # Verify: the device answers A_Memory_Write with a read-back, so asking
-        # ETS to check it costs nothing and catches a truncated download.
-        write.set('Verify', '1')
+    write_proc = ET.SubElement(load_procs, 'LoadProcedure')
+    write_proc.set('MergeId', str(_MERGE_WRITE_SEGMENT))
+    write = ET.SubElement(write_proc, 'LdCtrlWriteRelMem')
+    write.set('ObjIdx', str(_LSM_APPLICATION_PROGRAM))
+    write.set('Offset', '0')
+    write.set('Size', str(param_bytes))
+    write.set('Verify', 'true')
 
-    completed = ET.SubElement(load_proc, 'LdCtrlLoadCompleted')
-    completed.set('LsmIdx', str(_LSM_APPLICATION_PROGRAM))
-
-    ET.SubElement(load_proc, 'LdCtrlDisconnect')
 
 def _dpt_id(dpt_main: int, dpt_sub) -> str:
     """Return the KNX-canonical datapoint-type reference.
@@ -693,16 +704,11 @@ def export_product_json_to_knxprod(json_obj) -> str:
     app.set('ProgramType', 'ApplicationProgram')
     app.set('MaskVersion', mask_version_id)
     app.set('Name', identity.get('productDisplayName', app_ref))
-    # MergedProcedure, not DefaultProcedure: with "DefaultProcedure" ETS
-    # synthesizes the whole download from the mask version and IGNORES the
-    # product's <LoadProcedures>. That is exactly what was observed — ETS ran
-    # its built-in table download (0x4000/0x4400/0x5000) but never executed our
-    # LdCtrlRelSegment/LdCtrlWriteRelMem for the Application Program object, so
-    # parameters were never sent and the device kept firmware defaults.
-    # "Merged" keeps ETS's default handling for the tables and additionally runs
-    # the product steps below, which only describe the parameter segment.
-    # ("ProductProcedure" would replace the default entirely and would then have
-    # to describe the table download too, which these steps do not.)
+    # MergedProcedure: ETS runs the mask version's own load procedure (the
+    # tables, the load states, the restart) and merges in the product's steps
+    # for the parameter segment at the merge points (_emit_load_procedures).
+    # DefaultProcedure would ignore those steps; ProductProcedure would have
+    # to describe the whole download.
     app.set('LoadProcedureStyle', 'MergedProcedure')
     app.set('PeiType', '0')
     app.set('DefaultLanguage', 'en-US')
@@ -862,13 +868,8 @@ def export_product_json_to_knxprod(json_obj) -> str:
                 'address. Regenerate the JSON with the current product exporter.')
         ET.SubElement(static, element_name).set('MaxEntries', str(int(max_entries)))
 
-    # Kaenx publish check requires a non-empty load procedure for masks
-    # that are not marked as ProcedureTypes.Default. LoadProcedures comes last
-    # in the Static sequence, and each LdCtrl* step is wrapped in a
-    # LoadProcedure element.
-    load_procs = ET.SubElement(static, 'LoadProcedures')
-    load_proc = ET.SubElement(load_procs, 'LoadProcedure')
-    _emit_load_procedure(load_proc, param_bytes)
+    # LoadProcedures comes last in the Static sequence.
+    _emit_load_procedures(static, mask_version, param_bytes)
 
     # Data Secure is loaded through the extended memory services: ETS writes the
     # Security interface object key tables with A_MemoryExtended_Write, which the

@@ -286,32 +286,42 @@ change to that id renames the whole tree with it.
 
 ## The load procedure
 
-The exporter emits the standard System B application download:
+The application program is `LoadProcedureStyle="MergedProcedure"`. ETS runs the
+load procedure of the mask version from its own master data, and the product
+adds only what the master data cannot know: the parameter segment.
+
+The master procedures of MV-07B0 (TP1) and MV-57B0 (IP) contain numbered merge
+points (`LdCtrlMerge`). Every procedure that loads the Application Program
+("all", "par", "par,grp") runs `Unload 4`, then `Load 4` followed by merge
+point 2, and later merge point 4 just before the tables are written. ETS
+inserts each product `LoadProcedure` at the merge point with the same
+`MergeId`:
 
 ```xml
-<LoadProcedure>
-  <LdCtrlConnect/>
-  <LdCtrlUnload LsmIdx="4"/>
-  <LdCtrlRelSegment LsmIdx="4" Size="34" Mode="0" Fill="0"/>
-  <LdCtrlWriteRelMem ObjIdx="4" Offset="0" Size="34" Verify="1"/>
-  <LdCtrlLoadCompleted LsmIdx="4"/>
-  <LdCtrlDisconnect/>
-</LoadProcedure>
+<LoadProcedures>
+  <LoadProcedure MergeId="2">
+    <LdCtrlRelSegment LsmIdx="4" Size="34" Mode="0" Fill="0"/>
+  </LoadProcedure>
+  <LoadProcedure MergeId="4">
+    <LdCtrlWriteRelMem ObjIdx="4" Offset="0" Size="34" Verify="true"/>
+  </LoadProcedure>
+</LoadProcedures>
 ```
+
+A `LoadProcedure` without a `MergeId` has no place in a merged procedure: ETS
+skips it, downloads the tables and completes the load, and the parameters
+never reach the device.
 
 `LsmIdx=4` is the Application Program interface object as this stack registers
 them (0 Device, 1 Address Table, 2 Association Table, 3 Group Object Table,
 4 Application Program). **If that registration order changes, this index must
-change with it.**
+change with it.** `Size` is the exact parameter image the device decodes, and
+`Verify="true"` uses the read-back the device already sends in response to
+`A_Memory_Write`.
 
-The `Unload` step is not decoration: the load state machine only accepts a
-segment allocation from the Unloaded state, so without it a second download of
-an already-commissioned device fails. `Size` is the exact parameter image the
-device decodes, and `Verify="1"` uses the read-back the device already sends in
-response to `A_Memory_Write`.
-
-A product with no serialisable parameters omits the allocate and write steps
-rather than allocating a zero-length segment.
+The exporter refuses another mask version: its merge points may be numbered
+differently. A product with no serialisable parameters has no
+`LoadProcedures` at all; the master procedure covers the rest of the download.
 
 ## Current limitations
 

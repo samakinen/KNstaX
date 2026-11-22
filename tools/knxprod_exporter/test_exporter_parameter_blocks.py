@@ -283,17 +283,33 @@ def test_group_objects_are_not_nested_under_a_channel():
     assert top.findall('k:ComObjectRefRef', NS), 'group objects must sit at the top level'
 
 
-def test_load_procedure_drives_the_load_state_machine():
-    # Unload before allocation matters: the load state machine only accepts a
-    # segment allocation from Unloaded, so without it a second download of an
-    # already-commissioned device fails.
+def test_the_parameter_segment_is_merged_into_the_mask_procedure():
+    # MergedProcedure: ETS inserts each product LoadProcedure at the master
+    # data's LdCtrlMerge step with the same id. MergeId 2 follows "Load 4",
+    # MergeId 4 precedes the table writes. A LoadProcedure without a MergeId
+    # is never run, and the parameters are never written.
     root = _root([_device_block()])
-    procedure = _find(root, 'LoadProcedure')[0]
-    steps = [child.tag.rsplit('}', 1)[-1] for child in procedure]
-    assert steps == ['LdCtrlConnect', 'LdCtrlUnload', 'LdCtrlRelSegment',
-                     'LdCtrlWriteRelMem', 'LdCtrlLoadCompleted', 'LdCtrlDisconnect'], steps
-    assert _find(root, 'LdCtrlWriteRelMem')[0].get('Verify') == '1', \
-        'the device answers writes with a read-back; use it'
+    app = _find(root, 'ApplicationProgram')[0]
+    assert app.get('LoadProcedureStyle') == 'MergedProcedure'
+    procedures = {p.get('MergeId'): [c.tag.rsplit('}', 1)[-1] for c in p]
+                  for p in _find(root, 'LoadProcedure')}
+    assert procedures == {'2': ['LdCtrlRelSegment'], '4': ['LdCtrlWriteRelMem']}, procedures
+    segment = _find(root, 'LdCtrlRelSegment')[0]
+    assert (segment.get('LsmIdx'), segment.get('Mode'), segment.get('Fill')) == ('4', '0', '0')
+    write = _find(root, 'LdCtrlWriteRelMem')[0]
+    assert (write.get('ObjIdx'), write.get('Offset')) == ('4', '0')
+    assert write.get('Verify') == 'true', 'the device answers writes with a read-back; use it'
+
+
+def test_a_mask_with_unknown_merge_points_is_refused():
+    document = _doc([_device_block()])
+    document['identity']['medium']['maskVersion'] = 0x0705
+    try:
+        export_product_json_to_knxprod(document)
+    except SystemExit as error:
+        assert '0705h' in str(error), error
+    else:
+        raise AssertionError('a mask without known merge points must not export')
 
 
 def test_a_product_without_parameters_has_no_segment_and_no_memory_steps():
@@ -304,8 +320,8 @@ def test_a_product_without_parameters_has_no_segment_and_no_memory_steps():
     root = ET.fromstring(export_product_json_to_knxprod(document))
     assert not _find(root, 'Code') and not _find(root, 'RelativeSegment')
     assert not _find(root, 'Parameter') and not _find(root, 'ParameterBlock')
-    steps = [child.tag.rsplit('}', 1)[-1] for child in _find(root, 'LoadProcedure')[0]]
-    assert steps == ['LdCtrlConnect', 'LdCtrlUnload', 'LdCtrlLoadCompleted', 'LdCtrlDisconnect'], steps
+    # The mask's own procedure loads the tables; the product adds nothing.
+    assert not _find(root, 'LoadProcedures')
 
 
 def main():
