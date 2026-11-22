@@ -507,11 +507,58 @@ void InterfaceObjectManager::erasePersistenceBank(uint8_t bank) {
     }
 }
 
+bool InterfaceObjectManager::keptAcrossErase(uint16_t keyId) {
+    if (keyId >= kProductKeyIdFirst && keyId <= kProductKeyIdLast) {
+        return true;
+    }
+#if KNX_SECURE_ENABLED
+    if (keyId == kSendingSequenceCeilingKeyId) {
+        return true;
+    }
+#endif
+    return false;
+}
+
 void InterfaceObjectManager::eraseAllPersistence(const char* reason) {
+    // Read what is kept, erase everything, write it back. This runs only at
+    // start-up, before the heap is locked, and only when the stored layout
+    // is unknown or older. A power loss between the erase and the write-back
+    // loses the kept records; the schema version is written after this, so
+    // the next start finds no version and comes here again, with less to keep.
+    struct KeptRecord {
+        uint16_t keyId;
+        std::vector<uint8_t> data;
+    };
+    std::vector<KeptRecord> kept;
+    const auto keep = [&](uint16_t keyId) {
+        std::vector<uint8_t> data;
+        if (_persistence->loadById(keyId, data).isOk()) {
+            kept.push_back(KeptRecord{keyId, std::move(data)});
+        }
+    };
+    for (uint32_t keyId = kProductKeyIdFirst; keyId <= kProductKeyIdLast; ++keyId) {
+        if (const auto exists = _persistence->existsById(static_cast<uint16_t>(keyId));
+            exists.isOk() && exists.value()) {
+            keep(static_cast<uint16_t>(keyId));
+        }
+    }
+#if KNX_SECURE_ENABLED
+    keep(kSendingSequenceCeilingKeyId);
+#endif
+
     const auto erased = _persistence->eraseAll();
     if (erased.isError()) {
         KNX_LOGE(TAG, "Discarding persisted state (%s) failed: %s", reason,
                  util::errorCodeToString(erased.error()));
+    }
+    for (const auto& record : kept) {
+        if (const auto saved = _persistence->saveById(record.keyId, record.data); saved.isError()) {
+            KNX_LOGE(TAG, "Record 0x%04X lost while discarding persisted state: %s",
+                     static_cast<unsigned>(record.keyId), util::errorCodeToString(saved.error()));
+        }
+    }
+    if (!kept.empty()) {
+        KNX_LOGI(TAG, "Kept %zu record(s) across the discard", kept.size());
     }
 }
 

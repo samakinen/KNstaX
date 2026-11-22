@@ -156,8 +156,56 @@ void test_first_boot_records_the_version_without_complaining(void) {
     TEST_ASSERT_EQUAL(5u, storedSchemaVersion());
 }
 
+void test_product_records_and_the_sending_ceiling_outlive_a_discard(void) {
+    // A product's own records (a generated Factory Tool Key, say) are not the
+    // stack's state and carry no layout of the stack's; and the Data Secure
+    // sending ceiling must outlive any discard, or the device would send
+    // sequence numbers again that it has already used under the same key.
+    // Neither the unversioned discard of a first boot nor a schema change
+    // may take them.
+    const std::array<uint8_t, 3> productRecord{0x11, 0x22, 0x33};
+    const std::array<uint8_t, 6> ceiling{0x00, 0x00, 0x00, 0x01, 0x00, 0x00};
+    {
+        auto persistence = createPersistence();
+        TEST_ASSERT_TRUE(persistence->init(kNamespace));
+        TEST_ASSERT_EQUAL(util::ErrorCode::Success,
+                          persistence->saveById(InterfaceObjectManager::kProductKeyIdFirst + 1u,
+                                                productRecord).error());
+#if KNX_SECURE_ENABLED
+        TEST_ASSERT_EQUAL(util::ErrorCode::Success,
+                          persistence->saveById(InterfaceObjectManager::kSendingSequenceCeilingKeyId,
+                                                ceiling).error());
+#endif
+        persistence->close();
+    }
+
+    {
+        InterfaceObjectManager manager;  // no version stored: the first-boot discard
+        TEST_ASSERT_TRUE(manager.init(true, kNamespace, 3).isOk());
+    }
+    bootAndPersist(3, 0x01);
+    TEST_ASSERT_EQUAL(0u, bootAndLoad(4));  // a schema change
+
+    auto check = createPersistence();
+    TEST_ASSERT_TRUE(check->init(kNamespace));
+    std::vector<uint8_t> data;
+    TEST_ASSERT_EQUAL(util::ErrorCode::Success,
+                      check->loadById(InterfaceObjectManager::kProductKeyIdFirst + 1u, data).error());
+    TEST_ASSERT_EQUAL_MEMORY(productRecord.data(), data.data(), productRecord.size());
+#if KNX_SECURE_ENABLED
+    data.clear();
+    TEST_ASSERT_EQUAL(util::ErrorCode::Success,
+                      check->loadById(InterfaceObjectManager::kSendingSequenceCeilingKeyId, data).error());
+    TEST_ASSERT_EQUAL_MEMORY(ceiling.data(), data.data(), ceiling.size());
+#else
+    (void)ceiling;
+#endif
+    check->close();
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(test_product_records_and_the_sending_ceiling_outlive_a_discard);
     RUN_TEST(test_state_survives_a_reboot_on_the_same_schema);
     RUN_TEST(test_state_is_discarded_when_the_schema_changes);
     RUN_TEST(test_downgrade_also_discards);

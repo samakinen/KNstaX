@@ -162,8 +162,10 @@ public:
     /// same store (an actuator's output states written at a bus power
     /// failure, say). Object type 0x7F is not assigned and bit 15 is clear,
     /// so no property key, banked or not, falls in the range. The stack
-    /// leaves them alone, except that a schema version change (see
-    /// kPersistenceSchemaVersionKeyId) erases the whole store.
+    /// leaves them alone, also when a schema version change (see
+    /// kPersistenceSchemaVersionKeyId) discards its own state: a record a
+    /// device must keep for its lifetime, such as a generated Factory Tool
+    /// Key, can live here.
     static constexpr uint16_t kProductKeyIdFirst = 0x7F00u;
     static constexpr uint16_t kProductKeyIdLast = 0x7FFFu;
 
@@ -234,9 +236,15 @@ private:
     /// the next save overwrites or erases every key of the bank again.
     void erasePersistenceBank(uint8_t bank);
 
-    /// Erase the whole namespace; a failure is logged, since stored state of
-    /// another layout then survives.
+    /// Discard the stack's persisted state: erase the namespace, then write
+    /// back what outlives a layout change (keptAcrossErase()). A failure is
+    /// logged, since stored state of another layout then survives.
     void eraseAllPersistence(const char* reason);
+
+    /// True for the records a discard keeps: the product's own range, and the
+    /// Data Secure sending ceiling, without which the device would send
+    /// sequence numbers again that it has already used under the same key.
+    static bool keptAcrossErase(uint16_t keyId);
 
 public:
     
