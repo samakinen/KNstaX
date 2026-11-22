@@ -361,6 +361,7 @@ menu "KNX Stack Configuration"
             bool "Enable KNX Secure"
             default n
             select KNX_ENABLE_PROPERTY_EXT
+            select KNX_ENABLE_MEMORY_EXT
             select KNX_ENABLE_FUNCTION_PROPERTIES
             help
                 Enable KNX Data Security and/or System-B Secure: the Security
@@ -368,7 +369,12 @@ menu "KNX Stack Configuration"
                 and the crypto they use. Data Secure is configured with the
                 extended property services and function properties (ETS sets the
                 Security Mode with them), so this selects KNX_ENABLE_PROPERTY_EXT
-                and KNX_ENABLE_FUNCTION_PROPERTIES.
+                and KNX_ENABLE_FUNCTION_PROPERTIES. It also selects
+                KNX_ENABLE_MEMORY_EXT: the product file of a Secure device declares
+                SupportsExtendedMemoryServices (Profiles 9.1.2.3.1 makes both
+                extended services mandatory), so ETS loads its memory with
+                A_MemoryExtended_Write, and a device without the services ignores
+                the writes and fails the download with "Device does not respond".
 
                 With it off the Security Interface Object is not compiled, not
                 registered and not exposed: ETS finds no object 17.

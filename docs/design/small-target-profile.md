@@ -111,9 +111,9 @@ gate decides the final `tp1-small` values.
 | `KNX_MEDIUM_TP1`, `KNX_MEDIUM_IP` | Media (exists) | TP1 | TP1 | both |
 | `KNX_TP1_BITBANG`, `KNX_TP1_TPUART` | TP1 backend (choice; TP-UART is K3) | TP-UART | TP-UART | bit-bang |
 | `KNX_ENABLE_COUPLER` | The whole router role: Router object, filter and routing tables, coupler routing, two-port coupler, `CouplerOptions`, the layer-2 group acknowledge hook. Depends on function properties. | n | n | y |
-| `KNX_ENABLE_SECURITY` | Data Secure and the Security Interface Object (object 17, absent when off). Selects `KNX_ENABLE_PROPERTY_EXT` and `KNX_ENABLE_FUNCTION_PROPERTIES`. | n | n until the Security Interface Object has fixed capacities (data-secure-small-target.md D3–D5); the AES (K6) is in, as the software backend | y |
+| `KNX_ENABLE_SECURITY` | Data Secure and the Security Interface Object (object 17, absent when off). Selects `KNX_ENABLE_PROPERTY_EXT`, `KNX_ENABLE_MEMORY_EXT` and `KNX_ENABLE_FUNCTION_PROPERTIES`. | n | n until the Security Interface Object has fixed capacities (data-secure-small-target.md D3–D5); the AES (K6) is in, as the software backend | y |
 | `KNX_ENABLE_GO_DIAGNOSTICS` | Group object diagnostics function property (PID 66 of the group object table; not advertised when off). Depends on function properties. | n | y | y |
-| `KNX_ENABLE_MEMORY_EXT` | `A_MemoryExtended_*` services | n | y | y |
+| `KNX_ENABLE_MEMORY_EXT` | `A_MemoryExtended_*` services (needed with Secure: ETS loads a Secure device with them) | n | y | y |
 | `KNX_ENABLE_PROPERTY_EXT` | `A_PropertyExt*` services (needed with Secure) | n | y | y |
 | `KNX_ENABLE_NETWORK_PARAMETER` | `A_NetworkParameter_*` | n | y | y |
 | `KNX_ENABLE_FUNCTION_PROPERTIES` | Function property services; GO diagnostics and the router need them | y | y | y |
@@ -606,7 +606,7 @@ reasoned about.
 | `KNX_ENABLE_MEMORY_EXT`, `KNX_ENABLE_NETWORK_PARAMETER` | The `A_MemoryExtended_*` and `A_NetworkParameter_*` handlers, response callbacks and dispatch cases. Their classes stay compiled: `memory_service.cpp` also holds `A_Memory_*`, and `network_parameter_service.cpp` also holds the serial number and domain address services that ETS needs. |
 | `KNX_DPT_*`, `KNX_ENABLE_DPT_CATALOGUE` | The codecs of each family, their `DptTraits`, the dispatch cases, the catalogue table and its strings. Character DPT 4 is in `KNX_DPT_STRING`: nothing but its own catalogue entry uses it. |
 
-Dependencies: Secure selects property-ext and function properties; the coupler and GO diagnostics depend
+Dependencies: Secure selects property-ext, memory-ext and function properties; the coupler and GO diagnostics depend
 on function properties. A profile that asks for the impossible fails in `knx_genconfig.py`.
 
 **What ETS sees when a feature is off.** No Router Object (type 6) without the coupler; no Security
