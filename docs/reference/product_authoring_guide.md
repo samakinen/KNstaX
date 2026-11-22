@@ -450,6 +450,12 @@ included: the lock covers every allocation in the image, not only the stack's.
   objects and their value pool, the persistence save buffer. A host-side table
   that grows after start (`BusAccessUnit::addGroupObject`, an ETS-driven table
   beyond what was reserved) allocates and so belongs before `lock()`.
+- With Data Secure, the key tables are fixed arrays of the `KNX_SECURITY_*`
+  capacities (Kconfig, "Security Configuration"), reserved whether ETS fills
+  them or not. Size them to the product: the `SecurityPolicy` key table sizes
+  it declares, which the `.knxprod` promises ETS, must fit them (a compile
+  error for a `constexpr` product, InvalidParameter from `start()` otherwise).
+  `KNX_SECURITY_FIRMWARE_KEYS` bounds `setGroupKey()` / `setDeviceKey()`.
 
 ## Persistence on MCUs without NVS: `FlashLog`
 

@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | **In progress**, 22 November 2026. D1 (the AES part) and D2 are done and the size gate measures the device (§9); D3–D7 and D9 are open. Figures marked "est." are estimates from the source and `sizeof` reasoning, not a size gate run. |
+| Status | **In progress**, 22 November 2026. D1 (the AES part), D2, D3–D5 and D6 are done and the size gate measures the device (§9); D7 and D9 are open, and the gate does not yet script a secure download (§7). Figures marked "est." are estimates from the source and `sizeof` reasoning, not a size gate run. |
 | Goal | Data Secure (03/03/07 §5, the Security Interface Object) on a TP1 end device with 128 KiB of flash and 20 KiB of RAM, with the heap locked after start-up. |
 | Motivating product | H8i8o (GD32F103CB + TP-UART2). Its board-side plan is in the h8i8o repository, `docs/data-secure.md`. |
 | Builds on | [cortex-m-tpuart2-support.md](cortex-m-tpuart2-support.md) §8 (K6, software AES) and [small-target-profile.md](small-target-profile.md) (profiles, capacities, `init_only`, the size gate). |
@@ -136,6 +136,17 @@ software one.
 
 ### D3. Fixed-capacity Security Interface Object storage
 
+**Done.** As below, with two more capacities: `KNX_SECURITY_ZONE_KEYS` (PID_ZONE_KEY_TABLE, stored
+for ETS and not used; 0 on a TP1 end device) and `KNX_SECURITY_UNLISTED_SENDERS` (D5). The
+capacities are in the Kconfig menu "Security Configuration", next to the other Secure settings,
+since they exist only with Secure on; the defaults are the `full` column. Each array property
+reports its capacity as its maximum number of elements, so ETS reads it from the property
+description. PID_GO_SECURITY_FLAGS is sized once by `setGroupObjectCount()`, which the BAU calls
+before the restore. The check of a product's declared sizes is `securityPolicyFitsConfiguration()`:
+a compile error for a `constexpr` product, InvalidParameter from `start()` otherwise. The
+host test `test_SecurityInterfaceObject_SecureDownloadAllocatesNothing` replaces `operator new`
+and runs two downloads of every table, the lookups and the sequence updates: no allocation.
+
 New capacities (Kconfig, menu "Capacities"), each a promise checked on write as §3.3 rule 2 asks:
 
 | Symbol | `tp1-small` | `tp1-standard` | `full` |
@@ -155,6 +166,13 @@ New capacities (Kconfig, menu "Capacities"), each a promise checked on write as 
   `.knxprod` then cannot promise ETS more than the device stores.
 
 ### D4. Look keys up in the downloaded tables
+
+**Done.** The group key lookup runs the other way round from the plan: each entry's GA_Index is
+turned into its group address through the address table (`getAddress`, an array access) and
+compared, rather than the address searched in the address table first. It is the same 32 steps
+and needs only the index-to-address direction, which the address table has in O(1). The resolver
+is a function pointer the BAU installs (`setGroupAddressResolver`). The last entry for an address
+wins, as the map did. `DeviceModel::applySecurityKeyTables()` only logs what is in force now.
 
 Remove the resolved `KeyMap`s.
 
@@ -179,7 +197,26 @@ Behaviour for a sender that is not in the table: today it gets a map node and is
 check against 03/03/07 before building: whether such a sender's telegram must be rejected, or
 tracked in a small fixed set of transient slots.
 
+**Done, with the transient slots.** A listed partner's number is read and written in its table
+entry. A sender without an entry takes one of `KNX_SECURITY_UNLISTED_SENDERS` slots (the same
+8-octet format, not persisted, as the map was not); when all are taken, a secured telegram from
+one more such sender is rejected before decryption and logged as InvalidSender, and nothing is
+evicted, because an evicted sender could replay. Rejecting every unlisted sender, which a strict
+reading of §6.3.8.4 suggests, is left out: a device on firmware keys has no table at all, and
+whether ETS lists every group sender has not been checked on a bus.
+
+The slots also do what the live map did across a download: when ETS empties the table
+(StartLoading, or a resize to one element) or overwrites an entry, each number above 0 moves to a
+slot, and an entry written again for that sender takes the higher of the two numbers. A download
+therefore never rolls a partner's replay window back. That needs as many slots as there are
+partners with a number; with fewer, the rest are dropped with a log line.
+
+Only a change to a table entry marks the checkpoint dirty; an unlisted slot has nothing to save.
+
 ### D6. Persistence without the +1 KiB scratch
+
+**Done:** the scratch went with memory-reductions.md P3, and the tables are now saved from their
+own storage (`tableData()`), with no copy.
 
 With D3 the tables are fixed arrays already in their wire format. Persist them from that storage
 (a record header and a span; `FlashLog` writes in pieces already) rather than copying them into
@@ -254,7 +291,7 @@ what proves §3.3 closed. Without it, a device with Secure on has never run with
 
 ## 9. Status and measurements
 
-Steps 1 and 2 of §8 are done, step 2 with a narrower traffic script than §7 asks for.
+Steps 1 to 3 of §8 are done, step 2 with a narrower traffic script than §7 asks for.
 
 **Size gate variant.** `test/baremetal/size_gate/variants/secure.defconfig` over `tp1-small`:
 Secure on, `KNX_AES_BACKEND_SOFTWARE`, the extended property services, `KNX_MAX_APDU_LENGTH=55`.
@@ -282,3 +319,21 @@ one-off run with only `KNX_MAX_APDU_LENGTH=55`, to separate the two):
 - The H8i8o device check (the `tp1-small` M3 budget's `device` section) is not applied to this
   variant, because it fails: flash 133 510 of 131 072 B with the application (12 KiB), BSP (4 KiB)
   and persistence (8 KiB) reservations, **2 438 B over**. RAM fits: 15 422 of 20 480 B.
+
+**After D3–D5.** The variant sets the capacities of §4's reference: 32 group keys, 2 P2P keys, 8
+Security Individual Address Table entries, 8 unlisted senders, no firmware or zone keys.
+
+| | Flash | RAM: static + heap |
+|---|---:|---:|
+| `tp1-small` + Data Secure, before D3–D5 | 105 814 B | 9 374 B (key tables empty) |
+| `tp1-small` + Data Secure, after D3–D5 | 104 531 B (−1 283) | 10 074 B (+700) |
+
+- Flash went down by the red-black tree code and the resolution pass.
+- RAM went up because the tables are now reserved at their capacity (about 750 B at these sizes)
+  instead of being empty until a download. Before, a device with these tables filled needed about
+  2.4 KiB more (§4: the raw tables plus the resolved maps); now the figure is the same before and
+  after a download, and the device cannot run out of heap in the middle of one.
+- No allocation after `heap::lock()` in the gate's (plain) traffic, and none in the host test of
+  D3 for the secure download itself.
+- The H8i8o flash check would now fail by about 1.2 KiB (132 227 of 131 072 B); the H8i8o's own
+  image is what counts there (its `docs/data-secure.md`).
