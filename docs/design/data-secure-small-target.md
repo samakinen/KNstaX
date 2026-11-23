@@ -350,3 +350,17 @@ Security Individual Address Table entries, 8 unlisted senders, no firmware or zo
   D3 for the secure download itself.
 - The H8i8o flash check would now fail by about 1.2 KiB (132 227 of 131 072 B); the H8i8o's own
   image is what counts there (its `docs/data-secure.md`).
+
+**What ETS6 needs.** A download and a secured group write from ETS6 showed two services that Data
+Secure cannot do without, and `KNX_ENABLE_SECURITY` now selects both: the extended memory services
+(ETS loads a Secure device with `A_MemoryExtended_Write`) and the group object diagnostics (ETS
+sends a secured group write through the device when its interface cannot secure it). The gate no
+longer forbids `handleGroupObjectDiagnostics` in this variant.
+
+| | Flash | RAM: static + heap |
+|---|---:|---:|
+| `tp1-small` + Data Secure, with D9 | 105 021 B | 10 078 B |
+| + the extended memory services | 105 789 B (+768) | 10 078 B |
+| + the group object diagnostics | 107 183 B (+1 394) | 10 078 B |
+
+- The H8i8o flash check, scaled by the same growth, would fail by about 3.7 KiB.
