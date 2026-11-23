@@ -981,16 +981,18 @@ else()
             knx_add_test(test_data_secure_virtual_tp1 SOURCES test/integration/test_data_secure_virtual_tp1.cpp
                 LABELS tp1 virtual integration secure TIMEOUT 30)
         endif()
-        # Connection-oriented ETS session
+        # Connection-oriented ETS session. The binary pumps the device in wall-clock
+        # slices and runs for about 30 s on any machine, so the limit leaves room
+        # for a sanitizer build on a loaded runner.
         knx_add_test(test_ets_connected_session NEEDS SECURITY SOURCES test/integration/test_ets_connected_session.cpp
-            ARGS session TIMEOUT 30 LABELS integration)
+            ARGS session TIMEOUT 120 LABELS integration)
         # The same binary, A_Key_Write / A_Authorize group
         knx_add_test(test_ets_connected_session_keys NEEDS SECURITY COMMAND $<TARGET_FILE:test_ets_connected_session>
-            ARGS keys TIMEOUT 30 LABELS integration)
+            ARGS keys TIMEOUT 120 LABELS integration)
         if(KNX_FEATURE_NETIP)
             # The same binary, PID_ROUTING_MULTICAST_ADDRESS group
             knx_add_test(test_ets_connected_session_routing NEEDS SECURITY COMMAND $<TARGET_FILE:test_ets_connected_session>
-                ARGS routing TIMEOUT 30 LABELS integration)
+                ARGS routing TIMEOUT 120 LABELS integration)
         endif()
         # Started product runtime
         knx_add_test(test_product_runtime NEEDS DPT_FLOAT SOURCES test/integration/test_product_runtime.cpp LABELS integration)
@@ -1000,7 +1002,7 @@ else()
             LABELS integration)
         # The same binary, the table-segment capacity group (runs at every capacity)
         knx_add_test(test_ets_connected_session_capacity NEEDS SECURITY COMMAND $<TARGET_FILE:test_ets_connected_session>
-            ARGS capacity TIMEOUT 30 LABELS integration)
+            ARGS capacity TIMEOUT 120 LABELS integration)
         # Tests that need more than the tp1-small capacities (a 15-octet APDU, 4 receive
         # frames, no additional individual addresses) carry needs-full-capacity;
         # the host-small run excludes them: ctest -LE needs-full-capacity.
