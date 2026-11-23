@@ -148,13 +148,15 @@ def test_secure_needs_extended_property_services():
         assert 'KNX_ENABLE_PROPERTY_EXT' in err or 'KNX_ENABLE_SECURITY' in err, err
 
 
-def test_secure_needs_extended_memory_services():
+def test_secure_needs_extended_memory_services_and_go_diagnostics():
     # The product file of a Secure device declares SupportsExtendedMemoryServices, so ETS writes its
     # memory with A_MemoryExtended_Write: Secure selects KNX_ENABLE_MEMORY_EXT even where the profile
     # (tp1-small) leaves it out.
     rc, err, out = _run([PROFILES / 'tp1-small.defconfig', _fragment('CONFIG_KNX_ENABLE_SECURITY=y\n')])
     assert rc == 0, err
     assert '#define CONFIG_KNX_ENABLE_MEMORY_EXT 1' in _header(out)
+    # ETS6 writes a secured group address through the device's group object diagnostics.
+    assert '#define CONFIG_KNX_ENABLE_GO_DIAGNOSTICS 1' in _header(out)
 
 
 def test_group_object_diagnostics_need_function_properties():

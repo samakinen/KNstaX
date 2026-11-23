@@ -363,6 +363,7 @@ menu "KNX Stack Configuration"
             select KNX_ENABLE_PROPERTY_EXT
             select KNX_ENABLE_MEMORY_EXT
             select KNX_ENABLE_FUNCTION_PROPERTIES
+            select KNX_ENABLE_GO_DIAGNOSTICS
             help
                 Enable KNX Data Security and/or System-B Secure: the Security
                 Interface Object (object type 17), the secure application layer
@@ -375,6 +376,11 @@ menu "KNX Stack Configuration"
                 extended services mandatory), so ETS loads its memory with
                 A_MemoryExtended_Write, and a device without the services ignores
                 the writes and fails the download with "Device does not respond".
+                And it selects KNX_ENABLE_GO_DIAGNOSTICS: to write or read a secured
+                group address from its Group Monitor through an interface that
+                cannot secure telegrams itself, ETS6 asks the device to send them on
+                its behalf with the group object diagnostics, and fails the write
+                when the device does not have them.
 
                 With it off the Security Interface Object is not compiled, not
                 registered and not exposed: ETS finds no object 17.
