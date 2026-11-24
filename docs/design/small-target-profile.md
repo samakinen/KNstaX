@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | **Proposed**, 16 November 2026. Work items C1 and C2 (§9) are implemented, see "C1 status" and "C2 status"; nothing else here is. |
+| Status | **Implemented** (design record; the per-item status sections below are its history). C1–C4 (Kconfig for standalone builds, capacities, feature gates, the size gate in CI), S1–S4 (table-driven runtime, compact group objects, property storage, `init_only` allocation policy) and P1 (the reference STM32F1/GD32F1 port, run on hardware with ETS6) are done; see §9. Current figures: README.md, "Footprint and capacity" |
 | Goal | KNstaX runs as a TP1 end device on a Cortex-M with **128 KiB of flash and 20 KiB of RAM**, and every other target chooses, at build time, the features and capacities it needs. |
 | Motivating product | H8i8o (GD32F103CB + TP-UART2), the only STM32-class TP-UART board available for testing. Its design is in the h8i8o repository, `docs/design/`. |
 | Builds on | [cortex-m-tpuart2-support.md](cortex-m-tpuart2-support.md): K1 (bare-metal build, done), K7 (compact profile, which this document replaces and extends), and the M1 measurement in its §9.1. |

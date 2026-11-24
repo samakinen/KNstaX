@@ -8,8 +8,8 @@ a device's life. For a board that has never worked at all, start with
 
 **"No device found in programming mode"**
 
-1. Is programming mode actually on? `app.lifecycleState()` returns
-   `Commissioning`, or `bau.programmingModeEnabled()` is true. The lifecycle
+1. Is programming mode actually on? `app->lifecycleState()` returns
+   `Commissioning`, or `bau.management().commissioningModeEnabled()` is true. The lifecycle
    callback firing with `Commissioning` is the definitive check — a blinking
    LED driven by your own code is not.
 2. Is exactly *one* device in programming mode? `A_IndividualAddress_Read` is a
@@ -21,7 +21,9 @@ a device's life. For a board that has never worked at all, start with
 **Alternative that avoids the button entirely:** this stack implements
 `A_IndividualAddressSerialNumber_Read/_Write`, so a management client that knows
 the device's 6-octet serial number can address it directly without programming
-mode. The serial number is derived from the MAC and logged at boot.
+mode. On ESP-IDF the serial number is derived from the MAC and logged at boot;
+on bare metal the port supplies it (`CooperativeHooks::serialNumber`, the MCU's
+unique ID in the GD32F1 port).
 
 ## Download fails partway through
 
@@ -31,9 +33,13 @@ The most common cause is a transport-layer retransmission problem rather than
 anything application-level. Check, in order:
 
 1. **DL-ACK timing.** If the device answers the data-link ACK outside the t_ack
-   window, ETS sees an unacknowledged frame and gives up. Check the bitbang
-   ACK-window miss counter. This is a `SAMPLE_OFFSET_US` / interrupt-latency
-   issue, not a protocol one.
+   window, the sender repeats the frame and eventually gives up. On the
+   bit-bang backend this is an interrupt-latency issue: measure it with
+   `CONFIG_KNX_TP1_BITBANG_TIMING_STATS` and compensate with
+   `CONFIG_KNX_TP1_BITBANG_REACTION_LATENCY_US` (see the
+   [bring-up guide](board_bringup_guide.md), Step 5). On a TP-UART2 the
+   acknowledge decision has to reach the chip within about 1.7 ms of the last
+   octet: keep the UART interrupt at high priority.
 2. **Repeated frames.** A repeated connected request that the data link drops
    instead of passing up means the transport layer never retransmits, and ETS
    waits out its timeout. Look for a rising repeat count with no corresponding
@@ -123,9 +129,14 @@ Security Interface Object is registered.
 
 **Secure telegrams rejected**
 
-1. Sequence number out of the replay window. After a device restart without
-   persisted sequence numbers, the peer's counter is ahead. The receiving
-   sequence number must be restored from NVS across a reboot.
+1. Sequence number not accepted. A receiver refuses a sequence number at or
+   below the last one it accepted from that sender. KNstaX stores a ceiling
+   `CONFIG_KNX_SECURE_SEQ_RESERVE` numbers ahead of its sending number before
+   using it, so it does not reuse numbers after a restart or power loss; check
+   that persistence works (NVS on ESP-IDF, the flash log on bare metal). If a
+   partner is refused with `InvalidSender`, it is not in the Security
+   Individual Address Table and the `CONFIG_KNX_SECURITY_UNLISTED_SENDERS`
+   slots are full.
 2. Wrong key. ETS opens the first secure session with the Factory Tool Key the
    product supplies (`SecureCommissioningOptions::factoryToolKey`), so the device
    certificate entered in ETS must be the one made from that key and the

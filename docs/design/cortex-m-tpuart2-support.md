@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | **Accepted** 15 November 2026, including the compact profile (K7) as KNstaX scope even though it changes core structures such as group object storage. The first target runs bare metal with no RTOS. **K1 is implemented** (§6.3), and so are **K2** (§4.1), **K3** (§3.8) and **K5** (§7.1), host-tested, with flash erases guarded by the TP-UART2's busy mode so the receive path can stay in flash (§7.3). **K7 is started and the size gate (M1) is missed** (§9.1). Everything else is not implemented. Per DEVELOPMENT_GUIDELINES, README.md and the conformance status must not claim more than ships with tests. |
+| Status | **Implemented** (design record; the dated sections below are its history). K1–K7 and K10 are in the tree: the bare-metal build and `CooperativePlatform`, the UART HAL, `TpUartMediumBackend`, the TP-UART2 chip simulator, `FlashLogPersistence`, the portable AES, the compact profile with its size gate (carried out as [small-target-profile.md](small-target-profile.md)), and the `SAVE` power-fail path. Validated on a GD32F103 with ETS6, Data Secure included (the H8i8o firmware). K8 (reusable channel blocks) is not implemented; K9 (exporter channels and conditional objects) is in progress. For current status prefer README.md and docs/reference/knx_conformance_status.md |
 | Motivating product | H8i8o 8DI/8DO module: GD32F103CB (Cortex-M3, 128 KiB flash, 20 KiB RAM) + Siemens TP-UART2. Its design lives in the h8i8o repository, `docs/design/`. |
 | Principle | Everything here is generic. A different board, MCU, I/O count or TP-UART-family chip should be able to use it unchanged. Board facts (pins, clocks, flash geometry) stay in the product repository. |
 

@@ -23,7 +23,8 @@ Key headers:
 | [include/knx/product/commissioned_product.hpp](include/knx/product/commissioned_product.hpp) | The device authoring surface — start here |
 | [include/knx/product/endpoint_semantics.hpp](include/knx/product/endpoint_semantics.hpp) | Named signal helpers and port modifiers |
 | [include/knx/application/dpt_catalog.inc](include/knx/application/dpt_catalog.inc) | The DPT catalogue, one line per sub-type |
-| [include/knx/physical/tp1_medium_backend.hpp](include/knx/physical/tp1_medium_backend.hpp) | TP1 backend boundary — implement this for a new transceiver |
+| [include/knx/physical/uart_hal.h](include/knx/physical/uart_hal.h) | UART HAL for the TP-UART2 backend — implement this for a new board |
+| [include/knx/physical/tp1_medium_backend.hpp](include/knx/physical/tp1_medium_backend.hpp) | TP1 backend boundary — implement this for a new transceiver family |
 | [include/knx/platform/platform.hpp](include/knx/platform/platform.hpp) | Platform abstraction — implement this for a new OS |
 
 ## Commands
@@ -81,12 +82,16 @@ a decision about a shared bus, not a local one.
 
 ## Kconfig
 
-Medium and TP1 backend are compile-time choices:
+Medium and TP1 backend are compile-time choices. On ESP-IDF:
 
 ```
 KNX_MEDIUM_TP1 / KNX_MEDIUM_IP        # medium (mutually exclusive)
-KNX_TP1_BITBANG                       # TP1 backend (bit-bang is the only one)
+KNX_TP1_BITBANG                       # TP1 backend (the only one on ESP-IDF)
 ```
+
+Standalone and bare-metal builds select media with `KNX_BUILD_TP1` /
+`KNX_BUILD_NETIP` in their profile, and use the TP-UART2 backend
+(`TpUartMediumBackend` over the board's `knx_uart_hal_t`).
 
 Most-adjusted values, with defaults:
 
@@ -94,15 +99,15 @@ Most-adjusted values, with defaults:
 |---|---|---|
 | `KNX_MAX_GROUP_OBJECT_PAYLOAD_BYTES` | 16 | Costs ~2× per object; 16 covers every catalogued DPT |
 | `KNX_RX_TASK_STACK_SIZE` | 3072 | Frame reception task |
-| `KNX_ENABLE_SECURITY` | n | KNX Secure components |
+| `KNX_ENABLE_SECURITY` | n | KNX Secure; selects the extended property and memory services, function properties and group object diagnostics |
+| `KNX_ADDRESS_TABLE_ENTRIES` | 256 (`tp1-small`: 128) | Group address table capacity |
+| `KNX_ASSOCIATION_TABLE_ENTRIES` | 512 (`tp1-small`: 160) | Association table capacity |
 | `KNX_LOG_LEVEL` | 3 | Compile-time ceiling, 0=None … 5=Verbose |
 
-`KNX_MAX_GROUP_OBJECTS`, `KNX_MAX_ASSOCIATIONS` and
-`KNX_MAX_ADDRESS_TABLE_ENTRIES` appear in menuconfig but **are not read by any
-code** — they reach `config.hpp` and stop there. Real table capacity is the
-segment map in `include/knx/objects/table_segments.hpp` (256 group addresses,
-512 associations, 256 group objects), and a product's object count is fixed by
-its definition at compile time.
+The table capacities size the load segments in
+`include/knx/objects/table_segments.hpp`. The group object count is not a
+Kconfig option: a product's object count is fixed by its definition at compile
+time, up to 256.
 
 The bit-bang timing and link-health options (`KNX_TP1_BITBANG_*`) are board
 properties. Do not guess them — the

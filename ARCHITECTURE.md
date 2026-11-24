@@ -4,15 +4,13 @@
 
 KNstaX is a C++23 KNX System-7 stack with an embedded-first runtime model.
 
-Current production-focused media scope:
-- TP1
-- KNXnet/IP tunneling
-- KNXnet/IP routing
+Media:
+- TP1, over a software bit-bang backend or a TP-UART2 transceiver (validated on hardware with ETS6)
+- KNXnet/IP tunnelling and routing (implemented and host-tested; not yet validated against real ETS)
 
-Current product/runtime authoring model:
-- `DeviceDefinition` is the canonical declarative product source
-- `DeviceRuntime` is the canonical live runtime boundary
-- `RuntimeServices` is the injected environment and protocol-engine service boundary
+Product/runtime authoring model:
+- a `constexpr` `EndpointDefinition`, wrapped by `makeCommissionedProduct()`, is the one declarative product source
+- `startCommissionedProduct()` assembles the stack and returns a `CommissionedProductRuntime`, the live runtime boundary
 - exporter metadata is derived from the same definition source rather than duplicated in handwritten runtime code
 
 The commissioned product layer is table-driven. An endpoint definition compiles to one `constexpr`
@@ -23,7 +21,7 @@ tests read. `EndpointRuntime<Definition, Capacity>` is a thin shell over `Produc
 binding, transmit policy, bus-write dispatch, state providers, publish and the pending-action queue. The
 typed API (`publish<Id>(v)`, `onCommand<Id>(fn)`) is inline wrappers that pass the port's slot, and bindings
 are type-erased entries kept only for the ports that can use them. See
-`docs/design/small-target-profile.md` (6.1 and the S1 status).
+`docs/design/small-target-profile.md` (§6.1).
 
 RF is not part of the current repository architecture.
 
@@ -78,7 +76,7 @@ test double, so it is not an interface.
 service that arrived on a communication mode it is not defined for (03/03/07
 Table 1) or that the Access Policy refuses, and routes the rest: management
 services to `ManagementServer`, everything else to the group runtime.
-`ManagementServer` owns the nine management service objects, decodes their
+`ManagementServer` owns the management service objects (up to eight, depending on the enabled features), decodes their
 requests and encodes their responses; it is handed a `RequestContext` saying
 whether the request came on the transport connection and how it was secured,
 and its answers leave on that same path. `ASendPipeline` encodes APDUs and
@@ -91,10 +89,11 @@ Tp1DataLinkLayer
     ↓   (Tp1PhysicalLike)
 Tp1MacPhysical
     └─ Tp1MediumBackend
-             └─ BitBangMediumBackendAdapter
+             ├─ BitBangMediumBackendAdapter   (timer-ISR bit-bang, ESP-IDF)
+             └─ TpUartMediumBackend           (TP-UART2 over knx_uart_hal_t, standalone / bare metal)
 ```
 
-This is the only supported TP1 architecture.
+Every TP1 build uses this composition; only the medium backend differs.
 
 ## TP1 responsibilities
 
@@ -122,9 +121,9 @@ The decision to acknowledge a telegram is made by the physical layer's own match
 - **A copy.** The bit-bang ISR decides from its own copy of the group addresses. The data link layer builds it from the view into a transient array and hands it over through `setAckGroupAddresses`; the core replaces its copy under the ISR lock. No interrupt reads the table's storage.
 - **The storage itself.** The TP-UART backend keeps no copy (`setAckGroupAddressView` returns true). Its receive interrupt scans the table's storage between two loads of a generation that `AddressTableDomain` bumps around every change (`util::SharedGroupAddressState`; the data link layer does the same for a list it owns). A read during a change, or one the generation shows was overlapped by one, is discarded: that frame is not acknowledged and its sender repeats it. This does not depend on the view being republished, so a change that is published late, or not at all, cannot make the interrupt act on half-written entries.
 
-On the cooperative platform the receive filter, the stack's loop and the publication run in one context, so the swap of pointer and count is a plain store at a point where no frame is being filtered. On a platform with a separate receive task the filter has the relaxed guarantee the earlier list had: a telegram that arrives while a download changes the table is filtered by the old list, the new one or a mixture.
+On the cooperative platform the receive filter, the stack's loop and the publication run in one context, so the swap of pointer and count is a plain store at a point where no frame is being filtered. On a platform with a separate receive task the guarantee is relaxed: a telegram that arrives while a download changes the table is filtered by the old list, the new one or a mixture.
 
-Behaviour change: the layer filters and acknowledges on the table, so an address that is no longer in the table is no longer accepted. The earlier lists only grew: after an ETS Unload, or a download with fewer addresses, the device kept accepting and acknowledging the old ones until the next restart.
+The layer filters and acknowledges on the table in force, so an address removed by an ETS Unload or a smaller download is no longer accepted or acknowledged.
 
 #### The group tables and their load segments
 
@@ -134,7 +133,7 @@ ETS loads the three group tables with the SystemB procedure: Unload, StartLoadin
 - **Group address table.** The entries stay a native array, because the data link layers and the TP-UART interrupt read them (above). The segment (`AddressTableObject::loadSegment()`) is staging for a download, parsed into the entries at LoadCompleted, and the buffer a save encodes the table into (`persistenceRecord()`), so the persistence layer needs no copy of its own. While the table is Loading the segment is not touched and the record is empty, as the table is.
 - **Group object table.** Accepted and not applied (the group objects are the product's), and kept only so that ETS reads back what it wrote: `DeviceModel` holds one descriptor per group object the device registered before `init()` (256 when it registered none yet).
 
-A segment reads back what ETS wrote, before and after LoadCompleted. After a restore or a change by the firmware the association and address table segments read as the table in force (the address table's after the next save), where they used to read zeros or the last download.
+A segment reads back what ETS wrote, before and after LoadCompleted. After a restore or a change by the firmware the association and address table segments read as the table in force (the address table's after the next save).
 
 ### `Tp1PhysicalLike`
 
@@ -240,7 +239,7 @@ A target without an RTOS builds with `-DKNX_PLATFORM=baremetal` (standalone CMak
 - `platform::CooperativePlatform` (`knx/platform/cooperative_platform.hpp`): tasks are refused, locks never block, queues are fixed rings that fail instead of waiting, and a notification from an interrupt sets a flag the main loop reads.
 - `Tp1DataLinkLayer` without an RX task (`config::RX_TASK_ENABLED_DEFAULT` is false). The main loop drives it through `processRxAvailable()`, which `BusAccessStackPort::processBackgroundWork()` already calls.
 - No default `ObjectPersistence`. The product registers one with `objects::setPersistenceFactory()`, normally `objects::FlashLogPersistence` over a `FlashLog` on its internal flash (`knx/objects/flash_log.hpp`; the board implements the C `knx_flash_hal_t`). Saves only program; the main loop calls `FlashLog::service()`, which erases one page or compacts per call.
-- No system-clock fallback in `util::nowMs()` / `util::delayMs()`: time comes from the platform, which `BusAccessStackPort` now also hands to `Tp1MacPhysical`.
+- No system-clock fallback in `util::nowMs()` / `util::delayMs()`: time comes from the platform, which `BusAccessStackPort` also hands to `Tp1MacPhysical`.
 
 The bit-bang backend is not built in this mode; the product passes a `Tp1MediumBackend`, normally `TpUartMediumBackend` over its board's UART. `test/baremetal/size_gate` links a reference device in this configuration and checks it against flash and RAM budgets (`test/baremetal/size_gate/run_gate.sh`). Status of the bare-metal work and the measured sizes: `docs/design/cortex-m-tpuart2-support.md`.
 
@@ -298,10 +297,9 @@ same table ceilings and the product's APDU length. A product's `maxApduLength` m
 toolchain. `init_only` (`tp1-small`, `tp1-standard`) replaces it: the stack allocates while it starts, the
 product calls `knx::heap::lock()` when start-up is over (`knx/util/heap.hpp`), and a later allocation traps in
 a debug build and fails in a release build as an exhausted heap does. The size gate runs its traffic sequence
-with the heap locked, which is the check that the steady state allocates nothing. The `arena` policy of the
-design is not implemented. See the product authoring guide for what a product has to do.
+with the heap locked, which is the check that the steady state allocates nothing. See the product authoring guide for what a product has to do.
 
-Embedded TP1 backend selection is compile-time driven through Kconfig. `KNX_TP1_BITBANG` is the only choice today; the factory builds the canonical TP1 composition over it.
+On ESP-IDF the TP1 backend is selected in Kconfig, and `KNX_TP1_BITBANG` is the only choice there; the factory builds the TP1 composition over it. Standalone and bare-metal products construct a `TpUartMediumBackend` over their board's UART and pass it in.
 
 Bitbang builds also consume board/transceiver traits from Kconfig, including:
 - GPIO pin selection
@@ -317,7 +315,7 @@ extended property, extended memory and network parameter services, and the DPT f
 remove its declarations (so using it is a compile error, and a datapoint family that is off stops the build
 with a message naming the symbol), and the size gate checks the linked image for its symbols. `host-minimal`
 is the host profile with the `tp1-small` features; a test that needs an absent feature is not registered
-(`knx_add_test(... NEEDS <feature>)`). See `docs/design/small-target-profile.md` (C3 status).
+(`knx_add_test(... NEEDS <feature>)`). See `docs/design/small-target-profile.md`.
 
 ## Standards and configuration plane
 
@@ -333,11 +331,11 @@ Current configuration inputs also come from two distinct sources:
 - product-declared static configuration in `include/knx/product/`, `include/knx/product/export_descriptor.hpp`, and the product exporter path
 - ETS-derived binary/import configuration in `include/knx/ets/ets_config_loader.hpp` and the related importer/migration tests
 
-This means the standards/configuration plane is no longer only implied by lower-layer helpers, but it is still not yet one unified commissioning model. The current maintained product-facing export path is described in [docs/reference/ets_export_guide.md](docs/reference/ets_export_guide.md).
+These two sources are not yet one unified commissioning model. The maintained product-facing export path is described in [docs/reference/ets_export_guide.md](docs/reference/ets_export_guide.md).
 
 ## Security and IP scope
 
-- Data Secure is fully wired through the Security Interface Object and runtime transport/application flow; key provisioning is manual (inherent to the KNX commissioning model).
+- Data Secure is wired through the Security Interface Object and the runtime transport/application flow. ETS6 commissions it (it downloads the key tables and switches Security Mode); the product supplies the per-device FDSK. Validated on hardware over both TP1 backends. The key tables are fixed arrays sized by the `KNX_SECURITY_*` capacities, so a secure download does not allocate.
 - Data Secure sequence numbers survive resets with few writes: the sending number through a stored ceiling a window ahead (`KNX_SECURE_SEQ_RESERVE`), the partners' numbers through a checkpoint written only when changed (`KNX_SECURE_REPLAY_CHECKPOINT_S`) and on `requestPowerFailSave()`. See [docs/design/data-secure-sequence-persistence.md](docs/design/data-secure-sequence-persistence.md).
 - IP Secure Tunneling is supported through a dedicated physical adapter with ECDH session management, gated by `KNX_SECURE_IP_TUNNELING` so a routing-only device does not compile the session machinery it cannot use.
 - Secure Routing is wired in `IpRoutingPhysical` and applied from a `PID_BACKBONE_KEY` download at runtime, which is how ETS enables it; it is not the default routing configuration.
@@ -355,8 +353,9 @@ transport for the TP1 stack:
   the ROUTING_BUSY back-off as clock arithmetic, so both are testable at
   simulated time.
 - `CoreServerResponder` answers discovery and self-description on that same
-  socket. Core is mandatory for Device Class C; Device Management and Tunnelling
-  servers are not implemented.
+  socket. Core is mandatory for Device Class C. The KNX IP end device has no Device
+  Management or Tunnelling server; a tunnelling server exists only in the
+  TP1/IP interface role (`examples/tp1_ip_interface`).
 - `netip/system_broadcast.hpp` decides which broadcasts belong to the
   system-broadcast domain, which on IP is a service type rather than a control
   field bit.

@@ -15,8 +15,8 @@ visualisation that `1` means *open* rather than *on*.
 ## The API this example exists for
 
 ```cpp
-app.setWorkAvailableCallback([]{ /* set a flag; never block */ });
-const auto hint = app.ownerWorkHint();
+app->setWorkAvailableCallback([]{ /* set a flag; never block */ });
+const auto hint = app->ownerWorkHint();
 if (!hint.hasImmediateWork()) {
     platform.delay(hint.maxSleepMs.value_or(1000u));   // idle task light-sleeps
 }
@@ -38,8 +38,9 @@ telegram would be *missed* rather than merely delayed.
 
 A deep-sleep design needs either:
 
-- a transceiver that buffers frames while the host sleeps (a TPUART-class chip
-  has its own MCU; KNstaX has no driver for one yet), or
+- a transceiver that buffers frames while the host sleeps (a TP-UART2 has
+  its own controller; KNstaX's TP-UART2 backend runs in standalone and
+  bare-metal builds, but not yet in ESP-IDF builds), or
 - a device that only ever transmits and never has to answer a read — which means
   clearing the Read flag on every object, and accepting that ETS diagnostics
   cannot poll it.
@@ -84,4 +85,4 @@ that has not moved in a week should not be generating traffic, but a receiver
 still needs to distinguish "closed" from "dead".
 
 Cyclic sends are time-based and inert without a clock, which is why the example
-calls `app.setTimeSource(...)`.
+calls `app->setTimeSource(...)`.

@@ -38,13 +38,11 @@ wrappers.
 
 ### TP1 rules
 
-- Do not reintroduce the legacy standalone `BitbangPhysical` architecture.
 - Do not add backend-specific MAC policy to `Tp1MacPhysical`; it belongs in the
   backend, behind `Tp1MediumBackend`.
 - Prefer compile-time backend selection for embedded product builds.
 - Avoid RTTI in TP1 hot paths, event emission paths, steady-state capability
-  checks, and service loops. Limited construction-time RTTI in temporary
-  migration code may be tolerated; it must not become the pattern.
+  checks, and service loops.
 - Keep ISR and ISR-adjacent code allocation-free.
 - Keep backend service logic bounded and deterministic.
 
@@ -85,8 +83,9 @@ Physical Layer (medium-specific transmission)
 QueueHandle_t queue = xQueueCreate(...);
 vTaskDelay(pdMS_TO_TICKS(100));
 
-// Correct — through the narrowest platform interface that suffices:
-Result<void> NetworkLayer::init(platform::TimingPlatform& timing);
+// Correct — through the narrowest platform interface that suffices
+// (illustrative signature):
+Result<void> RetryScheduler::init(platform::TimingPlatform& timing);
 ```
 
 Depend on the smallest platform subset you need — `TimingPlatform`,
@@ -317,29 +316,9 @@ IndividualAddress raw(0x1203);     // raw 16-bit
 ### Frames
 
 Frames carry full KNX header information, checksum validation is mandatory, and
-encode/decode must round-trip. Document the structure:
-
-```cpp
-/**
- * @brief L_Data frame (data link layer)
- *
- * KNX TP1 standard frame format. The checksum is maintained by the frame codec.
- */
-struct LDataFrame {
-    IndividualAddress source;
-    GroupAddress destination;
-    AddressType destinationType;
-    Priority priority;
-    bool ackRequested;
-    bool confirmation;
-    uint8_t hopCount;                   ///< 0–6, decremented at each router
-    uint8_t tpci;
-    uint8_t apci;
-    std::vector<uint8_t> data;
-
-    bool isValid() const;
-};
-```
+encode/decode must round-trip. Document each field, and use fixed-capacity
+containers (`util::FixedVector`), not `std::vector`. See `LDataFrame` in
+`include/knx/datalink/tp1_data_link_layer.hpp` for the house style.
 
 ---
 
@@ -429,7 +408,6 @@ Rules:
 ## Testing
 
 - Every public component has unit tests; protocol flows have integration tests.
-- Target ≥80 % coverage for core functionality.
 - Unity is the framework in use. Mock external dependencies — physical layer,
   platform.
 - Tests must validate the current architecture, not preserve deleted paths.

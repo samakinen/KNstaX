@@ -1,11 +1,13 @@
 # GD32F1 reference port
 
 KNstaX on a GD32F103 or STM32F103 (Cortex-M3) with a Siemens TP-UART2, bare
-metal, no vendor HAL. It is the code of the H8i8o module firmware, the first
-KNstaX device on Cortex-M, made generic: that device completed ETS6 product
-import, address assignment, application download and group communication on
-a live bus with it. The `example/` firmware built here (one switch output) has
-not itself run on hardware yet.
+metal, no vendor HAL. It is the board support of the
+[H8i8o firmware](https://github.com/samakinen/h8i8o) made generic. On that
+device the same code has completed ETS6 product import, address assignment,
+application download and group communication on a live bus, and KNX Data
+Secure (secure commissioning, a secured download, secured group
+communication). The `example/` firmware built here (one switch output) has
+not itself run on hardware.
 
 ## What the port provides
 
@@ -89,7 +91,7 @@ What to check on the hardware, in order:
 
 1. The UART: the chip answers `U_Reset.req` (01h) with `U_Reset.ind` (03h).
    [docs/design/cortex-m-tpuart2-support.md](../../docs/design/cortex-m-tpuart2-support.md)
-   §3.8 lists what a TP-UART2 really does on the wire.
+   §3.2 and §3.9 describe what a TP-UART2 does on the wire.
 2. Time stamps: the acknowledge decision has to reach the chip within about
    1.7 ms of the frame's last octet. Keep the UART interrupt above everything
    but the tick.

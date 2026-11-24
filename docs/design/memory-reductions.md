@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | **Proposed**, 21 November 2026. Attribution measured; savings estimated unless marked. |
+| Status | **Implemented**, 21 November 2026: packages P1–P5 integrated and measured together (§9). Attribution measured; savings in the proposal sections are the estimates made before the work |
 | Goal | Room for Data Secure ([data-secure-small-target.md](data-secure-small-target.md)) and for products on 20 KiB parts, and the `tp1-small` flash budget met again. |
 | Builds on | [small-target-profile.md](small-target-profile.md) §10, whose heap attribution of 16 November this replaces. |
 

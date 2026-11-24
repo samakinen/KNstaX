@@ -55,8 +55,7 @@ Headers:
 
 See `examples/esp_idf_switch/main/product.hpp` for the intended shape: one
 `constexpr` definition shared by both the firmware binary and the export build
-target. That file is not an illustration — it is the definition the
-`tp1_switch_ets_knxprod` target actually exports from.
+target; the host build's `tp1_switch_ets_knxprod` target exports from it.
 
 ### Runtime layer
 
@@ -86,7 +85,7 @@ target. That file is not an illustration — it is the definition the
   maximum capture size in bytes:
 
   ```cpp
-  makeCommissionedBindings<8>(kMyProduct)   // no heap; captures of at most 8 bytes
+  makeCommissionedBindings<8>(kMyProduct)   // no heap; pointer-sized captures only
       .onCommand<Port::Relay>([](bool v) { gpio_set(PIN, v); })
       .provideState<Port::Relay>([]() -> bool { return gpio_read(PIN); });
   ```
@@ -332,12 +331,12 @@ definition declares.
 
 | Signal | Helper | Raw type |
 |---|---|---|
-| Boolean command (switch on/off) | `semantics::SwitchCommand<>` | `CommandPort<..., dpt::Switch>` |
-| Boolean state (readable) | `semantics::SwitchState<>` | `StatePort<..., dpt::Switch>` |
+| Boolean command (switch on/off) | `semantics::SwitchCommand<>` | `CommandPort<Id, bool, Key, Name, application::dptids::Switch>` |
+| Boolean state (readable) | `semantics::SwitchState<>` | `StatePort<Id, bool, Key, Name, application::dptids::Switch>` |
 | Percentage (0–100%) | `semantics::PercentCommand<>` / `semantics::PercentState<>` | — |
-| Temperature (DPT 9.001) | `semantics::TemperatureSensor<>` | — |
-| HVAC mode | `semantics::HvacMode<>` | — |
-| RGB color | `semantics::RgbColor<>` | — |
+| Temperature (DPT 9.001) | `semantics::TemperatureState<>` / `semantics::TemperatureStateInOut<>` | — |
+| HVAC mode | `semantics::HvacModeStateInOut<>` | — |
+| RGB colour | `semantics::RgbColorCommand<>` / `semantics::RgbColorState<>` | — |
 | Bidirectional state | — | `StateInOutPort<..., Dpt>` |
 
 ---
@@ -408,18 +407,16 @@ that every other device on the line shares:
 
 ## Group object memory
 
-Each communication object costs about 288 bytes of heap, dominated by two
-payload buffers of `config::MAX_GROUP_OBJECT_PAYLOAD_BYTES` (16 by default —
-one for the current value, one for the last transmitted value used by
-send-on-change).
+A communication object costs 12 bytes, plus its value in the group object
+table's shared value pool: as many octets as its datapoint type needs (one for
+a DPT 1 switch, two for a DPT 9 temperature). About 16 bytes per object in all.
 
-16 octets covers every datapoint type in the catalog; the widest is DPT 16 at
-14. A build-time assertion ties the bound to the catalog, so adding a wider DPT
-fails the build rather than failing at runtime.
-
-Raise `CONFIG_KNX_MAX_GROUP_OBJECT_PAYLOAD_BYTES` only for a product that uses
-group objects as opaque transport for larger blobs, and budget for it: the cost
-is paid twice per object, so a 40-object device pays 80× whatever you add.
+`CONFIG_KNX_MAX_GROUP_OBJECT_PAYLOAD_BYTES` (16 by default) bounds the largest
+value, and sizes the slot of an object whose datapoint type the stack does not
+know. 16 octets covers every datapoint type in the catalogue; the widest is
+DPT 16 at 14. A build-time assertion ties the bound to the catalogue, so adding
+a wider DPT fails the build rather than failing at runtime. Raise it only for a
+product that uses group objects as opaque transport for larger blobs.
 Oversized payloads are rejected with `BufferTooSmall`, never truncated.
 
 ## Heap policy: lock the heap after start-up

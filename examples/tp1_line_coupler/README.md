@@ -55,7 +55,7 @@ the same way:
   the Router Object and change nothing until you call:
 
 ```cpp
-app.syncRouterRoutingConfig();
+app->syncRouterRoutingConfig();
 ```
 
 The example calls it on the transition back to `Operational`, which is the
@@ -94,8 +94,10 @@ with two genuine TP1 backends on **separate transceivers**, one per line.
 
 ## Layer-2 acknowledge
 
-`PHYS_IACK` and `GROUP_IACK_ROUT` are computed and reported through
-`setAckPolicyCallback()`, but **not enforced** on TP1 — the backends decide
-`L_ACK` inside the receive ISR from a published address table and cannot consult
-a per-frame decision made in the coupler. See
+The acknowledge of group frames follows `GROUP_IACK_ROUT` and the Filter
+Table: the coupler installs a `GroupAckFilter` on each port, which the TP1
+backends evaluate in the receive interrupt. `PHYS_IACK` is computed and
+reported through `setAckPolicyCallback()` but **not enforced** — the backends
+cannot consult a per-frame decision made in the coupler for individually
+addressed frames. See
 [`../../docs/reference/knx_conformance_status.md`](../../docs/reference/knx_conformance_status.md).

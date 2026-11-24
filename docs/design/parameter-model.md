@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | **Built**, 17 November 2026: steps P0 to P3 (§8). The parameter layout is the only parameter model; the old one is removed from KNstaX and Habinari has moved to the new one. Open: an ETS6 import and download on a device (first on the H8i8o), and step P4, channels for communication objects. |
+| Status | **Built**, 17 November 2026: steps P0 to P3 (§8). The parameter layout is the only parameter model; Habinari and the H8i8o use it, and the H8i8o's parameters have been downloaded by ETS6 on hardware. Open: step P4, ETS channels for communication objects |
 | Goal | ETS parameters cost a product almost nothing at run time, on a 128 KiB Cortex-M as on an ESP32, and a product with *n* identical channels declares a channel once. |
 | Replaces | `StaticParameterSchema`, `ParameterState`, `ParameterCallbacks` and the per-parameter `onParameterChanged` in `commissioned_product.hpp`. The project is greenfield, so the old model is removed, not kept beside the new one. |
 | Motivating product | H8i8o milestone M6: 8 binary inputs and 8 outputs, about 200 parameters (h8i8o `docs/design/02-application-spec.md`). |

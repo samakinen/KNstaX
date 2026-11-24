@@ -13,9 +13,10 @@ This document is the inventory a certification effort would start from. It is
 deliberately blunt about gaps: a feature listed as implemented is one that has
 runtime behaviour and a test, not one that has an enum value.
 
-Read "implemented" as exactly that, and no further. Two areas have been
-validated on real hardware with real ETS: TP1 over the bit-bang backend, and
-KNX Data Secure over it (secure download and secure group communication).
+Read "implemented" as exactly that, and no further. Three areas have been
+validated on real hardware with ETS6: TP1 over the bit-bang backend (ESP32),
+TP1 over a TP-UART2 (GD32F103, bare metal), and KNX Data Secure over both
+(secure commissioning, secured download, secured group communication).
 Everything else in this document rests on host tests written against the
 specification texts — it has never met real ETS, a real gateway, or real
 transceiver hardware. The stack is also not finished; absence from the gap list
@@ -32,7 +33,8 @@ and extended function property services (`KNX_ENABLE_PROPERTY_EXT`), the functio
 object diagnostics (`KNX_ENABLE_GO_DIAGNOSTICS`), the Router Object and routing (`KNX_ENABLE_COUPLER`) and the
 Security Interface Object and Data Secure (`KNX_ENABLE_SECURITY`). A service that is off is ignored like an
 unknown APCI; an object that is off is not present, not described and not counted. Data Secure needs the
-extended property and the function property services, so it selects them. Where the result of a service does not fit the APDU, the service answers
+extended property, extended memory and function property services and group object diagnostics, so
+`KNX_ENABLE_SECURITY` selects them. Where the result of a service does not fit the APDU, the service answers
 with the error KNX defines instead of dropping the request: the extended memory, extended property value and
 function property services use E_EXCEED_MAX_APDU_LENGTH, the classic function property E_ERROR.
 
@@ -95,7 +97,7 @@ The KNX Standard v3.0.0, Volume 6 Profiles (06 Profiles v02.01.01)
 §9.1.2.3.1 lists both Extended Property services and Extended Memory services
 as `M` (mandatory) for the **KNX Data Security** profile. That requirement is
 about the Secure profile, not the base mask profile — mask 07B0 on its own does
-use the non-extended services, which is why this was mis-scoped at first.
+use the non-extended services.
 
 §9.1.2.3.2 names the seven mandatory services. Six are handled as a server;
 `A_PropertyExtValue_InfoReport` is a device-initiated notification with no
@@ -168,7 +170,7 @@ than a client's declaration.
 
 | Type | # | Status |
 |---|---|---|
-| KNXnet/IP Parameter | 11 | Auto-registered on IP builds; individual address, installation id and friendly name are seeded at start-up. The address-bearing properties — current IP address, subnet mask, gateway, TTL, MAC, assignment method and device capabilities — are supplied by the firmware through `applyKnxNetIpConfiguration()`, since none of them is knowable before the interface has a lease and most change again when one is renewed. `PID_BACKBONE_KEY` is not inert storage: writing it applies a Secure Routing group key to the live socket. `PID_ROUTING_MULTICAST_ADDRESS` belongs to ETS: it is persisted, a value that is not in 224.0.0.0/4 is refused, and a written value becomes the routing group at the next restart (03_08_03 §2.5.17); the product's configured group only fills it on the first start and after Factory Reset (Erase Code 02h, 03/05/02 Table 6). A_DomainAddressSerialNumber_Write with the 4-octet KNX IP plain format writes the same property. A new value is E11 for Secure Routing and restarts the multicast timer synchronisation (A7); the same value written again is E12 and changes nothing. |
+| KNXnet/IP Parameter | 11 | Auto-registered on IP builds; individual address, installation id and friendly name are seeded at start-up. The address-bearing properties — current IP address, subnet mask, gateway, TTL, MAC, assignment method and device capabilities — are supplied by the firmware through `applyKnxNetIpConfiguration()`, since none of them is knowable before the interface has a lease and most change again when one is renewed. `PID_BACKBONE_KEY` is not inert storage: writing it applies a Secure Routing group key to the live socket. `PID_ROUTING_MULTICAST_ADDRESS` belongs to ETS: it is persisted, a value that is not in 224.0.0.0/4 is refused, and a written value becomes the routing group at the next restart (03_08_03 §2.5.17); the product's configured group only fills it on the first start and after Factory Reset (Erase Code 02h, 03/05/02 Table 6). A_DomainAddressSerialNumber_Write with the 4-octet KNX IP plain format writes the same property. A new value is E11 for Secure Routing and restarts the multicast timer synchronisation; the same value written again is E12 and changes nothing. |
 | Router | 6 | Published by `BusAccessUnit::configureRouterRole()`. Opt-in on purpose: a plain end device advertising a Router Object would claim routing it does not perform. Once declared, `PID_ROUTETABLE_CONTROL` (a Function Property) applies ETS filter-table downloads to the coupler's live `FilterTable`, and `PID_*_LCCONFIG` / `PID_*_LCGRPCONFIG` reach the live `CouplerRoutingPolicy` via `syncRouterRoutingConfig()`. |
 | cEMI Server | 8 | Declared, no live wiring. |
 | Interface Program, LTE routing, Polling Master, File Server, RF Medium, E-mode objects | 4, 7, 10, 13, 19, … | Declarations only, via `setReferenceInterfaceObjectTypes()`. |
@@ -237,8 +239,8 @@ Behaviour required of Type 1 and covered by tests in `test_device_object.cpp`:
 
 | Medium | Status |
 |---|---|
-| TP1 — timer-ISR bitbang | Validated on real hardware (ESP32), including Data Secure. |
-| TP1 — TP-UART2 | **Implemented and validated on real hardware**: a GD32F103 (Cortex-M3, bare metal) with a Siemens TP-UART2 completed ETS6 product import, individual-address assignment, application and parameter download and group communication on a live bus. `TpUartMediumBackend` runs over a board's `knx_uart_hal_t` (standalone and bare-metal builds; no ESP-IDF UART HAL yet). The host tests run it against a scripted chip and against `VirtualTpUartChip`, a simulator of the chip on a virtual TP1 line (`-L tpuart`). What was seen on the chip, and what is still open, is in `docs/design/cortex-m-tpuart2-support.md` §3.8. Data Secure has not run over this backend. It builds for bare metal with the portable software AES (`KNX_AES_BACKEND_SOFTWARE`, no crypto library) and the size gate measures it (`tp1-small` + Data Secure on Cortex-M3), and the Security Interface Object's tables are fixed arrays of the `KNX_SECURITY_*` capacities, so a secure download no longer allocates after start-up (`docs/design/data-secure-small-target.md` D3–D5). An ETS6 secure commissioning over this backend is still to be done. |
+| TP1 — timer-ISR bit-bang | Validated on real hardware (ESP32), including Data Secure. |
+| TP1 — TP-UART2 | **Validated on real hardware, including Data Secure**: a GD32F103 (Cortex-M3, bare metal) with a Siemens TP-UART2 completed ETS6 product import, individual-address assignment, application and parameter download and group communication on a live bus, and with Data Secure on, secure commissioning with the device certificate, a secured download and secured group communication in both directions. Data Secure there uses the portable software AES (`KNX_AES_BACKEND_SOFTWARE`, no crypto library) and fixed-capacity Security Interface Object tables (`KNX_SECURITY_*`), so a secure download does not allocate after start-up; the size gate measures it (`tp1-small` + Data Secure on Cortex-M3). `TpUartMediumBackend` runs over a board's `knx_uart_hal_t` (standalone and bare-metal builds; there is no ESP-IDF UART HAL). The host tests run it against a scripted chip and against `VirtualTpUartChip`, a simulator of the chip on a virtual TP1 line (`-L tpuart`). What was observed on the chip, and what is still open, is in `docs/design/cortex-m-tpuart2-support.md` §3.8. |
 | TP1 — NCN5120 | **Not implemented.** The TP-UART backend is structured for it (`TpUartFamily`), but the differences are not coded until a board can test them. |
 | KNXnet/IP tunnelling (unicast) | Implemented; compiled out entirely unless `CONFIG_KNX_MEDIUM_IP` / `KNX_FEATURE_NETIP` is set. **Validated only by host interop against `xknx`** — never against real ETS or a real gateway. |
 | KNXnet/IP routing (multicast) | Implemented as a KNX IP medium (03/02/06), not only as a transport: Core discovery and self-description are answered, the system-broadcast domain is carried on ROUTING_SYSTEM_BROADCAST, the egress budget and ROUTING_BUSY back-off are enforced, and the Device Descriptor reports the KNX IP mask version. Wire formats are covered octet by octet by host tests against the specification's own layouts. **Still never run against real ETS or on hardware.** |
@@ -256,9 +258,7 @@ device:
 1. **No KNX Conformance Test Tool run.** The repository has one conformance
    evidence test. Certification requires the official test suite against real
    hardware.
-2. **FDSK absent** (see above) — blocks certification of a *secure* product,
-   though not of a plain one.
-3. **The IP-side secure paths are unexercised.** KNXnet/IP Secure Tunnelling
+2. **The IP-side secure paths are unexercised.** KNXnet/IP Secure Tunnelling
    and Secure Routing are implemented and verified against the specification's
    CCM vectors, but neither has run against a real peer, so the session and
    wrapper mechanics are unconfirmed on the wire.
@@ -269,16 +269,17 @@ device:
    That is a different and weaker claim than the one Data Secure on TP1 can
    make, which is that a full ETS6 download completed on hardware.
 
-   Data Secure itself is *not* in this list any more: a full ETS secure download
-   and secure group communication have both completed on hardware, which
+   Data Secure itself is *not* in this list: secure commissioning, a full ETS6
+   secure download and secured group communication have completed on hardware
+   over both TP1 backends, which
    exercised the `.knxprod` declarations (`IsSecureEnabled`, the
    `MaxSecurity*Entries` table sizes, `SupportsExtendedMemoryServices` /
    `SupportsExtendedPropertyServices`) and the extended memory and property
    services that carry the key tables.
-4. **`A_PropertyExtValue_InfoReport` is not emitted.** Listed `M` in Profiles
+3. **`A_PropertyExtValue_InfoReport` is not emitted.** Listed `M` in Profiles
    §9.1.2.3.2. It is device-initiated, so nothing rejects a device that never
    sends one, but a strict profile review would flag it.
-5. **Property access levels are not populated from the profile tables.**
+4. **Property access levels are not populated from the profile tables.**
    `InterfaceObjectManager::describeProperty` reports 0 / 0 for every
    property. Profiles §9.1.2.6.2
    specifies real values — PID_PROGMODE is 3/2, for example. The property write
@@ -287,7 +288,7 @@ device:
    numerically higher), so populating the levels means carrying wire-order
    numbers through the property handlers and `describeProperty`; the
    authorisation service already works in wire numbering.
-6. **Coupler profile is implemented, untested, and not complete.** None of the
+5. **Coupler profile is implemented, untested, and not complete.** None of the
    routing actions below has been exercised against real hardware or a real
    two-line installation; what follows describes implemented code and host
    tests. The routing algorithm of
@@ -300,11 +301,13 @@ device:
    commissioned-product path (see `examples/tp1_line_coupler`). What is still
    missing:
    - `A_Link_Read/_Write/_Response` and the LTE services.
-   - The layer-2 acknowledge fields (`PHYS_IACK`, `GROUP_IACK_ROUT`) are
-     computed and exposed through `TwoPortCoupler::setAckPolicyCallback()` but
-     not enforced: the TP1 backends decide `L_ACK` inside the receive ISR from
-     a published address table and cannot consult a per-frame decision made in
-     the coupler. A backend that defers the acknowledge can wire the callback.
+   - The layer-2 acknowledge of group frames (`GROUP_IACK_ROUT` and the
+     Filter Table) is enforced: `TwoPortCoupler` installs a
+     `physical::GroupAckFilter` per port, which the bit-bang ISR and the
+     TP-UART backend evaluate. `PHYS_IACK` is only computed and reported
+     through `TwoPortCoupler::setAckPolicyCallback()`: the backends decide the
+     acknowledge of individually addressed frames in the receive interrupt and
+     cannot consult a per-frame decision made in the coupler.
    - System broadcast is only distinguishable on media that carry the
      distinction; on TP1 it is indistinguishable from ordinary broadcast, so
      `ROUTE_LAST` is reachable only through the explicit `FrameClass` overload.
@@ -316,6 +319,6 @@ device:
      `configureRouterRole()`. The filter table does not need this — it applies
      live through `PID_ROUTETABLE_CONTROL`, and its memory window accepts
      `A_Memory_Write` only while its load state is Loading (§5.3.1.5).
-7. **HIL coverage is thin** — one hardware validation test. Virtual TP1
+6. **HIL coverage is thin.** Hardware validation is manual, on two products; there is no automated hardware-in-the-loop test. Virtual TP1
    simulation does not substitute for electrical/timing compliance testing on
    real transceivers.

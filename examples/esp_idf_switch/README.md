@@ -19,7 +19,7 @@ idf.py build flash monitor
 ```
 
 `sdkconfig.defaults` selects the **software bit-bang** TP1 backend, the only
-TP1 backend.
+one an ESP-IDF build offers.
 
 ## Wiring
 
@@ -68,7 +68,7 @@ from NVS on the next boot.
 | KNX write → hardware | `.onCommand<Port::RelayCommand>` |
 | Hardware → KNX read response | `.provideState<Port::RelayState>` |
 | Commissioning state → LED | `.onLifecycleChanged` |
-| Publishing feedback | `app.publish<Port::RelayState>()`, gated on `Operational` |
+| Publishing feedback | `app->publish<Port::RelayState>()`, gated on `Operational` |
 
 ## Bumping the persistence schema
 

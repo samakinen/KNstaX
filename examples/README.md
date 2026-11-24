@@ -28,8 +28,11 @@ idf.py build flash monitor
 before connecting to a live installation.** An inverted TX polarity holds the
 bus dominant and takes down the whole line, not just your device.
 
-CI builds all three for both an xtensa and a RISC-V target, because the two SoC
-families declare the GPIO registers the bitbang backend writes differently.
+KNstaX's CI does not build these. After a change to the bit-bang backend, build
+one by hand for both an xtensa and a RISC-V target: the two SoC families
+declare the GPIO registers the backend writes differently. (The
+[Habinari](https://github.com/samakinen/habinari-firmware) CI builds its
+ESP32-C6 firmware against KNstaX, which covers the RISC-V side.)
 
 ## Host examples
 
@@ -58,7 +61,7 @@ exercised during routine host validation.
   filtering and the group-object runtime entirely; that is what a sniffer wants
   and what device firmware must not do.
 - [`provider_binding_example.cpp`](provider_binding_example.cpp) — advanced
-  binding surface. In-tree for reference; not part of the release gate.
+  binding surface. Reference only: no CMake target builds it.
 
 ### Sniffing the integration tests
 

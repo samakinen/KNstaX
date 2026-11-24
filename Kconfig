@@ -36,8 +36,8 @@ menu "KNX Stack Configuration"
             config KNX_TP1_BITBANG
                 bool "Bit-Bang (Software)"
                 help
-                    Use software bit-bang implementation. This is the tested
-                    backend.
+                    Use the software bit-bang implementation (timer ISR),
+                    validated on ESP32 with ETS6.
         endchoice
         
         config KNX_TP1_BITBANG_TX_PIN
@@ -629,14 +629,14 @@ menu "KNX Stack Configuration"
             default 16
             range 14 254
             help
-                Payload octets reserved per group object.  Each object holds two
-                buffers of this size (current value plus last-transmitted value
-                for send-on-change), so the cost is paid twice per object.
+                The largest group object value, in octets. A group object keeps
+                its value in the table's shared value pool, sized by its
+                datapoint type; this bound applies to the widest value and to an
+                object whose datapoint type the stack does not know.
 
-                The default of 16 covers every datapoint type in the catalog
-                (the widest is DPT 16 at 14 octets) and keeps a group object at
-                ~288 bytes instead of ~768.  Raise it only for a product that
-                uses group objects as opaque transport for larger blobs.
+                The default of 16 covers every datapoint type in the catalogue
+                (the widest is DPT 16 at 14 octets). Raise it only for a product
+                that uses group objects as opaque transport for larger blobs.
                 Oversized payloads are rejected, never truncated.
     endmenu
 

@@ -18,8 +18,8 @@ idf.py menuconfig              # KNX Stack Configuration → pins, timing, backe
 idf.py build flash monitor
 ```
 
-`sdkconfig.defaults` selects the **software bit-bang** TP1 backend (the only
-TP1 backend) on TX 17 / RX 16.
+`sdkconfig.defaults` selects the **software bit-bang** TP1 backend (the only one an
+ESP-IDF build offers) on TX 17 / RX 16.
 
 > **Read [`../../docs/reference/board_bringup_guide.md`](../../docs/reference/board_bringup_guide.md)
 > before connecting to a live installation**. An inverted TX polarity holds the

@@ -1,6 +1,9 @@
-# Board bring-up guide (TP1)
+# Board bring-up guide (TP1 bit-bang)
 
-Getting a new TP1 board to talk to the bus. The bitbang backend has about a
+Getting a new bit-bang TP1 board to talk to the bus. (A board with a TP-UART2
+leaves bit timing to the chip; start from the
+[GD32F1 reference port](../../ports/gd32f1/README.md) instead, which lists what
+to check on that hardware.) The bit-bang backend has about a
 dozen Kconfig knobs and getting them wrong produces the same symptom — silence —
 regardless of which one is wrong, so this guide is ordered to eliminate causes
 one at a time rather than by topic.
@@ -71,9 +74,9 @@ The two worth attention:
   (bit time − offset), and against an *early* one it is the offset itself.
   Mid-cell — 52 µs of 104 — splits them evenly, which is why it is the default.
   Pushing the sample later does not "bias toward the settled half of the bit";
-  it spends late margin, and an earlier default of 78 µs left only 26 µs, which
-  measured interrupt latency on a busy ESP32-C6 can exceed. The failure is
-  silent: bits shift into the wrong position rather than erroring.
+  it spends late margin: at 78 µs only 26 µs would remain, which measured
+  interrupt latency on a busy ESP32-C6 can exceed. The failure is silent: bits
+  shift into the wrong position rather than erroring.
 
   If your transceiver's RX path is slow (opto-isolated designs often are),
   measure the bus-edge-to-RX-pin delay and shift this to re-centre — but keep
@@ -128,22 +131,30 @@ If nothing arrives:
 1. Scope RX. Is there activity at all? No → wiring/transceiver, not firmware.
 2. Is the idle level what you configured as recessive? No → polarity (Step 1).
 3. Activity present, correct idle, still nothing decoded → sample offset
-   (Step 2), or the frame is being rejected by the checksum. Check the driver's
-   receive-integrity diagnostics counters.
+   (Step 2), or the frame is being rejected by the checksum. Check
+   `startValidationRejects` in the driver's `BitBangLinkCounters`
+   (`bitbang_driver_timer_isr.hpp`): a growing value means interrupt latency
+   is pushing the start-bit re-read past the dominant pulse.
 
 ## Step 5: first telegram
 
 Put the device in programming mode and use ETS's "Device Info" read, or send a
 group value from a bus monitor and confirm the firmware callback fires.
 
-Watch the TP1 timing statistics (`bitbang_timing_stats.hpp`) for:
+Watch the driver's counters:
 
-- **collisions** — some collisions are normal on a busy bus; a rate near 100 %
-  means your TX is not arbitrating correctly, usually a TX polarity problem.
-- **ACK window misses** — the device is not answering the DL-ACK inside t_ack.
-  Almost always a sample-offset or interrupt-latency problem.
-- **deadline misses** — the timer ISR is not being serviced in time. Check for
-  other high-priority work or long critical sections on the same core.
+- **collisions** (`BitBangDriverInterface::Statistics::collisions`) — some
+  are normal on a busy bus; a rate near 100 % means your TX is not
+  arbitrating correctly, usually a TX polarity problem.
+- **ACK timeouts** on frames the device sends (`BitBangLinkCounters`:
+  `ackTimeoutNoEdge`, `ackTimeoutStartRejected`, `ackTimeoutIncomplete`) —
+  no edge at all means the peer did not answer; a rejected or incomplete start
+  means the device lost the peer's ACK, usually a sample-offset or
+  interrupt-latency problem.
+- **repeats from the sender** of frames addressed to the device — its own
+  DL-ACK is late. Measure the latency with `CONFIG_KNX_TP1_BITBANG_TIMING_STATS`
+  (`bitbang_timing_stats.hpp`: timer jitter and the TX echo delay) and set
+  `CONFIG_KNX_TP1_BITBANG_REACTION_LATENCY_US` to compensate.
 
 ## Step 6: validate against the virtual bus
 

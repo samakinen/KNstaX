@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | **In progress**, 22 November 2026. D1 (the AES part), D2, D3–D6 and D9 are done and the size gate measures the device (§9); D7 is open, and the gate does not yet script a secure download (§7). The H8i8o runs it in its application version 4. Figures marked "est." are estimates from the source and `sizeof` reasoning, not a size gate run. |
+| Status | **Implemented and validated**, 23 November 2026: D1 (the AES part), D2, D3–D6 and D9 are done, and the H8i8o (GD32F103, TP-UART2) has run Data Secure with ETS6 — secure commissioning, a secured download and secured group communication. Open: D7 (stack buffers in the secure path, about 1.6 KiB per secured telegram) and a secure download in the size gate's traffic (§7). Figures marked "est." are estimates from the source and `sizeof` reasoning, not a size gate run; §9 has the measurements. |
 | Goal | Data Secure (03/03/07 §5, the Security Interface Object) on a TP1 end device with 128 KiB of flash and 20 KiB of RAM, with the heap locked after start-up. |
 | Motivating product | H8i8o (GD32F103CB + TP-UART2). Its board-side plan is in the h8i8o repository, `docs/data-secure.md`. |
 | Builds on | [cortex-m-tpuart2-support.md](cortex-m-tpuart2-support.md) §8 (K6, software AES) and [small-target-profile.md](small-target-profile.md) (profiles, capacities, `init_only`, the size gate). |

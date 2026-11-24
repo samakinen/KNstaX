@@ -553,7 +553,8 @@ test of §3.5 passes on an idle bus.
   scheduled exactly 13 bit times apart, but each start bit is driven by a
   timer interrupt, and the standard allows +5 µs (§4.4). Critical sections
   elsewhere in the firmware that mask level-3 interrupts for longer break it.
-- **Bus timing is unverified on hardware.** Bus free detection, the
+- **Bus timing is not measured on a bench.** The backend commissions and
+  runs with ETS6 on ESP32 hardware, but bus free detection, the
   early-edge rule of §3.4 and the latency compensation are covered on the
   virtual bus only, which has no transceiver delay and no echo. The checks to
   run on a bench are 08_02_02 §8.2 (delay stepping) and §10.1.2 (50 and 53

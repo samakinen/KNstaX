@@ -81,19 +81,16 @@ pytest -q interop/python/tests
 ### KNX/IP Secure MAC rejection (`test_knstax_ip_secure_mac_rejection.py`)
 - Tampered MAC in a secure wrapper is rejected by KNstaX
 
-Note: `xknx`-dependent tests skip automatically when `xknx` (or the optional
-`xknx[secure]` extras) are not installed. Install
-`interop/python/requirements-secure.txt` for the full secure test set.
-The requirements pin `xknx==4.1.1`, the version the suite was last verified
-against (32 passed, 0 skipped); CI installs the same.
+Note: `xknx`-dependent tests skip automatically when `xknx` is not installed.
+`interop/python/requirements.txt` pins the `xknx` version the suite is
+verified against; CI installs the same.
 
 Two things the harness depends on that are easy to break:
 
 - The KNstaX peer installs its Data Secure keys *after* `BusAccessUnit::init()`.
   `init()` restores the interface objects and rebuilds the key maps from the
   persisted key tables, so a key set before it is silently dropped and every
-  secured telegram fails with "Unknown Key" (this is what failed the four Data
-  Secure cases until November 2026).
+  secured telegram fails with "Unknown Key".
 - The test gateway's CONNECT_RESPONSE carries a real tunnelling CRD with the
   assigned address (channel n is 1.1.n). xknx adopts that address as its
-  source; the old CRD (the CRI echoed back) made it 0.2.0.
+  source; a CRD that only echoes the CRI makes it 0.2.0.
