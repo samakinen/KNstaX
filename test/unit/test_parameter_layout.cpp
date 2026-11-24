@@ -397,9 +397,39 @@ void test_json_carries_the_layout(void)
     TEST_ASSERT_TRUE(has("\"name\":\"On closing\",\"valueKind\":5,\"sizeInBit\":8,\"offset\":2,\"default\":3,\"optionType\":1,"));
 }
 
+enum class TestPort : uint16_t { A = 5, B = 6 };
+
+inline constexpr auto kObjectViews = std::array{
+    views::view<TestPort::A>({.instance = 3,
+                              .visible = params::when<In::Function>(Function::Switch),
+                              .function = "Switch",
+                              .dpt = {1, 1}}),
+    views::view<TestPort::A>({.instance = 3,
+                              .visible = params::whenNot<In::Function>(Function::Switch),
+                              .text = "Other \"input\""}),
+    views::view<TestPort::B>({}),
+};
+
+void test_object_views_reach_the_export(void)
+{
+    const std::string json = objectViewsToJson(kLayout, std::span<const views::ObjectView>(kObjectViews));
+
+    // The condition names its block by the number parameterLayoutToJson()
+    // gives it (input is block 1), and the instance separately.
+    TEST_ASSERT_EQUAL_STRING(
+        "\"objectViews\":["
+        "{\"logicalId\":5,\"instance\":3,\"function\":\"Switch\",\"dpt_main\":1,\"dpt_sub\":1,"
+        "\"visible\":{\"block\":1,\"parameter\":4,\"op\":\"anyOf\",\"values\":[1]}},"
+        "{\"logicalId\":5,\"instance\":3,\"text\":\"Other \\\"input\\\"\","
+        "\"visible\":{\"block\":1,\"parameter\":4,\"op\":\"notEqual\",\"values\":[1]}},"
+        "{\"logicalId\":6,\"instance\":0}]",
+        json.c_str());
+}
+
 int main(void)
 {
     UNITY_BEGIN();
+    RUN_TEST(test_object_views_reach_the_export);
     RUN_TEST(test_view_reads_defaults_of_every_type);
     RUN_TEST(test_view_reads_the_instance_it_was_asked_for);
     RUN_TEST(test_an_instance_past_the_end_reads_the_last_one);

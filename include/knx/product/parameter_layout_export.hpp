@@ -13,6 +13,10 @@
  *                      parameters with the offset in the block, and their
  *                      sections (pages inside a block)
  *
+ * and, for a product that declares object views (object_views.hpp),
+ *
+ *   "objectViews":     when ETS shows each object, and as what
+ *
  * Every offset comes from the layout the firmware compiles. The Python side
  * places a parameter at base + instance × stride + offset and derives nothing.
  *
@@ -23,10 +27,12 @@
 #pragma once
 
 #include "knx/product/exporter.hpp"
+#include "knx/product/object_views.hpp"
 #include "knx/product/parameter_layout.hpp"
 
 #include <cstdint>
 #include <iomanip>
+#include <span>
 #include <string_view>
 #include <sstream>
 #include <string>
@@ -54,7 +60,53 @@ inline void writeConditionJson(std::ostringstream& o, const params::Condition& c
     o << "]}";
 }
 
+/// The blocks of a layout in image order, as their tags: the index of a tag
+/// here is the "block" number the JSON uses in a condition.
+template <typename... Rs>
+std::vector<uint64_t> layoutBlockTags(const params::ParameterLayout<Rs...>& layout)
+{
+    std::vector<uint64_t> blocks;
+    params::forEachParameter(layout, [&](const params::ParameterInfo& info) {
+        if (blocks.empty() || blocks.back() != info.block) {
+            blocks.push_back(info.block);
+        }
+    });
+    return blocks;
+}
+
 } // namespace detail
+
+/// Object views (object_views.hpp) as the JSON member "objectViews", without
+/// the enclosing braces. A condition names its block by the same number as
+/// the parameter blocks of parameterLayoutToJson() for the same layout.
+template <typename... Rs>
+std::string objectViewsToJson(const params::ParameterLayout<Rs...>& layout,
+                              std::span<const views::ObjectView> objectViews)
+{
+    const std::vector<uint64_t> blocks = detail::layoutBlockTags(layout);
+    std::ostringstream o;
+    o << "\"objectViews\":[";
+    for (size_t i = 0; i < objectViews.size(); ++i) {
+        const auto& view = objectViews[i];
+        o << (i ? "," : "") << "{\"logicalId\":" << view.port << ",\"instance\":" << view.spec.instance;
+        if (!view.spec.text.empty()) {
+            o << ",\"text\":\"" << jsonEscape(view.spec.text) << "\"";
+        }
+        if (!view.spec.function.empty()) {
+            o << ",\"function\":\"" << jsonEscape(view.spec.function) << "\"";
+        }
+        if (view.spec.dpt.main != 0u) {
+            o << ",\"dpt_main\":" << view.spec.dpt.main << ",\"dpt_sub\":" << view.spec.dpt.sub;
+        }
+        if (view.spec.visible.op != params::ConditionOp::Always) {
+            o << ",\"visible\":";
+            detail::writeConditionJson(o, view.spec.visible, blocks);
+        }
+        o << "}";
+    }
+    o << "]";
+    return o.str();
+}
 
 /// The layout as the JSON members "parameterImage", "optionTypes" and
 /// "parameterBlocks", without the enclosing braces.

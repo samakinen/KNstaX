@@ -18,7 +18,7 @@
 
 int main(int argc, char* argv[])
 {
-    const auto json = knx::product::exportCommissionedProductToJson(@PRODUCT_SYMBOL@);
+    const auto json = knx::product::exportCommissionedProductToJson(@PRODUCT_EXPORT_ARGS@);
 
     if (argc >= 2) {
         std::ofstream f(argv[1]);

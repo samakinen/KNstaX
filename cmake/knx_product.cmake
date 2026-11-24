@@ -6,6 +6,7 @@
 # knx_commissioned_product(<name>
 #   DEFINITION <header>          # path to the product definition header
 #   SYMBOL     <symbol>          # constexpr symbol name inside that header
+#   [VIEWS     <symbol>]         # its object views (knx/product/object_views.hpp)
 #   [OUTPUT_DIR <dir>]           # output directory (default: CMAKE_CURRENT_BINARY_DIR)
 # )
 #
@@ -43,7 +44,7 @@ set(_KNX_EXPORTER_SCRIPT "${_KNX_TOOLS_DIR}/knxprod_exporter/exporter.py")
 set(_KNX_GEN_TEMPLATE "${_KNX_CMAKE_DIR}/knxprod_gen_main.cpp.in")
 
 function(knx_commissioned_product target_name)
-    cmake_parse_arguments(ARG "" "DEFINITION;SYMBOL;OUTPUT_DIR" "" ${ARGN})
+    cmake_parse_arguments(ARG "" "DEFINITION;SYMBOL;VIEWS;OUTPUT_DIR" "" ${ARGN})
 
     if(NOT ARG_DEFINITION)
         message(FATAL_ERROR "knx_commissioned_product(${target_name}): DEFINITION is required")
@@ -68,6 +69,11 @@ function(knx_commissioned_product target_name)
     # Stamp variables used by the .cpp.in template
     set(DEFINITION_ABS_PATH "${ARG_DEFINITION}")
     set(PRODUCT_SYMBOL      "${ARG_SYMBOL}")
+    if(ARG_VIEWS)
+        set(PRODUCT_EXPORT_ARGS "${ARG_SYMBOL}, ${ARG_VIEWS}")
+    else()
+        set(PRODUCT_EXPORT_ARGS "${ARG_SYMBOL}")
+    endif()
     configure_file("${_KNX_GEN_TEMPLATE}" "${GEN_SRC}" @ONLY)
 
     # Host-native binary that emits JSON

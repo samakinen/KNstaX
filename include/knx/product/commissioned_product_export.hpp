@@ -14,8 +14,11 @@
 
 #include "knx/product/commissioned_product.hpp"
 #include "knx/product/exporter.hpp"
+#include "knx/product/object_views.hpp"
 #include "knx/product/parameter_layout_export.hpp"
 
+#include <array>
+#include <span>
 #include <string>
 
 namespace knx::product {
@@ -30,6 +33,22 @@ std::string exportCommissionedProductToJson(
     } else {
         return exportDescriptorToJson(descriptor);
     }
+}
+
+/// The same, with the product's object views (object_views.hpp): when ETS
+/// shows each object, and with which text and datapoint type. Views name
+/// their conditions' parameters, so the product must have a parameter layout.
+template <typename EndpointDefinitionT, typename ParametersT, size_t ViewCount>
+std::string exportCommissionedProductToJson(
+    const CommissionedProductDefinition<EndpointDefinitionT, ParametersT>& definition,
+    const std::array<views::ObjectView, ViewCount>& objectViews)
+{
+    static_assert(detail::kHasParameters<std::remove_cvref_t<ParametersT>>,
+                  "object views show objects by parameter values: the product needs a parameter layout");
+    const auto descriptor = makeCommissionedExportDescriptor(definition);
+    const auto& layout = std::remove_cvref_t<ParametersT>::layout;
+    return exportDescriptorToJson(descriptor, parameterLayoutToJson(layout) + ","
+                                                  + objectViewsToJson(layout, std::span<const views::ObjectView>(objectViews)));
 }
 
 } // namespace knx::product

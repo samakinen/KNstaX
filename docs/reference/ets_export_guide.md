@@ -199,6 +199,45 @@ shows is what the firmware enforces:
 `ReadOnInitFlag` defaults to Disabled. Enable it deliberately: the KNX spec warns
 it multiplies bus load after a whole-installation restart.
 
+## Object views: objects shown by a parameter
+
+A channel whose function is a parameter uses some objects for one function and
+others for another, and one object can mean different things (object A of an
+input is a switch for one function, a shutter move for the next). Object views
+(`knx/product/object_views.hpp`) tell ETS when to show a port and as what:
+
+```cpp
+inline constexpr auto kObjectViews = std::array{
+    views::view<Port::In1A>({.instance = 0,
+                             .visible = params::when<In::Function>(InputFunction::Switch),
+                             .function = "Switch", .dpt = {1, 1}}),
+    views::view<Port::In1A>({.instance = 0,
+                             .visible = params::when<In::Function>(InputFunction::Shutter),
+                             .function = "Move", .dpt = {1, 8}}),
+};
+```
+
+```cmake
+knx_commissioned_product(my_product DEFINITION product.hpp SYMBOL kProduct VIEWS kObjectViews)
+```
+
+- A port with views gets one `ComObjectRef` per view, each `ComObjectRefRef`
+  inside a `<choose>` on the condition's parameter: alternatives on one object
+  number. A port without views is exported as before, always shown.
+- `instance` is the instance of the repeated block the condition's parameter
+  belongs to; conditions use the same forms as parameter conditions.
+- `text` and `function` set `Text` and `FunctionText` (default: the port's
+  display name); `dpt` sets the datapoint type ETS shows.
+- The run time does not change: the port keeps its own datapoint type and value
+  type, and a view may only show a type of the same size. That is enough
+  because the encoding goes by size: one 1-byte port carries 5.010, 5.001,
+  17.001 and 18.001, one 1-bit port every DPT 1.
+- The exporter refuses a view of another size, a view of an unknown port or
+  block instance, and two views of one port that could be shown at once (they
+  must test the same parameter, and no value in 0..255 may satisfy both).
+- The list is passed to the export only; the firmware never reads it, so it
+  costs a device no flash.
+
 ## Building
 
 ```bash
@@ -332,8 +371,9 @@ Honest list of what the exporter does not yet produce:
 - **No channels.** Parameter pages and communication objects are not grouped
   into ETS `<Channel>` elements. A parameter layout gives one page per block
   instance, but the communication objects of a repeated function are still a
-  flat list, and an object cannot be hidden by a parameter (step P4 of
-  [parameter-model.md](../design/parameter-model.md)).
+  flat list (step P4 of [parameter-model.md](../design/parameter-model.md)).
+  Objects can be hidden and given alternative datapoint types by a parameter
+  (object views, above), but ports are declared one by one.
 - **The manufacturer name is taken from the product display name.** Fine for
   development against manufacturer id 0x00FA; a real product needs its own
   allocated manufacturer id and name.

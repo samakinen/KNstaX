@@ -85,12 +85,13 @@ def export_product_json_to_kaenx(json_obj) -> str:
 
 def _dpt_object_size(dpt_main: int) -> str:
     """Return the KNX ObjectSize string for a given DPT main type number."""
+    # The schema spells sizes below an octet in the singular: '2 Bit', '4 Bit'.
     if dpt_main == 1:
         return '1 Bit'
     if dpt_main in (2,):
-        return '2 Bits'
+        return '2 Bit'
     if dpt_main in (3,):
-        return '4 Bits'
+        return '4 Bit'
     if dpt_main in (4, 5, 6):
         return '1 Byte'
     if dpt_main in (7, 8, 9):
@@ -161,6 +162,84 @@ def _condition_tests(condition):
     raise ValueError(f'visibility condition {condition!r} is not one the exporter knows')
 
 
+def _condition_holds(condition, value: int) -> bool:
+    """Whether the controlling parameter holding `value` satisfies `condition`."""
+    op = condition.get('op', 'anyOf')
+    values = [int(v) for v in condition.get('values', [])]
+    if op == 'anyOf':
+        return value in values
+    if op == 'notEqual':
+        return value != values[0]
+    if op == 'range':
+        return values[0] <= value <= values[1]
+    raise ValueError(f'visibility condition {condition!r} is not one the exporter knows')
+
+
+def _under_condition(parent, condition, ref_ids, block_counts, own_block, instance):
+    """The element to put content in so that ETS shows it only while the
+    condition holds. A parameter of `own_block` is the one of `instance`; a
+    parameter of any other block is that block's only instance."""
+    if not condition:
+        return parent
+    controlling_block = int(condition['block'])
+    controlling_instance = instance if controlling_block == own_block else 0
+    if controlling_block not in block_counts:
+        raise ValueError(f'a condition names parameter block {controlling_block}, which the product does not have')
+    if controlling_instance >= block_counts[controlling_block]:
+        raise ValueError(f'a condition names instance {controlling_instance + 1} of parameter block '
+                         f'{controlling_block}, which has {block_counts[controlling_block]}')
+    key = (controlling_block, controlling_instance, int(condition['parameter']))
+    if key not in ref_ids:
+        raise ValueError(f'a condition names parameter {condition["parameter"]} of block {controlling_block}, '
+                         'which the block does not have')
+    for test in _condition_tests(condition):
+        choose = ET.SubElement(parent, 'choose')
+        choose.set('ParamRefId', ref_ids[key])
+        parent = ET.SubElement(choose, 'when')
+        parent.set('test', test)
+    return parent
+
+
+def _check_object_views(cos, views):
+    """Refuse views ETS could not use: of an unknown port, of a datapoint type
+    of another size than the port's, or two views of one port that could be
+    shown at once (ETS would list the object twice).
+
+    Two views of one port must test the same parameter instance, and no value
+    of it may satisfy both. The values are tried over 0..255, the range of the
+    selection parameters that choose a function."""
+    by_id = {int(c['logicalId']): c for c in cos if 'logicalId' in c}
+    by_port = {}
+    for view in views:
+        port = int(view['logicalId'])
+        co = by_id.get(port)
+        if co is None:
+            raise ValueError(f'an object view names port {port}, which the product does not have')
+        if 'dpt_main' in view and co.get('dpt_main') is not None:
+            if _dpt_size_in_bit(int(view['dpt_main'])) != _dpt_size_in_bit(int(co['dpt_main'])):
+                raise ValueError(
+                    f"object view of port {port} ({co.get('key')}) shows DPT {view['dpt_main']}.{view.get('dpt_sub', 0)}, "
+                    f"which is not the size of the port's DPT {co['dpt_main']}")
+        by_port.setdefault(port, []).append(view)
+    for port, port_views in by_port.items():
+        for i, first in enumerate(port_views):
+            for second in port_views[i + 1:]:
+                a, b = first.get('visible'), second.get('visible')
+                name = by_id[port].get('key', port)
+                if not a or not b:
+                    raise ValueError(f'port {name} has a view without a condition and another view: '
+                                     'ETS would show the object twice')
+                same = (int(a['block']), int(first.get('instance', 0)), int(a['parameter'])) == \
+                       (int(b['block']), int(second.get('instance', 0)), int(b['parameter']))
+                if not same:
+                    raise ValueError(f'two views of port {name} test different parameters, '
+                                     'so the exporter cannot tell that they never show at once')
+                both = [v for v in range(256) if _condition_holds(a, v) and _condition_holds(b, v)]
+                if both:
+                    raise ValueError(f'two views of port {name} are both shown for the value {both[0]}')
+    return by_port
+
+
 def _numeric_parameter_type(kind: int, size_in_bit: int, p):
     """(tag, attrs, name) of the ParameterType for a parameter without options."""
     fmt = lambda v: str(int(v)) if float(v) == int(v) else repr(float(v))
@@ -206,11 +285,13 @@ def _emit_parameter_blocks(static_elem, dynamic_channel, app_ref: str, rs_ref: s
     one ParameterBlock named after the instance. Every memory offset is
     base + instance × stride + offset, all three from the C++ layout; nothing
     about the layout is derived here. Returns the size of the image, which is
-    what ETS must download."""
+    what ETS must download, the ParameterRef id of every (block, instance,
+    parameter), and the repeat count of every block: what a condition on an
+    object needs."""
     blocks = json_obj.get('parameterBlocks', [])
     image_size = int(json_obj.get('parameterImage', {}).get('size', 0))
     if not blocks:
-        return 0
+        return 0, {}, {}
 
     # The layout is the firmware's; this only refuses a document that
     # contradicts itself, so a broken export cannot become a product file.
@@ -306,21 +387,10 @@ def _emit_parameter_blocks(static_elem, dynamic_channel, app_ref: str, rs_ref: s
                 pref.set('RefId', param_id)
                 ref_ids[(block_index, instance, int(parameter['id']))] = ref_id
 
+    block_counts = {int(block['index']): int(block['count']) for block in blocks}
+
     def under_condition(parent, condition, own_block, instance):
-        """The element to put content in so that it shows only while the
-        condition holds. A parameter of the same block is the one of the same
-        instance; any other block appears once."""
-        if not condition:
-            return parent
-        controlling_block = int(condition['block'])
-        controlling_instance = instance if controlling_block == own_block else 0
-        controlling_ref = ref_ids[(controlling_block, controlling_instance, int(condition['parameter']))]
-        for test in _condition_tests(condition):
-            choose = ET.SubElement(parent, 'choose')
-            choose.set('ParamRefId', controlling_ref)
-            parent = ET.SubElement(choose, 'when')
-            parent.set('test', test)
-        return parent
+        return _under_condition(parent, condition, ref_ids, block_counts, own_block, instance)
 
     # Pass 2: the pages. A block instance is one page; a section of the block
     # is a page of its own after it. A block whose parameters are all in
@@ -365,7 +435,7 @@ def _emit_parameter_blocks(static_elem, dynamic_channel, app_ref: str, rs_ref: s
                 section_holder = under_condition(holder, section.get('visible'), block_index, instance)
                 emit_page(section_holder, f"{page_name}_s{int(section['index']) + 1}", section_text, members)
 
-    return image_size
+    return image_size, ref_ids, block_counts
 
 
 # Load State Machine index of the Application Program interface object, as this
@@ -554,13 +624,21 @@ def export_product_json_to_knxprod(json_obj) -> str:
     medium_type_id = f'MT-{medium_code}'
     mask_version_id = f'MV-{mask_version:04X}'
 
-    # Collect unique DPTs used across all COs (preserve insertion order)
+    # Object views: when ETS shows an object, and as what. Checked before
+    # anything is written, so a contradictory export never becomes a file.
+    object_views = json_obj.get('objectViews') or []
+    views_by_port = _check_object_views(cos, object_views)
+
+    # Collect unique DPTs used across all COs and views (preserve insertion order)
     seen_dpts: dict[tuple, None] = {}
     for c in cos:
         main = c.get('dpt_main')
         sub = c.get('dpt_sub', 1)
         if main is not None:
             seen_dpts[(main, sub)] = None
+    for view in object_views:
+        if 'dpt_main' in view:
+            seen_dpts[(int(view['dpt_main']), int(view.get('dpt_sub', 0)))] = None
 
     # MasterData
     master = ET.SubElement(root, 'MasterData')
@@ -781,7 +859,7 @@ def export_product_json_to_knxprod(json_obj) -> str:
     dynamic = ET.SubElement(app, 'Dynamic')
     dyn_root = ET.SubElement(dynamic, 'ChannelIndependentBlock')
 
-    param_bytes = _emit_parameter_blocks(static, dyn_root, app_ref, rs_ref, json_obj)
+    param_bytes, param_ref_ids, block_counts = _emit_parameter_blocks(static, dyn_root, app_ref, rs_ref, json_obj)
 
     com_objects_parent = ET.SubElement(static, 'ComObjectTable')
     com_refs_parent = ET.SubElement(static, 'ComObjectRefs')
@@ -830,27 +908,40 @@ def export_product_json_to_knxprod(json_obj) -> str:
         if security_requirement != 'None':
             co.set('SecurityRequired', security_requirement)
 
-        # ComObjectRef and Dynamic linkage required by Kaenx importer.
-        cref = ET.SubElement(com_refs_parent, 'ComObjectRef')
-        cref_id = f'{co_id}_R-{export_number}'
-        cref.set('Id', cref_id)
-        cref.set('RefId', co_id)
-        cref.set('Text', name)
-        cref.set('FunctionText', name)
-        cref.set('ReadFlag', co.get('ReadFlag'))
-        cref.set('WriteFlag', co.get('WriteFlag'))
-        cref.set('CommunicationFlag', co.get('CommunicationFlag'))
-        cref.set('TransmitFlag', co.get('TransmitFlag'))
-        cref.set('UpdateFlag', co.get('UpdateFlag'))
-        cref.set('ReadOnInitFlag', co.get('ReadOnInitFlag'))
-        cref.set('ObjectSize', co.get('ObjectSize'))
-        if co.get('DatapointType') is not None:
-            cref.set('DatapointType', co.get('DatapointType'))
-        if co.get('SecurityRequired') is not None:
-            cref.set('SecurityRequired', co.get('SecurityRequired'))
+        # ComObjectRef and Dynamic linkage required by Kaenx importer. A port
+        # without views has one reference, always shown. A port with views
+        # has one per view, each shown while its condition holds: the
+        # alternatives of one object number (object_views.hpp).
+        port_views = views_by_port.get(int(c.get('logicalId', -1)), [])
+        references = port_views if port_views else [None]
+        for index, view in enumerate(references):
+            cref = ET.SubElement(com_refs_parent, 'ComObjectRef')
+            cref_id = f'{co_id}_R-{export_number}' if view is None else f'{co_id}_R-{index + 1}'
+            text = (view or {}).get('text') or name
+            cref.set('Id', cref_id)
+            cref.set('RefId', co_id)
+            cref.set('Text', text)
+            cref.set('FunctionText', (view or {}).get('function') or text)
+            cref.set('ReadFlag', co.get('ReadFlag'))
+            cref.set('WriteFlag', co.get('WriteFlag'))
+            cref.set('CommunicationFlag', co.get('CommunicationFlag'))
+            cref.set('TransmitFlag', co.get('TransmitFlag'))
+            cref.set('UpdateFlag', co.get('UpdateFlag'))
+            cref.set('ReadOnInitFlag', co.get('ReadOnInitFlag'))
+            cref.set('ObjectSize', co.get('ObjectSize'))
+            if view is not None and 'dpt_main' in view:
+                cref.set('DatapointType', _dpt_id(int(view['dpt_main']), int(view.get('dpt_sub', 0))))
+            elif co.get('DatapointType') is not None:
+                cref.set('DatapointType', co.get('DatapointType'))
+            if co.get('SecurityRequired') is not None:
+                cref.set('SecurityRequired', co.get('SecurityRequired'))
 
-        crefref = ET.SubElement(dyn_root, 'ComObjectRefRef')
-        crefref.set('RefId', cref_id)
+            holder = dyn_root
+            if view is not None and view.get('visible'):
+                condition = view['visible']
+                holder = _under_condition(dyn_root, condition, param_ref_ids, block_counts,
+                                          int(condition['block']), int(view.get('instance', 0)))
+            ET.SubElement(holder, 'ComObjectRefRef').set('RefId', cref_id)
 
     # How many group addresses and associations the device's tables hold. ETS
     # takes a missing declaration as zero and refuses the first link with "The
