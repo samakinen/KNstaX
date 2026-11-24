@@ -60,8 +60,6 @@ exercised during routine host validation.
   routing observer. Uses the raw `bau.link()` facet, which bypasses address
   filtering and the group-object runtime entirely; that is what a sniffer wants
   and what device firmware must not do.
-- [`provider_binding_example.cpp`](provider_binding_example.cpp) — advanced
-  binding surface. Reference only: no CMake target builds it.
 
 ### Sniffing the integration tests
 

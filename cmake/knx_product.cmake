@@ -12,7 +12,7 @@
 #
 # Creates a build-time target <name>_knxprod that:
 #   1. Compiles a tiny host-native binary that includes <header> and serialises
-#      <symbol>.endpointDefinition to JSON via exportEndpointToJson().
+#      <symbol>.endpointDefinition to JSON via exportCommissionedProductToJson().
 #   2. Runs that binary to produce <name>.json.
 #   3. Runs the KNstaX Python exporter to produce <name>.knxprod.xml.
 #

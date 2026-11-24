@@ -1,5 +1,7 @@
 # Design: portable AES-128 and in-place KNX CCM
 
+> A design record: the status line is current, the body is the history of the work. See [the index](README.md) for where the current reference is.
+
 | | |
 |---|---|
 | Status | **Partly done**, 22 November 2026: the AES of §3.1 is in the tree as one backend of three, and the build split of §3.5 is done for Data Secure. The in-place CCM (§3.2, §3.3) is not. See §7. |

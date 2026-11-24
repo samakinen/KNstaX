@@ -9,17 +9,37 @@ ComObjectRef per view, each inside a <choose> on the controlling parameter of
 the right block instance; that a port without views is exported as before;
 and that views ETS could not use are refused.
 """
+import contextlib
+import re
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
-
-import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from exporter import export_product_json_to_knxprod  # noqa: E402
 
 NS = {'k': 'http://knx.org/xml/project/23'}
 KIND_ENUM = 5
+
+
+@contextlib.contextmanager
+def _refused(match):
+    try:
+        yield
+    except ValueError as error:
+        assert re.search(match, str(error)), f'refused for another reason: {error}'
+    else:
+        raise AssertionError(f'not refused: expected "{match}"')
+
+
+def _validate_against_the_knx_schema(text):
+    try:
+        import xmlschema
+    except ImportError:
+        print('     (xmlschema not installed: schema check skipped)')
+        return
+    schema = xmlschema.XMLSchema(str(Path(__file__).resolve().parent / 'schema' / 'knx_schema_version23.xsd'))
+    schema.validate(text)
 
 FUNCTION_OPTIONS = {'id': 0, 'sizeInBit': 8,
                     'options': [{'value': 0, 'label': 'Disabled'}, {'value': 1, 'label': 'Switch'},
@@ -156,29 +176,27 @@ def test_not_equal_and_range_conditions_are_written_as_ets_tests():
 
 
 def test_a_view_of_another_size_is_refused():
-    with pytest.raises(ValueError, match='not the size'):
+    with _refused('not the size'):
         _root([{'logicalId': 0, 'instance': 0, 'dpt_main': 5, 'dpt_sub': 1, 'visible': _when([1])}])
 
 
 def test_views_that_can_show_at_once_are_refused():
-    with pytest.raises(ValueError, match='both shown for the value 1'):
+    with _refused('both shown for the value 1'):
         _root([{'logicalId': 0, 'instance': 0, 'visible': _when([1, 2])},
                {'logicalId': 0, 'instance': 0, 'visible': _when([1], op='range') | {'values': [0, 1]}}])
-    with pytest.raises(ValueError, match='without a condition'):
+    with _refused('without a condition'):
         _root([{'logicalId': 0, 'instance': 0},
                {'logicalId': 0, 'instance': 0, 'visible': _when([1])}])
 
 
 def test_views_on_different_instances_are_refused():
-    with pytest.raises(ValueError, match='different parameters'):
+    with _refused('different parameters'):
         _root([{'logicalId': 0, 'instance': 0, 'visible': _when([1])},
                {'logicalId': 0, 'instance': 1, 'visible': _when([2])}])
 
 
 def test_a_file_with_views_is_valid_against_the_knx_schema():
-    xmlschema = pytest.importorskip('xmlschema')
-    schema = xmlschema.XMLSchema(str(Path(__file__).resolve().parent / 'schema' / 'knx_schema_version23.xsd'))
-    schema.validate(export_product_json_to_knxprod(_doc(SWITCH_VIEWS)))
+    _validate_against_the_knx_schema(export_product_json_to_knxprod(_doc(SWITCH_VIEWS)))
 
 
 def test_objects_below_an_octet_use_the_schemas_spelling():
@@ -187,13 +205,30 @@ def test_objects_below_an_octet_use_the_schemas_spelling():
     root = ET.fromstring(export_product_json_to_knxprod(doc))
     sizes = {int(co.get('Number')): co.get('ObjectSize') for co in root.findall('.//k:ComObject', NS)}
     assert sizes[3] == '2 Bit' and sizes[4] == '4 Bit'
-    xmlschema = pytest.importorskip('xmlschema')
-    schema = xmlschema.XMLSchema(str(Path(__file__).resolve().parent / 'schema' / 'knx_schema_version23.xsd'))
-    schema.validate(export_product_json_to_knxprod(doc))
+    _validate_against_the_knx_schema(export_product_json_to_knxprod(doc))
 
 
 def test_a_view_of_an_unknown_port_or_instance_is_refused():
-    with pytest.raises(ValueError, match='port 9'):
+    with _refused('port 9'):
         _root([{'logicalId': 9, 'instance': 0}])
-    with pytest.raises(ValueError, match='instance 3'):
+    with _refused('instance 3'):
         _root([{'logicalId': 0, 'instance': 2, 'visible': _when([1])}])
+
+
+def main():
+    tests = [(name, fn) for name, fn in sorted(globals().items())
+             if name.startswith('test_') and callable(fn)]
+    failed = 0
+    for name, fn in tests:
+        try:
+            fn()
+            print(f'ok   {name}')
+        except AssertionError as error:
+            failed += 1
+            print(f'FAIL {name}: {error}')
+    print(f'{len(tests) - failed}/{len(tests)} passed')
+    return 1 if failed else 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

@@ -13,13 +13,15 @@ This document is the inventory a certification effort would start from. It is
 deliberately blunt about gaps: a feature listed as implemented is one that has
 runtime behaviour and a test, not one that has an enum value.
 
-Read "implemented" as exactly that, and no further. Three areas have been
+Read "implemented" as exactly that, and no further. These areas have been
 validated on real hardware with ETS6: TP1 over the bit-bang backend (ESP32),
-TP1 over a TP-UART2 (GD32F103, bare metal), and KNX Data Secure over both
-(secure commissioning, secured download, secured group communication).
-Everything else in this document rests on host tests written against the
-specification texts — it has never met real ETS, a real gateway, or real
-transceiver hardware. The stack is also not finished; absence from the gap list
+TP1 over a TP-UART2 (GD32F103, bare metal), KNX Data Secure over both (secure
+commissioning, secured download, secured group communication), and the KNX IP
+medium over KNXnet/IP routing (ESP32-C6 on Wi-Fi). KNXnet/IP tunnelling, KNX IP
+Secure tunnelling and Data Secure over IP are exercised on the wire against
+`xknx` in CI ([interop harness](../../interop/README.md)). Everything else in
+this document rests on host tests written against the specification texts — it
+has never met real ETS, a real gateway, or real transceiver hardware. The stack is also not finished; absence from the gap list
 at the end is not proof that an area is complete.
 
 ## Application layer services (03/03/07)
@@ -242,10 +244,10 @@ Behaviour required of Type 1 and covered by tests in `test_device_object.cpp`:
 | TP1 — timer-ISR bit-bang | Validated on real hardware (ESP32), including Data Secure. |
 | TP1 — TP-UART2 | **Validated on real hardware, including Data Secure**: a GD32F103 (Cortex-M3, bare metal) with a Siemens TP-UART2 completed ETS6 product import, individual-address assignment, application and parameter download and group communication on a live bus, and with Data Secure on, secure commissioning with the device certificate, a secured download and secured group communication in both directions. Data Secure there uses the portable software AES (`KNX_AES_BACKEND_SOFTWARE`, no crypto library) and fixed-capacity Security Interface Object tables (`KNX_SECURITY_*`), so a secure download does not allocate after start-up; the size gate measures it (`tp1-small` + Data Secure on Cortex-M3). `TpUartMediumBackend` runs over a board's `knx_uart_hal_t` (standalone and bare-metal builds; there is no ESP-IDF UART HAL). The host tests run it against a scripted chip and against `VirtualTpUartChip`, a simulator of the chip on a virtual TP1 line (`-L tpuart`). What was observed on the chip, and what is still open, is in `docs/design/cortex-m-tpuart2-support.md` §3.8. |
 | TP1 — NCN5120 | **Not implemented.** The TP-UART backend is structured for it (`TpUartFamily`), but the differences are not coded until a board can test them. |
-| KNXnet/IP tunnelling (unicast) | Implemented; compiled out entirely unless `CONFIG_KNX_MEDIUM_IP` / `KNX_FEATURE_NETIP` is set. **Validated only by host interop against `xknx`** — never against real ETS or a real gateway. |
-| KNXnet/IP routing (multicast) | Implemented as a KNX IP medium (03/02/06), not only as a transport: Core discovery and self-description are answered, the system-broadcast domain is carried on ROUTING_SYSTEM_BROADCAST, the egress budget and ROUTING_BUSY back-off are enforced, and the Device Descriptor reports the KNX IP mask version. Wire formats are covered octet by octet by host tests against the specification's own layouts. **Still never run against real ETS or on hardware.** |
+| KNXnet/IP tunnelling (unicast) | Implemented; compiled out entirely unless `CONFIG_KNX_MEDIUM_IP` / `KNX_FEATURE_NETIP` is set. Validated on the wire against `xknx` in CI, as a client and as an interface's tunnelling server; **not yet against ETS or a commercial gateway.** |
+| KNXnet/IP routing (multicast) | Implemented as a KNX IP medium (03/02/06), not only as a transport: Core discovery and self-description are answered, the system-broadcast domain is carried on ROUTING_SYSTEM_BROADCAST, the egress budget and ROUTING_BUSY back-off are enforced, and the Device Descriptor reports the KNX IP mask version. Wire formats are covered octet by octet by host tests against the specification's own layouts, and group communication is tested on the wire against `xknx`. **Run against ETS6 on hardware** (Habinari, ESP32-C6 on Wi-Fi) on an unsecured backbone; a secured backbone needs Device Management (below). |
 | KNXnet/IP Core (server side) | SEARCH_REQUEST, SEARCH_REQUEST_EXTENDED and DESCRIPTION_REQUEST are answered, with the full Search Request Parameter set including the unknown-SRP rule. Mandatory for Device Class C (03/08/01 Table 2). Shares the routing socket, so it is present exactly when routing is. |
-| KNXnet/IP Device Management (server side) | **Not implemented.** Mandatory for Device Class C. It was assumed nothing depended on it, because a KNX IP end device is commissioned over the KNX network rather than through a management connection. That holds only while the backbone is unsecured. On a secured backbone every point-to-point frame is wrapped in a `SECURE_WRAPPER`, so a device that has no backbone key cannot be reached over the KNX network at all — and `PID_BACKBONE_KEY`, the write that would give it one, is itself such a frame. A unicast management connection is the only way in, which makes this the gap that stops the device being added to a secure installation without de-securing it first. Confirmed against ETS6 on hardware. |
+| KNXnet/IP Device Management (server side) | **Not implemented.** Mandatory for Device Class C. On an unsecured backbone a KNX IP end device does not need it: ETS commissions it over the KNX network. On a secured backbone every point-to-point frame is wrapped in a `SECURE_WRAPPER`, so a device that has no backbone key cannot be reached over the KNX network at all — and `PID_BACKBONE_KEY`, the write that would give it one, is itself such a frame. A unicast management connection is the only way in, which makes this the gap that stops the device being added to a secure installation without de-securing it first. Observed with ETS6 on hardware. |
 | KNXnet/IP Tunnelling (server side) | **Not implemented**, and optional for Device Class C. The device is an end device on the medium, not a gateway; ETS cannot use it as an interface. |
 | RF | Not implemented, and not planned — no RF hardware is available to develop or validate against. |
 | Powerline | Not implemented, and not planned, for the same reason. |
@@ -258,16 +260,12 @@ device:
 1. **No KNX Conformance Test Tool run.** The repository has one conformance
    evidence test. Certification requires the official test suite against real
    hardware.
-2. **The IP-side secure paths are unexercised.** KNXnet/IP Secure Tunnelling
-   and Secure Routing are implemented and verified against the specification's
-   CCM vectors, but neither has run against a real peer, so the session and
-   wrapper mechanics are unconfirmed on the wire.
-
-   The same caveat now covers the whole KNX IP medium, and it is the honest
-   summary of where that work stands: the wire formats are tested against the
-   specification octet by octet, and no part of it has yet answered a real tool.
-   That is a different and weaker claim than the one Data Secure on TP1 can
-   make, which is that a full ETS6 download completed on hardware.
+2. **The IP-side secure paths are only partly exercised.** KNXnet/IP Secure
+   Tunnelling is tested on the wire against `xknx`, but not against ETS or a
+   commercial gateway. Secure Routing is verified against the specification's
+   CCM vectors and host tests only, and a secured backbone cannot be
+   commissioned until KNXnet/IP Device Management exists (see the IP table
+   above).
 
    Data Secure itself is *not* in this list: secure commissioning, a full ETS6
    secure download and secured group communication have completed on hardware

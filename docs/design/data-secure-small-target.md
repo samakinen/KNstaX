@@ -1,5 +1,7 @@
 # Design: KNX Data Secure on `tp1-small`
 
+> A design record: the status line is current, the body is the history of the work. See [the index](README.md) for where the current reference is.
+
 | | |
 |---|---|
 | Status | **Implemented and validated**, 23 November 2026: D1 (the AES part), D2, D3–D6 and D9 are done, and the H8i8o (GD32F103, TP-UART2) has run Data Secure with ETS6 — secure commissioning, a secured download and secured group communication. Open: D7 (stack buffers in the secure path, about 1.6 KiB per secured telegram) and a secure download in the size gate's traffic (§7). Figures marked "est." are estimates from the source and `sizeof` reasoning, not a size gate run; §9 has the measurements. |

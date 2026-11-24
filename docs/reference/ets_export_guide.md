@@ -5,16 +5,21 @@ How a `constexpr` product definition becomes a `.knxprod` ETS can import.
 ## The pipeline
 
 ```
-product.hpp  (constexpr ProductDefinition — the single source of truth)
+product.hpp  (constexpr product definition — the single source of truth)
      │
-     │  knx_commissioned_product() CMake function generates a host-side
-     │  exporter binary from cmake/knxprod_gen_main.cpp.in
+     │  knx_commissioned_product(<name> ...) generates a host-side exporter
+     │  binary from cmake/knxprod_gen_main.cpp.in
      ▼
-<product>_ets.json           exportDescriptorToJson()
+<name>.json             exportCommissionedProductToJson()
      │
      │  tools/knxprod_exporter/exporter.py
      ▼
-<product>_ets.knxprod.xml    KNX project schema v23, XSD-validated in CI
+<name>.knxprod.xml      KNX project schema v23, XSD-validated in CI
+```
+
+```cmake
+include(${KNSTAX_DIR}/cmake/knx_product.cmake)
+knx_commissioned_product(my_product DEFINITION product.hpp SYMBOL kProduct)
 ```
 
 The point of the design is that the runtime and the ETS catalogue entry are
@@ -74,6 +79,8 @@ enum class Action : uint8_t { Nothing, On, Off, Toggle };
 
 // An option list is a named constant. Parameters that share it share one ETS
 // ParameterType.
+inline constexpr auto kFunctionOptions = params::options<Function>(
+    {{Function::Disabled, "Disabled"}, {Function::Switch, "Switch"}, {Function::Dimming, "Dimming"}});
 inline constexpr auto kActionOptions = params::options<Action>(
     {{Action::Nothing, "Nothing"}, {Action::On, "On"}, {Action::Off, "Off"}, {Action::Toggle, "Toggle"}});
 
@@ -226,8 +233,8 @@ knx_commissioned_product(my_product DEFINITION product.hpp SYMBOL kProduct VIEWS
   number. A port without views is exported as before, always shown.
 - `instance` is the instance of the repeated block the condition's parameter
   belongs to; conditions use the same forms as parameter conditions.
-- `text` and `function` set `Text` and `FunctionText` (default: the port's
-  display name); `dpt` sets the datapoint type ETS shows.
+- `text` sets `Text` (default: the port's display name) and `function` sets
+  `FunctionText` (default: the text); `dpt` sets the datapoint type ETS shows.
 - The run time does not change: the port keeps its own datapoint type and value
   type, and a view may only show a type of the same size. That is enough
   because the encoding goes by size: one 1-byte port carries 5.010, 5.001,
@@ -241,12 +248,17 @@ knx_commissioned_product(my_product DEFINITION product.hpp SYMBOL kProduct VIEWS
 ## Building
 
 ```bash
-cmake --build build --target <product>_ets_knxprod
+cmake --build build --target <name>_knxprod
 ```
 
-The generated XML lands in the build directory. CI validates it against the KNX
-XSD (`test_knxprod_xsd_validation`) and round-trips it through the exporter test
-(`test_knxprod_exporter`).
+`<name>.knxprod.xml` lands in the build directory, or in `OUTPUT_DIR` when the
+call gives one. Every host build regenerates it, so it is never stale.
+
+CI renders a set of reference products and checks the result:
+`test_knxprod_exporter` (structure), `test_knxprod_xsd_validation` (the KNX
+project schema), and `test_exporter_parameter_blocks`, `test_exporter_medium`
+and `test_exporter_object_views` (parameters and the load procedure, the
+medium, object views).
 
 ## Importing into ETS
 
@@ -256,7 +268,7 @@ comparable tool.
 
 The XML is self-contained: it carries a `MasterData` section naming the medium,
 mask version, manufacturer and datapoint types it uses, so it can be validated
-and read back (`knxprod2profile.py`) without ETS. A `.knxprod` archive has no
+without ETS. A `.knxprod` archive has no
 such section — master data is ETS's own `knx_master.xml`. Strip `MasterData`
 before handing the file to a packer that signs with the ETS libraries, e.g.
 OpenKNXproducer: it splits the input into `Catalog.xml`, `Hardware.xml` and the
@@ -364,14 +376,14 @@ differently. A product with no serialisable parameters has no
 
 ## Current limitations
 
-Honest list of what the exporter does not yet produce:
+What the exporter does not produce yet:
 
 - **English only.** A single `<Language Identifier="en-US">` block; no
   translations. A product sold outside one language market needs them.
 - **No channels.** Parameter pages and communication objects are not grouped
   into ETS `<Channel>` elements. A parameter layout gives one page per block
   instance, but the communication objects of a repeated function are still a
-  flat list (step P4 of [parameter-model.md](../design/parameter-model.md)).
+  flat list ([parameter-model.md](../design/parameter-model.md) §3.7).
   Objects can be hidden and given alternative datapoint types by a parameter
   (object views, above), but ports are declared one by one.
 - **The manufacturer name is taken from the product display name.** Fine for

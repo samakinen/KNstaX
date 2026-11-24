@@ -1,5 +1,7 @@
 # Design: further RAM and flash reductions for `tp1-small`
 
+> A design record: the status line is current, the body is the history of the work. See [the index](README.md) for where the current reference is.
+
 | | |
 |---|---|
 | Status | **Implemented**, 21 November 2026: packages P1–P5 integrated and measured together (§9). Attribution measured; savings in the proposal sections are the estimates made before the work |

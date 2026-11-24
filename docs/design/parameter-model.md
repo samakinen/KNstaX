@@ -1,5 +1,7 @@
 # Design: one parameter model for every target
 
+> A design record: the status line is current, the body is the history of the work. See [the index](README.md) for where the current reference is.
+
 | | |
 |---|---|
 | Status | **Built**, 17 November 2026: steps P0 to P3 (§8). The parameter layout is the only parameter model; Habinari and the H8i8o use it, and the H8i8o's parameters have been downloaded by ETS6 on hardware. Open: step P4, ETS channels for communication objects |

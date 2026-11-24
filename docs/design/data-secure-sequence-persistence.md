@@ -1,5 +1,7 @@
 # Design: Data Secure sequence numbers in persistent storage
 
+> A design record: the status line is current, the body is the history of the work. See [the index](README.md) for where the current reference is.
+
 | | |
 |---|---|
 | Status | **Built**, 21 November 2026: steps S1 to S5 (§6). |

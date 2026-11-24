@@ -1,5 +1,7 @@
 # Design: build-time configuration and the small-target profile
 
+> A design record: the status line is current, the body is the history of the work. See [the index](README.md) for where the current reference is.
+
 | | |
 |---|---|
 | Status | **Implemented** (design record; the per-item status sections below are its history). C1–C4 (Kconfig for standalone builds, capacities, feature gates, the size gate in CI), S1–S4 (table-driven runtime, compact group objects, property storage, `init_only` allocation policy) and P1 (the reference STM32F1/GD32F1 port, run on hardware with ETS6) are done; see §9. Current figures: README.md, "Footprint and capacity" |

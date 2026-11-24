@@ -1,5 +1,7 @@
 # Design: Cortex-M bare-metal targets and the TP-UART2 backend
 
+> A design record: the status line is current, the body is the history of the work. See [the index](README.md) for where the current reference is.
+
 | | |
 |---|---|
 | Status | **Implemented** (design record; the dated sections below are its history). K1–K7 and K10 are in the tree: the bare-metal build and `CooperativePlatform`, the UART HAL, `TpUartMediumBackend`, the TP-UART2 chip simulator, `FlashLogPersistence`, the portable AES, the compact profile with its size gate (carried out as [small-target-profile.md](small-target-profile.md)), and the `SAVE` power-fail path. Validated on a GD32F103 with ETS6, Data Secure included (the H8i8o firmware). K8 (reusable channel blocks) is not implemented; K9 (exporter channels and conditional objects) is in progress. For current status prefer README.md and docs/reference/knx_conformance_status.md |

@@ -6,7 +6,7 @@ KNstaX is a C++23 KNX System-7 stack with an embedded-first runtime model.
 
 Media:
 - TP1, over a software bit-bang backend or a TP-UART2 transceiver (validated on hardware with ETS6)
-- KNXnet/IP tunnelling and routing (implemented and host-tested; not yet validated against real ETS)
+- KNXnet/IP tunnelling and routing (routing commissioned from ETS6 on hardware; tunnelling tested on the wire against `xknx`)
 
 Product/runtime authoring model:
 - a `constexpr` `EndpointDefinition`, wrapped by `makeCommissionedProduct()`, is the one declarative product source

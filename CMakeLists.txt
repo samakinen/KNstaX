@@ -635,6 +635,10 @@ else()
         knx_add_test(test_exporter_medium
             COMMAND ${Python3_EXECUTABLE} ${KNXPROD_EXPORTER_DIR}/test_exporter_medium.py
             LABELS script)
+        # Object views: alternative ComObjectRefs under a parameter (pure Python).
+        knx_add_test(test_exporter_object_views
+            COMMAND ${Python3_EXECUTABLE} ${KNXPROD_EXPORTER_DIR}/test_exporter_object_views.py
+            LABELS script)
         # Configuration generator: profiles resolve, bad fragments fail (pure Python).
         knx_add_test(test_knx_genconfig
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/kconfig/test_knx_genconfig.py
@@ -644,14 +648,6 @@ else()
         # Decoder fuzz/robustness
         knx_add_test(test_decoder_robustness SOURCES test/unit/test_decoder_robustness.cpp LABELS unit)
         knx_add_test(test_tp1_integration SOURCES test/integration/test_tp1_integration.cpp LABELS tp1 integration)
-
-        # PoC: generate product profile header from a .knxprod file
-        add_custom_command(
-            OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/generated_product_profile.hpp
-            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/knxprod2profile.py ${CMAKE_CURRENT_SOURCE_DIR}/tools/examples/sample.knxprod.xml --output ${CMAKE_CURRENT_BINARY_DIR}/generated_product_profile.hpp
-            DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tools/knxprod2profile.py ${CMAKE_CURRENT_SOURCE_DIR}/templates/profile_header.tpl ${CMAKE_CURRENT_SOURCE_DIR}/tools/examples/sample.knxprod.xml
-        )
-        add_custom_target(generate_product_profile DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/generated_product_profile.hpp)
 
         knx_add_test(test_result SOURCES test/unit/test_result.cpp LABELS unit)
         knx_add_test(test_config_validation SOURCES test/unit/test_config_validation.cpp LABELS unit)

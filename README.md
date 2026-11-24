@@ -25,11 +25,12 @@ What has been proven on hardware against ETS6:
 |---|---|---|
 | ESP32-C6 ([Habinari](https://github.com/samakinen/habinari-firmware) room controller) | Software bit-bang TP1 (STKNX transceiver) | Discovery, individual address, application download, group communication; **KNX Data Secure**: secure commissioning, secured download, secured group communication |
 | GD32F103 (STM32F103-compatible Cortex-M3, 128 KiB flash / 20 KiB RAM; [H8i8o](https://github.com/samakinen/h8i8o) 8-in/8-out module) | Siemens TP-UART2 | Product import, individual address, application and parameter download, group communication, configuration kept in flash across restarts and power cuts; **KNX Data Secure**: secure commissioning with the device certificate, secured download, secured group communication in both directions |
+| ESP32-C6 (Habinari, KNX IP variant) | KNXnet/IP routing over Wi-Fi | Discovery and commissioning as a KNX IP device on an unsecured backbone |
 
-Everything else is implemented and covered by host tests, but has not yet been
-run against real ETS, a real gateway or a real second line: KNXnet/IP
-tunnelling and routing, KNXnet/IP Secure Tunnelling and Secure Routing, and the
-coupler routing actions. Expect to debug these on first contact. The
+KNXnet/IP tunnelling, KNX IP Secure tunnelling and Data Secure over IP are
+tested on the wire against [`xknx`](interop/README.md) in CI, but not against
+ETS or a commercial gateway. KNX Secure Routing and the coupler routing actions
+rest on host tests only. Expect to debug those on first contact. The
 [support matrix](#support-matrix) splits it row by row, and the
 [conformance status](docs/reference/knx_conformance_status.md) does so service
 by service.
@@ -224,9 +225,10 @@ stronger claim, kept in its own column on purpose.
 | Bus power-fail warning (TP-UART2 `SAVE`, bit-bang `KNX_OK`) | Yes, debounced; the product calls `requestPowerFailSave()` to save the Data Secure sequence state | **Partly** — the warning pin was read and timed on a GD32F103 (about 120 ms of supply after it); the save itself is host-tested |
 | Flash persistence (`FlashLogPersistence`) | Yes | **Yes** — power cut at random moments on a GD32F103, every record whole |
 | KNX Data Secure | Yes — fixed-capacity key tables, persistent sequence numbers, FDSK/device-certificate helpers | **Yes** on both TP1 backends (ESP32-C6 bit-bang, GD32F103 TP-UART2) — secure commissioning, secured download, secured group communication |
-| KNXnet/IP tunnelling (unicast) | Yes | **No** — host interop against `xknx` only |
-| KNXnet/IP routing (multicast) | Yes | **No** — host interop against `xknx` only |
-| KNXnet/IP Secure Tunnelling | Yes, ECDH + `.knxkeys` import | **No** |
+| KNXnet/IP routing (multicast), KNX IP medium | Yes | **Yes** — commissioned from ETS6 on an ESP32-C6 over Wi-Fi (unsecured backbone); also tested against `xknx` in CI |
+| KNXnet/IP tunnelling (unicast) | Yes, client and interface server | **No** — tested on the wire against `xknx` in CI |
+| KNXnet/IP Secure Tunnelling | Yes, ECDH + `.knxkeys` import | **No** — tested on the wire against `xknx` in CI |
+| KNXnet/IP Device Management | **No** — a secured IP backbone cannot be commissioned without it | — |
 | KNX Secure Routing | Yes, opt-in; needs a provisioned backbone key | **No** |
 | Couplers / Router Object | Yes, opt-in via `configureRouterRole()` | **No** — the routing actions have not run on a real two-line installation |
 | Serial-number commissioning | Yes | **No** |
@@ -459,9 +461,10 @@ lists what stands between the stack and a certifiable device.
 | [Quick reference](QUICK_REFERENCE.md) | Commands and APIs on one page |
 | [Development guidelines](DEVELOPMENT_GUIDELINES.md) | Contributing |
 
-Design records in [docs/design/](docs/design/) explain why the bare-metal
-platform, the small-target profile, the parameter model, the software AES and
-Data Secure on small parts are built the way they are, with measurements.
+[Design records](docs/design/README.md) explain why the bare-metal platform,
+the small-target profile, the parameter model, the software AES and Data Secure
+on small parts are built the way they are, with the measurements taken at the
+time. They are history; the documents above describe the current state.
 
 ## Contributing
 
