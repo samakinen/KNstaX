@@ -21,6 +21,12 @@ honour: out of range, or a symbol whose dependencies make it invisible. A
 silent fallback to the default there would build something other than what the
 fragment asked for.
 
+An imported fragment (--import) is the exception: the configuration of another
+build, such as an ESP-IDF sdkconfig or a cross build's knx.config, applied to
+this one as far as it can be. Its unknown symbols and the assignments this
+configuration cannot take (an ESP-IDF-only choice, a menu behind another
+medium) are listed, not errors. Fragments and imports apply in the order given.
+
 Run it as `python3 -I tools/kconfig/knx_genconfig.py ...`. Isolated mode keeps
 the user's site-packages and the current directory out of the import path, so
 the script adds its own directory (where kconfiglib.py is vendored) itself.
@@ -111,13 +117,25 @@ def same_value(sym, expected):
     return got == expected
 
 
-def load(kconfig_path, srctree, fragments):
+def load(kconfig_path, srctree, fragments, not_applied=None):
+    """Resolve @p fragments: paths, or (path, imported) pairs.
+
+    The assignments of an imported fragment that do not apply are appended to
+    @p not_applied as (file, symbol, wanted, resolved) instead of failing.
+    """
     os.environ["srctree"] = str(srctree)
     kconf = kconfiglib.Kconfig(str(kconfig_path), warn=True, warn_to_stderr=False)
     for frag in fragments:
+        frag, imported = frag if isinstance(frag, tuple) else (frag, False)
         assigned = {}  # name -> (expected, where); the last assignment in the fragment wins
         for name, value, where in parse_fragment(frag):
             sym = kconf.syms.get(name)
+            if imported and (sym is None or not sym.nodes or name.startswith("KNX_MEDIUM_")):
+                # Unknown here, or the ESP-IDF medium choice, which a standalone
+                # build replaces with KNX_BUILD_* (see below).
+                if not_applied is not None:
+                    not_applied.append((frag, name, value, None))
+                continue
             if sym is None or not sym.nodes:
                 raise GenError(f"{where}: unknown symbol {CONFIG_PREFIX}{name}")
             assigned[name] = (assign(sym, value, where), where)
@@ -127,6 +145,10 @@ def load(kconfig_path, srctree, fragments):
         # takes tunnelling with it), so only the fragment that asked is held to it.
         for name, (expected, where) in assigned.items():
             sym = kconf.syms[name]
+            if not same_value(sym, expected) and imported:
+                if not_applied is not None:
+                    not_applied.append((frag, name, expected, sym.str_value))
+                continue
             if not same_value(sym, expected):
                 reason = ("not visible (a dependency is not met)" if sym.visibility == 0
                           else "out of range or conflicting")
@@ -201,13 +223,18 @@ def main(argv=None):
     ap.add_argument("--kconfig", required=True, help="top-level Kconfig file")
     ap.add_argument("--srctree", default=str(here.parent.parent),
                     help="base directory for `source` lines (default: the KNstaX root)")
-    ap.add_argument("--fragment", action="append", default=[], metavar="FILE",
-                    help="defconfig fragment; repeat, later ones win")
+    ap.add_argument("--fragment", dest="fragments", action="append", default=[], metavar="FILE",
+                    type=lambda p: (p, False), help="defconfig fragment; repeat, later ones win")
+    ap.add_argument("--import", dest="fragments", action="append", metavar="FILE",
+                    type=lambda p: (p, True),
+                    help="another build's configuration, applied as far as it can be")
     ap.add_argument("--out-dir", required=True, help="where to write the outputs")
     args = ap.parse_args(argv)
 
+    not_applied = []
     try:
-        kconf = load(Path(args.kconfig).resolve(), Path(args.srctree).resolve(), args.fragment)
+        kconf = load(Path(args.kconfig).resolve(), Path(args.srctree).resolve(), args.fragments,
+                     not_applied)
     except GenError as exc:
         print(f"knx_genconfig: error: {exc}", file=sys.stderr)
         return 1
@@ -223,7 +250,11 @@ def main(argv=None):
     write_if_changed(out / "knx_config.cmake", render_cmake(kconf))
     write_if_changed(out / "knx.config", render_config(kconf))
     print(f"knx_genconfig: {len(emitted(kconf))} symbols resolved from "
-          f"{len(args.fragment)} fragment(s), {len(kconf.warnings)} warning(s)")
+          f"{len(args.fragments)} fragment(s), {len(kconf.warnings)} warning(s)")
+    if not_applied:
+        names = ", ".join(CONFIG_PREFIX + name for _, name, _, _ in not_applied)
+        print(f"knx_genconfig: {len(not_applied)} imported setting(s) do not apply to this "
+              f"configuration: {names}")
     return 0
 
 

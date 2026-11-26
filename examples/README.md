@@ -93,8 +93,8 @@ ctest --test-dir build_examples -R '^test_netip_routing_multicast$'
 
 ## Generating the ETS product file
 
-`knx_commissioned_product()` turns a `product.hpp` into a `.knxprod.xml` at
-build time:
+`knx_ets_product()` turns a `product.hpp` into a `.knxprod.xml` (and the
+`.ets.xml` a packer signs into a `.knxprod`) at build time:
 
 ```bash
 cmake --build build --target tp1_switch_ets_knxprod

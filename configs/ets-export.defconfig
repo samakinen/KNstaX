@@ -1,0 +1,20 @@
+# Applied by knx_ets_product() after the firmware's own resolved configuration,
+# when the product file is built on the host for a cross-compiled firmware
+# (cmake/knx_ets_product.cmake). The exporter only compiles the product
+# definition and reads the capacities, so this turns the configuration into a
+# host build and drops what only a device or the test suite needs. None of it
+# changes what the product file declares: table sizes, Data Secure, the
+# optional services and the datapoint families all stay as the firmware has
+# them. ets-export-secure.defconfig follows when the firmware has Data Secure.
+#
+# The host platform instead of bare metal or ESP-IDF.
+CONFIG_KNX_STANDALONE_PLATFORM_AUTO=y
+# Media and transports: KNXnet/IP with Data Secure would need mbedTLS (IP
+# Secure), and the virtual bus works on Linux only.
+CONFIG_KNX_BUILD_NETIP=n
+CONFIG_KNX_ENABLE_TUNNELING=n
+CONFIG_KNX_BUILD_VIRTUAL_BUS=n
+CONFIG_KNX_BUILD_ETS_TOOLING=n
+CONFIG_KNX_BUILD_TEST_HOOKS=n
+CONFIG_KNX_BUILD_ZLIB=n
+CONFIG_KNX_ISR_IN_RAM=n

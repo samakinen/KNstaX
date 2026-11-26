@@ -167,9 +167,11 @@ for (;;) {
 Keep the product definition in its own header with no hardware or OS
 dependencies: the same header is compiled by the firmware *and* by the
 host-side exporter, which is what makes the runtime and the ETS entry incapable
-of disagreeing. `knx_commissioned_product()` (in `cmake/knx_product.cmake`)
-registers a `<name>_knxprod` target that generates the product file; the host
-build registers one for the switch example:
+of disagreeing. `knx_ets_product()` (in `cmake/knx_ets_product.cmake`) builds
+a firmware's product file with the firmware and from its configuration, checks
+it against a committed product lock (a changed product needs a new application
+version, or ETS refuses it) and packs it where ETS is installed; the host build
+generates the switch example's:
 
 ```bash
 cmake --build build --target tp1_switch_ets_knxprod

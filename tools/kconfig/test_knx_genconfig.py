@@ -159,6 +159,36 @@ def test_secure_needs_extended_memory_services_and_go_diagnostics():
     assert '#define CONFIG_KNX_ENABLE_GO_DIAGNOSTICS 1' in _header(out)
 
 
+def test_an_import_applies_what_it_can_and_lists_the_rest():
+    # An ESP-IDF sdkconfig, as knx_ets_product() imports it into a host build:
+    # the capacities and Secure apply; the medium choice, an unknown symbol and
+    # the IP menu (behind KNX_MEDIUM_IP) do not, and are listed.
+    sdkconfig = _fragment(
+        'CONFIG_KNX_MEDIUM_IP=y\n'
+        '# CONFIG_KNX_MEDIUM_TP1 is not set\n'
+        'CONFIG_KNX_IP_PORT=3671\n'
+        'CONFIG_KNX_NOT_A_SYMBOL=y\n'
+        'CONFIG_KNX_ENABLE_SECURITY=y\n'
+        'CONFIG_KNX_ENABLE_PROPERTY_EXT=y\n'
+        'CONFIG_KNX_ENABLE_MEMORY_EXT=y\n'
+        'CONFIG_KNX_ENABLE_GO_DIAGNOSTICS=y\n'
+        'CONFIG_KNX_ADDRESS_TABLE_ENTRIES=200\n')
+    out = Path(tempfile.mkdtemp(prefix='knx_genconfig_'))
+    cmd = [sys.executable, '-I', str(GEN), '--kconfig', str(TOP), '--out-dir', str(out),
+           '--fragment', str(PROFILES / 'host-minimal.defconfig'), '--import', str(sdkconfig)]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    text = '\n'.join(_header(out))
+    assert '#define CONFIG_KNX_ADDRESS_TABLE_ENTRIES 200' in text
+    assert '#define CONFIG_KNX_ENABLE_SECURITY 1' in text
+    for name in ('CONFIG_KNX_MEDIUM_IP', 'CONFIG_KNX_IP_PORT', 'CONFIG_KNX_NOT_A_SYMBOL'):
+        assert name in proc.stdout, (name, proc.stdout)
+    assert 'CONFIG_KNX_ADDRESS_TABLE_ENTRIES' not in proc.stdout, proc.stdout
+    # The same lines as an ordinary fragment are an error.
+    rc, _, _ = _run([PROFILES / 'host-minimal.defconfig', sdkconfig])
+    assert rc != 0
+
+
 def test_group_object_diagnostics_need_function_properties():
     bad = _fragment('CONFIG_KNX_ENABLE_SECURITY=n\nCONFIG_KNX_ENABLE_FUNCTION_PROPERTIES=n\nCONFIG_KNX_ENABLE_GO_DIAGNOSTICS=y\n')
     rc, err, _ = _run([PROFILES / 'host-test.defconfig', bad])

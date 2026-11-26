@@ -7,24 +7,41 @@ How a `constexpr` product definition becomes a `.knxprod` ETS can import.
 ```
 product.hpp  (constexpr product definition — the single source of truth)
      │
-     │  knx_commissioned_product(<name> ...) generates a host-side exporter
-     │  binary from cmake/knxprod_gen_main.cpp.in
+     │  a host-side exporter binary from cmake/knxprod_gen_main.cpp.in,
+     │  compiled with the firmware's KNstaX configuration
      ▼
 <name>.json             exportCommissionedProductToJson()
      │
      │  tools/knxprod_exporter/exporter.py
      ▼
-<name>.knxprod.xml      KNX project schema v23, XSD-validated in CI
+<name>.knxprod.xml      KNX project schema v23, self-contained (with MasterData)
+<name>.ets.xml          the same without MasterData: the packer's input
+     │
+     │  tools/ets_product/ets_product.py: validate, lock, pack, dist
+     ▼
+<name>.knxprod          packed and signed, on a PC with ETS
 ```
 
+A firmware declares its product once, in the firmware's own CMake project:
+
 ```cmake
-include(${KNSTAX_DIR}/cmake/knx_product.cmake)
-knx_commissioned_product(my_product DEFINITION product.hpp SYMBOL kProduct)
+include(${KNSTAX_DIR}/cmake/knx_ets_product.cmake)
+knx_ets_product(my_product
+    DEFINITION ${CMAKE_SOURCE_DIR}/main/product.hpp
+    SYMBOL     my_product::kProduct
+    LOCK       ${CMAKE_SOURCE_DIR}/product.lock
+    DIST_DIR   ${CMAKE_BINARY_DIR}/dist
+    DIST_FILES ${CMAKE_BINARY_DIR}/my_firmware.bin
+    DIST_DEPENDS my_firmware
+)
 ```
 
 The point of the design is that the runtime and the ETS catalogue entry are
-derived from the *same* declaration. There is no second place to update when a
-port is added, and no way for the two to drift.
+derived from the *same* declaration and the *same* configuration. There is no
+second place to update when a port is added or a table grows, and no way for the
+two to drift. `cmake/knx_ets_product.cmake` documents every argument;
+`knx_commissioned_product()` (`cmake/knx_product.cmake`) is the step that
+produces the JSON and the XML, for a host project that wants only those.
 
 ## Declaring a product
 
@@ -247,34 +264,115 @@ knx_commissioned_product(my_product DEFINITION product.hpp SYMBOL kProduct VIEWS
 
 ## Building
 
-```bash
-cmake --build build --target <name>_knxprod
+The product is built with the firmware: target `<name>_ets_product`, in `ALL`.
+Its files land in the build directory, or in `OUTPUT_DIR` when the call gives
+one, and every build refreshes them, so they are never stale.
+
+**Configuration.** The product file declares the device's capacities (table
+sizes, Data Secure key tables, APDU length), which come from the KNstaX
+configuration the exporter is compiled with. In a host build that is the
+build's own. A bare-metal or ESP-IDF firmware is cross-compiled, so
+`knx_ets_product()` runs the exporter in a nested host build
+(`cmake/ets_product_host`) whose configuration is:
+
+1. the `host-minimal` profile;
+2. the firmware's configuration, imported (`knx_configure(... IMPORT ...)`): the
+   `CONFIG_KNX_*` lines of a standalone build's resolved `knx.config` or of an
+   ESP-IDF build's `sdkconfig`. What a host build cannot take — the ESP-IDF
+   medium choice and AES peripheral, the IP menu behind `KNX_MEDIUM_IP` — is
+   listed in the configure output, not applied;
+3. `configs/ets-export.defconfig` (and `ets-export-secure.defconfig` with Data
+   Secure): the host platform, no media drivers, no mbedTLS. None of it changes
+   what the product declares.
+
+The nested build needs a host C++23 compiler (GCC 13 or later) next to the cross
+toolchain; `KNX_ETS_HOST_C_COMPILER` and `KNX_ETS_HOST_CXX_COMPILER` name one
+explicitly, and `-DKNX_ETS_PRODUCT=OFF` skips the product.
+
+**Validation.** `<name>.knxprod.xml` is validated against the KNX project schema
+when Python has `xmlschema`; without it the build says so and goes on.
+
+**Product lock.** With `LOCK`, the build compares the product with its entry in
+the lock file, a JSON file the firmware commits:
+
+```json
+{
+  "my_product": {
+    "application": "M-00FA_A-0001",
+    "content": "sha256:…",
+    "version": 5
+  }
+}
 ```
 
-`<name>.knxprod.xml` lands in the build directory, or in `OUTPUT_DIR` when the
-call gives one. Every host build regenerates it, so it is never stale.
+`content` is the SHA-256 of the canonical `<name>.ets.xml` (XML C14N, text
+trimmed), so line endings and indentation do not count and any change ETS can
+see does. ETS refuses a changed program under an application version it has
+already imported ("the product has a different hash than the existing
+product"), so:
+
+| The product | Its version | The build |
+|---|---|---|
+| unchanged | unchanged | passes |
+| changed | raised | passes and records the new entry: commit the lock with the change |
+| changed | unchanged or lower | **fails**: raise the application version |
+| new to the lock | any | records it |
+
+This also catches a KNstaX update that changes the exporter's output: moving
+the submodule either passes or names the version to raise. For iterations that
+never reach ETS, `-DKNX_ETS_LOCK_MODE=warn` reports instead of failing and
+leaves the lock as it is.
+
+**Dist.** With `DIST_DIR`, target `<name>_dist` collects the product files and
+`DIST_FILES` (the firmware image) in `DIST_DIR/<name>/`, with a `manifest.json`
+naming the application, its version and content hash, the firmware and KNstaX
+commits (`git describe`) and the SHA-256 of every file. The image and the
+product file that belong together travel together.
 
 CI renders a set of reference products and checks the result:
 `test_knxprod_exporter` (structure), `test_knxprod_xsd_validation` (the KNX
-project schema), and `test_exporter_parameter_blocks`, `test_exporter_medium`
-and `test_exporter_object_views` (parameters and the load procedure, the
-medium, object views).
+project schema), `test_exporter_parameter_blocks`, `test_exporter_medium` and
+`test_exporter_object_views` (parameters and the load procedure, the medium,
+object views), and `test_ets_product` (the lock, the archive check, packing and
+dist).
 
-## Importing into ETS
+## Packing and importing into ETS
 
-The generated file is a `.knxprod.xml`, not a zipped `.knxprod`. Import it
-through Kaenx-Creator (which produces the packed archive ETS consumes) or a
-comparable tool.
+ETS imports a `.knxprod`: a ZIP of `knx_master.xml`, the manufacturer's
+`Catalog.xml`, `Hardware.xml` and application program, and an
+`M-xxxx.signature`. Packing computes the program's hash (which replaces the
+`0000` placeholder in the ids) and signs the manufacturer folder. Both are done
+by the ETS libraries, so packing runs on a PC with ETS installed.
 
-The XML is self-contained: it carries a `MasterData` section naming the medium,
-mask version, manufacturer and datapoint types it uses, so it can be validated
-without ETS. A `.knxprod` archive has no
-such section — master data is ETS's own `knx_master.xml`. Strip `MasterData`
-before handing the file to a packer that signs with the ETS libraries, e.g.
-OpenKNXproducer: it splits the input into `Catalog.xml`, `Hardware.xml` and the
-application program file while removing only the elements it knows about, so
-`MasterData` is copied into all three and the ETS hasher fails on the first one
-it reads with `Naming pair for MasterData cannot be found`.
+`tools/ets_product/ets_product.py pack` packs through a **packer backend** and
+then reads the archive back (`check`): the signature, the parts, an application
+id without the placeholder, a `Hash` on the program and on its
+`Hardware2Program`, and the application number and version of the product
+file. On the PC with ETS:
+
+```
+python <KNstaX>/tools/ets_product/ets_product.py pack <build>/dist
+```
+
+packs every `*.ets.xml` under the directory, writes `<name>.knxprod` next to it
+and records the packer in `manifest.json`. A build that finds a backend packs by
+itself (`PACKER auto`, the default); one that does not, such as a Docker build,
+says how to pack and goes on.
+
+The backend today is **OpenKNXproducer** (found as `OPENKNXPRODUCER` or on
+`PATH`; tested with 4.3.12, other versions are packed with a warning). It is
+given `-N` (it otherwise reports the working directory as a missing schema), and
+an archive it writes before crashing on its success banner is accepted when the
+check passes. A new backend is a class in `ets_product.py` with `find()`,
+`describe()` and `pack()`; the firmwares do not change.
+
+`<name>.ets.xml` has no `MasterData`. The self-contained `<name>.knxprod.xml`
+carries one, naming the medium, mask version, manufacturer and datapoint types
+it uses, so that it can be validated without ETS. A `.knxprod` takes master
+data from ETS's own `knx_master.xml`, and a packer that signs with the ETS
+libraries copies an input's `MasterData` into every part of the archive, where
+the ETS hasher fails on it: `Naming pair for MasterData cannot be found`.
+Kaenx-Creator imports either file.
 
 ### Registration
 

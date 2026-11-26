@@ -20,11 +20,17 @@
 # (tp1-small on KNX_PLATFORM=baremetal, host-test otherwise) when the product
 # has not.
 #
-#   knx_configure(PROFILE <name | file> [OVERRIDES <defconfig>...])
+#   knx_configure(PROFILE <name | file> [IMPORT <config>...] [OVERRIDES <defconfig>...])
 #
 #   PROFILE    a name under configs/profiles/ (without .defconfig), or a path
 #              to a defconfig fragment of the product's own.
-#   OVERRIDES  further fragments, applied after the profile in the order given.
+#   IMPORT     the configuration of another build (an ESP-IDF sdkconfig's
+#              CONFIG_KNX_* lines, a cross build's knx.config), applied after
+#              the profile as far as this configuration can take it: settings
+#              that do not apply here are listed, not errors. For a host build
+#              that has to match a firmware (cmake/knx_ets_product.cmake).
+#   OVERRIDES  further fragments, applied after the profile and the imports
+#              in the order given.
 #
 # Legacy command-line options (-DKNX_FEATURE_NETIP=OFF and the like, see
 # _KNX_LEGACY_OPTIONS below) still work: each one given becomes an assignment
@@ -51,7 +57,7 @@ set(_KNX_LEGACY_OPTIONS
 )
 
 function(knx_configure)
-    cmake_parse_arguments(PARSE_ARGV 0 arg "" "PROFILE" "OVERRIDES")
+    cmake_parse_arguments(PARSE_ARGV 0 arg "" "PROFILE" "IMPORT;OVERRIDES")
     if(arg_UNPARSED_ARGUMENTS)
         message(FATAL_ERROR "knx_configure: unknown arguments: ${arg_UNPARSED_ARGUMENTS}")
     endif()
@@ -118,6 +124,11 @@ function(knx_configure)
     endif()
 
     set(_fragments "${_profile_file}")
+    set(_imports)
+    foreach(_i IN LISTS arg_IMPORT)
+        get_filename_component(_i_abs "${_i}" ABSOLUTE)
+        list(APPEND _imports "${_i_abs}")
+    endforeach()
     if(_legacy_names)
         list(JOIN _legacy_names ", " _legacy_list)
         message(STATUS "KNstaX: deprecated -D options applied over the profile: ${_legacy_list}; "
@@ -145,7 +156,14 @@ function(knx_configure)
 
     set(_gen_args --kconfig "${_KNX_ROOT}/tools/kconfig/Kconfig.standalone.top"
                   --srctree "${_KNX_ROOT}" --out-dir "${_out}")
-    foreach(_f IN LISTS _fragments)
+    # The profile, then the imports, then the rest.
+    set(_rest ${_fragments})
+    list(POP_FRONT _rest _first)
+    list(APPEND _gen_args --fragment "${_first}")
+    foreach(_i IN LISTS _imports)
+        list(APPEND _gen_args --import "${_i}")
+    endforeach()
+    foreach(_f IN LISTS _rest)
         list(APPEND _gen_args --fragment "${_f}")
     endforeach()
     execute_process(
@@ -174,7 +192,7 @@ function(knx_configure)
         "${_KNX_ROOT}/tools/kconfig/Kconfig.standalone.top"
         "${_KNX_ROOT}/tools/kconfig/knx_genconfig.py"
         "${_KNX_ROOT}/tools/kconfig/kconfiglib.py"
-        ${_dep_fragments})
+        ${_imports} ${_dep_fragments})
 
     # An editor on the resolved configuration. It saves to menuconfig.config,
     # which the next configure applies last. Needs a terminal with curses.

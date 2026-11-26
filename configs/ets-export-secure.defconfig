@@ -1,0 +1,5 @@
+# Applied after ets-export.defconfig when the firmware has Data Secure
+# (cmake/ets_product_host): the portable AES, so the host build needs no
+# crypto library. The firmware's own backend (the AES peripheral, mbedTLS)
+# changes nothing the product file declares.
+CONFIG_KNX_AES_BACKEND_SOFTWARE=y

@@ -566,7 +566,16 @@ def _ets_id_part(text: str, fallback: str = 'PRODUCT') -> str:
     return ''.join(out) or fallback
 
 
-def export_product_json_to_knxprod(json_obj) -> str:
+def export_product_json_to_knxprod(json_obj, master_data: bool = True) -> str:
+    """The product as KNX project XML (schema 2.3).
+
+    With @p master_data the file is self-contained: a MasterData section names
+    the medium, mask version and datapoint types it uses, so it validates and
+    reads back without ETS. Without it, it is the input for a packer that signs
+    with the ETS libraries (format `ets`): a .knxprod takes its master data from
+    ETS's own knx_master.xml, and the ETS hasher fails on a MasterData element
+    in the manufacturer files ("Naming pair for MasterData cannot be found").
+    """
     # Produce a minimal KNX v2.3 compatible XML structure expected by ETS XSD.
     # Root element: KNX, with MasterData and ManufacturerData/ApplicationPrograms.
     root = ET.Element('KNX')
@@ -1000,6 +1009,8 @@ def export_product_json_to_knxprod(json_obj) -> str:
     tet_product_text.set('AttributeName', 'Text')
     tet_product_text.set('Text', product_display_name)
 
+    if not master_data:
+        root.remove(master)
     return prettify(root)
 
 
@@ -1007,7 +1018,9 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description='KNX Kaenx XML exporter from JSON')
     parser.add_argument('--input', '-i', nargs='+', help='Input JSON file(s)', default=None)
     parser.add_argument('--output', '-o', nargs='+', help='Output XML file(s) (must match inputs count)', default=None)
-    parser.add_argument('--format', '-f', choices=['kaenx', 'knxprod'], default='kaenx', help='Output XML format')
+    parser.add_argument('--format', '-f', choices=['kaenx', 'knxprod', 'ets'], default='kaenx',
+                        help='Output XML format: knxprod is self-contained (with MasterData), '
+                             'ets is the same without MasterData, for a packer that signs with ETS')
     args = parser.parse_args(argv)
 
     inputs = args.input or ['pilot_a_export.json', 'pilot_b_export.json']
@@ -1016,6 +1029,8 @@ def main(argv=None):
     else:
         if args.format == 'knxprod':
             outputs = [inp.rsplit('.', 1)[0] + '.knxprod.xml' for inp in inputs]
+        elif args.format == 'ets':
+            outputs = [inp.rsplit('.', 1)[0] + '.ets.xml' for inp in inputs]
         else:
             outputs = [inp.rsplit('.', 1)[0] + '.kaenx.xml' for inp in inputs]
 
@@ -1026,8 +1041,8 @@ def main(argv=None):
     for inp, out in zip(inputs, outputs):
         with open(inp, 'r', encoding='utf-8') as f:
             data = json.load(f)
-        if args.format == 'knxprod':
-            xml_text = export_product_json_to_knxprod(data)
+        if args.format in ('knxprod', 'ets'):
+            xml_text = export_product_json_to_knxprod(data, master_data=args.format == 'knxprod')
         else:
             xml_text = export_product_json_to_kaenx(data)
         with open(out, 'w', encoding='utf-8') as fo:

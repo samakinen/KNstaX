@@ -639,6 +639,10 @@ else()
         knx_add_test(test_exporter_object_views
             COMMAND ${Python3_EXECUTABLE} ${KNXPROD_EXPORTER_DIR}/test_exporter_object_views.py
             LABELS script)
+        # The ETS product steps: lock, archive check, pack, dist (pure Python).
+        knx_add_test(test_ets_product
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/ets_product/test_ets_product.py
+            LABELS script)
         # Configuration generator: profiles resolve, bad fragments fail (pure Python).
         knx_add_test(test_knx_genconfig
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/kconfig/test_knx_genconfig.py
@@ -1109,12 +1113,15 @@ else()
                 ${KNX_TUNNELING_EXAMPLES}
         )
 
-        # Build-time .knxprod generation, demonstrating the single-source-of-truth
-        # DX: product.hpp → .knxprod.xml with no hand-written ETS file. Driven
-        # from the ESP-IDF switch example's definition, which proves the point
-        # that matters — the same header compiles for target firmware and for
-        # the host exporter.
-        knx_commissioned_product(tp1_switch_ets
+        # Build-time ETS product, demonstrating the single-source-of-truth DX:
+        # product.hpp → .knxprod.xml and .ets.xml with no hand-written ETS file
+        # (and a .knxprod where a packer is installed). Driven from the ESP-IDF
+        # switch example's definition, which proves the point that matters —
+        # the same header compiles for target firmware and for the host
+        # exporter. No product lock: the capacities follow the profile of this
+        # build, which differs between the CI jobs.
+        include(${CMAKE_CURRENT_LIST_DIR}/cmake/knx_ets_product.cmake)
+        knx_ets_product(tp1_switch_ets
             DEFINITION  ${CMAKE_CURRENT_SOURCE_DIR}/examples/esp_idf_switch/main/product.hpp
             SYMBOL      tp1_switch::kProduct
         )
